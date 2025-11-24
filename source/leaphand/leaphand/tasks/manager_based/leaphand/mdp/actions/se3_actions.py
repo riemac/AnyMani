@@ -395,7 +395,12 @@ class se3Action(ActionTerm):
         if jacobian_idx < 0:
              raise ValueError(f"试图获取固定基座 (index={self._body_idx}) 的雅可比矩阵，这是不允许的。")
 
-        jacobian = all_jacobians[:, jacobian_idx, :, jacobi_joint_ids]
+        jacobian_physx = all_jacobians[:, jacobian_idx, :, jacobi_joint_ids]
+
+        # PhysX 返回的雅可比矩阵顺序为 [线速度 v; 角速度 w]
+        # 而本类使用的旋量定义为 [角速度 w; 线速度 v]
+        # 因此需要交换前3行和后3行
+        jacobian = torch.cat([jacobian_physx[:, 3:, :], jacobian_physx[:, :3, :]], dim=1)
 
         return jacobian
 
