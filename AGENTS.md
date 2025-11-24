@@ -21,7 +21,7 @@
 
    * **信息源:** 不分先后，具情况选用
 
-     1. 本地代码（IsaacLab 源码、项目文档、示例，使用 `semantic_search` 或类似工具对整个codebase进行检索）。
+     1. 本地代码（查询IsaacLab 源码、项目文档、示例，都首选 `semantic_search` 对整个codebase进行检索）。
      2. 官方文档（`context7`工具或 `githubRepo`，当查询isaacsim, physx, rl_games等不在工作区的第三方库）。
      3. 网络搜索（`github`, `fetch`工具）。
    * **精准定位:** 
@@ -61,15 +61,7 @@ IsaacLab/                    # IsaacLab官方核心框架目录（位于~/isaac/
 
 ### 研究进展
 
-目前正在做Leaphand手内旋转方面的研究，主要环境架构为ManagerBasedRLEnv，主要使用的算法库为rl_games
-
-## 工作流程
-
-| 流程        | 步骤                                                                                                               |
-| :-------- | :--------------------------------------------------------------------------------------------------------------- |
-| **新功能开发** | 1. **规划:** 在对话中提出实现计划。<br>2. **确认:** 调用 `mcp-feedback-enhanced` 请求批准。<br>3. **执行:** 获得同意后，编码实现。                  |
-| **错误调试**  | 1. **收集:** 在终端中定位关键错误信息。<br>2. **分析:** 在对话中结合日志提出原因假设和调试步骤。<br>3. **确认:** 调用 `mcp-feedback-enhanced` 请求批准后，开始调试。 |
-
+目前正在做Leaphand手内操作方面的研究，主要环境架构为ManagerBasedRLEnv，主要使用的算法库为rl_games。最新科研idea位于 `source/leaphand/leaphand/ideas/idea.ipynb`
 
 ## 开发规范
 

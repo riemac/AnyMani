@@ -1,65 +1,101 @@
+# TODO:该文件为se(3)动作项的配置类文件，用于定义和管理se(3)动作项的配置参数
+# 有一个需注意的地方，指尖末端设置的坐标系{b'}是人为设置的Xform，它是虚拟的而非真实的刚体，因此无法获取关于该坐标系的雅可比矩阵J_b'
+# 如leaphand的leap_hand_right/fingertip_2/middle_tip_head，middle_tip_head为虚拟设置的Xform，fingertip_2才是真实的刚体，其所在坐标系为{b}
+# 好在这个T_bb'是固定不变的，可以预先计算好并存储下来，在计算J_b'^+时利用伴随变换转换为J_b^+即可
+
+from collections.abc import Sequence
+
 from isaaclab.managers.action_manager import ActionTerm, ActionTermCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.configclass import MISSING
 
-from isaaclab.envs.mdp.actions.actions_cfg import (
-    RelativeJointPositionActionCfg,
-    EMAJointPositionToLimitsActionCfg,
-)
-
-from . import (
-    dynamic_relative_joint_position_actions as dyn_rel,
-    dynamic_ema_joint_position_to_limits_actions as dyn_ema,
-)
+from . import se3_actions as se3
 
 
 @configclass
-class LinearDecayRelativeJointPositionActionCfg(RelativeJointPositionActionCfg):
-    """线性递减的相对关节位置动作配置。
+class se3ActionCfg(ActionTermCfg):
+    r"""SE(3) 动作项配置类。
 
-    字段说明：
-    - initial_scale_factor: 初始缩放因子（默认 0.5）
-    - final_scale_factor: 最终缩放因子（默认 0.1）
-    - init_epochs: 开始线性变化的 epoch（含）
-    - end_epochs: 结束线性变化的 epoch（含后保持 final）
-
-    Note:
-        - 父类的 ``scale`` 字段不会被直接使用；实际生效的是本配置的动态缩放因子。
+    该类用于定义和管理 SE(3) 动作项的配置参数。
     """
 
-    class_type: type[ActionTerm] = dyn_rel.LinearDecayRelativeJointPositionAction
+    class_type: type[ActionTerm] = se3.se3Action
 
-    # 动态缩放参数
-    initial_scale_factor: float = 0.5
-    final_scale_factor: float = 0.1
-    init_epochs: int = 0
-    end_epochs: int = 100
+    joint_names: str | Sequence[str] = ".*"
+    r"""控制的关节名称列表或正则表达式。
 
-    # epoch 长度
-    horizon_length: int = 32
+    默认为 ".*"，表示控制所有关节。可以指定具体的关节名称列表，
+    如 ["finger_1_joint_1", "finger_1_joint_2"] 来控制特定关节。
+    """
+
+    preserve_order: bool = True
+    r"""是否保持关节索引的顺序。
+
+    如果为 True，关节索引将按照 joint_names 中指定的顺序排列。
+    如果为 False，关节索引将按照它们在机器人模型中的默认顺序排列。
+    """
+
+    is_xform: bool = False
+    r"""指示末端是否为虚拟的Xform。"""  
+    # 如果是False，则直接使用真实刚体的雅可比矩阵J_b
+    # True的话，需要在动作项类初始化时，获取该Xform相对于真实刚体的位姿变换T_bb'，储存起来，为计算伴随变换提供支持。
+    # NOTE：可参考source/leaphand/leaphand/tasks/functional/launch_with_leaphand.py和其他文件中的prim路径解析和相对位姿获取
+
+    target: str = MISSING
+    r"""末端名称。
+
+    is_xform为True时，target指向虚拟Xform的名称
+    
+    is_xform为False时，target指向真实刚体的名称
+    """
+
+    parent: str = None
+    r"""末端的父节点名称，为实际的末端刚体。
+
+    如果is_xform为False，则parent应为None
+
+    如果is_xform为True，可通过指定该prim名称，显示指定parent和target之间的父子关系，T_bb'即为parent到target的相对位姿变换。
+    也可不指定该项，则在动作项类初始化时，通过解析环境中的target的上一级prim名称，作为parent。
+
+    这种情况可应付target和parent隔了2个及以上prim层级的情况。
+    """
+
+    use_pd: bool = False
+    r"""是否使用速度-位置比例微分控制。
+
+    True的话，动作项输出的旋量会被映射为速度目标，构成速度-位置比例微分控制。
+
+    False的话，速度目标默认为0。
+    """
+
+    angular_limits: None | float | tuple[float, float, float] = None
+    r"""角速度限制。如果为None，则不设置限制；如果为单个k，则代表对所有分量都有不超过|pi/k|；如果提供三个分量(kx, ky, kz)，代表各自分量不超过|pi/ki|。
+    
+    这里设置pi，主要是轴角切向量在pi处有奇异的缘故
+    """
+
+    linear_limits: None | float | tuple[float, float, float] = None
+    r"""线速度限制。如果为None，则不设置限制；如果为单个v，则代表对所有分量都有不超过sqrt(3)|v|；如果提供三个分量(vx, vy, vz)，代表各自分量不超过sqrt(3)|vi|。
+    
+    这里设置sqrt(3)，主要是v是在{s}上观察，而实际旋量的线速度分量是在{b}上，它们之间的关系由矩阵范数和向量范数的相容性所推导出
+    """
 
 
 @configclass
-class LinearDecayAlphaEMAJointPositionToLimitsActionCfg(EMAJointPositionToLimitsActionCfg):
-    """线性递减的 EMA JointPositionToLimits 动作配置（对 alpha 进行线性递减）。
+class se3dlsActionsCfg(se3ActionCfg):
+    r"""SE(3) 动作项 DLS（Damped Least Squares）配置类。
 
-    字段说明：
-    - initial_alpha: 初始 alpha（默认 0.5）
-    - final_alpha: 最终 alpha（默认 0.1）
-    - init_epochs: 开始线性变化的 epoch（含）
-    - end_epochs: 结束线性变化的 epoch（含后保持 final）
-
-    Note:
-        - 父类的 ``alpha`` 字段不会被直接使用；实际生效的是本配置的动态 alpha。
+    该类用于定义和管理 SE(3) 动作项 DLS 的配置参数。
     """
 
-    class_type: type[ActionTerm] = dyn_ema.LinearDecayAlphaEMAJointPositionToLimitsAction
+    class_type: type[ActionTerm] = se3.se3dlsAction
 
-    # 动态 alpha 参数
-    initial_alpha: float = 0.5
-    final_alpha: float = 0.1
-    init_epochs: int = 0
-    end_epochs: int = 100
-    #  epoch 长度
-    horizon_length: int = 32
+    damping: float = 0.01
+    r"""阻尼系数 :math:`\lambda`。
 
-
+    该参数控制 DLS 方法的数值稳定性。较大的值会使解更稳定但可能降低精度，
+    较小的值会提高精度但可能在奇异位形附近不稳定。
+    
+    典型取值范围为 0.01 到 0.1，具体值需根据雅可比矩阵的量级调整。
+    对于灵巧手操作，建议从 0.01 开始调试。
+    """

@@ -1,0 +1,501 @@
+# TODO:该文件为se(3)动作项的实现文件，用于定义和管理se(3)动作项的具体行为。
+# 主要思路参考 `/home/hac/isaac/AnyRotate/source/leaphand/leaphand/ideas/idea.ipynb`
+# 实现可参考 `/home/hac/isaac/IsaacLab/source/isaaclab/isaaclab/envs/mdp/actions/joint_actions.py`
+# 有一个问题，idea.ipynb里的se(3)动作似乎天生对应的就是相对动作（relative action），所以没必要设置所谓的绝对动作项，当然相对项既然是默认的，也没必要命名为Relative
+
+from __future__ import annotations
+
+import logging
+import torch
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+from isaaclab.assets.articulation import Articulation
+from isaaclab.managers.action_manager import ActionTerm
+
+from leaphand.mdp.utils import math as math_leap
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedEnv
+    from isaaclab.envs.utils.io_descriptors import GenericActionIODescriptor
+
+    from . import actions_cfg
+
+# import logger
+logger = logging.getLogger(__name__)
+
+
+class se3Action(ActionTerm):
+    r"""se(3) 动作项基础实现类。
+
+    该类实现了基于 se(3) 李代数旋量的动作空间。旋量 :math:`\mathcal{V}_b = [\omega_b^T, v_b^T]^T`
+    表示末端坐标系 {b} 的瞬时速度，通过雅可比伪逆映射到关节空间：
+
+    .. math::
+
+        \theta(t+1) = \theta(t) + J_b^+(\theta(t)) \cdot \mathcal{V}_b(t) \cdot \Delta t
+
+    主要特性：
+
+    1. **任务空间表征**：直接控制末端的旋转和平移速度，更符合手指末端操作的直觉
+    2. **坐标系无关**：旋量在局部坐标系 {b} 下定义，有利于策略泛化
+    3. **虚拟 Xform 支持**：通过伴随变换支持虚拟设置的指尖坐标系
+    4. **速度限制**：对角速度和线速度分别设置物理合理的上限
+
+    .. note::
+        该类使用 Moore-Penrose 伪逆计算雅可比逆。对于需要数值稳定性的场景，
+        建议使用 :class:`se3dlsAction` 的 DLS (Damped Least Squares) 变体。
+    """
+
+    cfg: actions_cfg.se3ActionCfg
+    """动作项配置。"""
+    _asset: Articulation
+    """应用动作项的关节机器人资产。"""
+
+    def __init__(self, cfg: actions_cfg.se3ActionCfg, env: ManagerBasedEnv) -> None:
+        """初始化 se(3) 动作项。
+
+        Args:
+            cfg: se(3) 动作项配置。
+            env: 管理器基础强化学习环境实例。
+
+        Raises:
+            ValueError: 当末端 body 不存在或存在多个匹配时。
+            RuntimeError: 当 is_xform=True 但无法获取虚拟Xform到真实刚体的变换时。
+        """
+        # 初始化基类
+        super().__init__(cfg, env)
+
+        # 解析目标末端 body
+        if self.cfg.is_xform:
+            # 如果是虚拟 Xform，需要找到其父刚体
+            if self.cfg.parent is not None:
+                # 用户显式指定了父刚体名称
+                parent_body_ids, parent_body_names = self._asset.find_bodies(self.cfg.parent)
+                if len(parent_body_ids) != 1:
+                    raise ValueError(
+                        f"配置的 parent 刚体名称 '{self.cfg.parent}' 匹配到 {len(parent_body_ids)} 个刚体：{parent_body_names}。"
+                        f"期望恰好 1 个匹配。"
+                    )
+                self._parent_body_idx = parent_body_ids[0]
+                self._parent_body_name = parent_body_names[0]
+            else:
+                # 自动推断：查找 target 的父 prim
+                # NOTE: 这部分需要访问 USD Stage 来解析 prim 层级关系
+                # 为简化实现，这里要求用户必须指定 parent
+                raise NotImplementedError(
+                    "当 is_xform=True 时，目前必须显式指定 'parent' 参数来指明虚拟Xform对应的实际刚体。"
+                    "自动推断功能将在后续版本实现。"
+                )
+
+            # 计算从父刚体{b_raw}到虚拟Xform{b_can}的固定变换 T_raw_to_can
+            # 这个变换在初始化时计算一次即可，因为它是固定的几何关系
+            self._T_bb_prime = self._compute_xform_offset_transform()
+
+            # 计算伴随变换矩阵 Ad_{T_raw_to_can}
+            # 旋量变换: V_raw = Ad * V_can
+            self._adjoint_matrix = math_leap.adjoint_transform(self._T_bb_prime)
+
+            # 实际用于雅可比的是父刚体
+            self._body_idx = self._parent_body_idx
+            self._body_name = self._parent_body_name
+
+            logger.info(
+                f"se(3) 动作项 '{self.__class__.__name__}' 配置为虚拟Xform模式：\n"
+                f"  虚拟末端: {self.cfg.target}\n"
+                f"  父刚体: {self._body_name} [idx={self._body_idx}]\n"
+                f"  固定偏移已计算"
+            )
+        else:
+            # 直接使用真实刚体
+            body_ids, body_names = self._asset.find_bodies(self.cfg.target)
+            if len(body_ids) != 1:
+                raise ValueError(
+                    f"末端刚体名称 '{self.cfg.target}' 匹配到 {len(body_ids)} 个刚体：{body_names}。"
+                    f"期望恰好 1 个匹配。"
+                )
+            self._body_idx = body_ids[0]
+            self._body_name = body_names[0]
+            self._T_bb_prime = None  # 不需要偏移变换
+            self._adjoint_matrix = None
+
+            logger.info(
+                f"se(3) 动作项 '{self.__class__.__name__}' 配置为真实刚体模式：\n"
+                f"  末端刚体: {self._body_name} [idx={self._body_idx}]"
+            )
+
+        # 解析控制的关节（通常是单根手指链或手臂）
+        # NOTE: 这里假设 cfg 中会有 joint_names 配置（类似于 JointAction）
+        # 如果没有，则默认控制所有关节
+        if hasattr(self.cfg, "joint_names") and self.cfg.joint_names is not None:
+            self._joint_ids, self._joint_names = self._asset.find_joints(
+                self.cfg.joint_names, preserve_order=getattr(self.cfg, "preserve_order", True)
+            )
+        else:
+            # 默认控制所有关节
+            self._joint_ids = slice(None)
+            self._joint_names = self._asset.joint_names
+
+        self._num_joints = len(self._joint_ids) if isinstance(self._joint_ids, (list, tuple)) else self._asset.num_joints
+
+        logger.info(
+            f"控制关节: {self._joint_names} [{self._joint_ids}]\n"
+            f"关节总数: {self._num_joints}"
+        )
+
+        # 创建动作缓冲区
+        # 输入动作维度是 6 (旋量维度：3角速度 + 3线速度)
+        self._raw_actions = torch.zeros(self.num_envs, 6, device=self.device)
+        # 处理后的动作是关节空间的目标（位置或速度，取决于use_pd配置）
+        self._processed_actions = torch.zeros(self.num_envs, self._num_joints, device=self.device)
+
+        # 解析角速度和线速度的限制
+        self._parse_velocity_limits()
+
+        # 如果使用 PD 控制，需要存储上一时刻的关节位置用于积分
+        if self.cfg.use_pd:
+            # 存储当前的目标位置（用于增量更新）
+            self._joint_pos_target = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
+
+        # 获取环境的物理步长（用于速度到位置的积分）
+        self._dt = self._env.step_dt
+
+        logger.info(f"环境物理步长: {self._dt} s")
+
+    """
+    Properties.
+    """
+
+    @property
+    def action_dim(self) -> int:
+        """动作维度，始终为 6 (se(3) 旋量的维度)。"""
+        return 6
+
+    @property
+    def raw_actions(self) -> torch.Tensor:
+        """原始动作张量（旋量）。形状为 (num_envs, 6)。"""
+        return self._raw_actions
+
+    @property
+    def processed_actions(self) -> torch.Tensor:
+        """处理后的动作张量（关节目标）。形状为 (num_envs, num_joints)。"""
+        return self._processed_actions
+
+    @property
+    def IO_descriptor(self) -> GenericActionIODescriptor:
+        """动作项的 IO 描述符。
+
+        包含动作维度、数据类型、动作类型等元信息。
+        """
+        super().IO_descriptor
+        self._IO_descriptor.shape = (self.action_dim,)
+        self._IO_descriptor.dtype = str(self.raw_actions.dtype)
+        self._IO_descriptor.action_type = "se3Action"
+        self._IO_descriptor.body_name = self._body_name
+        self._IO_descriptor.body_idx = self._body_idx
+        self._IO_descriptor.joint_names = self._joint_names
+        self._IO_descriptor.is_xform = self.cfg.is_xform
+        self._IO_descriptor.use_pd = self.cfg.use_pd
+        return self._IO_descriptor
+
+    """
+    Operations.
+    """
+
+    def process_actions(self, actions: torch.Tensor):
+        """处理输入的旋量动作，映射到关节空间。
+
+        处理流程：
+
+        1. 存储原始旋量动作
+        2. 应用速度限制（clamp）
+        3. 如果是虚拟 Xform，应用伴随变换
+        4. 获取当前雅可比矩阵
+        5. 计算雅可比伪逆
+        6. 计算关节速度增量：:math:`\Delta\dot{\theta} = J^+ \mathcal{V}_b`
+        7. 如果 use_pd=True，积分为位置目标；否则直接作为速度目标
+
+        Args:
+            actions: 输入的旋量动作。形状为 (num_envs, 6)，
+                     前3维为角速度 :math:`\omega_b`，后3维为线速度 :math:`v_b`。
+        """
+        # 1. 存储原始动作
+        self._raw_actions[:] = actions
+
+        # 2. 应用速度限制
+        twist_limited = self._apply_velocity_limits(self._raw_actions)
+
+        # 3. 如果是虚拟 Xform，应用伴随变换
+        if self.cfg.is_xform:
+            # V_raw = Ad_{T_raw_to_can} * V_can
+            twist_body = torch.matmul(self._adjoint_matrix, twist_limited.unsqueeze(-1)).squeeze(-1)
+        else:
+            twist_body = twist_limited
+
+        # 4. 获取当前的雅可比矩阵
+        jacobian = self._get_jacobian()  # shape: (num_envs, 6, num_joints)
+
+        # 5. 计算雅可比伪逆
+        jacobian_inv = self._compute_jacobian_inverse(jacobian)  # shape: (num_envs, num_joints, 6)
+
+        # 6. 计算关节空间的速度增量
+        # delta_joint_vel = J^+ @ twist_body
+        delta_joint_vel = torch.matmul(jacobian_inv, twist_body.unsqueeze(-1)).squeeze(-1)  # (num_envs, num_joints)
+
+        # 7. 转换为目标（位置或速度）
+        if self.cfg.use_pd:
+            # 使用位置-速度混合 PD 控制
+            # 将速度目标积分为位置增量，然后更新目标位置
+            # theta_target(t+1) = theta_actual(t) + delta_joint_vel(t) * dt
+            current_joint_pos = self._asset.data.joint_pos[:, self._joint_ids]
+            self._joint_pos_target = current_joint_pos + delta_joint_vel * self._dt
+            self._processed_actions[:] = self._joint_pos_target
+        else:
+            # 直接使用速度目标
+            self._processed_actions[:] = delta_joint_vel
+
+    def apply_actions(self):
+        """将处理后的动作应用到机器人。
+
+        根据 use_pd 配置，发送位置目标或速度目标到关节控制器。
+        """
+        if self.cfg.use_pd:
+            # 发送位置目标（底层会有 PD 控制器计算力矩）
+            self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+        else:
+            # 发送速度目标
+            self._asset.set_joint_velocity_target(self._processed_actions, joint_ids=self._joint_ids)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        """重置动作项状态。
+
+        Args:
+            env_ids: 需要重置的环境索引。如果为 None，则重置所有环境。
+        """
+        if env_ids is None:
+            env_ids = slice(None)
+
+        # 重置原始动作
+        self._raw_actions[env_ids] = 0.0
+
+        # 如果使用 PD 控制，重置目标位置为当前位置
+        if self.cfg.use_pd:
+            self._joint_pos_target[env_ids] = self._asset.data.joint_pos[env_ids, self._joint_ids]
+
+    """
+    Helper methods.
+    """
+
+    def _compute_xform_offset_transform(self) -> torch.Tensor:
+        """计算虚拟 Xform 相对于父刚体的固定变换 T_bb'。
+
+        Returns:
+            齐次变换矩阵。形状为 (4, 4)，表示从父刚体坐标系到虚拟Xform坐标系的变换。
+
+        Raises:
+            RuntimeError: 当无法从 USD Stage 获取变换时。
+        """
+        # TODO: 实现通过 USD Stage API 获取相对位姿
+        # 参考 source/leaphand/leaphand/tasks/functional/launch_with_leaphand.py
+        # 中的 _compute_custom_prim_offsets() 方法
+
+        from isaaclab.sim.utils import get_current_stage
+        import omni.isaac.core.utils.prims as prim_utils
+
+        stage = get_current_stage()
+
+        # 获取第一个环境的 prim 路径
+        env_prim_path = self._asset.prim_paths[0]  # 例如 "/World/envs/env_0/Robot"
+
+        # 构造父刚体和虚拟Xform的完整路径
+        # 假设 body_names 对应的路径结构是 prim_path/body_name
+        parent_prim_path = f"{env_prim_path}/{self._parent_body_name}"
+        xform_prim_path = f"{env_prim_path}/{self._parent_body_name}/{self.cfg.target}"
+
+        # 获取 USD prims
+        parent_prim = stage.GetPrimAtPath(parent_prim_path)
+        xform_prim = stage.GetPrimAtPath(xform_prim_path)
+
+        if not parent_prim.IsValid() or not xform_prim.IsValid():
+            raise RuntimeError(
+                f"无法获取有效的 USD Prim:\n"
+                f"  父刚体路径: {parent_prim_path} (valid={parent_prim.IsValid()})\n"
+                f"  Xform路径: {xform_prim_path} (valid={xform_prim.IsValid()})"
+            )
+
+        # 获取世界坐标系下的位姿
+        from pxr import UsdGeom
+        import omni.usd
+
+        xform_cache = UsdGeom.XformCache()
+
+        parent_transform_w = xform_cache.GetLocalToWorldTransform(parent_prim)
+        xform_transform_w = xform_cache.GetLocalToWorldTransform(xform_prim)
+
+        # 计算相对变换: T_bb' = T_b^{-1} * T_{b'}
+        parent_transform_inv = parent_transform_w.GetInverse()
+        relative_transform = parent_transform_inv * xform_transform_w
+
+        # 转换为 PyTorch tensor (4x4 齐次变换矩阵)
+        import numpy as np
+
+        transform_np = np.array(relative_transform, dtype=np.float32).T  # USD uses row-major, PyTorch column-major
+        T_bb_prime = torch.tensor(transform_np, device=self.device, dtype=torch.float32)
+
+        logger.info(
+            f"虚拟Xform相对变换 T_{{bb'}} 计算完成:\n"
+            f"  平移: {T_bb_prime[:3, 3]}\n"
+            f"  旋转矩阵:\n{T_bb_prime[:3, :3]}"
+        )
+
+        return T_bb_prime
+
+    def _get_jacobian(self) -> torch.Tensor:
+        """获取当前末端刚体相对于控制关节的雅可比矩阵。
+
+        Returns:
+            几何雅可比矩阵。形状为 (num_envs, 6, num_joints)。
+            前 3 行对应线速度，后 3 行对应角速度。
+        """
+        # 从 PhysX 获取所有刚体的雅可比矩阵
+        # shape: (num_envs, num_bodies, 6, num_total_joints)
+        all_jacobians = self._asset.root_physx_view.get_jacobians()
+
+        # 提取目标 body 的雅可比
+        # PhysX jacobian 的索引是 body_idx - 1（因为索引0是root）
+        jacobian_idx = self._body_idx - 1 if self._body_idx > 0 else 0
+
+        # 提取对应控制关节的部分
+        # shape: (num_envs, 6, num_joints)
+        if isinstance(self._joint_ids, slice):
+            jacobian = all_jacobians[:, jacobian_idx, :, self._joint_ids]
+        else:
+            jacobian = all_jacobians[:, jacobian_idx, :, :][:, :, self._joint_ids]
+
+        return jacobian
+
+    def _compute_jacobian_inverse(self, jacobian: torch.Tensor) -> torch.Tensor:
+        """计算雅可比矩阵的伪逆。
+
+        该方法在基类中使用 Moore-Penrose 伪逆。子类可以重写此方法以使用其他方法
+        （如 DLS）。
+
+        Args:
+            jacobian: 雅可比矩阵。形状为 (num_envs, 6, num_joints)。
+
+        Returns:
+            雅可比伪逆矩阵。形状为 (num_envs, num_joints, 6)。
+        """
+        return math_leap.pseudo_inv(jacobian)
+
+    def _parse_velocity_limits(self):
+        """解析和处理角速度与线速度的限制配置。
+
+        根据配置创建上下界张量，用于后续的 clamp 操作。
+        """
+        # 解析角速度限制
+        if self.cfg.angular_limits is not None:
+            if isinstance(self.cfg.angular_limits, (int, float)):
+                # 单个值：对所有分量使用相同的限制 [-pi/k, pi/k]
+                k = self.cfg.angular_limits
+                limit = torch.pi / k
+                self._angular_vel_limits = torch.tensor(
+                    [-limit, -limit, -limit, limit, limit, limit], device=self.device
+                ).view(2, 3)  # shape: (2, 3) for [lower, upper]
+            else:
+                # 三个分量的独立限制
+                kx, ky, kz = self.cfg.angular_limits
+                self._angular_vel_limits = torch.tensor(
+                    [-torch.pi / kx, -torch.pi / ky, -torch.pi / kz, torch.pi / kx, torch.pi / ky, torch.pi / kz],
+                    device=self.device,
+                ).view(2, 3)
+        else:
+            self._angular_vel_limits = None
+
+        # 解析线速度限制
+        if self.cfg.linear_limits is not None:
+            sqrt_3 = torch.sqrt(torch.tensor(3.0, device=self.device))
+            if isinstance(self.cfg.linear_limits, (int, float)):
+                # 单个值：对所有分量使用相同的限制
+                v = self.cfg.linear_limits
+                limit = sqrt_3 * v
+                self._linear_vel_limits = torch.tensor(
+                    [-limit, -limit, -limit, limit, limit, limit], device=self.device
+                ).view(2, 3)
+            else:
+                # 三个分量的独立限制
+                vx, vy, vz = self.cfg.linear_limits
+                self._linear_vel_limits = torch.tensor(
+                    [
+                        -sqrt_3 * vx,
+                        -sqrt_3 * vy,
+                        -sqrt_3 * vz,
+                        sqrt_3 * vx,
+                        sqrt_3 * vy,
+                        sqrt_3 * vz,
+                    ],
+                    device=self.device,
+                ).view(2, 3)
+        else:
+            self._linear_vel_limits = None
+
+        logger.info(
+            f"速度限制设置:\n"
+            f"  角速度限制: {self._angular_vel_limits if self._angular_vel_limits is not None else 'None'}\n"
+            f"  线速度限制: {self._linear_vel_limits if self._linear_vel_limits is not None else 'None'}"
+        )
+
+    def _apply_velocity_limits(self, twist: torch.Tensor) -> torch.Tensor:
+        """对旋量应用速度限制。
+
+        Args:
+            twist: 输入旋量。形状为 (num_envs, 6)，前3维为角速度，后3维为线速度。
+
+        Returns:
+            限制后的旋量。形状与输入相同。
+        """
+        twist_limited = twist.clone()
+
+        # 限制角速度
+        if self._angular_vel_limits is not None:
+            twist_limited[:, :3] = torch.clamp(
+                twist[:, :3], min=self._angular_vel_limits[0], max=self._angular_vel_limits[1]
+            )
+
+        # 限制线速度
+        if self._linear_vel_limits is not None:
+            twist_limited[:, 3:] = torch.clamp(
+                twist[:, 3:], min=self._linear_vel_limits[0], max=self._linear_vel_limits[1]
+            )
+
+        return twist_limited
+
+
+class se3dlsAction(se3Action):
+    r"""se(3) 动作项 DLS（Damped Least Squares）实现类。
+
+    该类继承自 :class:`se3Action`，使用阻尼最小二乘法计算雅可比逆，
+    提供更好的数值稳定性，特别是在接近奇异位形时。
+
+    DLS 方法通过在优化目标中加入正则化项来避免小奇异值导致的数值爆炸：
+
+    .. math::
+
+        J_{dls}^{\dagger} = J^T (JJ^T + \lambda^2 I)^{-1}
+
+    其中 :math:`\lambda` 是阻尼系数，由配置 :attr:`cfg.damping` 指定。
+    """
+
+    cfg: actions_cfg.se3dlsActionsCfg
+    """DLS 动作项配置。"""
+
+    def _compute_jacobian_inverse(self, jacobian: torch.Tensor) -> torch.Tensor:
+        """使用 DLS 方法计算雅可比伪逆。
+
+        Args:
+            jacobian: 雅可比矩阵。形状为 (num_envs, 6, num_joints)。
+
+        Returns:
+            DLS 伪逆矩阵。形状为 (num_envs, num_joints, 6)。
+        """
+        return math_leap.dls_inv(jacobian, self.cfg.damping)

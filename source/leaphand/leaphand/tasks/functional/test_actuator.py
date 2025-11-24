@@ -36,6 +36,7 @@ TODO: 理想误差和目标误差画在不同的图上，变为 3*关节数的�
 
 用法:
     python test_actuator.py --amplitude 0.3 --frequency 1.0 --stiffness 3.0 --damping 0.1 --decimation 4 --joint-group index
+    python source/leaphand/leaphand/tasks/functional/test_actuator.py --amplitude 0.25 --frequency 1.0 --stiffness 3.0 --damping 0.1 --decimation 4 --joint-names a_1
 """
 
 import argparse
@@ -374,7 +375,8 @@ def plot_results(logger: SineTrajectoryLogger, metadata: dict, output_dir: Path)
     """绘制追踪性能可视化
     
     第一行：绘制 q_ideal（连续理想）, q_target（离散指令）, q_actual（实际位置）
-    第二行：绘制两种误差：error_discrete（离散指令误差）和 error_ideal（理想轨迹误差）
+    第二行：绘制绝对误差：error_discrete（离散指令误差）和 error_ideal（理想轨迹误差）
+    第三行：绘制相对误差：rel_error_discrete 和 rel_error_ideal
     """
     
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -389,6 +391,14 @@ def plot_results(logger: SineTrajectoryLogger, metadata: dict, output_dir: Path)
     error_discrete = logger.error_discrete[:effective_steps].cpu().numpy()
     error_ideal = logger.error_ideal[:effective_steps].cpu().numpy()
 
+    # 计算相对误差 (相对于振幅)
+    import numpy as np
+    amplitude = metadata['amplitude']
+    denom = max(amplitude, 1e-4)
+    
+    rel_error_ideal = np.abs(error_ideal) / denom
+    rel_error_discrete = np.abs(error_discrete) / denom
+
     # 时间轴按物理步长(sim_dt)构建，确保不同 decimation 设置下
     # 采样频率一致，便于公平比较
     time = torch.arange(effective_steps, dtype=torch.float32).cpu().numpy() * metadata["sim_dt"]
@@ -397,9 +407,10 @@ def plot_results(logger: SineTrajectoryLogger, metadata: dict, output_dir: Path)
     metrics = logger.compute_metrics()
     
     num_joints = len(joint_names)
-    fig, axes = plt.subplots(2, num_joints, figsize=(max(10, 4 * num_joints), 8), sharex='row')
+    # 修改为 3 行
+    fig, axes = plt.subplots(3, num_joints, figsize=(max(10, 4 * num_joints), 12), sharex='col')
     if num_joints == 1:
-        axes = axes.reshape(2, 1)
+        axes = axes.reshape(3, 1)
 
     # 计算实际的动作频率 fc = 1 / (sim_dt * decimation)
     fc = 1.0 / (metadata["sim_dt"] * metadata["decimation"])
@@ -414,7 +425,8 @@ def plot_results(logger: SineTrajectoryLogger, metadata: dict, output_dir: Path)
     metrics_lines = []
     for idx, joint_name in enumerate(joint_names):
         ax_pos = axes[0, idx]
-        ax_err = axes[1, idx]
+        ax_abs_err = axes[1, idx]
+        ax_rel_err = axes[2, idx]
 
         # 第一行：三条曲线对比
         ax_pos.plot(time, q_ideal[:, idx], linewidth=2, label='Ideal (Continuous)', color='tab:blue', alpha=0.8)
@@ -426,25 +438,59 @@ def plot_results(logger: SineTrajectoryLogger, metadata: dict, output_dir: Path)
             ax_pos.set_ylabel('Position (rad)')
         ax_pos.legend(loc='upper right', fontsize=8)
 
-        # 第二行：两种误差对比
-        ax_err.plot(time, error_discrete[:, idx], linewidth=1.2, color='tab:orange', label='Error (Discrete)', alpha=0.7)
-        ax_err.plot(time, error_ideal[:, idx], linewidth=1.2, color='tab:blue', label='Error (Ideal)', alpha=0.7)
-        ax_err.grid(True, alpha=0.3)
-        ax_err.set_xlabel('Time (s)')
+        # 第二行：绝对误差对比
+        ax_abs_err.plot(time, error_discrete[:, idx], linewidth=1.2, color='tab:orange', label='Abs Error (Discrete)', alpha=0.7)
+        ax_abs_err.plot(time, error_ideal[:, idx], linewidth=1.2, color='tab:blue', label='Abs Error (Ideal)', alpha=0.7)
+        ax_abs_err.grid(True, alpha=0.3)
         if idx == 0:
-            ax_err.set_ylabel('Error (rad)')
-        ax_err.legend(loc='upper right', fontsize=8)
+            ax_abs_err.set_ylabel('Abs Error (rad)')
+        ax_abs_err.legend(loc='upper right', fontsize=8)
+
+        # 第三行：相对误差对比
+        ax_rel_err.plot(time, rel_error_discrete[:, idx], linewidth=1.2, color='tab:orange', label='Rel Error (vs Amp) (Discrete)', alpha=0.7)
+        ax_rel_err.plot(time, rel_error_ideal[:, idx], linewidth=1.2, color='tab:blue', label='Rel Error (vs Amp) (Ideal)', alpha=0.7)
+        ax_rel_err.grid(True, alpha=0.3)
+        ax_rel_err.set_xlabel('Time (s)')
+        if idx == 0:
+            ax_rel_err.set_ylabel('Rel Error (vs Amp)')
+        ax_rel_err.legend(loc='upper right', fontsize=8)
+        # 限制相对误差显示范围，避免过零点爆炸
+        # ax_rel_err.set_ylim(0, 2.0) 
 
         m = metrics[f"joint_{idx}"]
         metrics_lines.append(
             f"{joint_name}: Discrete[RMS={m['discrete']['rms_error']:.4f}, Max={m['discrete']['max_error']:.4f}] "
             f"| Ideal[RMS={m['ideal']['rms_error']:.4f}, Max={m['ideal']['max_error']:.4f}]"
         )
-        ax_err.text(
+        # 在绝对误差图上显示统计信息
+        ax_abs_err.text(
             0.02, 0.95,
             f"Discrete: RMS={m['discrete']['rms_error']:.4f}, Max={m['discrete']['max_error']:.4f}\n"
             f"Ideal: RMS={m['ideal']['rms_error']:.4f}, Max={m['ideal']['max_error']:.4f}",
-            transform=ax_err.transAxes,
+            transform=ax_abs_err.transAxes,
+            fontsize=8,
+            verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7)
+        )
+
+        # 计算相对误差的统计指标
+        rel_metrics = {
+            "discrete": {
+                "rms": np.sqrt(np.mean(rel_error_discrete[:, idx] ** 2)),
+                "max": np.max(rel_error_discrete[:, idx]),
+            },
+            "ideal": {
+                "rms": np.sqrt(np.mean(rel_error_ideal[:, idx] ** 2)),
+                "max": np.max(rel_error_ideal[:, idx]),
+            }
+        }
+
+        # 在相对误差图上显示统计信息
+        ax_rel_err.text(
+            0.02, 0.95,
+            f"Discrete: RMS={rel_metrics['discrete']['rms']:.4f}, Max={rel_metrics['discrete']['max']:.4f}\n"
+            f"Ideal: RMS={rel_metrics['ideal']['rms']:.4f}, Max={rel_metrics['ideal']['max']:.4f}",
+            transform=ax_rel_err.transAxes,
             fontsize=8,
             verticalalignment='top',
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7)
