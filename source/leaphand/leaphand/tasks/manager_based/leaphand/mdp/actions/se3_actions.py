@@ -152,10 +152,14 @@ class se3Action(ActionTerm):
         # 解析角速度和线速度的限制
         self._parse_velocity_limits()
 
-        # 如果使用 PD 控制，需要存储上一时刻的关节位置用于积分
-        if self.cfg.use_pd:
-            # 存储当前的目标位置（用于增量更新）
-            self._joint_pos_target = self._asset.data.default_joint_pos[:, self._joint_ids].clone()
+        # 创建内部状态缓冲区
+        # _joint_pos_target: 存储当前的目标位置（用于增量更新）
+        # _joint_vel_target: 存储当前的目标速度（用于前馈控制）
+        self._joint_pos_target = torch.zeros(self.num_envs, self._num_joints, device=self.device)
+        self._joint_vel_target = torch.zeros(self.num_envs, self._num_joints, device=self.device)
+
+        # 初始化为默认位置，实际运行前会被 reset() 覆盖为当前位置
+        self._joint_pos_target[:] = self._asset.data.default_joint_pos[:, self._joint_ids]
 
         # 获取环境的物理步长（用于速度到位置的积分）
         self._dt = self._env.step_dt
@@ -242,17 +246,15 @@ class se3Action(ActionTerm):
         # delta_joint_vel = J^+ @ twist_body
         delta_joint_vel = torch.matmul(jacobian_inv, twist_body.unsqueeze(-1)).squeeze(-1)  # (num_envs, num_joints)
 
-        # 7. 转换为目标（位置或速度）
-        if self.cfg.use_pd:
-            # 使用位置-速度混合 PD 控制
-            # 将速度目标积分为位置增量，然后更新目标位置
-            # theta_target(t+1) = theta_actual(t) + delta_joint_vel(t) * dt
-            current_joint_pos = self._asset.data.joint_pos[:, self._joint_ids]
-            self._joint_pos_target = current_joint_pos + delta_joint_vel * self._dt
-            self._processed_actions[:] = self._joint_pos_target
-        else:
-            # 直接使用速度目标
-            self._processed_actions[:] = delta_joint_vel
+        # 7. 计算目标状态
+        # 无论是否使用 PD，我们都计算下一时刻的目标位置
+        # theta_target(t+1) = theta_actual(t) + delta_joint_vel(t) * dt
+        current_joint_pos = self._asset.data.joint_pos[:, self._joint_ids]
+        self._joint_pos_target[:] = current_joint_pos + delta_joint_vel * self._dt
+        self._joint_vel_target[:] = delta_joint_vel
+
+        # 更新 processed_actions (主要用于日志记录，存储位置目标)
+        self._processed_actions[:] = self._joint_pos_target
 
     def apply_actions(self):
         """将处理后的动作应用到机器人。
@@ -260,11 +262,14 @@ class se3Action(ActionTerm):
         根据 use_pd 配置，发送位置目标或速度目标到关节控制器。
         """
         if self.cfg.use_pd:
-            # 发送位置目标（底层会有 PD 控制器计算力矩）
-            self._asset.set_joint_position_target(self._processed_actions, joint_ids=self._joint_ids)
+            # PD 控制模式：同时发送位置目标和速度前馈
+            # tau = Kp * (pos_target - pos) + Kd * (vel_target - vel)
+            self._asset.set_joint_position_target(self._joint_pos_target, joint_ids=self._joint_ids)
+            self._asset.set_joint_velocity_target(self._joint_vel_target, joint_ids=self._joint_ids)
         else:
-            # 发送速度目标
-            self._asset.set_joint_velocity_target(self._processed_actions, joint_ids=self._joint_ids)
+            # 纯位置控制模式：仅发送位置目标，速度目标设为0（仅利用阻尼）
+            self._asset.set_joint_position_target(self._joint_pos_target, joint_ids=self._joint_ids)
+            self._asset.set_joint_velocity_target(torch.zeros_like(self._joint_vel_target), joint_ids=self._joint_ids)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         """重置动作项状态。
@@ -278,9 +283,10 @@ class se3Action(ActionTerm):
         # 重置原始动作
         self._raw_actions[env_ids] = 0.0
 
-        # 如果使用 PD 控制，重置目标位置为当前位置
-        if self.cfg.use_pd:
-            self._joint_pos_target[env_ids] = self._asset.data.joint_pos[env_ids, self._joint_ids]
+        # 重置目标位置为当前位置，避免跳变
+        self._joint_pos_target[env_ids] = self._asset.data.joint_pos[env_ids, self._joint_ids]
+        # 重置目标速度为 0
+        self._joint_vel_target[env_ids] = 0.0
 
     """
     Helper methods.
@@ -362,15 +368,34 @@ class se3Action(ActionTerm):
         all_jacobians = self._asset.root_physx_view.get_jacobians()
 
         # 提取目标 body 的雅可比
-        # PhysX jacobian 的索引是 body_idx - 1（因为索引0是root）
-        jacobian_idx = self._body_idx - 1 if self._body_idx > 0 else 0
+        # 根据基座是否固定，调整 body 索引和关节索引
+        if self._asset.is_fixed_base:
+            # 固定基座：Jacobian 不包含基座，索引偏移 -1
+            jacobian_idx = self._body_idx - 1
+            jacobi_joint_ids = self._joint_ids
+        else:
+            # 浮动基座：Jacobian 包含基座，索引不变
+            # 但关节索引需要偏移 6 (跳过浮动基座的 6 个自由度)
+            jacobian_idx = self._body_idx
+            if isinstance(self._joint_ids, slice):
+                # 如果是 slice(None)，则需要手动构造列表或处理
+                # 这里简化处理，假设 slice(None) 意味着所有驱动关节
+                # 对于浮动基座，通常不建议使用 slice(None) 除非明确知道含义
+                # 为安全起见，我们重新获取所有关节索引
+                all_joint_ids = list(range(self._asset.num_joints))
+                jacobi_joint_ids = [i + 6 for i in all_joint_ids]
+            else:
+                jacobi_joint_ids = [i + 6 for i in self._joint_ids]
 
         # 提取对应控制关节的部分
         # shape: (num_envs, 6, num_joints)
-        if isinstance(self._joint_ids, slice):
-            jacobian = all_jacobians[:, jacobian_idx, :, self._joint_ids]
-        else:
-            jacobian = all_jacobians[:, jacobian_idx, :, :][:, :, self._joint_ids]
+        # 注意：get_jacobians() 返回的是 (num_envs, num_bodies, 6, num_dofs)
+        # 其中 num_dofs 包含浮动基座的 6 DoF (如果存在)
+        
+        if jacobian_idx < 0:
+             raise ValueError(f"试图获取固定基座 (index={self._body_idx}) 的雅可比矩阵，这是不允许的。")
+
+        jacobian = all_jacobians[:, jacobian_idx, :, jacobi_joint_ids]
 
         return jacobian
 

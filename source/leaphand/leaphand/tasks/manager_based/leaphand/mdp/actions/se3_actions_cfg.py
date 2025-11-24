@@ -61,11 +61,13 @@ class se3ActionCfg(ActionTermCfg):
     """
 
     use_pd: bool = False
-    r"""是否使用速度-位置比例微分控制。
+    r"""是否启用 PD 控制（位置+速度前馈）。
 
-    True的话，动作项输出的旋量会被映射为速度目标，构成速度-位置比例微分控制。
+    如果为 True，将同时设置关节的位置目标和速度目标（前馈速度）。
+    此时底层控制器执行：tau = Kp * (pos_target - pos) + Kd * (vel_target - vel)。
 
-    False的话，速度目标默认为0。
+    如果为 False，仅设置关节的位置目标，速度目标强制设为 0。
+    此时底层控制器执行：tau = Kp * (pos_target - pos) - Kd * vel。
     """
 
     angular_limits: None | float | tuple[float, float, float] = None
