@@ -37,9 +37,7 @@ from isaaclab.devices.openxr import XrCfg
 
 import isaaclab.envs.mdp as mdp
 from leaphand.robots.leap import LEAP_HAND_CFG
-from leaphand.tasks.manager_based.leaphand.mdp import observations_privileged as priv_obs
-from leaphand.tasks.manager_based.leaphand.mdp.rewards import pose_diff_penalty, track_orientation_inv_l2
-from . import mdp as leaphand_mdp
+from . import mdp as leap_mdp
 
 # from .mdp.actions import LinearDecayAlphaEMAJointPositionToLimitsActionCfg
 
@@ -154,7 +152,7 @@ class InHandSceneCfg(InteractiveSceneCfg):
 @configclass
 class CommandsCfg:
     """Commands specifications for the MDP."""
-    goal_pose = leaphand_mdp.ContinuousRotationCommandCfg(
+    goal_pose = leap_mdp.ContinuousRotationCommandCfg(
         asset_name="object",
         resampling_time_range=(1e6, 1e6),  # 不基于时间重采样
         init_pos_offset=(0.0, 0.0, 0.0),
@@ -199,7 +197,7 @@ class ObservationsCfg:
         # -- command terms
         goal_pose = ObsTerm(func=mdp.generated_commands, params={"command_name": "goal_pose"})
         goal_quat_diff = ObsTerm(
-            func=leaphand_mdp.goal_quat_diff,
+            func=leap_mdp.goal_quat_diff,
             params={"asset_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "make_quat_unique": True},
         )
 
@@ -246,7 +244,7 @@ class EventCfg: #
     )
 
     randomized_object_com = EventTerm(
-        func=leaphand_mdp.randomize_rigid_object_com,
+        func=leap_mdp.randomize_rigid_object_com,
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("object"),
@@ -369,17 +367,17 @@ class RewardsCfg:
 
     # -- task
     track_orientation_inv_l2 = RewTerm(
-        func=leaphand_mdp.track_orientation_inv_l2,
+        func=leap_mdp.track_orientation_inv_l2,
         weight=1.0,
         params={"object_cfg": SceneEntityCfg("object"), "rot_eps": 0.1, "command_name": "goal_pose"},
     )
     goal_position_distance = RewTerm(
-        func=leaphand_mdp.goal_position_distance,
+        func=leap_mdp.goal_position_distance,
         weight=-10.0,
         params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose"},
     )
     success_bonus = RewTerm(
-        func=leaphand_mdp.success_bonus,
+        func=leap_mdp.success_bonus,
         weight=250.0,
         params={
             "object_cfg": SceneEntityCfg("object"),
@@ -389,7 +387,7 @@ class RewardsCfg:
         },
     )
     fingertip_distance = RewTerm(
-        func=leaphand_mdp.fingertip_distance_penalty,
+        func=leap_mdp.fingertip_distance_penalty,
         weight=-2.0,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
@@ -407,10 +405,10 @@ class RewardsCfg:
     joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight=-2.5e-5)
     action_l2 = RewTerm(func=mdp.action_l2, weight=-0.0001)
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
-    pose_diff = RewTerm(func=leaphand_mdp.pose_diff_penalty, weight=-0.3)
-    torque_l2 = RewTerm(func=leaphand_mdp.torque_l2_penalty, weight=-1e-5)
+    pose_diff = RewTerm(func=leap_mdp.pose_diff_penalty, weight=-0.3)
+    torque_l2 = RewTerm(func=leap_mdp.torque_l2_penalty, weight=-1e-5)
     fall_penalty = RewTerm(
-        func=leaphand_mdp.fall_penalty,
+        func=leap_mdp.fall_penalty,
         weight=-10.0,
         params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "fall_distance": 0.07},
     )
@@ -421,7 +419,7 @@ class TerminationsCfg:
 
     # 物体掉落终止
     object_falling = DoneTerm(
-        func=leaphand_mdp.object_falling_termination,
+        func=leap_mdp.object_falling_termination,
         params={"fall_dist": 0.08, "target_pos_offset": (0.0, -0.1, 0.56)},
     )
 

@@ -80,12 +80,10 @@ class se3Action(ActionTerm):
                 self._parent_body_idx = parent_body_ids[0]
                 self._parent_body_name = parent_body_names[0]
             else:
-                # 自动推断：查找 target 的父 prim
-                # NOTE: 这部分需要访问 USD Stage 来解析 prim 层级关系
-                # 为简化实现，这里要求用户必须指定 parent
-                raise NotImplementedError(
-                    "当 is_xform=True 时，目前必须显式指定 'parent' 参数来指明虚拟Xform对应的实际刚体。"
-                    "自动推断功能将在后续版本实现。"
+                # 自动推断：查找 target 的父 prim（必须是刚体）
+                self._parent_body_name, self._parent_body_idx = self._find_parent_rigid_body()
+                logger.info(
+                    f"自动推断父刚体：{self._parent_body_name} [idx={self._parent_body_idx}]"
                 )
 
             # 计算从父刚体{b_raw}到虚拟Xform{b_can}的固定变换 T_raw_to_can
@@ -253,6 +251,16 @@ class se3Action(ActionTerm):
         self._joint_pos_target[:] = current_joint_pos + delta_joint_vel * self._dt
         self._joint_vel_target[:] = delta_joint_vel
 
+        # 8. 应用关节限位
+        if self.cfg.use_joint_limits:
+            # 获取软关节限位
+            # shape: (num_envs, num_controlled_joints, 2)
+            limits = self._asset.data.soft_joint_pos_limits[:, self._joint_ids]
+            # 截断目标位置
+            self._joint_pos_target[:] = torch.clamp(
+                self._joint_pos_target, min=limits[..., 0], max=limits[..., 1]
+            )
+
         # 更新 processed_actions (主要用于日志记录，存储位置目标)
         self._processed_actions[:] = self._joint_pos_target
 
@@ -292,6 +300,98 @@ class se3Action(ActionTerm):
     Helper methods.
     """
 
+    def _find_parent_rigid_body(self) -> tuple[str, int]:
+        """自动推断虚拟 Xform 的父刚体。
+
+        从 target（虚拟 Xform）向上遍历 USD prim 层级，找到第一个具有 RigidBodyAPI 的 prim。
+
+        Returns:
+            tuple[str, int]: (父刚体名称, 父刚体在 body_names 中的索引)
+
+        Raises:
+            RuntimeError: 当无法找到虚拟 Xform 或其父刚体时。
+            ValueError: 当推断出的父刚体不在机器人的 body_names 列表中时。
+        """
+        from isaaclab.sim.utils import get_current_stage
+        from pxr import UsdPhysics
+
+        stage = get_current_stage()
+
+        # 获取第一个环境的 prim 路径
+        env_prim_path = self._asset.prim_paths[0]  # 例如 "/World/envs/env_0/Robot"
+
+        # 首先需要找到 target Xform 在 USD 中的完整路径
+        # 由于不知道 target 的完整路径，我们需要在机器人子树中搜索
+        target_prim = self._find_prim_by_name(stage, env_prim_path, self.cfg.target)
+
+        if target_prim is None or not target_prim.IsValid():
+            raise RuntimeError(
+                f"无法在机器人 prim '{env_prim_path}' 下找到名为 '{self.cfg.target}' 的 Xform。"
+            )
+
+        logger.info(f"找到虚拟 Xform: {target_prim.GetPrimPath()}")
+
+        # 向上遍历层级，找到第一个刚体
+        current_prim = target_prim.GetParent()
+        parent_body_prim = None
+
+        while current_prim.IsValid():
+            # 检查当前 prim 是否有 RigidBodyAPI
+            if current_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                parent_body_prim = current_prim
+                break
+
+            # 如果到达机器人根节点或更高层级，停止搜索
+            if str(current_prim.GetPrimPath()) == env_prim_path:
+                break
+
+            current_prim = current_prim.GetParent()
+
+        if parent_body_prim is None:
+            raise RuntimeError(
+                f"无法找到虚拟 Xform '{self.cfg.target}' 的父刚体。"
+                f"请检查 USD 层级结构，或显式指定 'parent' 参数。"
+            )
+
+        # 提取刚体名称（相对于机器人根的路径最后一段）
+        parent_prim_path = str(parent_body_prim.GetPrimPath())
+        # 例如 "/World/envs/env_0/Robot/fingertip" -> "fingertip"
+        parent_body_name = parent_prim_path.replace(env_prim_path + "/", "").split("/")[-1]
+
+        # 验证并获取刚体索引
+        body_ids, body_names = self._asset.find_bodies(parent_body_name)
+        if len(body_ids) != 1:
+            raise ValueError(
+                f"推断出的父刚体名称 '{parent_body_name}' 在机器人中匹配到 {len(body_ids)} 个刚体：{body_names}。"
+                f"期望恰好 1 个匹配。请检查 USD 结构或显式指定 'parent' 参数。"
+            )
+
+        return body_names[0], body_ids[0]
+
+    def _find_prim_by_name(self, stage, root_path: str, target_name: str):
+        """在 USD stage 中搜索指定名称的 prim。
+
+        Args:
+            stage: USD Stage 对象。
+            root_path: 搜索的根路径。
+            target_name: 目标 prim 的名称。
+
+        Returns:
+            找到的 Usd.Prim 或 None。
+        """
+        from pxr import Usd
+
+        root_prim = stage.GetPrimAtPath(root_path)
+        if not root_prim.IsValid():
+            return None
+
+        # 深度优先搜索
+        for prim in Usd.PrimRange(root_prim):
+            if prim.GetName() == target_name:
+                return prim
+
+        return None
+
     def _compute_xform_offset_transform(self) -> torch.Tensor:
         """计算虚拟 Xform 相对于父刚体的固定变换 T_bb'。
 
@@ -301,38 +401,35 @@ class se3Action(ActionTerm):
         Raises:
             RuntimeError: 当无法从 USD Stage 获取变换时。
         """
-        # TODO: 实现通过 USD Stage API 获取相对位姿
-        # 参考 source/leaphand/leaphand/tasks/functional/launch_with_leaphand.py
-        # 中的 _compute_custom_prim_offsets() 方法
-
         from isaaclab.sim.utils import get_current_stage
-        import omni.isaac.core.utils.prims as prim_utils
+        from pxr import UsdGeom
 
         stage = get_current_stage()
 
         # 获取第一个环境的 prim 路径
         env_prim_path = self._asset.prim_paths[0]  # 例如 "/World/envs/env_0/Robot"
 
-        # 构造父刚体和虚拟Xform的完整路径
-        # 假设 body_names 对应的路径结构是 prim_path/body_name
-        parent_prim_path = f"{env_prim_path}/{self._parent_body_name}"
-        xform_prim_path = f"{env_prim_path}/{self._parent_body_name}/{self.cfg.target}"
+        # 动态搜索父刚体和虚拟 Xform 的 USD prim
+        parent_prim = self._find_prim_by_name(stage, env_prim_path, self._parent_body_name)
+        xform_prim = self._find_prim_by_name(stage, env_prim_path, self.cfg.target)
 
-        # 获取 USD prims
-        parent_prim = stage.GetPrimAtPath(parent_prim_path)
-        xform_prim = stage.GetPrimAtPath(xform_prim_path)
-
-        if not parent_prim.IsValid() or not xform_prim.IsValid():
+        if parent_prim is None or not parent_prim.IsValid():
             raise RuntimeError(
-                f"无法获取有效的 USD Prim:\n"
-                f"  父刚体路径: {parent_prim_path} (valid={parent_prim.IsValid()})\n"
-                f"  Xform路径: {xform_prim_path} (valid={xform_prim.IsValid()})"
+                f"无法在机器人 prim '{env_prim_path}' 下找到父刚体 '{self._parent_body_name}'。"
             )
 
-        # 获取世界坐标系下的位姿
-        from pxr import UsdGeom
-        import omni.usd
+        if xform_prim is None or not xform_prim.IsValid():
+            raise RuntimeError(
+                f"无法在机器人 prim '{env_prim_path}' 下找到虚拟 Xform '{self.cfg.target}'。"
+            )
 
+        logger.info(
+            f"计算相对变换:\n"
+            f"  父刚体路径: {parent_prim.GetPrimPath()}\n"
+            f"  Xform路径: {xform_prim.GetPrimPath()}"
+        )
+
+        # 获取世界坐标系下的位姿
         xform_cache = UsdGeom.XformCache()
 
         parent_transform_w = xform_cache.GetLocalToWorldTransform(parent_prim)

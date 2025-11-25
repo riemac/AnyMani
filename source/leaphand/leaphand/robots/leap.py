@@ -14,7 +14,8 @@ from pathlib import Path
 
 LEAP_HAND_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{Path(__file__).parent.parent.parent}/assets/leap_hand_v1_right/leap_hand_right.usd",
+        # usd_path=f"{Path(__file__).parent.parent.parent}/assets/leap_hand_v1_right/leap_hand_right.usd",
+        usd_path=f"{Path(__file__).parent.parent.parent}/assets/leap_hand_v1_right/leap_hand_right_edit.usd",
         activate_contact_sensors=False,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             kinematic_enabled=False,

@@ -82,6 +82,13 @@ class se3ActionCfg(ActionTermCfg):
     这里设置sqrt(3)，主要是v是在{s}上观察，而实际旋量的线速度分量是在{b}上，它们之间的关系由矩阵范数和向量范数的相容性所推导出
     """
 
+    use_joint_limits: bool = True
+    r"""是否启用关节限位。
+
+    如果为 True，将在计算出目标关节位置后，将其限制在机器人的软关节限位范围内。
+    这可以防止动作指令超出物理可行范围。
+    """
+
 
 @configclass
 class se3dlsActionsCfg(se3ActionCfg):

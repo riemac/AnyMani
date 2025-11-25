@@ -130,6 +130,9 @@ IsaacLab/                    # IsaacLab官方核心框架目录（位于~/isaac/
 * **SceneEntityCfg 关节索引顺序:**
   使用 `SceneEntityCfg` 指定 `joint_names` 时，需注意 `preserve_order` 的设置，以决定关节索引顺序与指定顺序是否一致。
 
+* **雅可比矩阵分量顺序**
+  PhysX 返回的雅可比矩阵顺序为 [线速度 v; 角速度 w]，注意与某些文献中 [w; v] 的顺序不同。本项目采用《Modern Robotics》里的 [w; v] 约定
+
 ### 个人偏好
 
 * **数理回复:**
