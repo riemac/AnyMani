@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from isaaclab.assets.articulation import Articulation
 from isaaclab.managers.action_manager import ActionTerm
 
-from leaphand.mdp.utils import math as math_leap
+from ..utils import math as math_leap
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -205,7 +205,7 @@ class se3Action(ActionTerm):
     """
 
     def process_actions(self, actions: torch.Tensor):
-        """处理输入的旋量动作，映射到关节空间。
+        r"""处理输入的旋量动作，映射到关节空间。
 
         处理流程：
 
@@ -292,7 +292,8 @@ class se3Action(ActionTerm):
         self._raw_actions[env_ids] = 0.0
 
         # 重置目标位置为当前位置，避免跳变
-        self._joint_pos_target[env_ids] = self._asset.data.joint_pos[env_ids, self._joint_ids]
+        # 注意：分步索引以避免当 env_ids 和 joint_ids 都是列表时的广播错误
+        self._joint_pos_target[env_ids] = self._asset.data.joint_pos[env_ids][:, self._joint_ids]
         # 重置目标速度为 0
         self._joint_vel_target[env_ids] = 0.0
 
@@ -314,11 +315,12 @@ class se3Action(ActionTerm):
         """
         from isaaclab.sim.utils import get_current_stage
         from pxr import UsdPhysics
+        import isaaclab.sim as sim_utils
 
         stage = get_current_stage()
 
         # 获取第一个环境的 prim 路径
-        env_prim_path = self._asset.prim_paths[0]  # 例如 "/World/envs/env_0/Robot"
+        env_prim_path = sim_utils.find_first_matching_prim(self._asset.cfg.prim_path).GetPath().pathString
 
         # 首先需要找到 target Xform 在 USD 中的完整路径
         # 由于不知道 target 的完整路径，我们需要在机器人子树中搜索
@@ -403,11 +405,12 @@ class se3Action(ActionTerm):
         """
         from isaaclab.sim.utils import get_current_stage
         from pxr import UsdGeom
+        import isaaclab.sim as sim_utils
 
         stage = get_current_stage()
 
         # 获取第一个环境的 prim 路径
-        env_prim_path = self._asset.prim_paths[0]  # 例如 "/World/envs/env_0/Robot"
+        env_prim_path = sim_utils.find_first_matching_prim(self._asset.cfg.prim_path).GetPath().pathString
 
         # 动态搜索父刚体和虚拟 Xform 的 USD prim
         parent_prim = self._find_prim_by_name(stage, env_prim_path, self._parent_body_name)

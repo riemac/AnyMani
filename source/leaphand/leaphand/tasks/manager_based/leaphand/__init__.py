@@ -9,6 +9,7 @@ import gymnasium as gym
 
 from . import agents
 from .inhand_base_env_cfg import InHandObjectEnvCfg
+from .inhand_se3_env_cfg import InHandse3EnvCfg
 
 ##
 # Register Gym environments.
@@ -21,6 +22,15 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.inhand_base_env_cfg:InHandObjectEnvCfg",
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
-        "torchrl_cfg_entry_point": f"{agents.__name__}:torchrl_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Template-Leaphand-se3-Rot-Manager-v0", # Template可被list_envs.py识别（但不影响环境注册与训练）
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.inhand_se3_env_cfg:InHandse3EnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_se3.yaml",
     },
 )

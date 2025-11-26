@@ -40,6 +40,7 @@ class ActionsCfg:
         angular_limits=2,
         linear_limits=0.2356,  # 估算逻辑为：指长0.15m左右，设每秒最多沿圆周转90度，则线速度约0.15*π/2=0.2356m/s
         damping=0.01,
+        use_joint_limits=True,
     )
     middle_se3 = leap_mdp.se3dlsActionsCfg(
         asset_name="robot",
@@ -52,6 +53,7 @@ class ActionsCfg:
         angular_limits=2,
         linear_limits=0.2356,
         damping=0.01,
+        use_joint_limits=True,
     )
     ring_se3 = leap_mdp.se3dlsActionsCfg(
         asset_name="robot",
@@ -64,6 +66,7 @@ class ActionsCfg:
         angular_limits=2,
         linear_limits=0.2356,
         damping=0.01,
+        use_joint_limits=True,
     )
     thumb_se3 = leap_mdp.se3dlsActionsCfg(
         asset_name="robot",
@@ -76,6 +79,7 @@ class ActionsCfg:
         angular_limits=2,
         linear_limits=0.2356,
         damping=0.01,
+        use_joint_limits=True,
     )
 
 
