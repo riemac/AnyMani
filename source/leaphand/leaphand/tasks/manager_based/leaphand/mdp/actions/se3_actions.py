@@ -147,7 +147,7 @@ class se3Action(ActionTerm):
         # 处理后的动作是关节空间的目标（位置或速度，取决于use_pd配置）
         self._processed_actions = torch.zeros(self.num_envs, self._num_joints, device=self.device)
 
-        # 解析角速度和线速度的限制
+        # 解析角速度和线速度的限制，并计算缩放系数
         self._parse_velocity_limits()
 
         # 创建内部状态缓冲区
@@ -169,12 +169,12 @@ class se3Action(ActionTerm):
     """
 
     @property
-    def action_dim(self) -> int:
+    def action_dim(self) -> int:  # 不同于关节空间动作，这里动作维度始终为6，关节空间的动作维度依赖于具体关节数量
         """动作维度，始终为 6 (se(3) 旋量的维度)。"""
         return 6
 
     @property
-    def raw_actions(self) -> torch.Tensor:
+    def raw_actions(self) -> torch.Tensor:  # 这里的raw_actions存储的就是来自rl_games或其他rl库归一化的[-1,1]动作值
         """原始动作张量（旋量）。形状为 (num_envs, 6)。"""
         return self._raw_actions
 
@@ -210,24 +210,40 @@ class se3Action(ActionTerm):
         处理流程：
 
         1. 存储原始旋量动作
-        2. 应用速度限制（clamp）
-        3. 如果是虚拟 Xform，应用伴随变换
-        4. 获取当前雅可比矩阵
-        5. 计算雅可比伪逆
-        6. 计算关节速度增量：:math:`\Delta\dot{\theta} = J^+ \mathcal{V}_b`
-        7. 如果 use_pd=True，积分为位置目标；否则直接作为速度目标
+        2. 应用缩放映射：将 [-1, 1] 的动作映射到物理速度范围 [min, max]
+        3. 应用速度限制（clamp，作为安全网）
+        4. 如果是虚拟 Xform，应用伴随变换
+        5. 获取当前雅可比矩阵
+        6. 计算雅可比伪逆
+        7. 计算关节速度增量：:math:`\Delta\dot{\theta} = J^+ \mathcal{V}_b`
+        8. 如果 use_pd=True，积分为位置目标；否则直接作为速度目标
 
         Args:
             actions: 输入的旋量动作。形状为 (num_envs, 6)，
                      前3维为角速度 :math:`\omega_b`，后3维为线速度 :math:`v_b`。
+                     假设输入范围为 [-1, 1]。
         """
         # 1. 存储原始动作
         self._raw_actions[:] = actions
 
-        # 2. 应用速度限制
-        twist_limited = self._apply_velocity_limits(self._raw_actions)
+        # 2. 应用缩放映射 (ax + b)
+        # actions: [angular (3), linear (3)]
+        if self._angular_vel_limits is not None:
+            scaled_angular = actions[:, :3] * self._angular_scale + self._angular_bias
+        else:
+            scaled_angular = actions[:, :3]
 
-        # 3. 如果是虚拟 Xform，应用伴随变换
+        if self._linear_vel_limits is not None:
+            scaled_linear = actions[:, 3:] * self._linear_scale + self._linear_bias
+        else:
+            scaled_linear = actions[:, 3:]
+            
+        twist = torch.cat([scaled_angular, scaled_linear], dim=1)
+
+        # 3. 应用速度限制 (Safety Clamp)
+        twist_limited = self._apply_velocity_limits(twist)
+
+        # 4. 如果是虚拟 Xform，应用伴随变换
         if self.cfg.is_xform:
             # V_raw = Ad_{T_raw_to_can} * V_can
             twist_body = torch.matmul(self._adjoint_matrix, twist_limited.unsqueeze(-1)).squeeze(-1)
@@ -522,6 +538,10 @@ class se3Action(ActionTerm):
         """解析和处理角速度与线速度的限制配置。
 
         根据配置创建上下界张量，用于后续的 clamp 操作。
+        同时计算缩放系数 (scale) 和偏移量 (bias)，用于将 [-1, 1] 的动作映射到 [min, max]。
+        公式: y = x * scale + bias
+        scale = (max - min) / 2
+        bias = (max + min) / 2
         """
         # 解析角速度限制
         if self.cfg.angular_limits is not None:
@@ -539,8 +559,14 @@ class se3Action(ActionTerm):
                     [-torch.pi / kx, -torch.pi / ky, -torch.pi / kz, torch.pi / kx, torch.pi / ky, torch.pi / kz],
                     device=self.device,
                 ).view(2, 3)
+            
+            # 计算角速度缩放参数
+            self._angular_scale = (self._angular_vel_limits[1] - self._angular_vel_limits[0]) / 2.0
+            self._angular_bias = (self._angular_vel_limits[1] + self._angular_vel_limits[0]) / 2.0
         else:
             self._angular_vel_limits = None
+            self._angular_scale = 1.0
+            self._angular_bias = 0.0
 
         # 解析线速度限制
         if self.cfg.linear_limits is not None:
@@ -566,13 +592,21 @@ class se3Action(ActionTerm):
                     ],
                     device=self.device,
                 ).view(2, 3)
+            
+            # 计算线速度缩放参数
+            self._linear_scale = (self._linear_vel_limits[1] - self._linear_vel_limits[0]) / 2.0
+            self._linear_bias = (self._linear_vel_limits[1] + self._linear_vel_limits[0]) / 2.0
         else:
             self._linear_vel_limits = None
+            self._linear_scale = 1.0
+            self._linear_bias = 0.0
 
         logger.info(
-            f"速度限制设置:\n"
+            f"速度限制与缩放设置:\n"
             f"  角速度限制: {self._angular_vel_limits if self._angular_vel_limits is not None else 'None'}\n"
-            f"  线速度限制: {self._linear_vel_limits if self._linear_vel_limits is not None else 'None'}"
+            f"  角速度缩放: scale={self._angular_scale}, bias={self._angular_bias}\n"
+            f"  线速度限制: {self._linear_vel_limits if self._linear_vel_limits is not None else 'None'}\n"
+            f"  线速度缩放: scale={self._linear_scale}, bias={self._linear_bias}"
         )
 
     def _apply_velocity_limits(self, twist: torch.Tensor) -> torch.Tensor:
