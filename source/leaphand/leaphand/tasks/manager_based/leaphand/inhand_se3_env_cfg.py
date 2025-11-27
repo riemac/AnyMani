@@ -83,11 +83,19 @@ class ActionsCfg:
     )
 
 
+@configclass
+class RewardCfg(inhand_base_env_cfg.RewardsCfg):
+    """奖励配置"""
+    
+    def __post_init__(self):
+        super().__post_init__()
+
 
 @configclass
 class InHandse3EnvCfg(inhand_base_env_cfg.InHandObjectEnvCfg):
     """LeapHand连续旋转任务环境配置 - 使用se3相对刚体末端旋量动作空间"""
     actions: ActionsCfg = ActionsCfg()
+    reward: RewardCfg = RewardCfg()
     def __post_init__(self):
         # post init of parent
         super().__post_init__()

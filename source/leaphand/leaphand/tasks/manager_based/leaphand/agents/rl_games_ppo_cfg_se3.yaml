@@ -12,7 +12,7 @@ params:
   # 环境包装器裁剪参数
   env:
     clip_observations: 5.0  # 观测值裁剪范围，防止数值过大
-    clip_actions: 1.0      # 动作值裁剪范围，限制动作幅度。这里裁减的是从策略网络分布中采样（Sample）出来的值
+    clip_actions: 1.0      # NOTE:动作值裁剪范围，限制动作幅度。这里裁减的是从策略网络分布中采样（Sample）出来的值
 
   # 算法相关配置
   algo:
@@ -87,8 +87,8 @@ params:
     kl_threshold: 0.01           # KL散度阈值，控制策略更新幅度
     score_to_win: 100000          # 获胜分数阈值
     max_epochs: 5000             # 最大训练轮数（采集数据->更新模型的完整流程）
-    save_best_after: 200         # 100轮后开始保存最佳模型
-    save_frequency: 100          # 每100轮保存一次
+    save_best_after: 200         # 200轮后开始保存最佳模型
+    save_frequency: 200          # 每200轮保存一次
     print_stats: True            # 打印训练统计信息
     grad_norm: 1.0               # 梯度裁剪范数
     entropy_coef: 0.002          # 熵正则化系数，用于鼓励探索

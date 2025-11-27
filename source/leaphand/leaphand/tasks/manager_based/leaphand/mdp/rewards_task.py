@@ -3,7 +3,11 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""LeapHand连续旋转任务的奖励函数"""
+r"""LeapHand与任务相关的奖励函数。主要由状态决定，衡量当前状态与目标状态的距离。它是稀疏的（如成功/失败）或稠密的（如距离度量）。
+
+简言之，该奖励文件决定 “做什么”，特定于任务（Task-Specific）。
+
+"""
 
 from __future__ import annotations
 
@@ -15,14 +19,15 @@ import isaaclab.utils.math as math_utils
 
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
-from isaaclab.utils.math import quat_conjugate, quat_mul, wrap_to_pi, quat_from_angle_axis
-from isaaclab.markers import VisualizationMarkers
-from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG
+# from isaaclab.markers import VisualizationMarkers
+# from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
-
+###
+# 旋转和重定向奖励
+###
 def track_orientation_inv_l2(
     env: ManagerBasedRLEnv,
     command_name: str = "goal_pose",
@@ -178,21 +183,6 @@ def fingertip_distance_penalty(
     return torch.mean(distances, dim=-1)
 
 
-def torque_l2_penalty(
-    env: ManagerBasedRLEnv,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """关节力矩平方和，用于约束动作的用力大小。"""
-
-    robot: Articulation = env.scene[robot_cfg.name]
-    torque = getattr(robot.data, "computed_torque", None)
-
-    if torque is None:
-        return torch.zeros(env.num_envs, device=env.device)
-
-    return torch.sum(torque ** 2, dim=-1)
-
-
 ###
 #  参考LEAP_Hand_Isaac_Lab奖励项
 ###
@@ -201,6 +191,7 @@ def pose_diff_penalty(
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     natural_pose: dict[str, float] | None = None
 ) -> torch.Tensor:
+    # TODO：这里的值可能需要修改，具体待操作度指标设计完成后再调整
     """计算手部姿态偏差惩罚 - 鼓励保持接近人手的自然姿态
 
     Args:
