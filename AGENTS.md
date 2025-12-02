@@ -32,7 +32,7 @@
 ## 工作区结构
 
 ```bash
-AnyRotate/                    # 个人AnyRotate项目根目录
+AnyRotate/                    # 个人AnyRotate项目根目录（位于~/isaac/AnyRotate）
 ├── scripts/                 # 脚本目录
 │   ├── debug/              # 调试脚本目录
 │   ├── demo/               # 演示脚本目录
@@ -104,7 +104,7 @@ IsaacLab/                    # IsaacLab官方核心框架目录（位于~/isaac/
 
 * **指令遵循:**
   - `mcp-feedback-enhanced` 调用失败时必须重试。
-  - 文件中以 `Prompt:` 标注的注释是必须遵循的指令，且不可删除。
+  - 优先使用 `semantic_search` 工具查询代码库相关内容。深入探索某一主题时，可反复使用 `semantic_search`。当其他本地查询方式搜索不到相关内容，也切换到 `semantic_search` 工具。只有在知道精确定位后，再使用 `file_read` 工具读取整个文件内容。
 
 ### 工程问题
 
@@ -130,8 +130,11 @@ IsaacLab/                    # IsaacLab官方核心框架目录（位于~/isaac/
 * **SceneEntityCfg 关节索引顺序:**
   使用 `SceneEntityCfg` 指定 `joint_names` 时，需注意 `preserve_order` 的设置，以决定关节索引顺序与指定顺序是否一致。
 
-* **雅可比矩阵分量顺序**
-  PhysX 返回的雅可比矩阵顺序为 [线速度 v; 角速度 w]，注意与某些文献中 [w; v] 的顺序不同。本项目采用《Modern Robotics》里的 [w; v] 约定
+* **雅可比矩阵**
+  - PhysX 返回的雅可比矩阵顺序为 [线速度 v; 角速度 w]，注意与某些文献中 [w; v] 的顺序不同。本项目遵循《Modern Robotics》里的 [w; v] 约定。
+  - 获取雅可比矩阵时注意基座的类型与索引的处理。对于固定基座关节机器人，self._asset.root_physx_view.get_jacobians() 的 body 索引需要减1，因是雅可比矩阵不包含固定基座的刚体。而浮动基座 Jacobian 包含基座，索引不变，但关节索引需要偏移 6 (跳过浮动基座的 6 个自由度)。
+
+
 
 ### 个人偏好
 

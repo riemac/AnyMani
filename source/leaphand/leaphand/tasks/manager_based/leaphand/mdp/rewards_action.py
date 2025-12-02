@@ -41,3 +41,36 @@ def torque_l2_penalty(
         return torch.zeros(env.num_envs, device=env.device)
 
     return torch.sum(torque ** 2, dim=-1)
+
+###
+# se3动作正则化项
+###
+
+def jacobian_manipulability(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    r"""TODO：刚体雅可比矩阵的可操作度指标。不知道用奖励还是惩罚
+    也暂不清楚用哪种形式，是det(JJ^T)，还是雅可比条件数。这个还得先弄清楚量级
+    """
+    pass
+
+def se3_kinetic_energy(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    r"""TODO：se3动作对应的末端动能计算。用于约束动作的平滑性和能量消耗。
+    """
+    pass
+
+def se3_action_smooth(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    norm: int = 2,
+) -> torch.Tensor:
+    r"""TODO：se3动作平滑性奖励/惩罚。用于鼓励动作的连续性和平滑变化。
+
+    Args:
+        norm: 动作平滑性的度量方式，默认为L2范数。可选L1、L2和无穷范数。
+    """
+    pass

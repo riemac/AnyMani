@@ -10,14 +10,19 @@
 import argparse
 from isaaclab.app import AppLauncher
 
-# 添加命令行参数
-parser = argparse.ArgumentParser(description="启动LeapHand场景并显示实时位姿监控面板")
-AppLauncher.add_app_launcher_args(parser)
-args_cli = parser.parse_args()
+# 全局变量定义，避免导入时未定义错误
+simulation_app = None
+args_cli = None
 
-# 启动 Isaac Sim
-app_launcher = AppLauncher(args_cli)
-simulation_app = app_launcher.app
+if __name__ == "__main__":
+    # 添加命令行参数
+    parser = argparse.ArgumentParser(description="启动LeapHand场景并显示实时位姿监控面板")
+    AppLauncher.add_app_launcher_args(parser)
+    args_cli = parser.parse_args()
+
+    # 启动 Isaac Sim
+    app_launcher = AppLauncher(args_cli)
+    simulation_app = app_launcher.app
 
 """Rest everything follows."""
 

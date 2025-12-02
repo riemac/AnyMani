@@ -9,6 +9,8 @@ r"""LeapHand连续旋转任务环境配置 - ManagerBasedRLEnv架构
 
 """
 
+from isaaclab.managers import RewardTermCfg as RewTerm
+
 from isaaclab.utils import configclass
 
 import isaaclab.envs.mdp as mdp
@@ -86,9 +88,13 @@ class ActionsCfg:
 @configclass
 class RewardCfg(inhand_base_env_cfg.RewardsCfg):
     """奖励配置"""
+    # TODO:这里到时候要加一些适配se3动作的奖励
+    se3 = RewTerm(
+    )
+
+    # def __post_init__(self):
+    #     super().__post_init__()
     
-    def __post_init__(self):
-        super().__post_init__()
 
 
 @configclass
