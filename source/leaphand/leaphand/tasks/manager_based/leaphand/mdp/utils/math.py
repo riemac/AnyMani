@@ -11,6 +11,8 @@ import torch
 import torch.nn.functional
 from typing import Literal
 
+from isaaclab.utils import math as math_utils
+
 # import logger
 logger = logging.getLogger(__name__)
 
@@ -226,3 +228,96 @@ def adjoint_transform(T: torch.Tensor) -> torch.Tensor:
     # (已经初始化为零，无需额外设置)
 
     return Ad
+
+
+def transform_from_pos_quat(pos: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
+    r"""根据位姿构造齐次变换矩阵。
+
+    Args:
+        pos: 位置向量，形状 ``(..., 3)``。
+        quat: 四元数 ``(w, x, y, z)``，形状 ``(..., 4)``。
+
+    Returns:
+        齐次变换矩阵，形状 ``(..., 4, 4)``，表示从局部坐标系到世界坐标系的变换。
+    """
+
+    rot = math_utils.matrix_from_quat(quat)
+    batch_shape = pos.shape[:-1]
+    T = torch.zeros(batch_shape + (4, 4), device=pos.device, dtype=pos.dtype)
+    T[..., :3, :3] = rot
+    T[..., :3, 3] = pos
+    T[..., 3, 3] = 1.0
+    return T
+
+
+def inverse_transform(T: torch.Tensor) -> torch.Tensor:
+    r"""计算 SE(3) 变换的逆。
+
+    Args:
+        T: 齐次变换矩阵，形状 ``(..., 4, 4)``。
+
+    Returns:
+        逆变换矩阵，形状 ``(..., 4, 4)``。
+    """
+
+    R = T[..., :3, :3]
+    p = T[..., :3, 3]
+    R_T = R.transpose(-1, -2)
+    p_inv = -torch.matmul(R_T, p.unsqueeze(-1)).squeeze(-1)
+
+    T_inv = torch.zeros_like(T)
+    T_inv[..., :3, :3] = R_T
+    T_inv[..., :3, 3] = p_inv
+    T_inv[..., 3, 3] = 1.0
+    return T_inv
+
+'''
+Mathematical measures related to manipulability.
+'''
+
+def manipulability(J: torch.Tensor, eps: float = 1.0e-12) -> torch.Tensor:
+    r"""计算 Yoshikawa 操作度指标。
+
+    Args:
+        J: 几何雅可比矩阵，形状 ``(..., m, n)``。
+        eps: 数值稳定用的下限，默认 ``1e-12``。
+
+    Returns:
+        操作度值，形状 ``(...)``。
+    """
+
+    if J.dim() < 2:
+        raise ValueError("Jacobian must have at least 2 dimensions (m, n).")
+
+    gram = (
+        torch.matmul(J.transpose(-2, -1), J)
+        if J.shape[-2] >= J.shape[-1]
+        else torch.matmul(J, J.transpose(-2, -1))
+    )
+
+    det = torch.linalg.det(gram)
+    det = torch.clamp(det, min=0.0)
+    return torch.sqrt(det + eps)
+
+
+def condition_number(J: torch.Tensor, eps: float = 1.0e-6) -> torch.Tensor:
+    r"""计算雅可比矩阵的 2-范数条件数。"""
+
+    S = torch.linalg.svdvals(J)
+    sigma_max = S[..., 0]
+    sigma_min = torch.clamp(S[..., -1], min=eps)
+    return sigma_max / sigma_min
+
+
+def svd(J: torch.Tensor, full_matrices: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    r"""对雅可比矩阵执行奇异值分解。
+
+    Args:
+        J: 输入矩阵 ``(..., m, n)``，支持批量。
+        full_matrices: 是否返回完整的 U/Vh。默认 ``False`` 获取经济型分解。
+
+    Returns:
+        ``(U, S, Vh)``：分别为左奇异向量、奇异值、右奇异向量转置，形状与 ``torch.linalg.svd`` 一致。
+    """
+
+    return torch.linalg.svd(J, full_matrices=full_matrices)

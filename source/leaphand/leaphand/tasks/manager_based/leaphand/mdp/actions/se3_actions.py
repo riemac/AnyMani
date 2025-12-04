@@ -1,11 +1,15 @@
-# TODO:该文件为se(3)动作项的实现文件，用于定义和管理se(3)动作项的具体行为。
+# 该文件为 se(3) 动作项的实现文件，用于定义和管理 se(3) 动作项的具体行为。
 # 主要思路参考 `/home/hac/isaac/AnyRotate/source/leaphand/leaphand/ideas/idea.ipynb`
 # 实现可参考 `/home/hac/isaac/IsaacLab/source/isaaclab/isaaclab/envs/mdp/actions/joint_actions.py`
-# 有一个问题，idea.ipynb里的se(3)动作似乎天生对应的就是相对动作（relative action），所以没必要设置所谓的绝对动作项，当然相对项既然是默认的，也没必要命名为Relative
+# NOTE：坐标系统一约定：{w}-World坐标系， {e}-Env坐标系， {s}-Base/Root坐标系
+# {b}-End Effector坐标系（USD关节链中的最后一层刚体的坐标），{b'}-虚拟Xform坐标系（人为设置的指尖坐标系）
+# 旋量、雅可比等均遵循 Modern Robotics 的约定
+# 主要数学工具调用 `source/leaphand/leaphand/tasks/manager_based/leaphand/mdp/utils/math.py`
 
 from __future__ import annotations
 
 import logging
+import numpy as np
 import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -38,8 +42,8 @@ class se3Action(ActionTerm):
     主要特性：
 
     1. **任务空间表征**：直接控制末端的旋转和平移速度，更符合手指末端操作的直觉
-    2. **坐标系无关**：旋量在局部坐标系 {b} 下定义，有利于策略泛化
-    3. **虚拟 Xform 支持**：通过伴随变换支持虚拟设置的指尖坐标系
+    2. **坐标系无关**：旋量在局部坐标系 {b}(或 {b'}) 下定义，有利于策略泛化
+    3. **虚拟 Xform 支持**：通过伴随变换支持虚拟设置的指尖坐标系 {b'}
     4. **速度限制**：对角速度和线速度分别设置物理合理的上限
 
     .. note::
@@ -89,10 +93,9 @@ class se3Action(ActionTerm):
             # 计算从父刚体{b_raw}到虚拟Xform{b_can}的固定变换 T_raw_to_can
             # 这个变换在初始化时计算一次即可，因为它是固定的几何关系
             self._T_bb_prime = self._compute_xform_offset_transform()
-
-            # 计算伴随变换矩阵 Ad_{T_raw_to_can}
-            # 旋量变换: V_raw = Ad * V_can
-            self._adjoint_matrix = math_leap.adjoint_transform(self._T_bb_prime)
+            self._Ad_bprime_b = math_leap.adjoint_transform(
+                math_leap.inverse_transform(self._T_bb_prime)
+            )
 
             # 实际用于雅可比的是父刚体
             self._body_idx = self._parent_body_idx
@@ -115,7 +118,7 @@ class se3Action(ActionTerm):
             self._body_idx = body_ids[0]
             self._body_name = body_names[0]
             self._T_bb_prime = None  # 不需要偏移变换
-            self._adjoint_matrix = None
+            self._Ad_bprime_b = None
 
             logger.info(
                 f"se(3) 动作项 '{self.__class__.__name__}' 配置为真实刚体模式：\n"
@@ -123,18 +126,20 @@ class se3Action(ActionTerm):
             )
 
         # 解析控制的关节（通常是单根手指链或手臂）
-        # NOTE: 这里假设 cfg 中会有 joint_names 配置（类似于 JointAction）
+        # 这里假设 cfg 中会有 joint_names 配置（类似于 JointAction）
         # 如果没有，则默认控制所有关节
         if hasattr(self.cfg, "joint_names") and self.cfg.joint_names is not None:
-            self._joint_ids, self._joint_names = self._asset.find_joints(
+            joint_ids, self._joint_names = self._asset.find_joints(
                 self.cfg.joint_names, preserve_order=getattr(self.cfg, "preserve_order", True)
             )
         else:
             # 默认控制所有关节
-            self._joint_ids = slice(None)
+            joint_ids = slice(None)
             self._joint_names = self._asset.joint_names
 
-        self._num_joints = len(self._joint_ids) if isinstance(self._joint_ids, (list, tuple)) else self._asset.num_joints
+        self._joint_ids = self._normalize_joint_indices(joint_ids)
+        self._num_joints = len(self._joint_ids)
+        self._prepare_jacobian_indices()
 
         logger.info(
             f"控制关节: {self._joint_names} [{self._joint_ids}]\n"
@@ -205,6 +210,9 @@ class se3Action(ActionTerm):
     """
 
     def process_actions(self, actions: torch.Tensor):
+        # FIXME：流程需部分重构
+        # 不再是 dthete = Jb^{+} Vb，而是 dthete = Jb'^{+} Vb'。这样无需将Vb'先转换为Vb
+        # 这样总的变换流程应该是 Jphysx -> Jg -> Jb -> Jb'，然后 dtheta = Jb'^{+} Vb'，最后转化为关节角增量
         r"""处理输入的旋量动作，映射到关节空间。
 
         处理流程：
@@ -244,28 +252,24 @@ class se3Action(ActionTerm):
         twist_limited = self._apply_velocity_limits(twist)
 
         # 4. 如果是虚拟 Xform，应用伴随变换
-        if self.cfg.is_xform:
-            # V_raw = Ad_{T_raw_to_can} * V_can
-            twist_body = torch.matmul(self._adjoint_matrix, twist_limited.unsqueeze(-1)).squeeze(-1)
-        else:
-            twist_body = twist_limited
+        twist_local = twist_limited
 
-        # 4. 获取当前的雅可比矩阵
+        # 4. 获取当前的雅可比矩阵 (J_{b'})
         jacobian = self._get_jacobian()  # shape: (num_envs, 6, num_joints)
 
         # 5. 计算雅可比伪逆
         jacobian_inv = self._compute_jacobian_inverse(jacobian)  # shape: (num_envs, num_joints, 6)
 
         # 6. 计算关节空间的速度增量
-        # delta_joint_vel = J^+ @ twist_body
-        delta_joint_vel = torch.matmul(jacobian_inv, twist_body.unsqueeze(-1)).squeeze(-1)  # (num_envs, num_joints)
+        # joint_vel = J_{b'}^+ @ V_{b'}
+        joint_vel = torch.matmul(jacobian_inv, twist_local.unsqueeze(-1)).squeeze(-1)
 
         # 7. 计算目标状态
         # 无论是否使用 PD，我们都计算下一时刻的目标位置
-        # theta_target(t+1) = theta_actual(t) + delta_joint_vel(t) * dt
+        # theta_target(t+1) = theta_actual(t) + joint_vel(t) * dt
         current_joint_pos = self._asset.data.joint_pos[:, self._joint_ids]
-        self._joint_pos_target[:] = current_joint_pos + delta_joint_vel * self._dt
-        self._joint_vel_target[:] = delta_joint_vel
+        self._joint_pos_target[:] = current_joint_pos + joint_vel * self._dt
+        self._joint_vel_target[:] = joint_vel
 
         # 8. 应用关节限位
         if self.cfg.use_joint_limits:
@@ -473,52 +477,91 @@ class se3Action(ActionTerm):
         return T_bb_prime
 
     def _get_jacobian(self) -> torch.Tensor:
-        """获取当前末端刚体相对于控制关节的雅可比矩阵。
-
+        """获取以 {b} 或 {b'}(当使用虚拟 Xform 时) 表示的几何雅可比矩阵。
+        
+        该方法执行以下变换流程：
+        1. 从 PhysX 获取原始雅可比矩阵（世界坐标系表示）
+        2. 调整速度分量顺序（PhysX: [v; w] → 本项目: [w; v]）
+        3. 通过伴随变换将雅可比从世界坐标系 {w} 转换到刚体坐标系 {b}
+        4. 如果使用虚拟 Xform，进一步转换到虚拟坐标系 {b'}
+        
         Returns:
-            几何雅可比矩阵。形状为 (num_envs, 6, num_joints)。
-            前 3 行对应线速度，后 3 行对应角速度。
+            torch.Tensor: 几何雅可比矩阵。形状为 (num_envs, 6, num_joints)。
+                         表示关节速度到末端坐标系 {b} 或 {b'} 的旋量的映射。
+        
+        Raises:
+            ValueError: 当固定基座场景下雅可比索引计算错误时。
         """
-        # 从 PhysX 获取所有刚体的雅可比矩阵
-        # shape: (num_envs, num_bodies, 6, num_total_joints)
+        # 1. 获取 PhysX 提供的所有刚体的雅可比矩阵
+        # shape: (num_envs, num_bodies, 6, num_dofs)
         all_jacobians = self._asset.root_physx_view.get_jacobians()
 
-        # 提取目标 body 的雅可比
-        # 根据基座是否固定，调整 body 索引和关节索引
-        if self._asset.is_fixed_base:
-            # 固定基座：Jacobian 不包含基座，索引偏移 -1
-            jacobian_idx = self._body_idx - 1
-            jacobi_joint_ids = self._joint_ids
-        else:
-            # 浮动基座：Jacobian 包含基座，索引不变
-            # 但关节索引需要偏移 6 (跳过浮动基座的 6 个自由度)
-            jacobian_idx = self._body_idx
-            if isinstance(self._joint_ids, slice):
-                # 如果是 slice(None)，则需要手动构造列表或处理
-                # 这里简化处理，假设 slice(None) 意味着所有驱动关节
-                # 对于浮动基座，通常不建议使用 slice(None) 除非明确知道含义
-                # 为安全起见，我们重新获取所有关节索引
-                all_joint_ids = list(range(self._asset.num_joints))
-                jacobi_joint_ids = [i + 6 for i in all_joint_ids]
-            else:
-                jacobi_joint_ids = [i + 6 for i in self._joint_ids]
+        # 2. 验证雅可比索引的有效性
+        if self._jacobi_body_idx < 0:
+            raise ValueError(
+                f"试图访问 body_idx={self._body_idx} 的雅可比矩阵，但固定基座偏移后索引 < 0。"
+            )
 
-        # 提取对应控制关节的部分
-        # shape: (num_envs, 6, num_joints)
-        # 注意：get_jacobians() 返回的是 (num_envs, num_bodies, 6, num_dofs)
-        # 其中 num_dofs 包含浮动基座的 6 DoF (如果存在)
+        # 3. 提取目标刚体和控制关节对应的雅可比子矩阵
+        jacobian_physx = all_jacobians[:, self._jacobi_body_idx, :, :][:, :, self._jacobi_joint_ids]  # shape: (num_envs, 6, num_dofs)
+
+        # 4. 调整速度分量顺序
+        # PhysX 约定: [v_x, v_y, v_z, w_x, w_y, w_z]^T
+        # 本项目约定（Modern Robotics）: [w_x, w_y, w_z, v_x, v_y, v_z]^T
+        jacobian_world = torch.cat([jacobian_physx[:, 3:, :], jacobian_physx[:, :3, :]], dim=1)  # shape: (num_envs, 6, num_dofs)
+
+        # 5. 获取目标刚体在世界坐标系下的位姿
+        body_pos_w = self._asset.data.body_pos_w[:, self._body_idx]  # shape: (num_envs, 3)
+        body_quat_w = self._asset.data.body_quat_w[:, self._body_idx]  # shape: (num_envs, 4)
         
-        if jacobian_idx < 0:
-             raise ValueError(f"试图获取固定基座 (index={self._body_idx}) 的雅可比矩阵，这是不允许的。")
+        # 6. 构造从世界坐标系到刚体坐标系的变换矩阵
+        T_wb = math_leap.transform_from_pos_quat(body_pos_w, body_quat_w)  # shape: (num_envs, 4, 4)
+        T_bw = math_leap.inverse_transform(T_wb)  # shape: (num_envs, 4, 4)
+        
+        # 7. 计算伴随变换矩阵 Ad_{T_bw}
+        # 用于将旋量从世界坐标系表示转换到刚体坐标系表示
+        Ad_bw = math_leap.adjoint_transform(T_bw)  # shape: (num_envs, 6, 6)
+        
+        # 8. 应用伴随变换：J_b = Ad_{T_bw} @ J_w
+        # 得到以刚体坐标系 {b} 表示的雅可比矩阵
+        jacobian_body = torch.matmul(Ad_bw, jacobian_world)  # shape: (num_envs, 6, num_joints)
 
-        jacobian_physx = all_jacobians[:, jacobian_idx, :, jacobi_joint_ids]
+        # 9. 如果使用虚拟 Xform，进一步转换到虚拟坐标系 {b'}
+        # J_{b'} = Ad_{T_{b'b}} @ J_b，其中 T_{b'b} = T_{bb'}^{-1}
+        if self._Ad_bprime_b is not None:
+            # 扩展伴随矩阵以匹配批次维度
+            Ad = self._Ad_bprime_b.unsqueeze(0).expand(jacobian_body.shape[0], -1, -1)  # shape: (num_envs, 6, 6)
+            jacobian_body = torch.matmul(Ad, jacobian_body)  # shape: (num_envs, 6, num_joints)
 
-        # PhysX 返回的雅可比矩阵顺序为 [线速度 v; 角速度 w]
-        # 而本类使用的旋量定义为 [角速度 w; 线速度 v]
-        # 因此需要交换前3行和后3行
-        jacobian = torch.cat([jacobian_physx[:, 3:, :], jacobian_physx[:, :3, :]], dim=1)
+        return jacobian_body
 
-        return jacobian
+    def _normalize_joint_indices(self, joint_ids) -> list[int]:
+        """将关节索引统一为列表形式。"""
+
+        if isinstance(joint_ids, slice):
+            return list(range(self._asset.num_joints))[joint_ids]
+
+        if isinstance(joint_ids, torch.Tensor):
+            return joint_ids.tolist()
+
+        if isinstance(joint_ids, np.ndarray):
+            return joint_ids.astype(int).tolist()
+
+        return list(joint_ids)
+
+    def _prepare_jacobian_indices(self) -> None:
+        """根据基座类型解析 PhysX 雅可比的索引。"""
+
+        if self._asset.is_fixed_base:
+            self._jacobi_body_idx = self._body_idx - 1
+            if self._jacobi_body_idx < 0:
+                raise ValueError(
+                    "固定基座场景下，目标刚体索引为 0，无法在 PhysX Jacobian 中找到对应条目。"
+                )
+            self._jacobi_joint_ids = self._joint_ids
+        else:
+            self._jacobi_body_idx = self._body_idx
+            self._jacobi_joint_ids = [idx + 6 for idx in self._joint_ids]
 
     def _compute_jacobian_inverse(self, jacobian: torch.Tensor) -> torch.Tensor:
         """计算雅可比矩阵的伪逆。
@@ -663,3 +706,29 @@ class se3dlsAction(se3Action):
             DLS 伪逆矩阵。形状为 (num_envs, num_joints, 6)。
         """
         return math_leap.dls_inv(jacobian, self.cfg.damping)
+    
+
+class se3wdlsAction(se3dlsAction):
+    # TODO: 加权DLS版本的se3动作项，实现对不同自由度应用不同权重的雅可比逆计算。
+    # 位置和姿态的**单位不一致**（米 vs 弧度）且**重要性可能不同**。加权雅可比通过引入权重矩阵来解决这个问题。
+    # 主要思路来源于 `source/leaphand/leaphand/ideas/idea.ipynb` 中的加权wdls变体
+    
+    def process_actions(self, actions):
+        # 这里的流程和se3Action不太一样，需要完全重写
+        # 最主要的区别是dtheta的计算: dot{theta} = W_q^{-1} tilde{J}_b^T (tilde{J}_b tilde{J}_b^T + lambda^2 I)^{-1} W_x V_b
+        pass
+        
+
+    def _get_jacobian(self):
+        # 这里需要实现加权雅可比 J_bprime_tilde = W_x J_bprime W_q^(-1)
+        Jacobian = super()._get_jacobian()
+
+        pass
+
+class se3adlsAction(se3dlsAction):
+    # TODO：自适应DLS版本的se3动作项，实现根据当前雅可比矩阵值动态调整阻尼系数。
+    pass
+
+class se3tikhonovAction(se3dlsAction):
+    # TODO：Tikhonov正则化版本的se3动作项，实现基于Tikhonov正则化的雅可比逆计算。
+    pass

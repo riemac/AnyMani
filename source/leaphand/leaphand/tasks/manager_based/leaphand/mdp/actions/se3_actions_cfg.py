@@ -14,9 +14,9 @@ from . import se3_actions as se3
 
 @configclass
 class se3ActionCfg(ActionTermCfg):
-    r"""SE(3) 动作项配置类。
+    r"""se(3) 动作项配置类。
 
-    该类用于定义和管理 SE(3) 动作项的配置参数。
+    该类用于定义和管理 se(3) 动作项的配置参数。
     """
 
     class_type: type[ActionTerm] = se3.se3Action
@@ -39,7 +39,6 @@ class se3ActionCfg(ActionTermCfg):
     r"""指示末端是否为虚拟的Xform。"""  
     # 如果是False，则直接使用真实刚体的雅可比矩阵J_b
     # True的话，需要在动作项类初始化时，获取该Xform相对于真实刚体的位姿变换T_bb'，储存起来，为计算伴随变换提供支持。
-    # NOTE：可参考source/leaphand/leaphand/tasks/functional/launch_with_leaphand.py和其他文件中的prim路径解析和相对位姿获取
 
     target: str = MISSING
     r"""末端名称。
@@ -92,9 +91,9 @@ class se3ActionCfg(ActionTermCfg):
 
 @configclass
 class se3dlsActionsCfg(se3ActionCfg):
-    r"""SE(3) 动作项 DLS（Damped Least Squares）配置类。
+    r"""se(3) 动作项 DLS（Damped Least Squares）配置类。
 
-    该类用于定义和管理 SE(3) 动作项 DLS 的配置参数。
+    该类用于定义和管理 se(3) 动作项 DLS 的配置参数。
     """
 
     class_type: type[ActionTerm] = se3.se3dlsAction
@@ -107,4 +106,43 @@ class se3dlsActionsCfg(se3ActionCfg):
     
     典型取值范围为 0.01 到 0.1，具体值需根据雅可比矩阵的量级调整。
     对于灵巧手操作，建议从 0.01 开始调试。
+    """
+
+@configclass
+class se3wdlsActionsCfg(se3dlsActionsCfg):
+    r"""se(3) 动作项 WDLS（Weighted Damped Least Squares）配置类。
+
+    该类用于定义和管理 se(3) 动作项 WDLS 的配置参数。
+    """
+
+    class_type: type[ActionTerm] = se3.se3wdlsAction
+
+    W_q: list | tuple | None = None
+    r"""TODO：关节空间权重矩阵。
+    
+    如果为 None，则使用单位矩阵，维度可根据实际关节数自动推断。
+    若提供具体矩阵，则应为方阵，维度与关节数相匹配，否则将引发报错。
+    
+    """
+
+    W_x: list | tuple | None = None
+    r"""TODO：任务空间权重矩阵。
+    
+    如果为 None，则使用单位矩阵，维度为6乘6。
+    若提供具体矩阵，则应为方阵，维度为6乘6，否则将引发报错。
+
+    """
+
+@configclass
+class se3adlsActionsCfg(se3dlsActionsCfg):
+    r"""se(3) 动作项 ADLS（Adaptive Damped Least Squares）配置类。
+
+    该类用于定义和管理 se(3) 动作项 ADLS 的配置参数。
+    """
+
+@configclass
+class se3awdlsActionsCfg(se3wdlsActionsCfg):
+    r"""se(3) 动作项 AWDLS（Adaptive Weighted Damped Least Squares）配置类。
+
+    该类用于定义和管理 se(3) 动作项 AWDLS 的配置参数。
     """

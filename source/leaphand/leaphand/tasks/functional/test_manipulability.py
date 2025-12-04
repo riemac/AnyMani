@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 
-"""
-启动 Isaac Sim 中的 LeapHand 场景，并提供实时位姿监控和可操作度分析面板。
+r"""启动 Isaac Sim 中的 LeapHand 场景，并提供实时位姿监控和可操作度分析面板。
 
-继承自 `launch_with_leaphand.py` 的功能，额外增加了可操作度指标 (Manipulability Index)
-和雅可比条件数 (Condition Number) 的实时计算与显示。
+继承自 `launch_with_leaphand.py` 的功能，额外增加了可操作度指标 (Manipulability Index) 和雅可比条件数 (Condition Number) 的实时计算与显示。
+
+NOTE：坐标系统一约定：{w}-World坐标系，{e}-Env坐标系， {s}-Base/Root坐标系，{b}-End Effector坐标系（USD关节链中的最后一层刚体的坐标），{b'}-虚拟Xform坐标系（人为设置的指尖坐标系）
+旋量、雅可比等均遵循 Modern Robotics 的约定
+
+主要数学工具调用 `source/leaphand/leaphand/tasks/manager_based/leaphand/mdp/utils/math.py`
+
+可操作度应是指尖末端 {b'} 相对于控制关节的可操作度，因此雅可比矩阵应为 Jb'，参考点在{b'}，参考系在{b'}
+FIXME：操作度、雅可比条件数等检测都应为Jb'的，但现在都为Jb
 
 使用方法:
     ./isaaclab.sh -p source/leaphand/leaphand/tasks/functional/test_manipulability.py
+不要启动headless模式！
 """
 
 import argparse
 import sys
 import os
+from dataclasses import dataclass
 
 from isaaclab.app import AppLauncher
 
@@ -33,6 +41,7 @@ import numpy as np
 
 from isaaclab.scene import InteractiveScene
 from isaaclab.sim import SimulationCfg, SimulationContext
+from isaaclab.sim.utils import get_current_stage, resolve_prim_pose
 
 # 尝试导入 launch_with_leaphand 中的类
 # 确保当前目录在 sys.path 中
@@ -46,12 +55,70 @@ except ImportError:
     print("[ERROR] 无法导入 launch_with_leaphand.py。请确保该文件在同一目录下。")
     sys.exit(1)
 
+from leaphand.tasks.manager_based.leaphand.mdp.utils import math as math_leap
+
+
+@dataclass
+class FingerConfig:
+    name: str
+    body: str
+    joint_names: list[str]
+    marker_path: str | None = None
+
+
+class FingerJacobianProbe:
+    """负责从 PhysX 提取并转换到 {b'} 表达的雅可比。"""
+
+    def __init__(self, robot):
+        self.robot = robot
+        self.device = robot.device
+        self.is_fixed_base = robot.is_fixed_base
+        self.body_names = robot.data.body_names
+        self.joint_names = robot.joint_names
+
+    def resolve_indices(self, cfg: FingerConfig) -> dict:
+        body_ids, _ = self.robot.find_bodies(cfg.body)
+        if not body_ids:
+            raise RuntimeError(f"未找到刚体 {cfg.body}")
+
+        body_idx = body_ids[0]
+        jacobian_idx = body_idx - 1 if self.is_fixed_base else body_idx
+        joint_indices = [self.joint_names.index(name) for name in cfg.joint_names]
+        jac_joint_ids = (
+            joint_indices if self.is_fixed_base else [idx + 6 for idx in joint_indices]
+        )
+
+        return {
+            "body_idx": body_idx,
+            "jacobian_idx": jacobian_idx,
+            "joint_indices": joint_indices,
+            "jacobian_joint_ids": jac_joint_ids,
+        }
+
+    def jacobian_bprime(self, indices: dict, T_bb_prime: torch.Tensor | None) -> torch.Tensor:
+        all_jacobians = self.robot.root_physx_view.get_jacobians()
+        jac_physx = all_jacobians[0, indices["jacobian_idx"], :, :][:, indices["jacobian_joint_ids"]]
+        jac_world = torch.cat([jac_physx[3:, :], jac_physx[:3, :]], dim=0).unsqueeze(0)
+
+        body_pos = self.robot.data.body_pos_w[:, indices["body_idx"]]
+        body_quat = self.robot.data.body_quat_w[:, indices["body_idx"]]
+        T_wb = math_leap.transform_from_pos_quat(body_pos, body_quat)
+        T_bw = math_leap.inverse_transform(T_wb)
+        Ad_bw = math_leap.adjoint_transform(T_bw)
+        jac_b = torch.matmul(Ad_bw, jac_world).squeeze(0)
+
+        if T_bb_prime is not None:
+            Ad = math_leap.adjoint_transform(math_leap.inverse_transform(T_bb_prime))
+            jac_b = torch.matmul(Ad, jac_b)
+
+        return jac_b
+
 
 class LeapHandManipulabilityPanel:
     """LeapHand 可操作度分析面板
     
     实时显示各手指的可操作度指标 (Manipulability Index) 和雅可比条件数 (Condition Number)。
-    支持原始雅可比 J_b 和加权雅可比 J_w = W_x @ J_b @ W_q^{-1} 的对比分析。
+    支持原始雅可比 J_b 和加权雅可比 J_weight_b = W_x @ J_b @ W_q^{-1} 的对比分析。
     
     Attributes:
         W_x: 任务空间权重矩阵 (6×6)，用于调节位置/姿态的相对重要性
@@ -76,20 +143,28 @@ class LeapHandManipulabilityPanel:
         """
         self.robot = robot
         self.device = robot.device
+        self.probe = FingerJacobianProbe(robot)
         
-        # 定义手指及其对应的末端刚体名称
-        self.fingers = {
-            "Index": {"body": "fingertip", "joint_indices": []},
-            "Thumb": {"body": "thumb_fingertip", "joint_indices": []},
-            "Middle": {"body": "fingertip_2", "joint_indices": []},
-            "Ring": {"body": "fingertip_3", "joint_indices": []},
+        finger_defs = {
+            "Index": ("fingertip", ["a_0", "a_1", "a_2", "a_3"], "index_tip_head"),
+            "Middle": ("fingertip_2", ["a_4", "a_5", "a_6", "a_7"], "middle_tip_head"),
+            "Ring": ("fingertip_3", ["a_8", "a_9", "a_10", "a_11"], "ring_tip_head"),
+            "Thumb": ("thumb_fingertip", ["a_12", "a_13", "a_14", "a_15"], "thumb_tip_head"),
         }
+        self.fingers = {
+            name: {
+                "cfg": FingerConfig(name=name, body=body, joint_names=joint_names, marker_path=marker_path),
+                "indices": None,
+            }
+            for name, (body, joint_names, marker_path) in finger_defs.items()
+        }
+        self._T_bb_prime: dict[str, torch.Tensor | None] = {name: None for name in self.fingers}
         
         # 构建权重矩阵
         self._build_weight_matrices()
         
-        # 解析各手指对应的关节索引
         self._resolve_indices()
+        self._compute_virtual_finger_frames()
         
         # 创建UI窗口
         self._window = ui.Window(
@@ -135,9 +210,11 @@ class LeapHandManipulabilityPanel:
     def _build_weight_matrices(self):
         """构建权重矩阵 W_x 和 W_q"""
         # W_x: 任务空间权重 (6×6)
-        # PhysX 格式: [v_x, v_y, v_z, ω_x, ω_y, ω_z]
-        w_x_diag = [self.W_V, self.W_V, self.W_V, 
-                    self.W_OMEGA, self.W_OMEGA, self.W_OMEGA]
+        # Modern Robotics 格式: [ω_x, ω_y, ω_z, v_x, v_y, v_z]
+        # 注意：PhysX 返回的是 [v; ω]，但我们在 FingerJacobianProbe 中转换为了 [ω; v]
+        # 因此权重矩阵也必须遵循 [ω; v] 的顺序
+        w_x_diag = [self.W_OMEGA, self.W_OMEGA, self.W_OMEGA,
+                    self.W_V, self.W_V, self.W_V]
         self._W_x = torch.diag(torch.tensor(w_x_diag, device=self.device, dtype=torch.float32))
         
         # W_q: 关节空间权重 (4×4)
@@ -145,8 +222,8 @@ class LeapHandManipulabilityPanel:
         self._W_q_inv = torch.diag(1.0 / torch.tensor(self.W_Q_DIAG, device=self.device, dtype=torch.float32))
         
         print(f"[INFO] 权重矩阵已构建:")
-        print(f"  W_x (任务空间): diag([{self.W_V:.2f}, {self.W_V:.2f}, {self.W_V:.2f}, "
-              f"{self.W_OMEGA:.2f}, {self.W_OMEGA:.2f}, {self.W_OMEGA:.2f}])")
+        print(f"  W_x (任务空间): diag([{self.W_OMEGA:.2f}, {self.W_OMEGA:.2f}, {self.W_OMEGA:.2f}, "
+              f"{self.W_V:.2f}, {self.W_V:.2f}, {self.W_V:.2f}])")
         print(f"  W_q (关节空间): diag({self.W_Q_DIAG})")
     
     def _create_weight_info_row(self):
@@ -159,73 +236,60 @@ class LeapHandManipulabilityPanel:
         ):
             with ui.VStack(spacing=3, height=0):
                 ui.Label(f"L_char = {self.L_CHAR} m", style={"color": 0xFFAAAAAA, "font_size": 10})
-                ui.Label(f"W_x: w_v = {self.W_V:.2f}, w_ω = {self.W_OMEGA:.2f}", 
+                ui.Label(f"W_x: w_ω = {self.W_OMEGA:.2f}, w_v = {self.W_V:.2f}", 
                         style={"color": 0xFFAAAAAA, "font_size": 10})
                 ui.Label(f"W_q: diag({self.W_Q_DIAG})", 
                         style={"color": 0xFFAAAAAA, "font_size": 10})
 
     def _resolve_indices(self):
-        """解析刚体和关节索引
-        
-        Notes:
-            对于固定基座机器人，PhysX 返回的雅可比矩阵不包含根刚体，
-            因此 body 索引需要减 1 才能正确访问雅可比矩阵。
-        """
-        joint_names_all = self.robot.joint_names
-        
-        # 检查是否固定基座
-        self._is_fixed_base = self.robot.is_fixed_base
-        
-        # 备用映射表 (LeapHand 关节命名)
-        finger_joint_map_alt = {
-            "Index": ["a_0", "a_1", "a_2", "a_3"],
-            "Middle": ["a_4", "a_5", "a_6", "a_7"],
-            "Ring": ["a_8", "a_9", "a_10", "a_11"],
-            "Thumb": ["a_12", "a_13", "a_14", "a_15"],
-        }
+        for name, entry in self.fingers.items():
+            try:
+                entry["indices"] = self.probe.resolve_indices(entry["cfg"])
+                print(f"[INFO] {name} indices ready: {entry['indices']}")
+            except RuntimeError as exc:
+                print(f"[WARNING] {exc}")
+                entry["indices"] = None
 
-        print(f"[INFO] LeapHand is_fixed_base: {self._is_fixed_base}")
-        print(f"[INFO] Joint names: {joint_names_all}")
-        print(f"[INFO] Body names: {self.robot.data.body_names}")
+    def _compute_virtual_finger_frames(self):
+        """计算每根手指的虚拟指尖坐标系 T_bb'"""
 
-        # 获取刚体索引和关节索引
-        for finger_name, data in self.fingers.items():
-            # 1. Body Index
-            body_name = data["body"]
-            body_ids, _ = self.robot.find_bodies(body_name)
-            if len(body_ids) > 0:
-                data["body_idx"] = body_ids[0]
-                # 对于固定基座，雅可比矩阵的索引需要 -1
-                if self._is_fixed_base:
-                    data["jacobi_idx"] = body_ids[0] - 1
-                else:
-                    data["jacobi_idx"] = body_ids[0]
-                print(f"[INFO] {finger_name}: body_idx={data['body_idx']}, jacobi_idx={data['jacobi_idx']}")
-            else:
-                print(f"[WARNING] 无法找到刚体: {body_name}")
-                data["body_idx"] = None
-                data["jacobi_idx"] = None
-            
-            # 2. Joint Indices
-            target_joints = finger_joint_map_alt.get(finger_name, [])
-            
-            indices = []
-            for j_name in target_joints:
-                if j_name in joint_names_all:
-                    indices.append(joint_names_all.index(j_name))
-            
-            data["joint_indices"] = indices
-            if len(indices) != 4:
-                print(f"[WARNING] 手指 {finger_name} 只有 {len(indices)} 个关节被找到 (期望 4 个)")
-            else:
-                print(f"[INFO] {finger_name} joint_indices: {indices}")
+        stage = get_current_stage()
+        robot_root = self.robot.root_physx_view.prim_paths[0]
+
+        for name, entry in self.fingers.items():
+            cfg = entry["cfg"]
+            marker_path = cfg.marker_path
+            if marker_path is None:
+                self._T_bb_prime[name] = None
+                continue
+
+            parent_prim_path = f"{robot_root}/{cfg.body}"
+            marker_prim_path = f"{parent_prim_path}/{marker_path}"
+            parent_prim = stage.GetPrimAtPath(parent_prim_path)
+            marker_prim = stage.GetPrimAtPath(marker_prim_path)
+
+            if not parent_prim.IsValid() or not marker_prim.IsValid():
+                print(f"[WARNING] 无法找到 {name} 指尖标记: {marker_prim_path}")
+                self._T_bb_prime[name] = None
+                continue
+
+            offset_pos, offset_quat = resolve_prim_pose(marker_prim, ref_prim=parent_prim)
+            offset_pos_tensor = torch.tensor(offset_pos, device=self.device, dtype=torch.float32)
+            offset_quat_tensor = torch.tensor(offset_quat, device=self.device, dtype=torch.float32)
+            T_bb_prime = math_leap.transform_from_pos_quat(
+                offset_pos_tensor.unsqueeze(0), offset_quat_tensor.unsqueeze(0)
+            ).squeeze(0)
+            self._T_bb_prime[name] = T_bb_prime
+            print(
+                f"[INFO] {name} 指尖偏移加载完成: {marker_path}, 平移={offset_pos_tensor.cpu().numpy()}"
+            )
 
     def _create_finger_row(self, finger_name: str):
         """创建单个手指的显示行
         
         显示两组指标：
         1. 原始雅可比 J_b (6x4)：直接从 PhysX 获取
-        2. 加权雅可比 J_w (6x4)：J_w = W_x @ J_b @ W_q^{-1}
+        2. 加权雅可比 J_weight_b (6x4)：J_weight_b = W_x @ J_b @ W_q^{-1}
         """
         with ui.CollapsableFrame(
             title=finger_name,
@@ -255,8 +319,8 @@ class LeapHandManipulabilityPanel:
                 
                 ui.Separator(height=5)
                 
-                # ===== 加权雅可比 J_w (6x4) =====
-                ui.Label("── Weighted J_w (6×4) ──", 
+                # ===== 加权雅可比 J_weight_b (6x4) =====
+                ui.Label("── Weighted J_weight_b (6×4) ──", 
                         height=18, style={"color": 0xFFAAAAAA, "font_size": 11})
                 
                 # 加权可操作度
@@ -294,100 +358,44 @@ class LeapHandManipulabilityPanel:
         
         计算两组可操作度指标：
         1. 原始雅可比 J_b (6×4): w = sqrt(det(J^T * J))
-        2. 加权雅可比 J_w (6×4): J_w = W_x @ J_b @ W_q^{-1}
+        2. 加权雅可比 J_weight_b (6×4): J_weight_b = W_x @ J_b @ W_q^{-1}
         
         Notes:
             PhysX 返回的雅可比矩阵格式为 [v; ω]（线速度在前，角速度在后）。
             对于欠驱动系统 (m=6 > n=4)，可操作度公式为 w = sqrt(det(J^T * J))。
         """
         # 获取所有刚体的雅可比矩阵
-        all_jacobians = self.robot.root_physx_view.get_jacobians()
-        num_jacobi_bodies = all_jacobians.shape[1]
-        
-        # 收集需要计算的 Jacobian
-        jac_list = []       # 原始雅可比 J_b (6, 4)
-        jac_w_list = []     # 加权雅可比 J_w (6, 4)
-        valid_fingers = []
-        
-        for finger_name, data in self.fingers.items():
-            jacobi_idx = data.get("jacobi_idx")
-            joint_indices = data.get("joint_indices")
-            
-            if jacobi_idx is not None and joint_indices:
-                if jacobi_idx < 0 or jacobi_idx >= num_jacobi_bodies:
-                    if not hasattr(self, "_warned_indices"):
-                        self._warned_indices = set()
-                    if jacobi_idx not in self._warned_indices:
-                        print(f"[WARNING] Jacobi index {jacobi_idx} out of bounds for finger {finger_name}.")
-                        self._warned_indices.add(jacobi_idx)
-                    continue
+        for name, entry in self.fingers.items():
+            indices = entry.get("indices")
+            if not indices:
+                continue
 
-                # 提取第0个环境，指定body
-                jac_full = all_jacobians[0, jacobi_idx, :, :]
-                
-                # 只提取该手指相关的关节列 (6, 4)
-                jac_b = jac_full[:, joint_indices]
-                
-                # 计算加权雅可比 J_w = W_x @ J_b @ W_q^{-1}
-                jac_w = self._W_x @ jac_b @ self._W_q_inv
-                
-                jac_list.append(jac_b)
-                jac_w_list.append(jac_w)
-                valid_fingers.append(finger_name)
-        
-        if not jac_list:
-            return
+            try:
+                jac_b = self.probe.jacobian_bprime(indices, self._T_bb_prime.get(name))
+            except Exception as exc:
+                print(f"[ERROR] 获取 {name} 雅可比失败: {exc}")
+                continue
 
-        # 堆叠成 batch
-        batched_jac = torch.stack(jac_list)      # (B, 6, 4)
-        batched_jac_w = torch.stack(jac_w_list)  # (B, 6, 4)
-        
-        # ===== 1. 原始雅可比可操作度 (欠驱动: m=6 > n=4) =====
-        # w = sqrt(det(J^T * J))
-        jt_j = torch.bmm(batched_jac.transpose(1, 2), batched_jac)
-        w_vals = torch.sqrt(torch.abs(torch.det(jt_j)))
-        
-        # ===== 2. 加权雅可比可操作度 =====
-        jt_j_w = torch.bmm(batched_jac_w.transpose(1, 2), batched_jac_w)
-        w_w_vals = torch.sqrt(torch.abs(torch.det(jt_j_w)))
-        
-        # ===== 3. SVD for Condition Numbers =====
-        try:
-            S_vals = torch.linalg.svdvals(batched_jac)      # (B, 4)
-            S_w_vals = torch.linalg.svdvals(batched_jac_w)  # (B, 4)
-            
-            # 同步到 CPU
-            w_cpu = w_vals.cpu().tolist()
-            w_w_cpu = w_w_vals.cpu().tolist()
-            S_cpu = S_vals.cpu().tolist()
-            S_w_cpu = S_w_vals.cpu().tolist()
-            
-            # 更新 UI
-            for i, finger_name in enumerate(valid_fingers):
-                # --- 原始雅可比指标 ---
-                w = w_cpu[i]
-                S = S_cpu[i]
-                sigma_max = S[0]
-                sigma_min = S[-1]
-                cond_num = sigma_max / sigma_min if sigma_min > 1e-6 else float('inf')
-                
-                self.labels[finger_name]["w"].text = f"{w:.4f}"
-                self.labels[finger_name]["k"].text = f"{cond_num:.2f}"
-                self.labels[finger_name]["s"].text = f"{sigma_min:.4f}"
-                
-                # --- 加权雅可比指标 ---
-                w_w = w_w_cpu[i]
-                S_w = S_w_cpu[i]
-                sigma_max_w = S_w[0]
-                sigma_min_w = S_w[-1]
-                cond_w = sigma_max_w / sigma_min_w if sigma_min_w > 1e-6 else float('inf')
-                
-                self.labels[finger_name]["w_w"].text = f"{w_w:.4f}"
-                self.labels[finger_name]["k_w"].text = f"{cond_w:.2f}"
-                self.labels[finger_name]["s_w"].text = f"{sigma_min_w:.4f}"
-                
-        except Exception as e:
-            print(f"[ERROR] SVD calculation failed: {e}")
+            jac_w = self._W_x @ jac_b @ self._W_q_inv
+            jac_b_batch = jac_b.unsqueeze(0)
+            jac_w_batch = jac_w.unsqueeze(0)
+            _, S, _ = math_leap.svd(jac_b_batch)
+            _, S_w, _ = math_leap.svd(jac_w_batch)
+            metrics = {
+                "w": math_leap.manipulability(jac_b_batch)[0].item(),
+                "cond": math_leap.condition_number(jac_b_batch)[0].item(),
+                "sigma_min": S[0, -1].item(),
+                "w_w": math_leap.manipulability(jac_w_batch)[0].item(),
+                "cond_w": math_leap.condition_number(jac_w_batch)[0].item(),
+                "sigma_min_w": S_w[0, -1].item(),
+            }
+
+            self.labels[name]["w"].text = f"{metrics['w']:.4f}"
+            self.labels[name]["k"].text = f"{metrics['cond']:.2f}" if metrics['cond'] < 1e6 else "∞"
+            self.labels[name]["s"].text = f"{metrics['sigma_min']:.4f}"
+            self.labels[name]["w_w"].text = f"{metrics['w_w']:.4f}"
+            self.labels[name]["k_w"].text = f"{metrics['cond_w']:.2f}" if metrics['cond_w'] < 1e6 else "∞"
+            self.labels[name]["s_w"].text = f"{metrics['sigma_min_w']:.4f}"
 
     def _print_single_finger_info(self, finger_name: str):
         """打印单个手指的详细雅可比信息到终端
@@ -395,64 +403,39 @@ class LeapHandManipulabilityPanel:
         Args:
             finger_name: 手指名称
         """
-        data = self.fingers.get(finger_name)
-        if data is None:
+        entry = self.fingers.get(finger_name)
+        if entry is None:
             print(f"[ERROR] Unknown finger: {finger_name}")
             return
-        
-        jacobi_idx = data.get("jacobi_idx")
-        joint_indices = data.get("joint_indices")
-        body_idx = data.get("body_idx")
-        
-        if jacobi_idx is None or not joint_indices:
-            print(f"[ERROR] Invalid indices for finger: {finger_name}")
+        indices = entry.get("indices")
+        if not indices:
+            print(f"[ERROR] Missing indices for finger {finger_name}")
             return
-        
-        all_jacobians = self.robot.root_physx_view.get_jacobians()
-        num_jacobi_bodies = all_jacobians.shape[1]
-        
-        if jacobi_idx < 0 or jacobi_idx >= num_jacobi_bodies:
-            print(f"[ERROR] Jacobi index {jacobi_idx} out of bounds for finger {finger_name}")
-            return
-        
-        # 提取该手指的雅可比子矩阵 (6, 4)
-        # PhysX 返回格式: [v; w] (线速度在前，角速度在后)
-        jac_physx = all_jacobians[0, jacobi_idx, :, :][:, joint_indices]
-        
-        # 转换为 Modern Robotics 约定: [w; v] (角速度在前，线速度在后)
-        jac = torch.cat([jac_physx[3:, :], jac_physx[:3, :]], dim=0)
-        
-        # 计算加权雅可比 (在 PhysX 格式下计算，因为 W_x 是按 PhysX 格式构建的)
-        jac_w = self._W_x @ jac_physx @ self._W_q_inv
-        # 转换为 Modern Robotics 约定
-        jac_w_mr = torch.cat([jac_w[3:, :], jac_w[:3, :]], dim=0)
-        
-        # 原始雅可比 SVD 和可操作度
-        S = torch.linalg.svdvals(jac)
-        jt_j = torch.mm(jac.t(), jac)
-        w = torch.sqrt(torch.abs(torch.det(jt_j))).item()
-        sigma_max = S[0].item()
-        sigma_min = S[-1].item()
-        cond = sigma_max / sigma_min if sigma_min > 1e-6 else float('inf')
-        
-        # 加权雅可比 SVD 和可操作度
-        S_w = torch.linalg.svdvals(jac_w_mr)
-        jt_j_w = torch.mm(jac_w_mr.t(), jac_w_mr)
-        w_w = torch.sqrt(torch.abs(torch.det(jt_j_w))).item()
-        sigma_max_w = S_w[0].item()
-        sigma_min_w = S_w[-1].item()
-        cond_w = sigma_max_w / sigma_min_w if sigma_min_w > 1e-6 else float('inf')
+
+        jac_b = self.probe.jacobian_bprime(indices, self._T_bb_prime.get(finger_name))
+        jac_w = self._W_x @ jac_b @ self._W_q_inv
+        jac_b_batch = jac_b.unsqueeze(0)
+        jac_w_batch = jac_w.unsqueeze(0)
+        _, S, _ = math_leap.svd(jac_b_batch)
+        _, S_w, _ = math_leap.svd(jac_w_batch)
+        w = math_leap.manipulability(jac_b_batch)[0].item()
+        cond = math_leap.condition_number(jac_b_batch)[0].item()
+        w_w = math_leap.manipulability(jac_w_batch)[0].item()
+        cond_w = math_leap.condition_number(jac_w_batch)[0].item()
+        sigma_min = S[0, -1].item()
+        sigma_min_w = S_w[0, -1].item()
         
         # 格式化打印设置
         np.set_printoptions(precision=6, suppress=True, linewidth=120)
         
         # 获取当前关节角度
+        joint_indices = indices["joint_indices"]
         joint_pos = self.robot.data.joint_pos[0, joint_indices].cpu().numpy()
         joint_names = [self.robot.joint_names[i] for i in joint_indices]
         
         # 打印详细信息
         print("\n" + "="*35 + f" {finger_name} Finger Jacobian " + "="*35)
-        print(f"Body Idx: {body_idx}, Jacobi Idx: {jacobi_idx}")
+        print(f"Body Idx: {indices['body_idx']}, Jacobi Idx: {indices['jacobian_idx']}")
         print(f"Joint Indices: {joint_indices}")
         
         # --- 当前关节角度 ---
@@ -462,23 +445,23 @@ class LeapHandManipulabilityPanel:
         
         # --- 权重配置 ---
         print(f"\n[Weight Configuration]")
-        print(f"  W_x (task space): w_v = {self.W_V:.2f}, w_ω = {self.W_OMEGA:.2f}")
+        print(f"  W_x (task space): w_ω = {self.W_OMEGA:.2f}, w_v = {self.W_V:.2f}")
         print(f"  W_q (joint space): diag({self.W_Q_DIAG})")
         
         # --- 原始雅可比 (6x4) ---
         print(f"\n[Original J_b (6×4)] - Modern Robotics Convention:")
         print(f"  Row 0-2: Angular velocity [ωx, ωy, ωz]")
         print(f"  Row 3-5: Linear velocity  [vx, vy, vz]")
-        print(jac.cpu().numpy())
+        print(jac_b.cpu().numpy())
         print(f"  Singular Values: {S.cpu().numpy()}")
         print(f"  Condition Number (κ): {cond:.4f}")
         print(f"  Manipulability (w): {w:.6f}")
         
         # --- 加权雅可比 (6x4) ---
-        print(f"\n[Weighted J_w (6×4)] - J_w = W_x @ J_b @ W_q^{{-1}}:")
+        print(f"\n[Weighted J_weight_b (6×4)] - J_weight_b = W_x @ J_b @ W_q^{{-1}}:")
         print(f"  Row 0-2: Weighted angular velocity")
         print(f"  Row 3-5: Weighted linear velocity")
-        print(jac_w_mr.cpu().numpy())
+        print(jac_w.cpu().numpy())
         print(f"  Singular Values: {S_w.cpu().numpy()}")
         print(f"  Condition Number (κ_w): {cond_w:.4f}")
         print(f"  Manipulability (w_w): {w_w:.6f}")
@@ -492,60 +475,38 @@ class LeapHandManipulabilityPanel:
         """
         print("\n" + "="*45 + " Jacobian Analysis Summary " + "="*45)
         print("\nWeight Configuration:")
-        print(f"  W_x (task space): w_v = {self.W_V:.2f}, w_ω = {self.W_OMEGA:.2f}")
+        print(f"  W_x (task space): w_ω = {self.W_OMEGA:.2f}, w_v = {self.W_V:.2f}")
         print(f"  W_q (joint space): diag({self.W_Q_DIAG})")
         print(f"  L_char = {self.L_CHAR} m")
-        
-        all_jacobians = self.robot.root_physx_view.get_jacobians()
-        num_jacobi_bodies = all_jacobians.shape[1]
         
         # 收集所有手指数据
         finger_data_list = []
         
-        for finger_name, data in self.fingers.items():
-            jacobi_idx = data.get("jacobi_idx")
-            joint_indices = data.get("joint_indices")
-            
-            if jacobi_idx is None or not joint_indices:
+        for finger_name, entry in self.fingers.items():
+            indices = entry.get("indices")
+            if not indices:
                 continue
-            
-            if jacobi_idx < 0 or jacobi_idx >= num_jacobi_bodies:
-                print(f"[WARNING] Jacobi index {jacobi_idx} out of bounds for finger {finger_name}")
-                continue
-            
-            # 获取关节角度
-            joint_pos = self.robot.data.joint_pos[0, joint_indices].cpu().numpy()
-            joint_names = [self.robot.joint_names[i] for i in joint_indices]
-            
-            # 提取该手指的雅可比 (6, 4)
-            jac_b = all_jacobians[0, jacobi_idx, :, :][:, joint_indices]
-            
-            # 计算加权雅可比
+
+            jac_b = self.probe.jacobian_bprime(indices, self._T_bb_prime.get(finger_name))
             jac_w = self._W_x @ jac_b @ self._W_q_inv
-            
-            # === 原始雅可比 ===
-            S = torch.linalg.svdvals(jac_b)
-            jt_j = torch.mm(jac_b.t(), jac_b)
-            w = torch.sqrt(torch.abs(torch.det(jt_j))).item()
-            sigma_max = S[0].item()
-            sigma_min = S[-1].item()
-            cond = sigma_max / sigma_min if sigma_min > 1e-6 else float('inf')
-            
-            # === 加权雅可比 ===
-            S_w = torch.linalg.svdvals(jac_w)
-            jt_j_w = torch.mm(jac_w.t(), jac_w)
-            w_w = torch.sqrt(torch.abs(torch.det(jt_j_w))).item()
-            sigma_max_w = S_w[0].item()
-            sigma_min_w = S_w[-1].item()
-            cond_w = sigma_max_w / sigma_min_w if sigma_min_w > 1e-6 else float('inf')
-            
-            finger_data_list.append({
-                "name": finger_name,
-                "joint_names": joint_names,
-                "joint_pos": joint_pos,
-                "w": w, "cond": cond, "sigma_min": sigma_min,
-                "w_w": w_w, "cond_w": cond_w, "sigma_min_w": sigma_min_w
-            })
+            jac_b_batch = jac_b.unsqueeze(0)
+            jac_w_batch = jac_w.unsqueeze(0)
+            _, S, _ = math_leap.svd(jac_b_batch)
+            _, S_w, _ = math_leap.svd(jac_w_batch)
+
+            finger_data_list.append(
+                {
+                    "name": finger_name,
+                    "joint_names": [self.robot.joint_names[i] for i in indices["joint_indices"]],
+                    "joint_pos": self.robot.data.joint_pos[0, indices["joint_indices"]].cpu().numpy(),
+                    "w": math_leap.manipulability(jac_b_batch)[0].item(),
+                    "cond": math_leap.condition_number(jac_b_batch)[0].item(),
+                    "sigma_min": S[0, -1].item(),
+                    "w_w": math_leap.manipulability(jac_w_batch)[0].item(),
+                    "cond_w": math_leap.condition_number(jac_w_batch)[0].item(),
+                    "sigma_min_w": S_w[0, -1].item(),
+                }
+            )
         
         # 打印关节角度表格
         print("\n[Current Joint Positions]")
@@ -558,7 +519,7 @@ class LeapHandManipulabilityPanel:
         
         # 打印操作度表格
         print("\n[Manipulability Metrics]")
-        print(f"{'Finger':<8} | {'w(J_b)':<10} | {'κ(J_b)':<10} | {'σ_min':<8} | {'w(J_w)':<10} | {'κ(J_w)':<10} | {'σ_min_w':<8}")
+        print(f"{'Finger':<8} | {'w(J_b)':<10} | {'κ(J_b)':<10} | {'σ_min':<8} | {'w(J_weight_b)':<10} | {'κ(J_weight_b)':<10} | {'σ_min_w':<8}")
         print("-" * 85)
         
         for fd in finger_data_list:

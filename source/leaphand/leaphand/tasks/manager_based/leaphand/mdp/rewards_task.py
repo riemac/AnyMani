@@ -87,6 +87,8 @@ def success_bonus(
     """
     # 获取物体资产
     asset: RigidObject = env.scene[object_cfg.name]
+    # act = env.action_manager.get_term(action_name)
+    # act
 
     # 获取目标姿态（从命令管理器）
     goal_pose = env.command_manager.get_command(command_name)
