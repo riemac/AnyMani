@@ -5,15 +5,39 @@
 
 r"""LeapHand连续旋转任务环境配置 - ManagerBasedRLEnv架构
 
-主要是动作空间从关节空间被改为se3动作空间
+- 主要是动作空间从关节空间被改为se3动作空间，奖励和观察组件也改为适配se3动作空间的版本
 
 """
 
-from isaaclab.managers import RewardTermCfg as RewTerm
+import math
+from shlex import join
 
+import isaaclab.sim as sim_utils
+from isaaclab.assets import ArticulationCfg, RigidObjectCfg
+from isaaclab.assets import AssetBaseCfg
+from isaaclab.envs import ManagerBasedRLEnvCfg
+
+from isaaclab.managers import RecorderManagerBaseCfg as DefaultEmptyRecorderManagerCfg
+from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sim import PhysxCfg, SimulationCfg
+from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as Gnoise
+
+from isaaclab.envs.ui import ManagerBasedRLEnvWindow
+from isaaclab.envs.common import ViewerCfg
+from isaaclab.devices.openxr import XrCfg
 
 import isaaclab.envs.mdp as mdp
+from leaphand.robots.leap import LEAP_HAND_CFG
 from . import mdp as leap_mdp
 from . import inhand_base_env_cfg
 
@@ -31,7 +55,7 @@ class ActionsCfg:
         - ring_tip_head   → fingertip_3     (无名指)
         - thumb_tip_head  → thumb_fingertip (拇指)
     """
-    index_se3 = leap_mdp.se3dlsActionsCfg(
+    index_se3 = leap_mdp.se3awdlsActionsCfg(
         asset_name="robot",
         joint_names=["a_1", "a_0", "a_2", "a_3"],
         preserve_order=True,
@@ -43,8 +67,10 @@ class ActionsCfg:
         linear_limits=0.2356,  # 估算逻辑为：指长0.15m左右，设每秒最多沿圆周转90度，则线速度约0.15*π/2=0.2356m/s
         damping=0.01,
         use_joint_limits=True,
+        vme_max=10,  # 预设可操作度最大值，，在 `test_manipulability.py` 初步测得。 TODO：这个项后续动态替换最大值最好，后期可实现
+        W_x=[1, 1, 1, 20, 20 ,20],
     )
-    middle_se3 = leap_mdp.se3dlsActionsCfg(
+    middle_se3 = leap_mdp.se3awdlsActionsCfg(
         asset_name="robot",
         joint_names=["a_5", "a_4", "a_6", "a_7"],
         preserve_order=True,
@@ -56,8 +82,10 @@ class ActionsCfg:
         linear_limits=0.2356,
         damping=0.01,
         use_joint_limits=True,
+        vme_max=10,
+        W_x=[1, 1, 1, 20, 20 ,20],
     )
-    ring_se3 = leap_mdp.se3dlsActionsCfg(
+    ring_se3 = leap_mdp.se3awdlsActionsCfg(
         asset_name="robot",
         joint_names=["a_9", "a_8", "a_10", "a_11"],
         preserve_order=True,
@@ -69,8 +97,10 @@ class ActionsCfg:
         linear_limits=0.2356,
         damping=0.01,
         use_joint_limits=True,
+        vme_max=10,
+        W_x=[1, 1, 1, 20, 20 ,20],
     )
-    thumb_se3 = leap_mdp.se3dlsActionsCfg(
+    thumb_se3 = leap_mdp.se3awdlsActionsCfg(
         asset_name="robot",
         joint_names=["a_12", "a_13", "a_14", "a_15"],
         preserve_order=True,
@@ -82,26 +112,131 @@ class ActionsCfg:
         linear_limits=0.2356,
         damping=0.01,
         use_joint_limits=True,
+        vme_max=10,
+        W_x=[1, 1, 1, 20, 20 ,20],
     )
 
 
 @configclass
-class RewardCfg(inhand_base_env_cfg.RewardsCfg):
-    """奖励配置"""
-    # TODO:这里到时候要加一些适配se3动作的奖励
-    se3 = RewTerm(
+class ObservationsCfg:
+    """观测配置 - 支持非对称Actor-Critic"""
+
+    @configclass
+    class PrivilegedObsCfg(ObsGroup):
+        """Actor策略观测 - 包含大量仅仿真可用的特权信息"""
+        # -- robot terms
+        joint_pos = ObsTerm(
+            func=mdp.joint_pos_limit_normalized,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
+        body_twists = ObsTerm(
+            func=leap_mdp.body_twists,
+            params={"asset_cfg": SceneEntityCfg("robot"), "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]},
+        )
+
+        # -- object terms
+        object_pos = ObsTerm(func=mdp.root_pos_w, noise=Gnoise(std=0.002), params={"asset_cfg": SceneEntityCfg("object")})
+        object_quat = ObsTerm( # IDEA:该项添加噪音可能会破坏归一化约束？
+            func=mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object"), "make_quat_unique": False}
+        )
+
+        # -- command terms
+        goal_pose = ObsTerm(func=mdp.generated_commands, params={"command_name": "goal_pose"})
+        goal_quat_diff = ObsTerm(
+            func=leap_mdp.goal_quat_diff,
+            params={"asset_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "make_quat_unique": True},
+        )
+
+        # -- action terms
+        last_action = ObsTerm(func=mdp.last_action) # 返回的是 策略输出的规范化后值（通常是 -1 到 1）
+
+        def __post_init__(self):
+            self.enable_corruption = True
+            self.concatenate_terms = True
+
+    @configclass
+    class ProprioceptionObsCfg(PrivilegedObsCfg):
+        """Actor策略观测 - 仅包含灵巧手本体感受的信息"""
+        # 仅保留关节位置信息，上一步动作信息，目标位姿信息
+        def __post_init__(self):
+            super().__post_init__()
+            self.object_pos = None
+            self.object_quat = None
+            self.goal_quat_diff = None
+
+    @configclass
+    class CriticCfg(PrivilegedObsCfg):
+        """Critic价值函数观测 - 包含大量仅仿真可用的特权信息"""
+
+    # 观测组配置
+    policy: ObsGroup = PrivilegedObsCfg(history_length=2)
+    critic: ObsGroup = CriticCfg(history_length=2)
+
+
+@configclass
+class RewardsCfg:
+    """奖励配置 - 连续旋转任务奖励机制"""
+
+    # -- task
+    track_orientation_inv_l2 = RewTerm(
+        func=leap_mdp.track_orientation_inv_l2, weight=1.0,
+        params={"object_cfg": SceneEntityCfg("object"), "rot_eps": 0.1, "command_name": "goal_pose"},
+    )
+    goal_position_distance = RewTerm(
+        func=leap_mdp.goal_position_distance, weight=-10.0,
+        params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose"},
+    )
+    success_bonus = RewTerm(
+        func=leap_mdp.success_bonus, weight=250.0,
+        params={
+            "object_cfg": SceneEntityCfg("object"),
+            "command_name": "goal_pose",
+            "orientation_threshold": 0.2,
+            "position_threshold": 0.025,
+        },
+    )
+    fingertip_distance = RewTerm(
+        func=leap_mdp.fingertip_distance_penalty, weight=-2.0,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "object_cfg": SceneEntityCfg("object"),
+            "fingertip_body_names": ["fingertip", "thumb_fingertip", "fingertip_2", "fingertip_3"],
+        },
+    )
+    fall_penalty = RewTerm(
+        func=leap_mdp.fall_penalty, weight=-10.0,
+        params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "fall_distance": 0.07},
+    )
+    # pose_diff = RewTerm(func=leap_mdp.pose_diff_penalty, weight=-0.3)
+
+    # -- action
+    manipulability = RewTerm(
+        func=leap_mdp.jacobian_manipulability, weight=0.025,  # 按照最大可操作度约10来设定权重（奖励为0.25），鼓励手指保持良好可操作度
+        params={"asset_cfg": SceneEntityCfg("robot"), "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]},
+    )
+    kinetic_energy = RewTerm(  # 动能
+        func=leap_mdp.se3_kinetic_energy, weight=-0.01,
+        params={"asset_cfg": SceneEntityCfg("robot"), "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]},
+    )
+    action_smooth = RewTerm(
+        func=mdp.se3_action_smooth, weight=-0.01, # 鼓励动作平滑
+        params={"asset_cfg": SceneEntityCfg("robot"), "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"],
+                "use_processed":False, 'norm': 1},
     )
 
-    # def __post_init__(self):
-    #     super().__post_init__()
-    
+
+@configclass
+class CurriculumCfg:
+    """课程学习配置 - 提供各种课程学习策略"""
+    pass
 
 
 @configclass
 class InHandse3EnvCfg(inhand_base_env_cfg.InHandObjectEnvCfg):
     """LeapHand连续旋转任务环境配置 - 使用se3相对刚体末端旋量动作空间"""
     actions: ActionsCfg = ActionsCfg()
-    reward: RewardCfg = RewardCfg()
+    rewards: RewardsCfg = RewardsCfg()
+    curriculum: CurriculumCfg = CurriculumCfg()
     def __post_init__(self):
         # post init of parent
         super().__post_init__()

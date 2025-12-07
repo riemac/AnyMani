@@ -392,26 +392,21 @@ class RewardsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "object_cfg": SceneEntityCfg("object"),
-            "fingertip_body_names": [
-                "fingertip",
-                "thumb_fingertip",
-                "fingertip_2",
-                "fingertip_3",
-            ],
+            "fingertip_body_names": ["fingertip", "thumb_fingertip", "fingertip_2", "fingertip_3"],
         },
     )
-
-    # -- penalties
-    joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight=-2.5e-5)
-    action_l2 = RewTerm(func=mdp.action_l2, weight=-0.0001)
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     pose_diff = RewTerm(func=leap_mdp.pose_diff_penalty, weight=-0.3)
-    torque_l2 = RewTerm(func=leap_mdp.torque_l2_penalty, weight=-1e-5)
     fall_penalty = RewTerm(
         func=leap_mdp.fall_penalty,
         weight=-10.0,
         params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "fall_distance": 0.07},
     )
+
+    # -- action
+    joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight=-2.5e-5)
+    action_l2 = RewTerm(func=mdp.action_l2, weight=-0.0001)
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
+    torque_l2 = RewTerm(func=leap_mdp.torque_l2_penalty, weight=-1e-5)
 
 @configclass
 class TerminationsCfg:

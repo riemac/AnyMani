@@ -5,6 +5,7 @@
 # {b}-End Effector坐标系（USD关节链中的最后一层刚体的坐标），{b'}-虚拟Xform坐标系（人为设置的指尖坐标系）
 # 旋量、雅可比等均遵循 Modern Robotics 的约定
 # 主要数学工具调用 `source/leaphand/leaphand/tasks/manager_based/leaphand/mdp/utils/math.py`
+# IDEA：关于代码风格，torch的矩阵乘法改为 @ 会不会更直观？
 
 from __future__ import annotations
 
@@ -97,7 +98,7 @@ class se3Action(ActionTerm):
                 math_leap.inverse_transform(self._T_bb_prime)
             )
 
-            # 实际用于雅可比的是父刚体
+            # 实际通过physx API可获取的雅可比是父刚体
             self._body_idx = self._parent_body_idx
             self._body_name = self._parent_body_name
 
@@ -149,8 +150,8 @@ class se3Action(ActionTerm):
         # 创建动作缓冲区
         # 输入动作维度是 6 (旋量维度：3角速度 + 3线速度)
         self._raw_actions = torch.zeros(self.num_envs, 6, device=self.device)
-        # 处理后的动作是关节空间的目标（位置或速度，取决于use_pd配置）
-        self._processed_actions = torch.zeros(self.num_envs, self._num_joints, device=self.device)
+        # 处理后的动作是缩放后的旋量（经过scaling和clamping）
+        self._processed_actions = torch.zeros(self.num_envs, 6, device=self.device)
 
         # 解析角速度和线速度的限制，并计算缩放系数
         self._parse_velocity_limits()
@@ -185,8 +186,23 @@ class se3Action(ActionTerm):
 
     @property
     def processed_actions(self) -> torch.Tensor:
-        """处理后的动作张量（关节目标）。形状为 (num_envs, num_joints)。"""
+        """处理后的动作张量（缩放后的旋量命令）。形状为 (num_envs, 6)。"""
         return self._processed_actions
+
+    @property
+    def body_idx(self) -> int:
+        """末端刚体索引（若为虚拟Xform则为其父刚体索引）。"""
+        return self._body_idx
+
+    @property
+    def is_xform(self) -> bool:
+        """是否使用虚拟Xform作为末端。"""
+        return self.cfg.is_xform
+
+    @property
+    def Ad_bprime_b(self) -> torch.Tensor | None:
+        """从真实刚体{b}到虚拟Xform{b'}的伴随变换矩阵。仅当 is_xform=True 时有效。"""
+        return self._Ad_bprime_b if self.cfg.is_xform else None
 
     @property
     def IO_descriptor(self) -> GenericActionIODescriptor:
@@ -210,9 +226,6 @@ class se3Action(ActionTerm):
     """
 
     def process_actions(self, actions: torch.Tensor):
-        # FIXME：流程需部分重构
-        # 不再是 dthete = Jb^{+} Vb，而是 dthete = Jb'^{+} Vb'。这样无需将Vb'先转换为Vb
-        # 这样总的变换流程应该是 Jphysx -> Jg -> Jb -> Jb'，然后 dtheta = Jb'^{+} Vb'，最后转化为关节角增量
         r"""处理输入的旋量动作，映射到关节空间。
 
         处理流程：
@@ -251,6 +264,9 @@ class se3Action(ActionTerm):
         # 3. 应用速度限制 (Safety Clamp)
         twist_limited = self._apply_velocity_limits(twist)
 
+        # 存储处理后的旋量（用于奖励项和观察项）
+        self._processed_actions[:] = twist_limited
+
         # 4. 如果是虚拟 Xform，应用伴随变换
         twist_local = twist_limited
 
@@ -280,9 +296,6 @@ class se3Action(ActionTerm):
             self._joint_pos_target[:] = torch.clamp(
                 self._joint_pos_target, min=limits[..., 0], max=limits[..., 1]
             )
-
-        # 更新 processed_actions (主要用于日志记录，存储位置目标)
-        self._processed_actions[:] = self._joint_pos_target
 
     def apply_actions(self):
         """将处理后的动作应用到机器人。
@@ -709,26 +722,422 @@ class se3dlsAction(se3Action):
     
 
 class se3wdlsAction(se3dlsAction):
-    # TODO: 加权DLS版本的se3动作项，实现对不同自由度应用不同权重的雅可比逆计算。
-    # 位置和姿态的**单位不一致**（米 vs 弧度）且**重要性可能不同**。加权雅可比通过引入权重矩阵来解决这个问题。
-    # 主要思路来源于 `source/leaphand/leaphand/ideas/idea.ipynb` 中的加权wdls变体
-    
-    def process_actions(self, actions):
-        # 这里的流程和se3Action不太一样，需要完全重写
-        # 最主要的区别是dtheta的计算: dot{theta} = W_q^{-1} tilde{J}_b^T (tilde{J}_b tilde{J}_b^T + lambda^2 I)^{-1} W_x V_b
-        pass
-        
+    r"""se(3) 动作项 WDLS（Weighted Damped Least Squares）实现类。
 
-    def _get_jacobian(self):
-        # 这里需要实现加权雅可比 J_bprime_tilde = W_x J_bprime W_q^(-1)
-        Jacobian = super()._get_jacobian()
+    该类继承自 :class:`se3dlsAction`，通过引入任务空间权重矩阵 :math:`W_x` 和关节空间权重矩阵 :math:`W_q`，
+    解决标准DLS存在的量纲不一致和任务优先级缺失问题。
 
-        pass
+    **数学形式：**
+
+    加权DLS求解以下优化问题：
+
+    .. math::
+
+        \min_{\dot{\theta}} \| W_x (J_b \dot{\theta} - \mathcal{V}_b) \|^2 + \lambda^2 \| W_q \dot{\theta} \|^2
+
+    通过变量代换 :math:`\dot{\phi} = W_q \dot{\theta}`，:math:`\tilde{J}_b = W_x J_b W_q^{-1}`，
+    :math:`\tilde{\mathcal{V}}_b = W_x \mathcal{V}_b`，可转化为标准DLS形式：
+
+    .. math::
+
+        \min_{\dot{\phi}} \| \tilde{J}_b \dot{\phi} - \tilde{\mathcal{V}}_b \|^2 + \lambda^2 \| \dot{\phi} \|^2
+
+    解为：
+
+    .. math::
+
+        \dot{\theta} = W_q^{-1} \tilde{J}_b^T (\tilde{J}_b \tilde{J}_b^T + \lambda^2 I)^{-1} W_x \mathcal{V}_b
+
+    **物理意义：**
+
+    1. **量纲归一化**：通过 :math:`W_x = \mathrm{diag}(w_\omega I_3, w_v I_3)` 统一角速度（rad/s）和线速度（m/s）的量级
+    2. **关节限位回避**：通过 :math:`W_q = \mathrm{diag}(w_1, \dots, w_n)` 惩罚接近限位的关节运动
+    3. **性能指标优化**：使用加权雅可比计算的操作度更能反映实际任务执行能力
+
+    Reference:
+        - Modern Robotics, Section 6.2: Numerical Inverse Kinematics
+        - Sciavicco & Siciliano (2000). "Modelling and Control of Robot Manipulators"
+    """
+
+    cfg: actions_cfg.se3wdlsActionsCfg
+    """WDLS 动作项配置。"""
+
+    def __init__(self, cfg: actions_cfg.se3wdlsActionsCfg, env: ManagerBasedEnv) -> None:
+        """初始化 WDLS 动作项。
+
+        Args:
+            cfg: WDLS 动作项配置。
+            env: 管理器基础强化学习环境实例。
+
+        Raises:
+            ValueError: 当权重矩阵维度不匹配时。
+        """
+        # 调用父类初始化
+        super().__init__(cfg, env)
+
+        # 初始化任务空间权重矩阵 W_x (6x6)
+        if self.cfg.W_x is not None:
+            W_x_list = list(self.cfg.W_x) if isinstance(self.cfg.W_x, (tuple, list)) else [self.cfg.W_x] * 6
+            if len(W_x_list) != 6:
+                raise ValueError(
+                    f"W_x 权重矩阵应为 6 个元素，实际收到 {len(W_x_list)} 个。"
+                )
+            self._W_x = torch.diag(torch.tensor(W_x_list, device=self.device, dtype=torch.float32))
+        else:
+            # 默认：单位矩阵（不加权）
+            self._W_x = torch.eye(6, device=self.device, dtype=torch.float32)
+
+        # 初始化关节空间权重矩阵 W_q (num_joints x num_joints)
+        if self.cfg.W_q is not None:
+            W_q_list = list(self.cfg.W_q) if isinstance(self.cfg.W_q, (tuple, list)) else [self.cfg.W_q] * self._num_joints
+            if len(W_q_list) != self._num_joints:
+                raise ValueError(
+                    f"W_q 权重矩阵应为 {self._num_joints} 个元素（匹配关节数），实际收到 {len(W_q_list)} 个。"
+                )
+            self._W_q = torch.diag(torch.tensor(W_q_list, device=self.device, dtype=torch.float32))
+        else:
+            # 默认：单位矩阵（不加权）
+            self._W_q = torch.eye(self._num_joints, device=self.device, dtype=torch.float32)
+
+        # 预计算 W_q 的逆矩阵（对角矩阵求逆直接对角线元素取倒数）
+        self._W_q_inv = torch.diag(1.0 / torch.diag(self._W_q))
+
+        logger.info(
+            f"WDLS 权重矩阵初始化:\n"
+            f"  W_x (任务空间): {torch.diag(self._W_x).tolist()}\n"
+            f"  W_q (关节空间): {torch.diag(self._W_q).tolist()}"
+        )
+
+    def process_actions(self, actions: torch.Tensor):
+        r"""处理输入的旋量动作，使用加权DLS映射到关节空间。
+
+        处理流程（与 se3Action 不同）：
+
+        1. 存储原始旋量动作
+        2. 应用缩放和限制
+        3. 计算加权旋量：:math:`\tilde{\mathcal{V}}_b = W_x \mathcal{V}_b`
+        4. 获取当前雅可比矩阵 :math:`J_b`
+        5. 计算加权雅可比：:math:`\tilde{J}_b = W_x J_b W_q^{-1}`
+        6. 计算加权DLS伪逆
+        7. 计算关节速度增量：:math:`\dot{\theta} = W_q^{-1} \tilde{J}_b^+ \tilde{\mathcal{V}}_b`
+        8. 积分为位置目标
+
+        Args:
+            actions: 输入的旋量动作。形状为 (num_envs, 6)。
+        """
+        # 1-2. 存储原始动作、应用缩放和限制（与基类相同）
+        self._raw_actions[:] = actions
+
+        # 应用缩放映射
+        if self._angular_vel_limits is not None:
+            scaled_angular = actions[:, :3] * self._angular_scale + self._angular_bias
+        else:
+            scaled_angular = actions[:, :3]
+
+        if self._linear_vel_limits is not None:
+            scaled_linear = actions[:, 3:] * self._linear_scale + self._linear_bias
+        else:
+            scaled_linear = actions[:, 3:]
+
+        twist = torch.cat([scaled_angular, scaled_linear], dim=1)
+        twist_limited = self._apply_velocity_limits(twist)
+
+        # 存储处理后的旋量（用于奖励项和观察项）
+        self._processed_actions[:] = twist_limited
+
+        # 3. 计算加权旋量：tilde_V_b = W_x @ V_b
+        # W_x 形状: (6, 6), twist_limited 形状: (num_envs, 6)
+        # 扩展 W_x 以支持批量操作
+        W_x_batch = self._W_x.unsqueeze(0).expand(self.num_envs, -1, -1)  # (num_envs, 6, 6)
+        tilde_twist = torch.matmul(W_x_batch, twist_limited.unsqueeze(-1)).squeeze(-1)  # (num_envs, 6)
+
+        # 4. 获取当前的雅可比矩阵 J_b
+        jacobian = self._get_jacobian()  # (num_envs, 6, num_joints)
+
+        # 5. 计算加权雅可比：tilde_J_b = W_x @ J_b @ W_q^{-1}
+        # W_q_inv 形状: (num_joints, num_joints)
+        W_q_inv_batch = self._W_q_inv.unsqueeze(0).expand(self.num_envs, -1, -1)  # (num_envs, num_joints, num_joints)
+        tilde_jacobian = torch.matmul(W_x_batch, jacobian)  # (num_envs, 6, num_joints)
+        tilde_jacobian = torch.matmul(tilde_jacobian, W_q_inv_batch)  # (num_envs, 6, num_joints)
+
+        # 6. 计算加权雅可比的DLS伪逆
+        # tilde_J_b^+ = tilde_J_b^T (tilde_J_b tilde_J_b^T + lambda^2 I)^{-1}
+        tilde_jacobian_inv = math_leap.dls_inv(tilde_jacobian, self.cfg.damping)  # (num_envs, num_joints, 6)
+
+        # 7. 计算关节空间的速度增量（考虑权重）
+        # dot_theta = W_q^{-1} @ tilde_J_b^+ @ tilde_V_b
+        joint_vel_weighted = torch.matmul(tilde_jacobian_inv, tilde_twist.unsqueeze(-1)).squeeze(-1)  # (num_envs, num_joints)
+        joint_vel = torch.matmul(W_q_inv_batch, joint_vel_weighted.unsqueeze(-1)).squeeze(-1)  # (num_envs, num_joints)
+
+        # 8. 计算目标状态
+        current_joint_pos = self._asset.data.joint_pos[:, self._joint_ids]
+        self._joint_pos_target[:] = current_joint_pos + joint_vel * self._dt
+        self._joint_vel_target[:] = joint_vel
+
+        # 应用关节限位
+        if self.cfg.use_joint_limits:
+            limits = self._asset.data.soft_joint_pos_limits[:, self._joint_ids]
+            self._joint_pos_target[:] = torch.clamp(
+                self._joint_pos_target, min=limits[..., 0], max=limits[..., 1]
+            )
 
 class se3adlsAction(se3dlsAction):
-    # TODO：自适应DLS版本的se3动作项，实现根据当前雅可比矩阵值动态调整阻尼系数。
-    pass
+    r"""se(3) 动作项 ADLS（Adaptive Damped Least Squares）实现类。
 
-class se3tikhonovAction(se3dlsAction):
-    # TODO：Tikhonov正则化版本的se3动作项，实现基于Tikhonov正则化的雅可比逆计算。
-    pass
+    该类继承自 :class:`se3dlsAction`，通过引入自适应阻尼机制，根据当前雅可比矩阵的操作度动态调整阻尼系数，
+    在远离奇异位形时保持高精度，在接近奇异位形时提升稳定性。
+
+    **数学形式：**
+
+    标准DLS求解公式：
+
+    .. math::
+
+        \dot{\theta} = J_b^T (J_b J_b^T + \lambda^2 I)^{-1} \mathcal{V}_b
+
+    自适应阻尼根据操作度 :math:`m` 动态调整：
+
+    .. math::
+
+        \lambda(m) = \lambda_{max} \left( 1 - \frac{m}{m_0} \right)^2
+
+    其中：
+    - :math:`m = \sqrt{\det(J_b J_b^T)}` 为 Yoshikawa 操作度
+    - :math:`m_0` 为预设的最大操作度阈值
+    - :math:`\lambda_{max}` 为最大阻尼系数
+
+    **物理意义：**
+
+    1. **自适应性**：当操作度 :math:`m \approx m_0` 时，系统远离奇异位形，:math:`\lambda \approx 0`，解接近伪逆，精度高
+    2. **奇异回避**：当操作度 :math:`m \to 0` 时，系统接近奇异位形，:math:`\lambda \to \lambda_{max}`，增强稳定性
+    3. **平滑过渡**：二次方衰减保证阻尼变化的平滑性，避免控制抖动
+
+    Reference:
+        - Nakamura & Hanafusa (1986). "Inverse Kinematic Solutions With Singularity Robustness for Robot Manipulator Control"
+        - Modern Robotics, Section 6.2: Numerical Inverse Kinematics
+    """
+
+    cfg: actions_cfg.se3adlsActionsCfg
+    """ADLS 动作项配置。"""
+
+    def __init__(self, cfg: actions_cfg.se3adlsActionsCfg, env: ManagerBasedEnv) -> None:
+        """初始化 ADLS 动作项。
+
+        Args:
+            cfg: ADLS 动作项配置。
+            env: 管理器基础强化学习环境实例。
+
+        Raises:
+            ValueError: 当 vme_max 配置无效时。
+        """
+        # 调用父类初始化（会设置 self.cfg.damping 作为 lambda_max）
+        super().__init__(cfg, env)
+
+        # 验证并设置最大操作度阈值 m_0
+        if self.cfg.vme_max is None or self.cfg.vme_max <= 0:
+            raise ValueError(
+                f"vme_max 必须为正数，实际收到：{self.cfg.vme_max}。"
+                "建议值：对于6自由度机械臂约为 0.1-0.5，对于灵巧手约为 0.01-0.1。"
+            )
+        
+        self._m_0 = self.cfg.vme_max
+        self._lambda_max = self.cfg.damping  # 继承自 se3dlsActionsCfg
+
+        logger.info(
+            f"ADLS 自适应阻尼参数初始化:\n"
+            f"  最大操作度 m_0: {self._m_0}\n"
+            f"  最大阻尼系数 λ_max: {self._lambda_max}"
+        )
+
+    def _compute_jacobian_inverse(self, jacobian: torch.Tensor) -> torch.Tensor:
+        r"""计算雅可比矩阵的自适应DLS伪逆。
+
+        该方法重写父类的静态阻尼计算，引入基于操作度的自适应阻尼机制。
+
+        **算法流程：**
+
+        1. 计算当前操作度：:math:`m = \sqrt{\det(J_b J_b^T)}`
+        2. 计算自适应阻尼：:math:`\lambda = \lambda_{max} (1 - m / m_0)^2`
+        3. 应用 DLS 公式：:math:`J^+ = J^T (JJ^T + \lambda^2 I)^{-1}`
+
+        Args:
+            jacobian: 雅可比矩阵。形状为 (num_envs, 6, num_joints)。
+
+        Returns:
+            自适应DLS伪逆矩阵。形状为 (num_envs, num_joints, 6)。
+
+        Note:
+            使用 Cholesky 分解加速求解，避免显式矩阵求逆。
+        """
+        # 1. 计算操作度 m
+        m = math_leap.manipulability(jacobian)  # (num_envs,)
+
+        # 2. 计算自适应阻尼系数 lambda(m)
+        # lambda(m) = lambda_max * (1 - m / m_0)^2
+        # 注意：当 m > m_0 时，限制 lambda >= 0
+        m_ratio = torch.clamp(m / self._m_0, min=0.0, max=1.0)  # 限制在 [0, 1]
+        adaptive_damping = self._lambda_max * (1.0 - m_ratio) ** 2  # (num_envs,)
+
+        # 3. 调用 DLS 伪逆计算（支持逐环境的不同阻尼）
+        # dls_inv 支持标量或向量阻尼
+        jacobian_inv = math_leap.dls_inv(jacobian, adaptive_damping)  # (num_envs, num_joints, 6)
+
+        return jacobian_inv
+
+class se3awdlsAction(se3wdlsAction):
+    r"""se(3) 动作项 AWDLS（Adaptive Weighted Damped Least Squares）实现类。
+
+    该类继承自 :class:`se3wdlsAction`，结合了加权DLS的量纲归一化能力和自适应DLS的奇异回避能力，
+    是最完整的DLS变体实现。
+
+    **数学形式：**
+
+    加权DLS优化问题：
+
+    .. math::
+
+        \min_{\dot{\theta}} \| W_x (J_b \dot{\theta} - \mathcal{V}_b) \|^2 + \lambda^2 \| W_q \dot{\theta} \|^2
+
+    解为：
+
+    .. math::
+
+        \dot{\theta} = W_q^{-1} \tilde{J}_b^T (\tilde{J}_b \tilde{J}_b^T + \lambda(m)^2 I)^{-1} W_x \mathcal{V}_b
+
+    其中：
+    - 加权雅可比：:math:`\tilde{J}_b = W_x J_b W_q^{-1}`
+    - 自适应阻尼：:math:`\lambda(m) = \lambda_{max} (1 - m / m_0)^2`
+    - 加权操作度：:math:`m = \sqrt{\det(\tilde{J}_b \tilde{J}_b^T)}`
+
+    **物理意义：**
+
+    1. **量纲统一**：:math:`W_x` 统一角速度和线速度的物理量纲，使优化目标更合理
+    2. **关节限位回避**：:math:`W_q` 惩罚接近关节限位的运动，提升安全性
+    3. **自适应奇异回避**：:math:`\lambda(m)` 在奇异位形附近自动增大，保证求解稳定性
+    4. **最优性能**：结合三种机制，在保证精度的同时最大化鲁棒性
+
+    Reference:
+        - Nakamura & Hanafusa (1986). "Inverse Kinematic Solutions With Singularity Robustness"
+        - Chan & Lawrence (1988). "General Inverse Kinematics with the Error Damped Pseudoinverse"
+        - Modern Robotics, Section 6.2
+    """
+
+    cfg: actions_cfg.se3awdlsActionsCfg
+    """AWDLS 动作项配置。"""
+
+    def __init__(self, cfg: actions_cfg.se3awdlsActionsCfg, env: ManagerBasedEnv) -> None:
+        """初始化 AWDLS 动作项。
+
+        Args:
+            cfg: AWDLS 动作项配置。
+            env: 管理器基础强化学习环境实例。
+
+        Raises:
+            ValueError: 当 vme_max 配置无效时。
+        """
+        # 调用父类初始化（会设置权重矩阵 W_x 和 W_q）
+        super().__init__(cfg, env)
+
+        # 验证并设置最大操作度阈值 m_0
+        if self.cfg.vme_max is None or self.cfg.vme_max <= 0:
+            raise ValueError(
+                f"vme_max 必须为正数，实际收到：{self.cfg.vme_max}。"
+                "建议值：对于6自由度机械臂约为 0.1-0.5，对于灵巧手约为 0.01-0.1。"
+            )
+        
+        self._m_0 = self.cfg.vme_max
+        self._lambda_max = self.cfg.damping  # 继承自 se3dlsActionsCfg
+
+        logger.info(
+            f"AWDLS 自适应加权阻尼参数初始化:\n"
+            f"  任务空间权重 W_x: {torch.diag(self._W_x).tolist()}\n"
+            f"  关节空间权重 W_q: {torch.diag(self._W_q).tolist()}\n"
+            f"  最大操作度 m_0: {self._m_0}\n"
+            f"  最大阻尼系数 λ_max: {self._lambda_max}"
+        )
+
+    def process_actions(self, actions: torch.Tensor):
+        # FIXME:实现逻辑没有错，但注意复用_compute_jacobian_inverse，重构是可考虑
+        r"""处理输入的旋量动作，使用自适应加权DLS映射到关节空间。
+
+        该方法结合了 se3wdlsAction 的加权机制和 se3adlsAction 的自适应阻尼，
+        实现最完整的DLS变体。
+
+        **关键区别：**
+        
+        - 操作度计算使用加权雅可比 :math:`\tilde{J}_b` 而非原始雅可比 :math:`J_b`
+        - 自适应阻尼基于加权操作度，更真实反映任务空间的可控性
+
+        **算法流程：**
+
+        1. 应用缩放和限制
+        2. 计算加权旋量：:math:`\tilde{\mathcal{V}}_b = W_x \mathcal{V}_b`
+        3. 获取雅可比矩阵 :math:`J_b`
+        4. 计算加权雅可比：:math:`\tilde{J}_b = W_x J_b W_q^{-1}`
+        5. 计算加权操作度：:math:`m = \sqrt{\det(\tilde{J}_b \tilde{J}_b^T)}`
+        6. 计算自适应阻尼：:math:`\lambda = \lambda_{max} (1 - m / m_0)^2`
+        7. 计算加权DLS伪逆（使用自适应阻尼）
+        8. 计算关节速度并积分为位置目标
+
+        Args:
+            actions: 输入的旋量动作。形状为 (num_envs, 6)。
+        """
+        # 1-2. 存储原始动作、应用缩放和限制（与基类相同）
+        self._raw_actions[:] = actions
+
+        # 应用缩放映射
+        if self._angular_vel_limits is not None:
+            scaled_angular = actions[:, :3] * self._angular_scale + self._angular_bias
+        else:
+            scaled_angular = actions[:, :3]
+
+        if self._linear_vel_limits is not None:
+            scaled_linear = actions[:, 3:] * self._linear_scale + self._linear_bias
+        else:
+            scaled_linear = actions[:, 3:]
+
+        twist = torch.cat([scaled_angular, scaled_linear], dim=1)
+        twist_limited = self._apply_velocity_limits(twist)
+
+        # 存储处理后的旋量（用于奖励项和观察项）
+        self._processed_actions[:] = twist_limited
+
+        # 3. 计算加权旋量：tilde_V_b = W_x @ V_b
+        W_x_batch = self._W_x.unsqueeze(0).expand(self.num_envs, -1, -1)  # (num_envs, 6, 6)
+        tilde_twist = torch.matmul(W_x_batch, twist_limited.unsqueeze(-1)).squeeze(-1)  # (num_envs, 6)
+
+        # 4. 获取当前的雅可比矩阵 J_b
+        jacobian = self._get_jacobian()  # (num_envs, 6, num_joints)
+
+        # 5. 计算加权雅可比：tilde_J_b = W_x @ J_b @ W_q^{-1}
+        W_q_inv_batch = self._W_q_inv.unsqueeze(0).expand(self.num_envs, -1, -1)  # (num_envs, num_joints, num_joints)
+        tilde_jacobian = torch.matmul(W_x_batch, jacobian)  # (num_envs, 6, num_joints)
+        tilde_jacobian = torch.matmul(tilde_jacobian, W_q_inv_batch)  # (num_envs, 6, num_joints)
+
+        # 6. 计算加权操作度 m
+        m = math_leap.manipulability(tilde_jacobian)  # (num_envs,)
+
+        # 7. 计算自适应阻尼系数 lambda(m)
+        # lambda(m) = lambda_max * (1 - m / m_0)^2
+        m_ratio = torch.clamp(m / self._m_0, min=0.0, max=1.0)
+        adaptive_damping = self._lambda_max * (1.0 - m_ratio) ** 2  # (num_envs,)
+
+        # 8. 计算加权雅可比的自适应DLS伪逆 tilde_J_dls^+
+        tilde_jacobian_inv = math_leap.dls_inv(tilde_jacobian, adaptive_damping)  # (num_envs, num_joints, 6)
+
+        # 9. 计算关节空间的速度增量（考虑权重）
+        # dot_theta = W_q^{-1} @ tilde_J_dls^+ @ tilde_V_b
+        joint_vel_weighted = torch.matmul(tilde_jacobian_inv, tilde_twist.unsqueeze(-1)).squeeze(-1)  # (num_envs, num_joints)
+        joint_vel = torch.matmul(W_q_inv_batch, joint_vel_weighted.unsqueeze(-1)).squeeze(-1)  # (num_envs, num_joints)
+
+        # 10. 计算目标状态
+        current_joint_pos = self._asset.data.joint_pos[:, self._joint_ids]
+        self._joint_pos_target[:] = current_joint_pos + joint_vel * self._dt
+        self._joint_vel_target[:] = joint_vel
+
+        # 应用关节限位
+        if self.cfg.use_joint_limits:
+            limits = self._asset.data.soft_joint_pos_limits[:, self._joint_ids]
+            self._joint_pos_target[:] = torch.clamp(
+                self._joint_pos_target, min=limits[..., 0], max=limits[..., 1]
+            )

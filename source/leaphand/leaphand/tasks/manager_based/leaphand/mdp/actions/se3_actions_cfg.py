@@ -1,7 +1,5 @@
-# TODO:该文件为se(3)动作项的配置类文件，用于定义和管理se(3)动作项的配置参数
-# 有一个需注意的地方，指尖末端设置的坐标系{b'}是人为设置的Xform，它是虚拟的而非真实的刚体，因此无法获取关于该坐标系的雅可比矩阵J_b'
-# 如leaphand的leap_hand_right/fingertip_2/middle_tip_head，middle_tip_head为虚拟设置的Xform，fingertip_2才是真实的刚体，其所在坐标系为{b}
-# 好在这个T_bb'是固定不变的，可以预先计算好并存储下来，在计算J_b'^+时利用伴随变换转换为J_b^+即可
+# 该文件为 se(3) 动作项提供配置类。
+# 指尖末端的虚拟坐标系 {b'} 需要通过伴随变换将父刚体 {b} 的雅可比矩阵转换得到。
 
 from collections.abc import Sequence
 
@@ -88,6 +86,10 @@ class se3ActionCfg(ActionTermCfg):
     这可以防止动作指令超出物理可行范围。
     """
 
+    def __post_init__(self):
+        if self.target is MISSING:
+            raise ValueError("se3ActionCfg.target 必须提供末端名称。")
+
 
 @configclass
 class se3dlsActionsCfg(se3ActionCfg):
@@ -108,17 +110,19 @@ class se3dlsActionsCfg(se3ActionCfg):
     对于灵巧手操作，建议从 0.01 开始调试。
     """
 
+    def __post_init__(self):
+        super().__post_init__()
+        if self.damping <= 0:
+            raise ValueError("se3dlsActionsCfg.damping 必须为正值。")
+
 @configclass
 class se3wdlsActionsCfg(se3dlsActionsCfg):
-    r"""se(3) 动作项 WDLS（Weighted Damped Least Squares）配置类。
-
-    该类用于定义和管理 se(3) 动作项 WDLS 的配置参数。
-    """
+    r"""se(3) 动作项 WDLS（Weighted Damped Least Squares）配置类。"""
 
     class_type: type[ActionTerm] = se3.se3wdlsAction
 
     W_q: list | tuple | None = None
-    r"""TODO：关节空间权重矩阵。
+    r"""关节空间权重矩阵。
     
     如果为 None，则使用单位矩阵，维度可根据实际关节数自动推断。
     若提供具体矩阵，则应为方阵，维度与关节数相匹配，否则将引发报错。
@@ -126,23 +130,52 @@ class se3wdlsActionsCfg(se3dlsActionsCfg):
     """
 
     W_x: list | tuple | None = None
-    r"""TODO：任务空间权重矩阵。
+    r"""任务空间权重矩阵。
     
     如果为 None，则使用单位矩阵，维度为6乘6。
     若提供具体矩阵，则应为方阵，维度为6乘6，否则将引发报错。
 
     """
 
+    def __post_init__(self):
+        super().__post_init__()
+        if self.W_x is not None:
+            if not isinstance(self.W_x, (list, tuple)):
+                raise ValueError("se3wdlsActionsCfg.W_x 需为长度为6的列表或元组。")
+            if len(self.W_x) != 6:
+                raise ValueError(f"se3wdlsActionsCfg.W_x 长度应为6，实际为 {len(self.W_x)}。")
+        if self.W_q is not None:
+            if not isinstance(self.W_q, (list, tuple)):
+                raise ValueError("se3wdlsActionsCfg.W_q 需为对角权重列表或元组。")
+            if len(self.W_q) == 0:
+                raise ValueError("se3wdlsActionsCfg.W_q 不能为空列表。")
+
 @configclass
 class se3adlsActionsCfg(se3dlsActionsCfg):
-    r"""se(3) 动作项 ADLS（Adaptive Damped Least Squares）配置类。
+    r"""se(3) 动作项 ADLS（Adaptive Damped Least Squares）配置类。"""
+    class_type: type[ActionTerm] = se3.se3adlsAction
 
-    该类用于定义和管理 se(3) 动作项 ADLS 的配置参数。
+    vme_max: float = None
+    r"""速度可操作性椭球，简称可操作度。预设的最大值
+    
     """
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.vme_max is None or self.vme_max <= 0:
+            raise ValueError("se3adlsActionsCfg.vme_max 必须为正值。")
 
 @configclass
 class se3awdlsActionsCfg(se3wdlsActionsCfg):
-    r"""se(3) 动作项 AWDLS（Adaptive Weighted Damped Least Squares）配置类。
+    r"""se(3) 动作项 AWDLS（Adaptive Weighted Damped Least Squares）配置类。"""
+    class_type: type[ActionTerm] = se3.se3awdlsAction
 
-    该类用于定义和管理 se(3) 动作项 AWDLS 的配置参数。
+    vme_max: float = None
+    r"""速度可操作性椭球，简称可操作度。预设的最大值
+
     """
+    
+    def __post_init__(self):
+        super().__post_init__()
+        if self.vme_max is None or self.vme_max <= 0:
+            raise ValueError("se3awdlsActionsCfg.vme_max 必须为正值。")

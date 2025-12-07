@@ -45,8 +45,7 @@ def pseudo_inv(J: torch.Tensor) -> torch.Tensor:
     return torch.linalg.pinv(J, rcond=1e-5)
 
 
-@torch.jit.script
-def dls_inv(J: torch.Tensor, damping: float) -> torch.Tensor:
+def dls_inv(J: torch.Tensor, damping) -> torch.Tensor:
     r"""计算雅可比矩阵的阻尼最小二乘(DLS)伪逆（Cholesky 加速版本）。
 
     利用 Cholesky 分解求解线性方程组，避免显式求逆，速度更快且数值更稳定。
@@ -78,7 +77,7 @@ def dls_inv(J: torch.Tensor, damping: float) -> torch.Tensor:
 
     Args:
         J: 雅可比矩阵。形状为 ``(N, 6, num_joints)`` 或 ``(6, num_joints)``。
-        damping: 阻尼系数 :math:`\lambda`。
+        damping: 阻尼系数 :math:`\lambda`。可以是标量浮点数（所有环境相同）或形状为 ``(N,)`` 的张量（每个环境不同）。
 
     Returns:
         DLS 伪逆矩阵。形状为 ``(N, num_joints, 6)`` 或 ``(num_joints, 6)``。
@@ -95,8 +94,21 @@ def dls_inv(J: torch.Tensor, damping: float) -> torch.Tensor:
     A = torch.matmul(J, J_T)  # (..., 6, 6)
 
     # 2. 添加阻尼项到对角线
-    # 原地操作，节省显存
-    A.diagonal(dim1=-2, dim2=-1).add_(damping**2)
+    # 支持标量或向量阻尼
+    if isinstance(damping, (int, float)):
+        # 标量阻尼：直接原地加到对角线
+        A.diagonal(dim1=-2, dim2=-1).add_(damping**2)
+    else:
+        # 张量阻尼：广播到对角线维度
+        # damping shape: (N,) -> damping_sq shape: (N,) -> (N, 1) -> (N, 6)
+        damping_sq = damping **2
+        if damping_sq.dim() == 0:
+            # 0维张量（标量）
+            A.diagonal(dim1=-2, dim2=-1).add_(damping_sq.item())
+        else:
+            # 向量阻尼：广播到对角线维度
+            damping_sq_expanded = damping_sq.unsqueeze(-1).expand(*A.shape[:-1])
+            A.diagonal(dim1=-2, dim2=-1).add_(damping_sq_expanded)
 
     # 3. Cholesky 分解: A = L * L^T
     L = torch.linalg.cholesky(A)
