@@ -31,12 +31,12 @@ if TYPE_CHECKING:
 
 def torque_l2_penalty(
     env: ManagerBasedRLEnv,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """关节力矩平方和，用于约束动作的用力大小。"""
 
-    robot: Articulation = env.scene[robot_cfg.name]
-    torque = getattr(robot.data, "computed_torque", None)
+    asset: Articulation = env.scene[asset_cfg.name]
+    torque = getattr(asset.data, "computed_torque", None)
 
     if torque is None:
         return torch.zeros(env.num_envs, device=env.device)
@@ -61,11 +61,11 @@ class jacobian_manipulability(ManagerTermBase):
     未指定 ``action_names`` 时默认遍历所有 se3Action。
     """
 
-    def __init__(self, cfg: SceneEntityCfg, env: ManagerBasedRLEnv):
+    def __init__(self, cfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
         from . import actions as se3
 
-        action_names = cfg.params.get("action_names") if hasattr(cfg, "params") else None
+        action_names = cfg.params.get("action_names")
         candidate_names = list(env.action_manager.active_terms) if action_names is None else list(action_names)
 
         terms = []
@@ -82,8 +82,9 @@ class jacobian_manipulability(ManagerTermBase):
     def __call__(
         self,
         env: ManagerBasedRLEnv,
-        robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+        action_names: list[str] | None = None,
     ) -> torch.Tensor:
+        # action_names 参数仅用于满足框架签名要求，实际使用 self._se3_terms
         metrics = []
         for term in self._se3_terms:
             jac = term._get_jacobian()  # (num_envs, 6, nj)
@@ -108,15 +109,16 @@ class se3_kinetic_energy(ManagerTermBase):
         将使用单位惯量矩阵作为退化近似，可能导致动能计算不准确。
     """
 
-    def __init__(self, cfg: SceneEntityCfg, env: ManagerBasedRLEnv):
+    def __init__(self, cfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
         from . import actions as se3
 
-        # 获取机器人资产（默认名称为 "robot"）
-        self._asset: Articulation = env.scene[cfg.params.get("robot_name", "robot")] if hasattr(cfg, "params") else env.scene["robot"]
+        # 获取资产（默认名称为 "robot"）
+        robot_name = cfg.params.get("robot_name", "robot")
+        self._asset: Articulation = env.scene[robot_name]
 
         # 解析动作项名称列表
-        action_names = cfg.params.get("action_names") if hasattr(cfg, "params") else None
+        action_names = cfg.params.get("action_names")
         candidate_names = list(env.action_manager.active_terms) if action_names is None else list(action_names)
 
         # 筛选出所有 se3Action 类型的动作项
@@ -143,8 +145,8 @@ class se3_kinetic_energy(ManagerTermBase):
             b_idx = term.body_idx
             if mass is not None and inertia_vec is not None:
                 # 从 USD 数据构造真实的空间惯量矩阵
-                m = mass[:, b_idx]  # (num_envs,) 质量标量
-                I_vals = inertia_vec[:, b_idx]  # (num_envs, 9) 惯性张量展平向量
+                m = mass[:, b_idx].to(env.device)  # (num_envs,) 质量标量
+                I_vals = inertia_vec[:, b_idx].to(env.device)  # (num_envs, 9) 惯性张量展平向量
                 
                 # 重构 3x3 惯性张量矩阵（列主序）
                 I_mat = torch.stack(
@@ -177,8 +179,11 @@ class se3_kinetic_energy(ManagerTermBase):
     def __call__(
         self,
         env: ManagerBasedRLEnv,
-        robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+        action_names: list[str] | None = None,
+        robot_name: str = "robot",
     ) -> torch.Tensor:
+        # action_names 和 robot_name 参数仅用于满足框架签名要求
+        # 实际使用 self._se3_terms 和 self._asset
         energies = []
         for term in self._se3_terms:
             b_idx = term.body_idx
@@ -211,28 +216,23 @@ class se3_action_smooth(ManagerTermBase):
 
     用法：``RewTerm(func=mdp.se3_action_smooth, weight=..., params={"action_names": ["se3"], "norm": 2})``。
     """
-
-    def __init__(self, cfg: SceneEntityCfg, env: ManagerBasedRLEnv, norm: int = 2):
+    def __init__(self, cfg, env: ManagerBasedRLEnv):
         """初始化 se3 动作平滑性奖励项。
 
         Args:
-            cfg: 场景实体配置，包含动作名称、范数类型等参数。
+            cfg: 奖励项配置，包含动作名称、范数类型等参数。
             env: 管理器基础强化学习环境实例。
-            norm: 范数类型（1, 2 或 inf），默认为 L2 范数。
         """
         super().__init__(cfg, env)
         from . import actions as se3
 
         # 从配置中获取动作名称列表
-        action_names = cfg.params.get("action_names") if hasattr(cfg, "params") else None
-        # 从配置中获取范数类型，优先使用配置值
-        norm_cfg = cfg.params.get("norm") if hasattr(cfg, "params") else None
-        self.norm = norm_cfg if norm_cfg is not None else norm
+        action_names = cfg.params.get("action_names")
+        # 从配置中获取范数类型
+        self.norm = cfg.params.get("norm", 2)
 
         # 确定使用原始动作还是处理后的动作
-        self._use_processed = False
-        if hasattr(cfg, "params"):
-            self._use_processed = bool(cfg.params.get("use_processed", False))
+        self._use_processed = bool(cfg.params.get("use_processed", False))
 
         # 获取候选动作项名称列表
         candidate_names = list(env.action_manager.active_terms) if action_names is None else list(action_names)
@@ -253,21 +253,28 @@ class se3_action_smooth(ManagerTermBase):
         self._prev: dict[object, torch.Tensor] = {term: torch.zeros(env.num_envs, 6, device=env.device) for term in terms}
         # 为每个动作项创建初始化标志（首次调用时跳过惩罚计算）
         self._initialized: dict[object, bool] = {term: False for term in terms}
+        self._initialized: dict[object, bool] = {term: False for term in terms}
 
     def __call__(
         self,
         env: ManagerBasedRLEnv,
-        robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+        action_names: list[str] | None = None,
+        use_processed: bool = False,
+        norm: int = 2,
     ) -> torch.Tensor:
         """计算动作平滑性惩罚。
 
         Args:
             env: 管理器基础强化学习环境实例。
-            robot_cfg: 机器人场景实体配置（此处未使用，保留以符合接口规范）。
+            action_names: 动作名称列表（参数仅用于满足框架签名要求）。
+            use_processed: 是否使用处理后的动作（参数仅用于满足框架签名要求）。
+            norm: 范数类型（参数仅用于满足框架签名要求）。
 
         Returns:
             动作平滑性惩罚值，形状为 (num_envs,)。
         """
+        # 注意：action_names, use_processed, norm 参数仅用于满足框架签名要求
+        # 实际使用 self._se3_terms, self._use_processed, self.norm（已在 __init__ 中缓存）
         penalties = []
         for term in self._se3_terms:
             # 获取当前时间步的动作（原始或处理后）

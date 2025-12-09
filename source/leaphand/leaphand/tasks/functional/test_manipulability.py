@@ -105,11 +105,11 @@ class FingerJacobianProbe:
         T_wb = math_leap.transform_from_pos_quat(body_pos, body_quat)
         T_bw = math_leap.inverse_transform(T_wb)
         Ad_bw = math_leap.adjoint_transform(T_bw)
-        jac_b = torch.matmul(Ad_bw, jac_world).squeeze(0)
+        jac_b = (Ad_bw @ jac_world).squeeze(0)
 
         if T_bb_prime is not None:
             Ad = math_leap.adjoint_transform(math_leap.inverse_transform(T_bb_prime))
-            jac_b = torch.matmul(Ad, jac_b)
+            jac_b = Ad @ jac_b
 
         return jac_b
 
@@ -127,7 +127,7 @@ class LeapHandManipulabilityPanel:
     
     # ========== 可配置的权重参数 ==========
     # 任务空间权重 (PhysX格式: [v; ω])
-    L_CHAR = 0.05          # 特征长度 (m)，用于单位归一化
+    L_CHAR = 0.10          # 特征长度 (m)，用于单位归一化
     W_OMEGA = 1.0          # 角速度权重
     W_V = 1.0 / L_CHAR      # 线速度权重 (默认 1/L_CHAR = 20)
     

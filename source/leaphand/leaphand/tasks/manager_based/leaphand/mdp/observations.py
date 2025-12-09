@@ -46,6 +46,9 @@ class body_twists(ManagerTermBase):
         self._asset_cfg: SceneEntityCfg = cfg.params.get("asset_cfg", SceneEntityCfg("robot"))
         self._asset: Articulation = env.scene[self._asset_cfg.name]
 
+        # 是否归一化（默认True）
+        self._normalize = cfg.params.get("normalize", True)
+
         # 获取要读取的动作项名称列表
         action_names = cfg.params.get("action_names")
         # 如果未指定，则使用所有活跃的动作项
@@ -65,6 +68,11 @@ class body_twists(ManagerTermBase):
                 "name": name,
                 "body_idx": term.body_idx,  # 末端执行器的 body 索引
                 "Ad_batch": None,  # 伴随变换矩阵（如果需要坐标变换）
+                # 存储缩放参数
+                "ang_scale": getattr(term, "_angular_scale", 1.0),
+                "ang_bias": getattr(term, "_angular_bias", 0.0),
+                "lin_scale": getattr(term, "_linear_scale", 1.0),
+                "lin_bias": getattr(term, "_linear_bias", 0.0),
             }
             # 如果动作项使用了坐标变换，预计算伴随矩阵
             if term.is_xform and term.Ad_bprime_b is not None:
@@ -99,12 +107,17 @@ class body_twists(ManagerTermBase):
             lin_vel_b = quat_rotate_inverse(body_quat_w, lin_vel_w)
             ang_vel_b = quat_rotate_inverse(body_quat_w, ang_vel_w)
 
+            # 归一化
+            if self._normalize:
+                ang_vel_b = (ang_vel_b - info["ang_bias"]) / info["ang_scale"]
+                lin_vel_b = (lin_vel_b - info["lin_bias"]) / info["lin_scale"]
+
             # 组合成速度旋量 [角速度, 线速度]
             twist_b = torch.cat([ang_vel_b, lin_vel_b], dim=1)
 
             # 如果需要，应用伴随变换到目标坐标系
             if info["Ad_batch"] is not None:
-                twist_b = torch.matmul(info["Ad_batch"], twist_b.unsqueeze(-1)).squeeze(-1)
+                twist_b = (info["Ad_batch"] @ twist_b.unsqueeze(-1)).squeeze(-1)
 
             twists.append(twist_b)
 

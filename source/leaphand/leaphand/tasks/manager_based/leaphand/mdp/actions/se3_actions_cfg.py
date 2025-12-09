@@ -152,30 +152,55 @@ class se3wdlsActionsCfg(se3dlsActionsCfg):
 
 @configclass
 class se3adlsActionsCfg(se3dlsActionsCfg):
-    r"""se(3) 动作项 ADLS（Adaptive Damped Least Squares）配置类。"""
+    r"""se(3) 动作项 ADLS（Adaptive Damped Least Squares）配置类。
+    
+    引入选择性阻尼机制，仅对接近奇异的方向施加阻尼。
+    """
     class_type: type[ActionTerm] = se3.se3adlsAction
 
-    vme_max: float = None
-    r"""速度可操作性椭球，简称可操作度。预设的最大值
+    singular_threshold: float = 0.05
+    r"""最小奇异值阈值 :math:`\epsilon`。
     
+    当雅可比矩阵的奇异值低于此阈值时，对该方向施加选择性阻尼。
+    
+    建议值范围：0.01 - 0.1。
+    
+    Note:
+        使用选择性阻尼机制 (Selective Damping)：
+        - 若 :math:`\sigma_i \ge \epsilon`: :math:`\lambda_i = 0`
+        - 若 :math:`\sigma_i < \epsilon`: :math:`\lambda_i = \lambda_{max}(1-\sigma_i/\epsilon)^2`
     """
 
     def __post_init__(self):
         super().__post_init__()
-        if self.vme_max is None or self.vme_max <= 0:
-            raise ValueError("se3adlsActionsCfg.vme_max 必须为正值。")
+        if self.singular_threshold <= 0:
+            raise ValueError("se3adlsActionsCfg.singular_threshold 必须为正值。")
 
 @configclass
 class se3awdlsActionsCfg(se3wdlsActionsCfg):
-    r"""se(3) 动作项 AWDLS（Adaptive Weighted Damped Least Squares）配置类。"""
+    r"""se(3) 动作项 AWDLS（Adaptive Weighted Damped Least Squares）配置类。
+    
+    结合加权DLS的量纲归一化能力和自适应阻尼的奇异回避能力。
+    """
     class_type: type[ActionTerm] = se3.se3awdlsAction
 
-    vme_max: float = None
-    r"""速度可操作性椭球，简称可操作度。预设的最大值
-
+    singular_threshold: float = 0.05
+    r"""最小奇异值阈值 :math:`\epsilon`。
+    
+    当加权雅可比矩阵 :math:`\tilde{J}_b` 的奇异值低于此阈值时，
+    对该方向施加选择性阻尼。健康方向保持无阻尼状态。
+    
+    建议值范围：0.01 - 0.1。
+    
+    Note:
+        使用选择性阻尼机制 (Selective Damping)：
+        - 若 :math:`\sigma_i \ge \epsilon`: :math:`\lambda_i = 0`
+        - 若 :math:`\sigma_i < \epsilon`: :math:`\lambda_i = \lambda_{max}(1-\sigma_i/\epsilon)^2`
     """
     
     def __post_init__(self):
         super().__post_init__()
-        if self.vme_max is None or self.vme_max <= 0:
-            raise ValueError("se3awdlsActionsCfg.vme_max 必须为正值。")
+        if self.singular_threshold <= 0:
+            raise ValueError("se3awdlsActionsCfg.singular_threshold 必须为正值。")
+
+            raise ValueError("se3awdlsActionsCfg.singular_threshold 必须为正值。")

@@ -43,7 +43,7 @@ from . import inhand_base_env_cfg
 
 
 @configclass
-class ActionsCfg:
+class se3awdlsActionsCfg:
     """动作配置 - SE(3) 旋量动作空间
     
     每根手指配置独立的 se(3) 动作项，共4根手指 × 6维旋量 = 24维动作空间。
@@ -67,8 +67,8 @@ class ActionsCfg:
         linear_limits=0.2356,  # 估算逻辑为：指长0.15m左右，设每秒最多沿圆周转90度，则线速度约0.15*π/2=0.2356m/s
         damping=0.01,
         use_joint_limits=True,
-        vme_max=10,  # 预设可操作度最大值，，在 `test_manipulability.py` 初步测得。 TODO：这个项后续动态替换最大值最好，后期可实现
-        W_x=[1, 1, 1, 20, 20 ,20],
+        singular_threshold=0.05,
+        W_x=[1, 1, 1, 1, 1, 1],
     )
     middle_se3 = leap_mdp.se3awdlsActionsCfg(
         asset_name="robot",
@@ -82,8 +82,8 @@ class ActionsCfg:
         linear_limits=0.2356,
         damping=0.01,
         use_joint_limits=True,
-        vme_max=10,
-        W_x=[1, 1, 1, 20, 20 ,20],
+        singular_threshold=0.05,
+        W_x=[1, 1, 1, 1, 1, 1],
     )
     ring_se3 = leap_mdp.se3awdlsActionsCfg(
         asset_name="robot",
@@ -97,8 +97,8 @@ class ActionsCfg:
         linear_limits=0.2356,
         damping=0.01,
         use_joint_limits=True,
-        vme_max=10,
-        W_x=[1, 1, 1, 20, 20 ,20],
+        singular_threshold=0.05,
+        W_x=[1, 1, 1, 1, 1, 1],
     )
     thumb_se3 = leap_mdp.se3awdlsActionsCfg(
         asset_name="robot",
@@ -112,8 +112,74 @@ class ActionsCfg:
         linear_limits=0.2356,
         damping=0.01,
         use_joint_limits=True,
-        vme_max=10,
-        W_x=[1, 1, 1, 20, 20 ,20],
+        singular_threshold=0.05,
+        W_x=[1, 1, 1, 1, 1, 1],
+    )
+
+@configclass
+class se3dlsActionsCfg:
+    """动作配置 - SE(3) 旋量动作空间
+    
+    每根手指配置独立的 se(3) 动作项，共4根手指 × 6维旋量 = 24维动作空间。
+    
+    Note:
+        虚拟Xform到父刚体的映射关系：
+        - index_tip_head  → fingertip       (食指)
+        - middle_tip_head → fingertip_2     (中指)
+        - ring_tip_head   → fingertip_3     (无名指)
+        - thumb_tip_head  → thumb_fingertip (拇指)
+    """
+    index_se3 = leap_mdp.se3dlsActionsCfg(
+        asset_name="robot",
+        joint_names=["a_1", "a_0", "a_2", "a_3"],
+        preserve_order=True,
+        is_xform=True,
+        target="index_tip_head",
+        parent="fingertip",  # 食指末端刚体
+        use_pd=True,
+        angular_limits=2,
+        linear_limits=0.2356,  # 估算逻辑为：指长0.15m左右，设每秒最多沿圆周转90度，则线速度约0.15*π/2=0.2356m/s
+        damping=0.01,
+        use_joint_limits=True,
+    )
+    middle_se3 = leap_mdp.se3dlsActionsCfg(
+        asset_name="robot",
+        joint_names=["a_5", "a_4", "a_6", "a_7"],
+        preserve_order=True,
+        is_xform=True,
+        target="middle_tip_head",
+        parent="fingertip_2",  # 中指末端刚体
+        use_pd=True,
+        angular_limits=2,
+        linear_limits=0.2356,
+        damping=0.01,
+        use_joint_limits=True,
+    )
+    ring_se3 = leap_mdp.se3dlsActionsCfg(
+        asset_name="robot",
+        joint_names=["a_9", "a_8", "a_10", "a_11"],
+        preserve_order=True,
+        is_xform=True,
+        target="ring_tip_head",
+        parent="fingertip_3",  # 无名指末端刚体
+        use_pd=True,
+        angular_limits=2,
+        linear_limits=0.2356,
+        damping=0.01,
+        use_joint_limits=True,
+    )
+    thumb_se3 = leap_mdp.se3dlsActionsCfg(
+        asset_name="robot",
+        joint_names=["a_12", "a_13", "a_14", "a_15"],
+        preserve_order=True,
+        is_xform=True,
+        target="thumb_tip_head",
+        parent="thumb_fingertip",  # 拇指末端刚体
+        use_pd=True,
+        angular_limits=2,
+        linear_limits=0.2356,
+        damping=0.01,
+        use_joint_limits=True,
     )
 
 
@@ -148,7 +214,7 @@ class ObservationsCfg:
         )
 
         # -- action terms
-        last_action = ObsTerm(func=mdp.last_action) # 返回的是 策略输出的规范化后值（通常是 -1 到 1）
+        last_action = ObsTerm(func=mdp.last_action) # 返回的是 策略输出的规范化后值（通常是 -1 到 1）动作步a_{t-1}
 
         def __post_init__(self):
             self.enable_corruption = True
@@ -207,34 +273,36 @@ class RewardsCfg:
         func=leap_mdp.fall_penalty, weight=-10.0,
         params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "fall_distance": 0.07},
     )
-    # pose_diff = RewTerm(func=leap_mdp.pose_diff_penalty, weight=-0.3)
+    pose_diff = RewTerm(func=leap_mdp.pose_diff_penalty, weight=-0.3)
 
     # -- action
     manipulability = RewTerm(
-        func=leap_mdp.jacobian_manipulability, weight=0.025,  # 按照最大可操作度约10来设定权重（奖励为0.25），鼓励手指保持良好可操作度
-        params={"asset_cfg": SceneEntityCfg("robot"), "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]},
+        func=leap_mdp.jacobian_manipulability, weight=0.1,  # 按照最大可操作度约10来设定权重（奖励为0.25），鼓励手指保持良好可操作度
+        params={"action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]},
     )
     kinetic_energy = RewTerm(  # 动能
-        func=leap_mdp.se3_kinetic_energy, weight=-0.01,
-        params={"asset_cfg": SceneEntityCfg("robot"), "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]},
+        func=leap_mdp.se3_kinetic_energy, weight=-1,
+        params={"action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]},
     )
     action_smooth = RewTerm(
-        func=mdp.se3_action_smooth, weight=-0.01, # 鼓励动作平滑
-        params={"asset_cfg": SceneEntityCfg("robot"), "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"],
-                "use_processed":False, 'norm': 1},
+        func=leap_mdp.se3_action_smooth, weight=-1, # 鼓励动作平滑
+        params={"action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"],
+                "use_processed": False, "norm": 1},
     )
 
 
 @configclass
 class CurriculumCfg:
     """课程学习配置 - 提供各种课程学习策略"""
+    
     pass
 
 
 @configclass
 class InHandse3EnvCfg(inhand_base_env_cfg.InHandObjectEnvCfg):
     """LeapHand连续旋转任务环境配置 - 使用se3相对刚体末端旋量动作空间"""
-    actions: ActionsCfg = ActionsCfg()
+    # actions: se3dlsActionsCfg = se3dlsActionsCfg()
+    actions: se3awdlsActionsCfg = se3awdlsActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
     curriculum: CurriculumCfg = CurriculumCfg()
     def __post_init__(self):

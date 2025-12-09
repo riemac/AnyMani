@@ -193,55 +193,80 @@ def pose_diff_penalty(
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     natural_pose: dict[str, float] | None = None
 ) -> torch.Tensor:
-    # TODO：这里的值可能需要修改，具体待操作度指标设计完成后再调整
     """计算手部姿态偏差惩罚 - 鼓励保持接近人手的自然姿态
 
+    关键点：**通过关节名对齐自然姿态和当前姿态**，避免依赖“隐含的关节索引顺序”。
+
+    这样既保证了目标姿态和当前姿态在关节维度上的一一对应，也与动作空间中
+    使用 ``preserve_order=True`` 时的关节选择逻辑兼容。
+
     Args:
-        env: 环境实例
-        asset_cfg: 机器人资产配置
-        natural_pose: 自然姿态的关节角度字典，如果为None则使用默认值
+        env: 环境实例。
+        asset_cfg: 机器人资产配置。
+        natural_pose: 以关节名为键的自然姿态字典；若为 ``None`` 则使用默认的 LeapHand 自然姿态。
 
     Returns:
-        姿态偏差惩罚 (num_envs,)
+        姿态偏差惩罚 (num_envs,)。
     """
+
     # 获取机器人资产
     asset: Articulation = env.scene[asset_cfg.name]
 
-    # 定义LeapHand的自然姿态（基于LEAP_Hand_Isaac_Lab项目的官方配置）
+    # 1) 定义 LeapHand 的自然姿态（以「关节名 -> 目标角度」的形式），
+    #    数值与 InHandSceneCfg.robot.init_state.joint_pos 完全一致。
     if natural_pose is None:
-        # 这些值来自orientation_env.py中的override_default_joint_pos配置
-        # 按照ArticulationData的关节索引顺序：a_0到a_15
-        natural_joint_angles = [
-            0.000,  # a_1
-            0.500,  # a_12
-            0.000,  # a_5
-            0.000,  # a_9
-            -0.750, # a_0
-            1.300,  # a_13
-            0.000,  # a_4
-            0.750,  # a_8
-            1.750,  # a_2
-            1.500,  # a_14
-            1.750,  # a_6
-            1.750,  # a_10
-            0.000,  # a_3
-            1.000,  # a_15
-            0.000,  # a_7
-            0.000,  # a_11
-        ]
+        natural_pose = {
+            "a_1": 0.000,
+            "a_12": 0.500,
+            "a_5": 0.000,
+            "a_9": 0.000,
+            "a_0": -0.750,
+            "a_13": 1.300,
+            "a_4": 0.000,
+            "a_8": 0.750,
+            "a_2": 1.750,
+            "a_14": 1.500,
+            "a_6": 1.750,
+            "a_10": 1.750,
+            "a_3": 0.000,
+            "a_15": 1.000,
+            "a_7": 0.000,
+            "a_11": 0.000,
+        }
 
-    # 将自然姿态转换为张量（直接按关节索引顺序）
-    natural_joint_pos = torch.tensor(
-        natural_joint_angles,
-        device=env.device,
-        dtype=torch.float32
-    ).expand(env.num_envs, -1) # 用于扩展张量的维度，它通过复制数据来创建一个更大的视图，但不会实际分配新的内存
+    # 2) 缓存：按照 Articulation 中 **关节名解析结果** 的顺序，构建
+    #    - 关节索引 joint_ids
+    #    - 自然姿态向量 natural_joint_pos
+    #
+    #    这里通过名字解析来对齐，而不是假定某个固定的关节索引顺序，
+    #    这样可以避免与动作空间（尤其是使用 preserve_order=True 的 se3 动作项）
+    #    之间出现隐式的索引错位。
+    if not hasattr(env, "_leaphand_natural_joint_ids") or not hasattr(env, "_leaphand_natural_joint_pos"):
+        # 使用关节名列表作为解析顺序；在 Python 3.7+ 中 dict 保证插入顺序，
+        # 因此 natural_pose 的键顺序是显式且可控的。
+        natural_joint_names = list(natural_pose.keys())
+        joint_ids, joint_names = asset.find_joints(natural_joint_names, preserve_order=True)
 
-    # 计算当前关节位置与自然姿态的差异
-    current_joint_pos = asset.data.joint_pos
+        # 根据解析后的 joint_names 顺序生成自然姿态向量
+        natural_joint_list = [float(natural_pose[name]) for name in joint_names]
+
+        # 保存到 env 上以避免每步重复解析
+        env._leaphand_natural_joint_ids = torch.as_tensor(
+            joint_ids, device=env.device, dtype=torch.long
+        )
+        env._leaphand_natural_joint_pos = torch.tensor(
+            natural_joint_list, device=env.device, dtype=torch.float32
+        ).unsqueeze(0)  # 形状: (1, num_natural_joints)
+
+    joint_ids = env._leaphand_natural_joint_ids
+    # 扩展到所有 env：形状 (num_envs, num_natural_joints)
+    natural_joint_pos = env._leaphand_natural_joint_pos.expand(env.num_envs, -1)
+
+    # 3) 计算当前关节位置与自然姿态的差异（仅对配置了自然姿态的那几个关节）
+    current_joint_pos = asset.data.joint_pos[:, joint_ids]
     pose_diff = current_joint_pos - natural_joint_pos
 
-    # 计算L2平方惩罚
+    # 4) 计算 L2 平方惩罚：对每个 env 在关节维度求和
     pose_diff_penalty = torch.sum(pose_diff ** 2, dim=-1)
 
     return pose_diff_penalty
