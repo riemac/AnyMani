@@ -1,7 +1,10 @@
-# TODO:该文件为se(3)动作项的实现文件，用于定义和管理se(3)动作项的具体行为。
+# 该文件为se(3)动作项的实现文件，用于定义和管理se(3)动作项的具体行为。
 # 主要思路参考 `/home/hac/isaac/AnyRotate/source/leaphand/leaphand/ideas/idea.ipynb`
 # 实现可参考 `/home/hac/isaac/IsaacLab/source/isaaclab/isaaclab/envs/mdp/actions/joint_actions.py`
-# 有一个问题，idea.ipynb里的se(3)动作似乎天生对应的就是相对动作（relative action），所以没必要设置所谓的绝对动作项，当然相对项既然是默认的，也没必要命名为Relative
+# NOTE：坐标系统一约定：{w}-World坐标系， {e}-Env坐标系， {s}-Base/Root坐标系
+# {b}-End Effector坐标系（USD关节链中的最后一层刚体的坐标），{b'}-虚拟Xform坐标系（人为设置的指尖坐标系）
+# 旋量、雅可比等均遵循 Modern Robotics 的约定
+# 主要数学工具调用 `source/leaphand/leaphand/tasks/manager_based/leaphand/mdp/utils/math.py`
 
 from __future__ import annotations
 
@@ -10,6 +13,7 @@ import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+import isaaclab.utils.math as math_utils
 from isaaclab.assets.articulation import Articulation
 from isaaclab.managers.action_manager import ActionTerm
 
@@ -474,16 +478,22 @@ class se3Action(ActionTerm):
 
     def _get_jacobian(self) -> torch.Tensor:
         """获取当前末端刚体相对于控制关节的雅可比矩阵。
-
+        
+        该方法执行以下变换流程：
+        1. 从 PhysX 获取原始雅可比矩阵（世界坐标系 {w} 表示）
+        2. 调整速度分量顺序（PhysX: [v; w] → 本项目: [w; v]）
+        3. 通过旋转变换将雅可比从世界坐标系 {w} 转换到刚体坐标系 {b}
+        
         Returns:
             几何雅可比矩阵。形状为 (num_envs, 6, num_joints)。
-            前 3 行对应线速度，后 3 行对应角速度。
+            表示关节速度到末端坐标系 {b} 的旋量的映射。
+            前 3 行对应角速度，后 3 行对应线速度。
         """
-        # 从 PhysX 获取所有刚体的雅可比矩阵
+        # 1. 从 PhysX 获取所有刚体的雅可比矩阵（世界坐标系表示）
         # shape: (num_envs, num_bodies, 6, num_total_joints)
         all_jacobians = self._asset.root_physx_view.get_jacobians()
 
-        # 提取目标 body 的雅可比
+        # 2. 提取目标 body 的雅可比
         # 根据基座是否固定，调整 body 索引和关节索引
         if self._asset.is_fixed_base:
             # 固定基座：Jacobian 不包含基座，索引偏移 -1
@@ -503,22 +513,32 @@ class se3Action(ActionTerm):
             else:
                 jacobi_joint_ids = [i + 6 for i in self._joint_ids]
 
-        # 提取对应控制关节的部分
-        # shape: (num_envs, 6, num_joints)
-        # 注意：get_jacobians() 返回的是 (num_envs, num_bodies, 6, num_dofs)
-        # 其中 num_dofs 包含浮动基座的 6 DoF (如果存在)
-        
+        # 验证索引有效性
         if jacobian_idx < 0:
              raise ValueError(f"试图获取固定基座 (index={self._body_idx}) 的雅可比矩阵，这是不允许的。")
 
         jacobian_physx = all_jacobians[:, jacobian_idx, :, jacobi_joint_ids]
+        # shape: (num_envs, 6, num_joints)
 
-        # PhysX 返回的雅可比矩阵顺序为 [线速度 v; 角速度 w]
-        # 而本类使用的旋量定义为 [角速度 w; 线速度 v]
-        # 因此需要交换前3行和后3行
-        jacobian = torch.cat([jacobian_physx[:, 3:, :], jacobian_physx[:, :3, :]], dim=1)
+        # 3. 交换速度分量顺序：PhysX [v; w] → Modern Robotics [w; v]
+        jacobian_physx_swapped = torch.cat([jacobian_physx[:, 3:, :], jacobian_physx[:, :3, :]], dim=1)
 
-        return jacobian
+        # 注意，一下相对于原版git有改动
+        # 4. 从世界坐标系 {w} 转换到刚体坐标系 {b}
+        # 获取刚体在世界坐标系下的姿态
+        pos_b, quat_b = self._asset.data.body_pose_w[:, self._body_idx].split([3, 4], dim=-1)
+        quat_b = math_utils.convert_quat(quat_b, to="wxyz")  # 转换为 (w, x, y, z) 格式
+        
+        # 计算从世界坐标系到刚体坐标系的旋转矩阵 R_bw = R(q_b^{-1})
+        R_bw = math_utils.matrix_from_quat(math_utils.quat_inv(quat_b))  # (num_envs, 3, 3)
+        
+        # 应用旋转变换到雅可比的角速度和线速度部分
+        # J_b = R_bw @ J_w (对每个速度分量独立旋转)
+        jacobian_body = jacobian_physx_swapped.clone()
+        jacobian_body[:, :3, :] = torch.bmm(R_bw, jacobian_physx_swapped[:, :3, :])  # 角速度部分
+        jacobian_body[:, 3:, :] = torch.bmm(R_bw, jacobian_physx_swapped[:, 3:, :])  # 线速度部分
+
+        return jacobian_body
 
     def _compute_jacobian_inverse(self, jacobian: torch.Tensor) -> torch.Tensor:
         """计算雅可比矩阵的伪逆。
