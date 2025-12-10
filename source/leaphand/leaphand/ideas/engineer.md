@@ -25,6 +25,7 @@
 * **雅可比矩阵**
   - PhysX 返回的雅可比矩阵顺序为 [线速度 v; 角速度 w]，注意与某些文献中 [w; v] 的顺序不同。本项目遵循《Modern Robotics》里的 [w; v] 约定。
   - 获取雅可比矩阵时注意基座的类型与索引的处理。对于固定基座关节机器人，self._asset.root_physx_view.get_jacobians() 的 body 索引需要减1，因是雅可比矩阵不包含固定基座的刚体。而浮动基座 Jacobian 包含基座，索引不变，但关节索引需要偏移 6 (跳过浮动基座的 6 个自由度)。
+  - asset.root_physx_view.get_jacobians() 返回的是几何雅可比，参考点在{b}(末端)，参考系在{w}(World坐标系)
 
 * **IsaacSim 模块导入:**
   某些IsaacSim模块（如 `isaacgym`, `omni.isaac` 等）只能在Applauncher启动IsaacSim环境后导入使用，否则会报找不到错误，这是正常的。

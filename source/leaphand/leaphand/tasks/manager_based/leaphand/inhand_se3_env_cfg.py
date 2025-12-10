@@ -301,8 +301,8 @@ class CurriculumCfg:
 @configclass
 class InHandse3EnvCfg(inhand_base_env_cfg.InHandObjectEnvCfg):
     """LeapHand连续旋转任务环境配置 - 使用se3相对刚体末端旋量动作空间"""
-    # actions: se3dlsActionsCfg = se3dlsActionsCfg()
-    actions: se3awdlsActionsCfg = se3awdlsActionsCfg()
+    actions: se3dlsActionsCfg = se3dlsActionsCfg()
+    # actions: se3awdlsActionsCfg = se3awdlsActionsCfg()
     rewards: RewardsCfg = RewardsCfg()
     curriculum: CurriculumCfg = CurriculumCfg()
     def __post_init__(self):

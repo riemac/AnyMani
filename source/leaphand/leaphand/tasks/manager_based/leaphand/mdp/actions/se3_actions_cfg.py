@@ -38,6 +38,24 @@ class se3ActionCfg(ActionTermCfg):
     # 如果是False，则直接使用真实刚体的雅可比矩阵J_b
     # True的话，需要在动作项类初始化时，获取该Xform相对于真实刚体的位姿变换T_bb'，储存起来，为计算伴随变换提供支持。
 
+    use_xform_jacobian: bool = False
+    r"""虚拟 Xform 模式下的技术路线选择（仅当 is_xform=True 时有效）。
+    
+    当 is_xform=True 时，存在两种等价的技术路线：
+    
+    - **False (默认)**：变换旋量策略
+      计算流程：V_b' (输入) → V_b = Ad_{T_bb'} @ V_b' → dθ = J_b^+ @ V_b
+      优点：数值稳定，符合 AnyRotate-temp 的实现
+    
+    - **True**：变换雅可比策略  
+      计算流程：V_b' (输入) → J_b' = Ad_{T_b'b} @ J_b → dθ = J_b'^+ @ V_b'
+      优点：雅可比在虚拟帧表示，便于加权操作度计算
+    
+    数学上两者等价（dθ 相同），但数值特性和计算效率略有差异。
+    """
+
+    body_twist_in_body: bool = True
+
     target: str = MISSING
     r"""末端名称。
 
@@ -84,6 +102,17 @@ class se3ActionCfg(ActionTermCfg):
 
     如果为 True，将在计算出目标关节位置后，将其限制在机器人的软关节限位范围内。
     这可以防止动作指令超出物理可行范围。
+    """
+
+    use_body_frame: bool = True
+    r"""雅可比坐标系选择。
+
+    - True: 雅可比在刚体坐标系 {b} 下表示，旋量也在 {b} 下
+    - False: 雅可比在世界坐标系 {w} 下表示，旋量也在 {w} 下
+    
+    Note:
+        刚体坐标系更适合策略泛化（与世界方向无关），
+        世界坐标系更直观调试（与全局坐标对齐）。
     """
 
     def __post_init__(self):

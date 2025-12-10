@@ -45,7 +45,72 @@ def pseudo_inv(J: torch.Tensor) -> torch.Tensor:
     return torch.linalg.pinv(J, rcond=1e-5)  # 如果一个方向上的运动能力（奇异值 σ_i）太弱，pinv 会直接切断该方向的控制，认为该方向不可控
 
 
-def dls_inv(
+@torch.jit.script
+def dls_cholesky_inv(J: torch.Tensor, damping: float) -> torch.Tensor:
+    r"""计算雅可比矩阵的阻尼最小二乘(DLS)伪逆（Cholesky 加速版本）。
+
+    利用 Cholesky 分解求解线性方程组，避免显式求逆，速度更快且数值更稳定。
+
+    **为什么不用 torch.linalg.inv？**
+
+    1. **数值稳定性**：直接求逆容易放大浮点数误差，特别是当矩阵接近奇异时
+    2. **计算效率**：对于 SPD 矩阵，Cholesky 分解 + 前后代求解 (O(n³/3)) 比直接求逆 (O(n³)) 更快
+    3. **最优算法**：Cholesky 是求解 SPD 线性系统的黄金标准
+
+    **数学推导:**
+
+    目标：计算 :math:`J_{dls}^{\dagger} = J^T (JJ^T + \lambda^2 I)^{-1}`
+
+    令 :math:`A = JJ^T + \lambda^2 I`，则 A 是 SPD 矩阵。
+
+    我们需要求解：:math:`X = J^T A^{-1}`
+
+    等价于求解线性方程组：:math:`A X^T = J \Rightarrow X^T = A^{-1} J`
+
+    然后转置得到结果。
+
+    **实现步骤:**
+
+    1. 计算 :math:`A = JJ^T + \lambda^2 I`
+    2. Cholesky 分解：:math:`A = LL^T`
+    3. 求解 :math:`A Y = J`，得到 :math:`Y = A^{-1} J`
+    4. 返回 :math:`J_{dls}^{\dagger} = Y^T`
+
+    Args:
+        J: 雅可比矩阵。形状为 ``(N, 6, num_joints)`` 或 ``(6, num_joints)``。
+        damping: 阻尼系数 :math:`\lambda`。
+
+    Returns:
+        DLS 伪逆矩阵。形状为 ``(N, num_joints, 6)`` 或 ``(num_joints, 6)``。
+
+    Reference:
+        - Wampler, C. W. (1986). "Manipulator Inverse Kinematic Solutions Based on Vector
+          Formulations and Damped Least-Squares Methods"
+        - Modern Robotics, Section 6.2: Numerical Inverse Kinematics
+        - Golub & Van Loan (2013). "Matrix Computations", Chapter 4: The Cholesky Decomposition
+    """
+    # 1. 计算 A = JJ^T + lambda^2 I
+    # J shape: (..., 6, num_joints)
+    J_T = J.transpose(-2, -1)
+    A = torch.matmul(J, J_T)  # (..., 6, 6)
+
+    # 2. 添加阻尼项到对角线
+    # 原地操作，节省显存
+    A.diagonal(dim1=-2, dim2=-1).add_(damping**2)
+
+    # 3. Cholesky 分解: A = L * L^T
+    L = torch.linalg.cholesky(A)
+
+    # 4. 求解 A * Y = J，即 Y = A^{-1} * J
+    # cholesky_solve 接受 (B, L)，求解 A * X = B
+    Y = torch.cholesky_solve(J, L)
+
+    # 5. 返回 J_dls^+ = Y^T
+    return Y.transpose(-2, -1)
+
+
+@torch.jit.script
+def dls_svd_inv(
     J: torch.Tensor | None = None,
     damping=None,
     U: torch.Tensor | None = None,
@@ -195,6 +260,80 @@ def dls_inv(
     J_inv = (V * S_dls.unsqueeze(-2)) @ U_T
     
     return J_inv
+
+
+def dls_inv(
+    J: torch.Tensor | None = None,
+    damping: float | None = None,
+    method: Literal["cholesky", "svd"] = "cholesky",
+    U: torch.Tensor | None = None,
+    S: torch.Tensor | None = None,
+    Vh: torch.Tensor | None = None,
+    singular_threshold: float | None = None,
+    selective: bool = False,
+) -> torch.Tensor:
+    r"""计算雅可比矩阵的阻尼最小二乘(DLS)伪逆（统一接口）。
+    
+    根据 method 参数选择不同的实现方式：
+    
+    - **cholesky**: 使用 Cholesky 分解，速度快，适合一般场景（默认）
+    - **svd**: 使用 SVD 分解，数值稳定性最高，支持选择性阻尼
+    
+    Args:
+        J: 雅可比矩阵。形状为 ``(N, 6, num_joints)`` 或 ``(6, num_joints)``。
+           当 method="svd" 且提供了 (U, S, Vh) 时可为 None。
+        damping: 阻尼系数 :math:`\lambda`。
+        method: 计算方法，"cholesky" 或 "svd"。默认 "cholesky"。
+        U: SVD 分解的左奇异向量矩阵（仅 svd 方法）。
+        S: SVD 分解的奇异值向量（仅 svd 方法）。
+        Vh: SVD 分解的右奇异向量矩阵的共轭转置（仅 svd 方法）。
+        singular_threshold: 奇异值阈值（仅 svd + selective 时使用）。
+        selective: 是否启用选择性阻尼（仅 svd 方法支持）。
+    
+    Returns:
+        DLS 伪逆矩阵。形状为 ``(N, num_joints, 6)`` 或 ``(num_joints, 6)``。
+    
+    Raises:
+        ValueError: 当 method 参数无效，或 cholesky 方法尝试使用 selective 时。
+    
+    Examples:
+        >>> # 默认使用 Cholesky 方法（最快）
+        >>> J_inv = dls_inv(J, damping=0.01)
+        
+        >>> # 使用 SVD 方法（数值稳定性最高）
+        >>> J_inv = dls_inv(J, damping=0.01, method="svd")
+        
+        >>> # 使用选择性阻尼（仅 SVD 支持）
+        >>> J_inv = dls_inv(J, damping=0.1, method="svd", 
+        ...                 singular_threshold=0.05, selective=True)
+        
+        >>> # 传入预计算的 SVD 结果
+        >>> U, S, Vh = torch.linalg.svd(J, full_matrices=False)
+        >>> J_inv = dls_inv(damping=0.1, method="svd", U=U, S=S, Vh=Vh,
+        ...                 singular_threshold=0.05, selective=True)
+    """
+    if method == "cholesky":
+        if selective:
+            raise ValueError(
+                "Cholesky 方法不支持选择性阻尼。请使用 method='svd' 并设置 selective=True。"
+            )
+        if J is None or damping is None:
+            raise ValueError("Cholesky 方法需要提供 J 和 damping 参数。")
+        return dls_cholesky_inv(J, damping)
+    elif method == "svd":
+        return dls_svd_inv(
+            J=J,
+            damping=damping,
+            U=U,
+            S=S,
+            Vh=Vh,
+            singular_threshold=singular_threshold,
+            selective=selective,
+        )
+    else:
+        raise ValueError(
+            f"未知的 DLS 方法: '{method}'。支持的方法: 'cholesky', 'svd'。"
+        )
 
 
 """
