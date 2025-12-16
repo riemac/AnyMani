@@ -1,3 +1,16 @@
+## 坐标系与数学约定
+
+* **坐标系定义:**
+  - `{w}` - World坐标系（世界坐标系）
+  - `{e}` - Env坐标系（环境坐标系）
+  - `{s}` - Base/Root坐标系（基座/根坐标系）
+  - `{b}` - End Effector坐标系（USD关节链中的最后一层刚体的坐标）
+  - `{b'}` - 虚拟Xform坐标系（人为设置的指尖坐标系）
+
+* **数学约定:**
+  - 旋量、雅可比等均遵循 Modern Robotics 的约定
+  - 主要数学工具调用 `source/leaphand/leaphand/tasks/manager_based/leaphand/mdp/utils/math.py`
+
 ## 工程问题记录
 
 * **环境原点偏置:**

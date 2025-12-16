@@ -54,8 +54,6 @@ class se3ActionCfg(ActionTermCfg):
     数学上两者等价（dθ 相同），但数值特性和计算效率略有差异。
     """
 
-    body_twist_in_body: bool = True
-
     target: str = MISSING
     r"""末端名称。
 

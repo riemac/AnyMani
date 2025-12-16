@@ -42,6 +42,8 @@ from . import mdp as leap_mdp
 from . import inhand_base_env_cfg
 
 
+use_body_frame = False
+
 @configclass
 class se3awdlsActionsCfg:
     """动作配置 - SE(3) 旋量动作空间
@@ -134,6 +136,7 @@ class se3dlsActionsCfg:
         joint_names=["a_1", "a_0", "a_2", "a_3"],
         preserve_order=True,
         is_xform=True,
+        use_body_frame=use_body_frame,
         target="index_tip_head",
         parent="fingertip",  # 食指末端刚体
         use_pd=True,
@@ -147,6 +150,7 @@ class se3dlsActionsCfg:
         joint_names=["a_5", "a_4", "a_6", "a_7"],
         preserve_order=True,
         is_xform=True,
+        use_body_frame=use_body_frame,
         target="middle_tip_head",
         parent="fingertip_2",  # 中指末端刚体
         use_pd=True,
@@ -160,6 +164,7 @@ class se3dlsActionsCfg:
         joint_names=["a_9", "a_8", "a_10", "a_11"],
         preserve_order=True,
         is_xform=True,
+        use_body_frame=use_body_frame,
         target="ring_tip_head",
         parent="fingertip_3",  # 无名指末端刚体
         use_pd=True,
@@ -173,6 +178,7 @@ class se3dlsActionsCfg:
         joint_names=["a_12", "a_13", "a_14", "a_15"],
         preserve_order=True,
         is_xform=True,
+        use_body_frame=use_body_frame,
         target="thumb_tip_head",
         parent="thumb_fingertip",  # 拇指末端刚体
         use_pd=True,
@@ -191,13 +197,14 @@ class ObservationsCfg:
     class PrivilegedObsCfg(ObsGroup):
         """Actor策略观测 - 包含大量仅仿真可用的特权信息"""
         # -- robot terms
-        joint_pos = ObsTerm(
-            func=mdp.joint_pos_limit_normalized,
-            params={"asset_cfg": SceneEntityCfg("robot")},
-        )
+        # joint_pos = ObsTerm(
+        #     func=mdp.joint_pos_limit_normalized,
+        #     params={"asset_cfg": SceneEntityCfg("robot")},
+        # )
         body_twists = ObsTerm(
             func=leap_mdp.body_twists,
-            params={"asset_cfg": SceneEntityCfg("robot"), "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]},
+            params={"asset_cfg": SceneEntityCfg("robot"), "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"],
+                    "use_body_frame": use_body_frame},
         )
 
         # -- object terms
@@ -235,8 +242,8 @@ class ObservationsCfg:
         """Critic价值函数观测 - 包含大量仅仿真可用的特权信息"""
 
     # 观测组配置
-    policy: ObsGroup = PrivilegedObsCfg(history_length=2)
-    critic: ObsGroup = CriticCfg(history_length=2)
+    policy: ObsGroup = PrivilegedObsCfg(history_length=3)
+    critic: ObsGroup = CriticCfg(history_length=3)
 
 
 @configclass
@@ -277,7 +284,7 @@ class RewardsCfg:
 
     # -- action
     manipulability = RewTerm(
-        func=leap_mdp.jacobian_manipulability, weight=0.1,  # 按照最大可操作度约10来设定权重（奖励为0.25），鼓励手指保持良好可操作度
+        func=leap_mdp.jacobian_manipulability, weight=1,  # 按照最大可操作度约10来设定权重（奖励为0.25），鼓励手指保持良好可操作度
         params={"action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]},
     )
     kinetic_energy = RewTerm(  # 动能
@@ -285,7 +292,7 @@ class RewardsCfg:
         params={"action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]},
     )
     action_smooth = RewTerm(
-        func=leap_mdp.se3_action_smooth, weight=-1, # 鼓励动作平滑
+        func=leap_mdp.se3_action_smooth, weight=-0.25, # 鼓励动作平滑
         params={"action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"],
                 "use_processed": False, "norm": 1},
     )
@@ -302,9 +309,10 @@ class CurriculumCfg:
 class InHandse3EnvCfg(inhand_base_env_cfg.InHandObjectEnvCfg):
     """LeapHand连续旋转任务环境配置 - 使用se3相对刚体末端旋量动作空间"""
     actions: se3dlsActionsCfg = se3dlsActionsCfg()
+    observations: ObservationsCfg = ObservationsCfg()
     # actions: se3awdlsActionsCfg = se3awdlsActionsCfg()
-    rewards: RewardsCfg = RewardsCfg()
-    curriculum: CurriculumCfg = CurriculumCfg()
+    # rewards: RewardsCfg = RewardsCfg()
+    # curriculum: CurriculumCfg = CurriculumCfg()
     def __post_init__(self):
         # post init of parent
         super().__post_init__()

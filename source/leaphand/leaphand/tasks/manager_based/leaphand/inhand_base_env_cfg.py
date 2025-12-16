@@ -16,7 +16,6 @@ from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 
-from isaaclab.managers import RecorderManagerBaseCfg as DefaultEmptyRecorderManagerCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -24,6 +23,8 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
+from isaaclab.managers import RecorderManagerBaseCfg
+from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
@@ -167,12 +168,21 @@ class CommandsCfg:
 @configclass
 class ActionsCfg:
     """动作配置 - 动作平滑"""
-    hand_joint_pos = mdp.EMAJointPositionToLimitsActionCfg(
+    # hand_joint_pos = mdp.EMAJointPositionToLimitsActionCfg(
+    #     asset_name="robot",
+    #     joint_names=["a_.*"],  # 所有手部关节
+    #     scale=1.0,  # 动作缩放因子（对EMA类型影响不大，因为有rescale_to_limits）
+    #     rescale_to_limits=True,  # 将[-1,1]动作自动映射到关节限制
+    #     alpha=1/24,  # 平滑系数
+    # )
+    hand_joint_pos = mdp.RelativeJointPositionActionCfg(
         asset_name="robot",
-        joint_names=["a_.*"],  # 所有手部关节
-        scale=1.0,  # 动作缩放因子（对EMA类型影响不大，因为有rescale_to_limits）
-        rescale_to_limits=True,  # 将[-1,1]动作自动映射到关节限制
-        alpha=1/24,  # 平滑系数
+        joint_names=["a_1", "a_0", "a_2", "a_3",  # index finger
+                     "a_5", "a_4", "a_6", "a_7",  # middle finger
+                     "a_9", "a_8", "a_10", "a_11",  # little finger
+                     "a_12", "a_13", "a_14", "a_15"],  # thumb
+        scale=1/24,
+        preserve_order=True
     )
 
 @configclass
@@ -426,6 +436,16 @@ class TerminationsCfg:
 class CurriculumCfg:
     """课程学习配置 - 提供各种课程学习策略"""
 
+# @configclass
+# class RecordersCfg(RecorderManagerBaseCfg):
+#     """录制器配置 - 用于 BC 数据采集"""
+
+#     # 直接使用 RecorderManagerBaseCfg 实例
+#     recorders: object = leap_mdp.LeapHandBCRecorderManagerCfg(
+#         dataset_export_dir_path="./outputs/datasets",
+#         dataset_filename="leaphand_bc_joint_to_se3",
+#         dataset_export_mode=leap_mdp.DatasetExportMode.EXPORT_SUCCEEDED_ONLY,
+#     )
 
 @configclass
 class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
@@ -448,7 +468,6 @@ class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
         ),
     )
     seed: int | None = 42  # 确保每次训练都是可重复的
-    recorders: object = DefaultEmptyRecorderManagerCfg()
     rerender_on_reset: bool = False
     wait_for_textures: bool = True
     xr: XrCfg | None = None
@@ -465,6 +484,14 @@ class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
 
     # Curriculum settings
     curriculum: CurriculumCfg = CurriculumCfg()
+
+    # Recorder settings - 默认启用 BC 数据录制
+    # 运行时可覆盖：env_cfg.recorders.dataset_export_dir_path / dataset_filename / dataset_export_mode
+    # recorders: object = leap_mdp.LeapHandBCRecorderManagerCfg(
+    #     dataset_export_dir_path="./outputs/datasets",
+    #     dataset_filename="leaphand_bc_joint_to_se3",
+    #     dataset_export_mode=leap_mdp.DatasetExportMode.EXPORT_SUCCEEDED_ONLY,
+    # )
 
     def __post_init__(self):
         super().__post_init__()

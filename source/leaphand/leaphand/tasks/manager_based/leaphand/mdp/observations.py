@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Sequence
 
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg, ManagerTermBase
-from isaaclab.utils.math import quat_rotate_inverse
+from isaaclab.utils.math import quat_apply_inverse
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -29,6 +29,15 @@ class body_twists(ManagerTermBase):
     - ObservationsCfg 中配置 `ObsTerm(func=leap_mdp.body_twists, params={"action_names": ["se3"], "asset_cfg": SceneEntityCfg("robot")})`
     - 若未指定 `action_names`，默认遍历全部 se3Action 动作项并按顺序拼接 `(num_envs, 6 * N)` 的 twist。
     - 观测管理器实例化时将 `cfg.params` 传入本类，调用阶段仅传入 `env`（无需额外参数）。
+
+    坐标系约定：
+        - 默认在刚体坐标系 {b} 下表达旋量（use_body_frame=True）。
+        - 若 use_body_frame=False，则在世界坐标系 {w} 下表达旋量。
+
+    Note:
+        若动作项使用虚拟 Xform（term.is_xform=True），这里会缓存其伴随矩阵 ``Ad_bprime_b``。
+        该伴随矩阵用于在 {b} 下将旋量转换到虚拟帧 {b'}。
+        因此当 use_body_frame=False（输出 {w}）时，当前实现不会应用该伴随变换，避免产生错误的帧混用。
     """
 
     def __init__(self, cfg, env: "ManagerBasedRLEnv") -> None:
@@ -48,6 +57,9 @@ class body_twists(ManagerTermBase):
 
         # 是否归一化（默认True）
         self._normalize = cfg.params.get("normalize", True)
+
+        # 观测旋量是否在刚体坐标系 {b} 下表达（默认True）。若为 False，则在世界坐标系 {w} 下表达。
+        self._use_body_frame = cfg.params.get("use_body_frame", True)
 
         # 获取要读取的动作项名称列表
         action_names = cfg.params.get("action_names")
@@ -85,7 +97,8 @@ class body_twists(ManagerTermBase):
 
         self._term_infos = term_infos
 
-    def __call__(self, env: "ManagerBasedRLEnv") -> torch.Tensor:
+    def __call__(self, env: "ManagerBasedRLEnv", asset_cfg: SceneEntityCfg,
+                 use_body_frame: False, action_names= ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]) -> torch.Tensor:
         """计算并返回所有 se3Action 末端的速度旋量。
         
         Args:
@@ -103,23 +116,29 @@ class body_twists(ManagerTermBase):
             ang_vel_w = self._asset.data.body_ang_vel_w[:, body_idx]
             body_quat_w = self._asset.data.body_quat_w[:, body_idx]
 
-            # 将速度从世界坐标系转换到 body 坐标系
-            lin_vel_b = quat_rotate_inverse(body_quat_w, lin_vel_w)
-            ang_vel_b = quat_rotate_inverse(body_quat_w, ang_vel_w)
+            # 根据 use_body_frame 选择输出旋量的表达坐标系
+            if self._use_body_frame:
+                # 将速度从世界坐标系转换到 body 坐标系 {b}
+                lin_vel = quat_apply_inverse(body_quat_w, lin_vel_w)
+                ang_vel = quat_apply_inverse(body_quat_w, ang_vel_w)
+            else:
+                # 直接使用世界坐标系 {w} 下的速度
+                lin_vel = lin_vel_w
+                ang_vel = ang_vel_w
 
             # 归一化
             if self._normalize:
-                ang_vel_b = (ang_vel_b - info["ang_bias"]) / info["ang_scale"]
-                lin_vel_b = (lin_vel_b - info["lin_bias"]) / info["lin_scale"]
+                ang_vel = (ang_vel - info["ang_bias"]) / info["ang_scale"]
+                lin_vel = (lin_vel - info["lin_bias"]) / info["lin_scale"]
 
             # 组合成速度旋量 [角速度, 线速度]
-            twist_b = torch.cat([ang_vel_b, lin_vel_b], dim=1)
+            twist = torch.cat([ang_vel, lin_vel], dim=1)
 
-            # 如果需要，应用伴随变换到目标坐标系
-            if info["Ad_batch"] is not None:
-                twist_b = (info["Ad_batch"] @ twist_b.unsqueeze(-1)).squeeze(-1)
+            # 如果需要，应用伴随变换到目标坐标系（仅在 {b} 下成立）
+            if info["Ad_batch"] is not None and self._use_body_frame:
+                twist = (info["Ad_batch"] @ twist.unsqueeze(-1)).squeeze(-1)
 
-            twists.append(twist_b)
+            twists.append(twist)
 
         # 拼接所有动作项的速度旋量
         return torch.cat(twists, dim=1)

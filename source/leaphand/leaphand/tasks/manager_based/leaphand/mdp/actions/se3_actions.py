@@ -585,15 +585,17 @@ class se3Action(ActionTerm):
         """根据基座类型解析 PhysX 雅可比的索引。"""
 
         if self._asset.is_fixed_base:
+            # 固定基座：PhysX 雅可比不包含基座刚体，索引需要减 1
             self._jacobi_body_idx = self._body_idx - 1
             if self._jacobi_body_idx < 0:
                 raise ValueError(
                     "固定基座场景下，目标刚体索引为 0，无法在 PhysX Jacobian 中找到对应条目。"
                 )
-            self._jacobi_joint_ids = self._joint_ids
+            self._jacobi_joint_ids = self._joint_ids  # 关节索引保持不变
         else:
-            self._jacobi_body_idx = self._body_idx
-            self._jacobi_joint_ids = [idx + 6 for idx in self._joint_ids]
+            # 浮动基座：PhysX 雅可比包含 6 个虚拟自由度（基座位姿）
+            self._jacobi_body_idx = self._body_idx  # 刚体索引保持不变
+            self._jacobi_joint_ids = [idx + 6 for idx in self._joint_ids]  # 关节索引需要偏移 6
 
     def _compute_jacobian_inverse(self, jacobian: torch.Tensor) -> torch.Tensor:
         """计算雅可比矩阵的伪逆。
