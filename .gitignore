@@ -32,7 +32,8 @@ docker/.container.cfg
 **/.vscode/
 # Don't ignore the top-level .vscode directory as it is
 # used to configure VS Code settings
-!.vscode
+!/.vscode/
+!/.vscode/**
 
 # Outputs
 **/output/*
@@ -56,6 +57,11 @@ _build
 # RL-Games
 **/runs/*
 **/logs/*
+# 允许追踪预训练模型目录（只包含 pretrained 子目录）
+!/logs/rl_games/
+logs/rl_games/*
+!logs/rl_games/pretrained/
+!logs/rl_games/pretrained/**
 **/recordings/*
 
 # Pre-Trained Checkpoints

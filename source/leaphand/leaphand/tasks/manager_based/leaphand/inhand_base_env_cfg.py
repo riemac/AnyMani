@@ -16,7 +16,6 @@ from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 
-from isaaclab.managers import RecorderManagerBaseCfg as DefaultEmptyRecorderManagerCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -24,6 +23,8 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
+from isaaclab.managers import RecorderManagerBaseCfg
+from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
@@ -37,9 +38,7 @@ from isaaclab.devices.openxr import XrCfg
 
 import isaaclab.envs.mdp as mdp
 from leaphand.robots.leap import LEAP_HAND_CFG
-from leaphand.tasks.manager_based.leaphand.mdp import observations_privileged as priv_obs
-from leaphand.tasks.manager_based.leaphand.mdp.rewards import pose_diff_penalty, track_orientation_inv_l2
-from . import mdp as leaphand_mdp
+from . import mdp as leap_mdp
 
 # from .mdp.actions import LinearDecayAlphaEMAJointPositionToLimitsActionCfg
 
@@ -57,9 +56,7 @@ class InHandSceneCfg(InteractiveSceneCfg):
     # 地面
     ground = AssetBaseCfg(
         prim_path="/World/ground",
-        spawn=sim_utils.GroundPlaneCfg(
-            usd_path="/home/hac/isaac/isaacsim_assets/Assets/Isaac/5.0/Isaac/Environments/Grid/default_environment.usd"
-        ),
+        spawn=sim_utils.GroundPlaneCfg(),
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -0.1)),
     )
 
@@ -156,7 +153,7 @@ class InHandSceneCfg(InteractiveSceneCfg):
 @configclass
 class CommandsCfg:
     """Commands specifications for the MDP."""
-    goal_pose = leaphand_mdp.ContinuousRotationCommandCfg(
+    goal_pose = leap_mdp.ContinuousRotationCommandCfg(
         asset_name="object",
         resampling_time_range=(1e6, 1e6),  # 不基于时间重采样
         init_pos_offset=(0.0, 0.0, 0.0),
@@ -171,12 +168,21 @@ class CommandsCfg:
 @configclass
 class ActionsCfg:
     """动作配置 - 动作平滑"""
-    hand_joint_pos = mdp.EMAJointPositionToLimitsActionCfg(
+    # hand_joint_pos = mdp.EMAJointPositionToLimitsActionCfg(
+    #     asset_name="robot",
+    #     joint_names=["a_.*"],  # 所有手部关节
+    #     scale=1.0,  # 动作缩放因子（对EMA类型影响不大，因为有rescale_to_limits）
+    #     rescale_to_limits=True,  # 将[-1,1]动作自动映射到关节限制
+    #     alpha=1/24,  # 平滑系数
+    # )
+    hand_joint_pos = mdp.RelativeJointPositionActionCfg(
         asset_name="robot",
-        joint_names=["a_.*"],  # 所有手部关节
-        scale=1.0,  # 动作缩放因子（对EMA类型影响不大，因为有rescale_to_limits）
-        rescale_to_limits=True,  # 将[-1,1]动作自动映射到关节限制
-        alpha=1/24,  # 平滑系数
+        joint_names=["a_1", "a_0", "a_2", "a_3",  # index finger
+                     "a_5", "a_4", "a_6", "a_7",  # middle finger
+                     "a_9", "a_8", "a_10", "a_11",  # little finger
+                     "a_12", "a_13", "a_14", "a_15"],  # thumb
+        scale=1/24,
+        preserve_order=True
     )
 
 @configclass
@@ -201,7 +207,7 @@ class ObservationsCfg:
         # -- command terms
         goal_pose = ObsTerm(func=mdp.generated_commands, params={"command_name": "goal_pose"})
         goal_quat_diff = ObsTerm(
-            func=leaphand_mdp.goal_quat_diff,
+            func=leap_mdp.goal_quat_diff,
             params={"asset_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "make_quat_unique": True},
         )
 
@@ -248,7 +254,7 @@ class EventCfg: #
     )
 
     randomized_object_com = EventTerm(
-        func=leaphand_mdp.randomize_rigid_object_com,
+        func=leap_mdp.randomize_rigid_object_com,
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("object"),
@@ -371,17 +377,17 @@ class RewardsCfg:
 
     # -- task
     track_orientation_inv_l2 = RewTerm(
-        func=leaphand_mdp.track_orientation_inv_l2,
+        func=leap_mdp.track_orientation_inv_l2,
         weight=1.0,
         params={"object_cfg": SceneEntityCfg("object"), "rot_eps": 0.1, "command_name": "goal_pose"},
     )
     goal_position_distance = RewTerm(
-        func=leaphand_mdp.goal_position_distance,
+        func=leap_mdp.goal_position_distance,
         weight=-10.0,
         params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose"},
     )
     success_bonus = RewTerm(
-        func=leaphand_mdp.success_bonus,
+        func=leap_mdp.success_bonus,
         weight=250.0,
         params={
             "object_cfg": SceneEntityCfg("object"),
@@ -391,31 +397,26 @@ class RewardsCfg:
         },
     )
     fingertip_distance = RewTerm(
-        func=leaphand_mdp.fingertip_distance_penalty,
+        func=leap_mdp.fingertip_distance_penalty,
         weight=-2.0,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "object_cfg": SceneEntityCfg("object"),
-            "fingertip_body_names": [
-                "fingertip",
-                "thumb_fingertip",
-                "fingertip_2",
-                "fingertip_3",
-            ],
+            "fingertip_body_names": ["fingertip", "thumb_fingertip", "fingertip_2", "fingertip_3"],
         },
     )
-
-    # -- penalties
-    joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight=-2.5e-5)
-    action_l2 = RewTerm(func=mdp.action_l2, weight=-0.0001)
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
-    pose_diff = RewTerm(func=leaphand_mdp.pose_diff_penalty, weight=-0.3)
-    torque_l2 = RewTerm(func=leaphand_mdp.torque_l2_penalty, weight=-1e-5)
+    pose_diff = RewTerm(func=leap_mdp.pose_diff_penalty, weight=-0.3)
     fall_penalty = RewTerm(
-        func=leaphand_mdp.fall_penalty,
+        func=leap_mdp.fall_penalty,
         weight=-10.0,
         params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "fall_distance": 0.07},
     )
+
+    # -- action
+    joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight=-2.5e-5)
+    action_l2 = RewTerm(func=mdp.action_l2, weight=-0.0001)
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
+    torque_l2 = RewTerm(func=leap_mdp.torque_l2_penalty, weight=-1e-5)
 
 @configclass
 class TerminationsCfg:
@@ -423,7 +424,7 @@ class TerminationsCfg:
 
     # 物体掉落终止
     object_falling = DoneTerm(
-        func=leaphand_mdp.object_falling_termination,
+        func=leap_mdp.object_falling_termination,
         params={"fall_dist": 0.08, "target_pos_offset": (0.0, -0.1, 0.56)},
     )
 
@@ -435,6 +436,16 @@ class TerminationsCfg:
 class CurriculumCfg:
     """课程学习配置 - 提供各种课程学习策略"""
 
+# @configclass
+# class RecordersCfg(RecorderManagerBaseCfg):
+#     """录制器配置 - 用于 BC 数据采集"""
+
+#     # 直接使用 RecorderManagerBaseCfg 实例
+#     recorders: object = leap_mdp.LeapHandBCRecorderManagerCfg(
+#         dataset_export_dir_path="./outputs/datasets",
+#         dataset_filename="leaphand_bc_joint_to_se3",
+#         dataset_export_mode=leap_mdp.DatasetExportMode.EXPORT_SUCCEEDED_ONLY,
+#     )
 
 @configclass
 class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
@@ -457,7 +468,6 @@ class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
         ),
     )
     seed: int | None = 42  # 确保每次训练都是可重复的
-    recorders: object = DefaultEmptyRecorderManagerCfg()
     rerender_on_reset: bool = False
     wait_for_textures: bool = True
     xr: XrCfg | None = None
@@ -475,6 +485,14 @@ class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
     # Curriculum settings
     curriculum: CurriculumCfg = CurriculumCfg()
 
+    # Recorder settings - 默认启用 BC 数据录制
+    # 运行时可覆盖：env_cfg.recorders.dataset_export_dir_path / dataset_filename / dataset_export_mode
+    # recorders: object = leap_mdp.LeapHandBCRecorderManagerCfg(
+    #     dataset_export_dir_path="./outputs/datasets",
+    #     dataset_filename="leaphand_bc_joint_to_se3",
+    #     dataset_export_mode=leap_mdp.DatasetExportMode.EXPORT_SUCCEEDED_ONLY,
+    # )
+
     def __post_init__(self):
         super().__post_init__()
         """后初始化钩子 - 可用于自定义验证或调整配置"""
@@ -483,6 +501,6 @@ class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 30.0
         # simulation settings
         self.sim.dt = 1.0 / 120.0
-        self.sim.render_interval = self.decimation
+        self.sim.render_interval = self.decimation/2
         # change viewer settings
         self.viewer.eye = (2.0, 2.0, 2.0)
