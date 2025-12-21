@@ -132,7 +132,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # ======= 日志与实验目录设置 =======
     config_name = agent_cfg["params"]["config"]["name"]
     log_root_path = os.path.join("logs", "rl_games", config_name)
-    log_root_path = os.path.abspath(log_root_path)
+    log_root_path = os.path.abspath(log_root_path)  # 基于当前工作目录转换为绝对路径，所以得在终端正确位置运行
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # 如果没有指定完整实验名称，则使用当前时间戳作为标识
     log_dir = agent_cfg["params"]["config"].get("full_experiment_name", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))

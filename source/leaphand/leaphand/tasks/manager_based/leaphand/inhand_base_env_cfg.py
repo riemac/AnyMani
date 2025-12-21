@@ -436,17 +436,6 @@ class TerminationsCfg:
 class CurriculumCfg:
     """课程学习配置 - 提供各种课程学习策略"""
 
-# @configclass
-# class RecordersCfg(RecorderManagerBaseCfg):
-#     """录制器配置 - 用于 BC 数据采集"""
-
-#     # 直接使用 RecorderManagerBaseCfg 实例
-#     recorders: object = leap_mdp.LeapHandBCRecorderManagerCfg(
-#         dataset_export_dir_path="./outputs/datasets",
-#         dataset_filename="leaphand_bc_joint_to_se3",
-#         dataset_export_mode=leap_mdp.DatasetExportMode.EXPORT_SUCCEEDED_ONLY,
-#     )
-
 @configclass
 class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
     """LeapHand连续旋转任务环境配置类 - ManagerBasedRLEnv架构"""
@@ -485,9 +474,13 @@ class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
     # Curriculum settings
     curriculum: CurriculumCfg = CurriculumCfg()
 
-    # Recorder settings - 默认启用 BC 数据录制
-    # 运行时可覆盖：env_cfg.recorders.dataset_export_dir_path / dataset_filename / dataset_export_mode
+    # Recorder settings - 数据录制配置
+    # 运行 rl_games play.py 时，RecorderManager 会自动触发数据记录
+    # 
+    # 使用示例：启用BC数据录制
     # recorders: object = leap_mdp.LeapHandBCRecorderManagerCfg(
+    #     finger_body_names=["fingertip", "fingertip_2", "fingertip_3", "thumb_fingertip"],
+    #     finger_xform_names=["index_tip_head", "middle_tip_head", "ring_tip_head", "thumb_tip_head"],
     #     dataset_export_dir_path="./outputs/datasets",
     #     dataset_filename="leaphand_bc_joint_to_se3",
     #     dataset_export_mode=leap_mdp.DatasetExportMode.EXPORT_SUCCEEDED_ONLY,
