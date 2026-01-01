@@ -3,8 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-# RL-Games配置文件 - LeapHand连续旋转任务
-# 基于官方manipulation任务配置，针对连续旋转任务优化
+# RL-Games配置文件 - LeapHand连续旋转任务 (RMA)
+# 在 baseline 配置基础上，仅增加多观测组(dict)输出相关参数。
 
 params:
   seed: 42  # 随机种子，保证实验可重复性
@@ -13,6 +13,11 @@ params:
   env:
     clip_observations: 5.0  # 观测值裁剪范围，防止数值过大
     clip_actions: 1.0      # 动作值裁剪范围，限制动作幅度
+
+    # RMA: 让 IsaacLab rl_games wrapper 以 dict 形式返回多观测组
+    # 期望 env 侧提供这些 observation groups：policy / priv_info / proprio_hist
+    obs_groups: [policy, priv_info, proprio_hist]
+    concate_obs_group: false
 
   # 算法相关配置
   algo:
@@ -26,7 +31,7 @@ params:
   network:
     name: actor_critic     # 使用Actor-Critic架构
     separate: True        # 启用非对称Actor-Critic，Actor和Critic使用独立的网络
-    
+
     # 连续动作空间配置
     space:
       continuous:
@@ -39,13 +44,13 @@ params:
           name: const_initializer  # 标准差使用常数初始化
           val: 0                  # 初始化值为0
         fixed_sigma: True         # 使用固定的标准差
-    
+
     # MLP网络配置
     mlp:
       units: [512, 512, 256]  # 三层隐藏层，神经元数量分别为512,512,256
       activation: elu         # 使用ELU激活函数
       d2rl: False            # 不使用D2RL架构
-      
+
       initializer:
         name: default        # 使用默认权重初始化方法
       regularizer:
@@ -65,7 +70,7 @@ params:
 
   # 训练配置
   config:
-    name: leaphand_object_rot  # 任务名称
+    name: leaphand_object_rot_rma  # 任务名称
     env_name: rlgpu               # 使用GPU训练环境
     device: 'cuda:0'              # 使用第一块GPU
     device_name: 'cuda:0'         # 设备名称
@@ -83,7 +88,7 @@ params:
     tau: 0.95                    # GAE-Lambda参数
     learning_rate: 5e-4          # 学习率
     lr_schedule: adaptive        # 自适应学习率调整
-    schedule_type: standard      
+    schedule_type: standard
     kl_threshold: 0.01           # KL散度阈值，控制策略更新幅度
     score_to_win: 100000          # 获胜分数阈值
     max_epochs: 10000             # 最大训练轮数（采集数据->更新模型的完整流程）
@@ -109,17 +114,12 @@ params:
       print_stats: True  # 是否打印统计信息
 
 # Population-Based Training (PBT) 配置
-# 使用方法：启动多个进程，每个进程设置不同的policy_idx
-# 例如：agent.pbt.enabled=True agent.pbt.policy_idx=0
 pbt:
   enabled: False                   # 是否启用PBT（默认关闭，通过命令行开启）
   policy_idx: 0                    # 当前策略索引 [0, num_policies-1]
   num_policies: 6                  # 种群大小（推荐6-8个）
   directory: "."                   # 共享工作目录（存放所有策略的checkpoint）
   workspace: "pbt_workspace"       # PBT工件子目录名
-  # objective格式说明：rl_games会在extras["episode"]的键前加"episode."前缀
-  # RewardsCfg中的属性名 → Episode_Reward/<name> → episode.Episode_Reward/<name>
-  # CurriculumCfg中的属性名 → Curriculum/<name> → episode.Curriculum/<name>
   objective: "episode.Episode_Reward/track_orientation_inv_l2"  # 使用方向跟踪奖励作为评分指标
   interval_steps: 2000000          # PBT迭代间隔（环境步数），约每2M步评估一次
   threshold_std: 0.1               # 标准差阈值（用于确定领导者/落后者）

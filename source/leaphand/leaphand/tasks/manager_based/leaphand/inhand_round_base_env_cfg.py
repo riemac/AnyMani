@@ -6,6 +6,7 @@
 """LeapHand连续旋转任务环境配置 - ManagerBasedRLEnv架构
 - 该配置类的奖项参考LEAP_Hand_Isaac_Lab，尽管任务不同
 - 主要增加一个连续旋转目标达成的稀疏奖励项
+- 主要的区别是该文件所使用的leaphand灵巧手的指尖变为了半球型的
 """
 
 import math
@@ -40,7 +41,7 @@ from isaaclab.devices.openxr import XrCfg
 import isaaclab.utils.math as math_utils
 
 import isaaclab.envs.mdp as mdp
-from leaphand.robots.leap import LEAP_HAND_CFG
+from leaphand.robots.leap_round_tip import LEAP_HAND_CFG
 from . import mdp as leap_mdp
 
 # from .mdp.actions import LinearDecayAlphaEMAJointPositionToLimitsActionCfg
@@ -48,6 +49,7 @@ from . import mdp as leap_mdp
 # 全局超参数(来源于rl_games_ppo_cfg.yaml)
 horizon_length = 32
 epochs_num = 5 # 与horizon_length配合以确定数据更新频率
+object_pos=(-0.05505, 0.04315, 0.56)  # 物体放置位置
 
 # 使用Isaac Lab内置的cube资产
 object_usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
@@ -69,7 +71,7 @@ class InHandSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.5),
-            rot=(0.5, 0.5, -0.5, 0.5),
+            rot=(0.0, 1.0, 0.0, 0.0),
             joint_pos={
                 "a_1": 0.000, "a_12": 0.500, "a_5": 0.000, "a_9": 0.000,
                 "a_0": -0.750, "a_13": 1.300, "a_4": 0.000, "a_8": 0.750,
@@ -139,7 +141,7 @@ class InHandSceneCfg(InteractiveSceneCfg):
             # 初始位置：(x=0.0, y=-0.1, z=0.56)
             # z=0.56是在LeapHand手部上方的合适高度
             # y=-0.1稍微偏离中心，给抓取提供更好的角度
-            pos=(0.0, -0.1, 0.56),  # root_pos_w -0.05比-0.1稍微更偏近手掌中心，相对更容易抓取
+            pos=object_pos,  # root_pos_w -0.05比-0.1稍微更偏近手掌中心，相对更容易抓取
             
             # 初始旋转：(w=1.0, x=0.0, y=0.0, z=0.0)
             # 这是单位四元数，表示无旋转（立方体的标准朝向）
@@ -437,7 +439,7 @@ class TerminationsCfg:
     # 物体掉落终止
     object_falling = DoneTerm(
         func=leap_mdp.object_falling_termination,
-        params={"fall_dist": 0.08, "target_pos_offset": (0.0, -0.1, 0.56)},
+        params={"fall_dist": 0.08, "target_pos_offset": object_pos},
     )
 
     # 超时终止
@@ -506,6 +508,6 @@ class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 30.0
         # simulation settings
         self.sim.dt = 1.0 / 120.0
-        self.sim.render_interval = self.decimation/2
+        self.sim.render_interval = self.decimation
         # change viewer settings
         self.viewer.eye = (2.0, 2.0, 2.0)

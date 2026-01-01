@@ -78,3 +78,12 @@ tests/
 
 # LEAP_Hand_Sim
 /LEAP_Hand_Sim/
+
+# assets
+**/source/leaphand/assets/**
+
+# ideas
+**/source/leaphand/leaphand/ideas/*
+
+# task doc
+**/source/leaphand/leaphand/task_md/*

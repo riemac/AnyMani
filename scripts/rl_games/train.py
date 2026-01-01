@@ -77,7 +77,7 @@ from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_yaml
 
-from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
+from isaaclab_rl.rl_games import MultiObserver, PbtAlgoObserver, RlGamesGpuEnv, RlGamesVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -150,6 +150,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     rl_device = agent_cfg["params"]["config"]["device"]
     clip_obs = agent_cfg["params"]["env"].get("clip_observations", math.inf)
     clip_actions = agent_cfg["params"]["env"].get("clip_actions", math.inf)
+    # 可选：按观测组传递给 rl-games（用于 RMA 等多路输入网络）
+    obs_groups = agent_cfg["params"].get("env", {}).get("obs_groups")
+    concate_obs_group = agent_cfg["params"].get("env", {}).get("concate_obs_group", True)
 
     # ======= 创建 Isaac 环境（通过 Gym 接口） =======
     # 传入 hydra 解析后的 env_cfg 对象供环境构造使用；若要录像，则 render_mode 为 rgb_array
@@ -175,7 +178,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # ======= 将环境包装成 RL-Games 能够使用的向量化环境 ======= # IDEA: 如果集成第三方RL库，这个可能是要改动的部分
     # RlGamesVecEnvWrapper 负责将单环境或多环境适配成 RL-Games 所需的接口
-    env = RlGamesVecEnvWrapper(env, rl_device, clip_obs, clip_actions)
+    env = RlGamesVecEnvWrapper(
+        env,
+        rl_device,
+        clip_obs,
+        clip_actions,
+        obs_groups=obs_groups,
+        concate_obs_group=concate_obs_group,
+    )
 
     # ======= 向 RL-Games 注册自定义 VecEnv 和环境实例 =======
     # 注册一个名为 "IsaacRlgWrapper" 的 vecenv 工厂函数，返回 RlGamesGpuEnv 实例
@@ -188,8 +198,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # 将实际并行 actor 数量写入 agent 配置，供 RL-Games 运行器使用
     agent_cfg["params"]["config"]["num_actors"] = env.unwrapped.num_envs
+
     # 使用 IsaacAlgoObserver 创建 runner（该 observer 为 rl-games 提供 Isaac/Sim 的统计回调）
-    runner = Runner(IsaacAlgoObserver())
+    if "pbt" in agent_cfg and agent_cfg["pbt"]["enabled"]:
+        observers = MultiObserver([IsaacAlgoObserver(), PbtAlgoObserver(agent_cfg, args_cli)])
+        runner = Runner(observers)
+    else:
+        runner = Runner(IsaacAlgoObserver())
+    
     # 加载 agent 配置（包含算法、网络与训练超参等）
     runner.load(agent_cfg)
 

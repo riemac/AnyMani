@@ -107,28 +107,3 @@ params:
       deterministic: True  # 是否使用确定性策略
       games_num: 100000  # 测试游戏次数
       print_stats: True  # 是否打印统计信息
-
-# Population-Based Training (PBT) 配置
-# 使用方法：启动多个进程，每个进程设置不同的policy_idx
-# 例如：agent.pbt.enabled=True agent.pbt.policy_idx=0
-pbt:
-  enabled: False                   # 是否启用PBT（默认关闭，通过命令行开启）
-  policy_idx: 0                    # 当前策略索引 [0, num_policies-1]
-  num_policies: 6                  # 种群大小（推荐6-8个）
-  directory: "."                   # 共享工作目录（存放所有策略的checkpoint）
-  workspace: "pbt_workspace"       # PBT工件子目录名
-  # objective格式说明：rl_games会在extras["episode"]的键前加"episode."前缀
-  # RewardsCfg中的属性名 → Episode_Reward/<name> → episode.Episode_Reward/<name>
-  # CurriculumCfg中的属性名 → Curriculum/<name> → episode.Curriculum/<name>
-  objective: "episode.Episode_Reward/track_orientation_inv_l2"  # 使用方向跟踪奖励作为评分指标
-  interval_steps: 2000000          # PBT迭代间隔（环境步数），约每2M步评估一次
-  threshold_std: 0.1               # 标准差阈值（用于确定领导者/落后者）
-  threshold_abs: 0.05              # 绝对阈值
-  mutation_rate: 0.25              # 每个参数的变异概率
-  change_range: [1.1, 2.0]         # 变异因子范围 [min, max]
-  mutation:                        # 可变异的超参数列表
-    agent.params.config.learning_rate: "mutate_float"   # 学习率
-    agent.params.config.entropy_coef: "mutate_float"    # 熵正则化系数
-    agent.params.config.grad_norm: "mutate_float"       # 梯度裁剪阈值
-    agent.params.config.gamma: "mutate_discount"        # 折扣因子
-    agent.params.config.tau: "mutate_discount"          # GAE参数

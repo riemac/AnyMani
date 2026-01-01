@@ -11,6 +11,8 @@ from . import agents
 from .inhand_base_env_cfg import InHandObjectEnvCfg
 from .inhand_se3_env_cfg import InHandse3EnvCfg
 from .inhand_affine_env_cfg import InHandAffineEnvCfg
+from .inhand_float_env_cfg import InHandFloatEnvCfg
+from .inhand_rma_env_cfg import InHandRmaEnvCfg
 
 ##
 # Register Gym environments.
@@ -44,5 +46,38 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.inhand_affine_env_cfg:InHandAffineEnvCfg",
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",  # 复用baseline的训练配置
+    },
+)
+
+# 浮动基座
+gym.register(
+    id="Template-Leaphand-Float-Manager-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.inhand_float_env_cfg:InHandFloatEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_float.yaml",  # 复用baseline的训练配置
+    },
+)
+
+# 圆形指尖
+gym.register(
+    id="Template-Leaphand-RoundTip-Manager-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.inhand_round_base_env_cfg:InHandObjectEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",  # 复用baseline的训练配置
+    },
+)
+
+# RMA (Rapid Motor Adaptation) 专用环境：与 baseline/float/round-tip 等配置隔离
+gym.register(
+    id="Template-Leaphand-RMA-Manager-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.inhand_rma_env_cfg:InHandRmaEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_rma.yaml",
     },
 )
