@@ -87,3 +87,4 @@ tests/
 
 # task doc
 **/source/leaphand/leaphand/task_md/*
+source/leaphand/leaphand/mytask/**

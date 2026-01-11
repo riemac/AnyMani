@@ -142,3 +142,104 @@ class body_twists(ManagerTermBase):
 
         # 拼接所有动作项的速度旋量
         return torch.cat(twists, dim=1)
+
+###
+# 触觉相关
+###
+
+def fingertip_contact_data(
+    env: ManagerBasedRLEnv,
+    sensor_names: Sequence[str],
+    output_type: str = "force",
+    force_threshold: float = 1.0,
+) -> torch.Tensor:
+    """获取指尖触觉数据（支持力信号或二值化接触状态）。
+    
+    此函数从ContactSensor中提取触觉信息，支持两种输出模式：
+    
+    1. **力信号模式** (`output_type="force"`):
+       - 返回每个指尖的总接触合力（法向力 + 摩擦力）在世界坐标系下的矢量
+       - 计算公式：f_total = force_matrix_w + friction_forces_w
+       - 输出形状：(num_envs, num_sensors * 3)
+       - 用于teacher policy的精确力控制
+    
+    2. **二值信号模式** (`output_type="binary"`):
+       - 返回每个指尖是否接触（0或1）
+       - 判断标准：||f_total|| > force_threshold
+       - 输出形状：(num_envs, num_sensors)
+       - 用于student policy的sim2real部署
+    
+    Args:
+        env: 强化学习环境实例
+        sensor_names: ContactSensor名称列表，如 ["contact_index", "contact_middle", ...]
+        output_type: 输出类型，"force"（默认）或 "binary"
+        force_threshold: 二值化阈值（仅在output_type="binary"时使用）
+    
+    Returns:
+        力信号：(num_envs, num_sensors * 3) 的张量
+        二值信号：(num_envs, num_sensors) 的张量
+    
+    Raises:
+        ValueError: 如果 output_type 不是 "force" 或 "binary"
+        RuntimeError: 如果传感器未启用 track_friction_forces（在 force 模式下）
+    
+    Notes:
+        - 对于力信号模式，ContactSensor 必须配置 `track_friction_forces=True`
+        - 形状说明：
+          - force_matrix_w: (num_envs, num_bodies, num_filters, 3) 
+          - friction_forces_w: (num_envs, num_bodies, num_filters, 3)
+          - 由于每个指尖传感器只有1个body、1个filter，所以取 [0, 0] 即可
+        - 无接触时，force_matrix_w 和 friction_forces_w 均为零向量（不会产生NaN）
+    """
+    if output_type not in ["force", "binary"]:
+        raise ValueError(f"output_type must be 'force' or 'binary', got '{output_type}'")
+    
+    num_sensors = len(sensor_names)
+    forces = []
+    
+    for sensor_name in sensor_names:
+        # 获取传感器实例
+        sensor = env.scene[sensor_name]
+        
+        # 获取法向力 (num_envs, num_bodies, num_filters, 3)
+        normal_force = sensor.data.force_matrix_w  # 默认值为 0
+        
+        if output_type == "force":
+            # 获取摩擦力（切向力）
+            if sensor.data.friction_forces_w is None:
+                raise RuntimeError(
+                    f"Sensor '{sensor_name}' does not have friction_forces_w enabled. "
+                    "Please set track_friction_forces=True in ContactSensorCfg."
+                )
+            friction_force = sensor.data.friction_forces_w  # 默认值为 0
+            
+            # 计算总合力（法向 + 切向）
+            # 形状：(num_envs, num_bodies, num_filters, 3)
+            total_force_w = normal_force + friction_force
+            
+            # 提取第一个 body、第一个 filter 的力
+            # 形状：(num_envs, 3)
+            force = total_force_w[:, 0, 0, :]
+            forces.append(force)
+        
+        else:  # output_type == "binary"
+            # 计算总合力的模
+            # 如果没有摩擦力数据，只用法向力判断
+            if sensor.data.friction_forces_w is not None:
+                friction_force = sensor.data.friction_forces_w
+                total_force_w = normal_force + friction_force
+            else:
+                total_force_w = normal_force
+            
+            force = total_force_w[:, 0, 0, :]  # (num_envs, 3)
+            force_norm = torch.norm(force, dim=-1)  # (num_envs,)
+            is_contact = (force_norm > force_threshold).float()  # (num_envs,)
+            forces.append(is_contact)
+    
+    # 拼接所有传感器的数据
+    if output_type == "force":
+        # (num_envs, num_sensors * 3)
+        return torch.cat(forces, dim=1)
+    else:
+        # (num_envs, num_sensors)
+        return torch.stack(forces, dim=1)

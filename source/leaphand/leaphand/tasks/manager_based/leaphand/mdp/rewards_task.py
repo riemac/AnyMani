@@ -270,3 +270,8 @@ def pose_diff_penalty(
     pose_diff_penalty = torch.sum(pose_diff ** 2, dim=-1)
 
     return pose_diff_penalty
+
+
+###
+# 接触奖励
+###

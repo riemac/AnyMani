@@ -62,6 +62,21 @@ import os
 import random
 from datetime import datetime
 
+# ----------------------------------------------------------------------------
+# PyTorch 2.x: disable dynamo/inductor cudagraphs by default for Isaac Sim runs.
+#
+# rl_games in this workspace enables torch.compile() (and thus Inductor CUDA
+# graphs) in a few places. With some workloads (e.g., dynamic shapes / allocator
+# behavior over time), this can crash with errors like:
+# "These storage data ptrs are not allocated in pool ...".
+#
+# Users can re-enable compilation by exporting these env vars before running.
+# ----------------------------------------------------------------------------
+# torch.compile / Inductor / CUDA Graph 只作用在神经网络前向/反向（loss、梯度、policy inference）这一段。
+# 仿真物理（PhysX）、环境 reset/step、奖励、观测计算这些逻辑不因为 compile 开关而改变
+os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+os.environ.setdefault("TORCHINDUCTOR_CUDAGRAPHS", "0")
+
 from rl_games.common import env_configurations, vecenv
 from rl_games.common.algo_observer import IsaacAlgoObserver
 from rl_games.torch_runner import Runner
