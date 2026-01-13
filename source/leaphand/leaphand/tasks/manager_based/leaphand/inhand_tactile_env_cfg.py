@@ -9,6 +9,8 @@ Usage:
     创建该环境时会自动集成触觉传感器，无需修改基础配置
 """
 
+import math
+
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -33,6 +35,39 @@ from . import mdp as leap_mdp
 import isaaclab.envs.mdp as mdp
 
 
+# =====================
+# Tactile hyper-params
+# =====================
+# Keep tactile thresholds consistent across observations and rewards.
+TACTILE_FORCE_THRESHOLD = 0.2
+
+# Reward shaping mode:
+# - "binary": keep legacy 0/1 logic
+# - "count":  reward/penalty scales with number of contacts
+TACTILE_CONTACT_REWARD_TYPE = "binary"
+
+# Adaptive reward curriculum (AnyRotate Appendix B.3)
+TACTILE_USE_REWARD_CURRICULUM = True
+# NOTE:
+# - metric_key="consecutive_success": g_eval is the number of reached goals in the current episode.
+# - metric_key="cumulative_rotation": g_eval is the cumulative rotation angle (radians) in the current episode.
+TACTILE_CURRICULUM_METRIC_KEY = "consecutive_success"  # or "cumulative_rotation"
+
+# Defaults for different curriculum metrics.
+_TACTILE_G_MIN_SUCCESS = 0.0
+_TACTILE_G_MAX_SUCCESS = 8.0
+_TACTILE_G_MIN_RAD = 0.0
+_TACTILE_G_MAX_RAD = math.pi
+
+# Final G range used by reward terms.
+if TACTILE_CURRICULUM_METRIC_KEY == "cumulative_rotation":
+    TACTILE_G_MIN = _TACTILE_G_MIN_RAD
+    TACTILE_G_MAX = _TACTILE_G_MAX_RAD
+else:
+    TACTILE_G_MIN = _TACTILE_G_MIN_SUCCESS
+    TACTILE_G_MAX = _TACTILE_G_MAX_SUCCESS
+
+
 ##
 # 场景配置 - 添加触觉传感器
 ##
@@ -43,6 +78,9 @@ class InHandTactileSceneCfg(InHandSceneCfg):
     
     # 禁用物理复制以支持域随机化（如物体尺寸随机化）
     replicate_physics = False
+    # ContactSensor 的 contact buffer 太小导致 contact_data.index_select 越
+    # 越界会导致 contact_data.index_select 越界，导致 contact_data 全为0
+    # 因此需要增加 contact buffer 的大小
     
     # ===== 指尖触觉传感器 =====
     # 食指指尖
@@ -53,7 +91,9 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         history_length=3,
         track_air_time=True,
         track_friction_forces=True,  # 需要切向力以计算总合力
-        max_contact_data_count_per_prim=8,  # 指尖面接触通常4-6个点
+        # NOTE: contact-rich scenes (many envs / many contacts per body) need a larger buffer.
+        # Otherwise, PhysX contact buffers can overflow and trigger CUDA index out-of-bounds.
+        max_contact_data_count_per_prim=64,
         force_threshold=0.125,
         debug_vis=True,
     )
@@ -66,7 +106,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         history_length=3,
         track_air_time=True,
         track_friction_forces=True,
-        max_contact_data_count_per_prim=8,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.125,
         debug_vis=True,
     )
@@ -79,7 +119,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         history_length=3,
         track_air_time=True,
         track_friction_forces=True,
-        max_contact_data_count_per_prim=8,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.125,
         debug_vis=True,
     )
@@ -92,7 +132,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         history_length=3,
         track_air_time=True,
         track_friction_forces=True,
-        max_contact_data_count_per_prim=8,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.125,
         debug_vis=True,
     )
@@ -105,6 +145,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         update_period=0.0,
         history_length=3,
         track_friction_forces=True,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         debug_vis=False,
     )
@@ -114,6 +155,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/mcp_joint",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
         update_period=0.0,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         track_friction_forces=True,
         debug_vis=False,
@@ -123,6 +165,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/pip",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
         update_period=0.0,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         track_friction_forces=True,
         debug_vis=False,
@@ -132,6 +175,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/dip",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
         update_period=0.0,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         track_friction_forces=True,
         debug_vis=False,
@@ -142,6 +186,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/mcp_joint_2",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
         update_period=0.0,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         track_friction_forces=True,
         debug_vis=False,
@@ -151,6 +196,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/pip_2",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
         update_period=0.0,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         track_friction_forces=True,
         debug_vis=False,
@@ -160,6 +206,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/dip_2",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
         update_period=0.0,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         track_friction_forces=True,
         debug_vis=False,
@@ -170,6 +217,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/mcp_joint_3",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
         update_period=0.0,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         track_friction_forces=True,
         debug_vis=False,
@@ -179,6 +227,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/pip_3",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
         update_period=0.0,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         track_friction_forces=True,
         debug_vis=False,
@@ -188,6 +237,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/dip_3",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
         update_period=0.0,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         track_friction_forces=True,
         debug_vis=False,
@@ -198,6 +248,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/thumb_temp_base",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
         update_period=0.0,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         track_friction_forces=True,
         debug_vis=False,
@@ -207,6 +258,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/thumb_pip",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
         update_period=0.0,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         track_friction_forces=True,
         debug_vis=False,
@@ -216,6 +268,7 @@ class InHandTactileSceneCfg(InHandSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot/thumb_dip",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
         update_period=0.0,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.5,
         track_friction_forces=True,
         debug_vis=False,
@@ -231,8 +284,8 @@ class TactileObservationsCfg(ObservationsCfg):
     """扩展观测配置，添加触觉信息"""
     
     @configclass
-    class PolicyCfg(ObservationsCfg.PolicyCfg):
-        """策略观测（Student Policy）：使用二值化触觉信号"""
+    class PolicyPropTactileCfg(ObservationsCfg.ProprioceptionObsCfg):
+        """策略观测（Student Policy）：本体感受 + 二值化触觉信号"""
         
         # ===== 触觉观测：0-1二值接触信号 =====
         # 检测哪些指尖在接触物体（适合sim2real）
@@ -246,13 +299,33 @@ class TactileObservationsCfg(ObservationsCfg):
                     "contact_thumb",   # 拇指
                 ],
                 "output_type": "binary",
-                "force_threshold": 1.0,
+                "force_threshold": TACTILE_FORCE_THRESHOLD,
             },
         )
 
     @configclass
-    class CriticCfg(ObservationsCfg.PrivilegedObsCfg):
-        """Critic观测（Teacher Policy）：使用精确力信号"""
+    class PolicyPrivTactileCfg(ObservationsCfg.PrivilegedObsCfg):
+        """策略观测（Student Policy）：本体感受 + 特权信息 + 二值化触觉信号"""
+        
+        # ===== 触觉观测：0-1二值接触信号 =====
+        # 检测哪些指尖在接触物体（适合sim2real）
+        fingertip_contact_binary = ObsTerm(
+            func=leap_mdp.fingertip_contact_data,
+            params={
+                "sensor_names": [
+                    "contact_index",   # 食指
+                    "contact_middle",  # 中指
+                    "contact_ring",    # 无名指
+                    "contact_thumb",   # 拇指
+                ],
+                "output_type": "binary",
+                "force_threshold": TACTILE_FORCE_THRESHOLD,
+            },
+        )
+
+    @configclass
+    class CriticTactileCfg(ObservationsCfg.PrivilegedObsCfg):
+        """Critic观测（Teacher Policy）：特权信息 + 精确力信号"""
         
         # ===== 触觉观测：指尖接触合力（法向+切向）=====
         # 每个指尖的总接触力矢量，用于精确力控制
@@ -271,8 +344,8 @@ class TactileObservationsCfg(ObservationsCfg):
             scale=0.1,  # 归一化到合理范围
         )
 
-    policy: ObsGroup = PolicyCfg()
-    critic: ObsGroup = CriticCfg()
+    policy: ObsGroup = PolicyPropTactileCfg(history_length=1)
+    critic: ObsGroup = CriticTactileCfg(history_length=1)
 
 ##
 # 奖励配置 - 添加触觉奖励
@@ -286,7 +359,7 @@ class TactileRewardsCfg(RewardsCfg):
     # 鼓励手指承担垂直载荷占比趋近于1（手掌承担趋近于0）
     load_distribution = RewTerm(
         func=leap_mdp.load_distribution_reward,
-        weight=0.5,  # λ_load
+        weight=1,  # λ_load
         params={
             "fingertip_sensor_names": [
                 "contact_index",
@@ -302,6 +375,7 @@ class TactileRewardsCfg(RewardsCfg):
                 "contact_thumb_base", "contact_thumb_pip", "contact_thumb_dip",
             ],
             "gravity_axis": 2,  # z轴向上
+            "epsilon": 1e-3,
         },
     )
     
@@ -318,7 +392,13 @@ class TactileRewardsCfg(RewardsCfg):
                 "contact_thumb",
             ],
             "min_contacts": 2,  # 至少2个指尖接触
-            "force_threshold": 1.0,
+            "force_threshold": TACTILE_FORCE_THRESHOLD,
+            "reward_type": TACTILE_CONTACT_REWARD_TYPE,
+            "use_curriculum": TACTILE_USE_REWARD_CURRICULUM,
+            "command_name": "goal_pose",
+            "g_min": TACTILE_G_MIN,
+            "g_max": TACTILE_G_MAX,
+            "metric_key": TACTILE_CURRICULUM_METRIC_KEY,
         },
     )
     
@@ -335,7 +415,13 @@ class TactileRewardsCfg(RewardsCfg):
                 "contact_ring_mcp", "contact_ring_pip", "contact_ring_dip",
                 "contact_thumb_base", "contact_thumb_pip", "contact_thumb_dip",
             ],
-            "force_threshold": 0.5,  # 比指尖接触阈值低，减少误报
+            "force_threshold": TACTILE_FORCE_THRESHOLD,
+            "reward_type": TACTILE_CONTACT_REWARD_TYPE,
+            "use_curriculum": TACTILE_USE_REWARD_CURRICULUM,
+            "command_name": "goal_pose",
+            "g_min": TACTILE_G_MIN,
+            "g_max": TACTILE_G_MAX,
+            "metric_key": TACTILE_CURRICULUM_METRIC_KEY,
         },
     )
 

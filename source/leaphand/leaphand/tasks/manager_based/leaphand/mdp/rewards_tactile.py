@@ -20,6 +20,37 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
+def _compute_reward_curriculum_lambda(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    g_min: float,
+    g_max: float,
+    metric_key: str = "consecutive_success",
+) -> torch.Tensor:
+    """Compute adaptive reward curriculum coefficient.
+
+    Uses a linear schedule based on a command term metric (per environment):
+
+    .. math::
+
+        \lambda = \mathrm{clip}\left(\frac{g_{\text{eval}} - g_{\min}}{g_{\max} - g_{\min}}, 0, 1\right)
+
+    If the metric is missing, returns zeros.
+    """
+    # Guard against degenerate ranges.
+    denom = float(g_max) - float(g_min)
+    if denom <= 0.0:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    cmd_term = env.command_manager.get_term(command_name)
+    g_eval = cmd_term.metrics.get(metric_key, None)
+    if g_eval is None:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    lam = (g_eval - float(g_min)) / denom
+    return torch.clamp(lam, 0.0, 1.0)
+
+
 def load_distribution_reward(
     env: ManagerBasedRLEnv,
     fingertip_sensor_names: Sequence[str],
@@ -70,19 +101,16 @@ def load_distribution_reward(
         epsilon: 数值稳定项，防止分母为零
     
     Returns:
-        奖励张量，形状 (num_envs,)，范围 [0, 1]
-        
-        - 1.0：手指承担100%垂直载荷（理想状态）
-        - 0.5：手指和手掌各承担50%
-        - 0.0：手指不承担任何垂直载荷（完全由手掌托举）
+        奖励张量，形状 (num_envs,)；为手指垂直合力占总垂直合力的比例。
+        在采用“完整垂直合力分量”的定义下，该比例不再严格限制在 [0, 1]。
     
     Raises:
         RuntimeError: 如果传感器未启用 ``track_friction_forces=True``
     
     Notes:
         - 所有指尖传感器必须配置 ``track_friction_forces=True``
-        - 只计算**向上**的支撑力（与重力方向相反的分量），向下的压力被忽略
-        - 如果总垂直载荷接近0（物体失重/飘浮），返回0而非NaN
+        - 计算的是垂直方向的**完整合力分量**（包含向上与向下），不进行 clamp。
+        - 如果总垂直合力接近0（例如接触很弱或正负抵消），返回0而非NaN。
     
     Example:
         在 ``RewardsCfg`` 中配置：
@@ -136,9 +164,9 @@ def load_distribution_reward(
             
             # 计算垂直分量（点积）
             vertical_component = torch.sum(force * gravity_dir, dim=-1)  # (num_envs,)
-            
-            # 只累加向上的支撑力（正值）
-            vertical_load += torch.clamp(vertical_component, min=0.0)
+
+            # 累加完整的垂直方向合力（不做 clamp）
+            vertical_load += vertical_component
         
         return vertical_load
     
@@ -151,9 +179,9 @@ def load_distribution_reward(
     
     # 计算奖励比例（避免除零）
     reward = fingers_vertical_load / (total_vertical_load + epsilon)
-    
-    # 如果总载荷接近0（物体失重），奖励设为0
-    reward = torch.where(total_vertical_load < epsilon, torch.zeros_like(reward), reward)
+
+    # 如果总合力接近0（数值不稳定），奖励设为0
+    reward = torch.where(torch.abs(total_vertical_load) < epsilon, torch.zeros_like(reward), reward)
     
     return reward
 
@@ -163,6 +191,12 @@ def good_fingertip_contact(
     sensor_names: Sequence[str],
     min_contacts: int = 2,
     force_threshold: float = 1.0,
+    reward_type: str = "binary",
+    use_curriculum: bool = False,
+    command_name: str = "goal_pose",
+    g_min: float = 1.0,
+    g_max: float = 2.0,
+    metric_key: str = "consecutive_success",
 ) -> torch.Tensor:
     r"""Good Contact奖励：鼓励至少 ``min_contacts`` 个指尖与物体接触。
     
@@ -247,9 +281,17 @@ def good_fingertip_contact(
         # 累加接触计数
         contact_count += is_contact
     
-    # 返回二值奖励
-    reward = (contact_count >= min_contacts).float()
-    
+    if reward_type == "binary":
+        reward = (contact_count >= min_contacts).float()
+    elif reward_type in {"count", "continuous"}:
+        reward = contact_count.float()
+    else:
+        raise ValueError(f"Unknown reward_type: {reward_type}. Expected 'binary' or 'count'.")
+
+    if use_curriculum:
+        lam = _compute_reward_curriculum_lambda(env, command_name, g_min, g_max, metric_key)
+        reward = lam * reward
+
     return reward
 
 
@@ -257,6 +299,12 @@ def bad_palm_contact(
     env: ManagerBasedRLEnv,
     sensor_names: Sequence[str],
     force_threshold: float = 0.5,
+    reward_type: str = "binary",
+    use_curriculum: bool = False,
+    command_name: str = "goal_pose",
+    g_min: float = 1.0,
+    g_max: float = 2.0,
+    metric_key: str = "consecutive_success",
 ) -> torch.Tensor:
     r"""Bad Contact惩罚：惩罚手掌或非指尖部位与物体的接触。
     
@@ -317,8 +365,8 @@ def bad_palm_contact(
     num_envs = env.num_envs
     device = env.device
     
-    # 检测是否有任何非期望接触
-    has_bad_contact = torch.zeros(num_envs, device=device, dtype=torch.bool)
+    # 统计非期望接触的数量（按传感器计数）
+    bad_contact_count = torch.zeros(num_envs, device=device, dtype=torch.int32)
     
     for sensor_name in sensor_names:
         sensor = env.scene[sensor_name]
@@ -341,11 +389,18 @@ def bad_palm_contact(
         
         # 检测接触
         is_contact = force_norm > force_threshold
-        
-        # 逻辑或：只要有任何一个传感器接触，就标记为bad contact
-        has_bad_contact |= is_contact
-    
-    # 返回正值（在配置中用负权重）
-    penalty = has_bad_contact.float()
-    
+
+        bad_contact_count += is_contact.int()
+
+    if reward_type == "binary":
+        penalty = (bad_contact_count > 0).float()
+    elif reward_type in {"count", "continuous"}:
+        penalty = bad_contact_count.float()
+    else:
+        raise ValueError(f"Unknown reward_type: {reward_type}. Expected 'binary' or 'count'.")
+
+    if use_curriculum:
+        lam = _compute_reward_curriculum_lambda(env, command_name, g_min, g_max, metric_key)
+        penalty = lam * penalty
+
     return penalty
