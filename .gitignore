@@ -86,5 +86,4 @@ tests/
 **/source/leaphand/leaphand/ideas/*
 
 # task doc
-**/source/leaphand/leaphand/task_md/*
-source/leaphand/leaphand/mytask/**
+**/source/leaphand/mytask/AnyRotate/tactile/tactile_analysis/**
