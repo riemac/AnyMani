@@ -103,14 +103,23 @@ class se3ActionCfg(ActionTermCfg):
     """
 
     use_body_frame: bool = True
-    r"""雅可比坐标系选择。
+    r"""参考系选择（reference frame）。
 
-    - True: 雅可比在刚体坐标系 {b} 下表示，旋量也在 {b} 下
-    - False: 雅可比在世界坐标系 {w} 下表示，旋量也在 {w} 下
-    
-    Note:
-        刚体坐标系更适合策略泛化（与世界方向无关），
-        世界坐标系更直观调试（与全局坐标对齐）。
+    该开关同时决定：
+    1) se(3) 动作 :math:`\mathcal{V}=[\omega, v]` 的坐标表达参考系；
+    2) 雅可比 :math:`J` 的输出参考系（从而保证 :math:`\dot{\theta} = J^{\dagger} \mathcal{V}` 的帧一致）。
+
+    - True: 参考系为末端刚体坐标系 {b}
+        - is_xform=False: 动作为 :math:`\mathcal{V}_b`，参考点为 {b}
+        - is_xform=True : 动作为 :math:`\mathcal{V}_{b'}`，参考点为 {b'}
+    - False: 参考系为机器人根/基坐标系 {s}
+        - is_xform=False: 动作为 :math:`\mathcal{V}_s`，参考点为 {b}
+        - is_xform=True : 动作为 :math:`\mathcal{V}_s^{b'}`，参考点为 {b'}
+
+    Notes:
+        - 这里的 {s} 取自 articulation 的 root link 姿态（``root_quat_w``），并不等同于世界坐标系 {w}。
+        - 在 is_xform=True 且 use_body_frame=False 时，动作在 {s} 下表达，因此 ``use_xform_jacobian``
+          仅对 use_body_frame=True 的分支有意义。
     """
 
     def __post_init__(self):
@@ -141,6 +150,32 @@ class se3dlsActionsCfg(se3ActionCfg):
         super().__post_init__()
         if self.damping <= 0:
             raise ValueError("se3dlsActionsCfg.damping 必须为正值。")
+
+
+@configclass
+class se3dlsEmaActionsCfg(se3dlsActionsCfg):
+    r"""se(3) 动作项 DLS + EMA（Exponential Moving Average）配置类。
+
+    该配置用于对 se(3) 旋量命令（处理后的物理量级 twist）施加 EMA 平滑：
+
+    .. math::
+
+        \mathcal{V}_{\mathrm{ema},t} = \alpha\,\mathcal{V}_t + (1-\alpha)\,\mathcal{V}_{\mathrm{ema},t-1}
+
+    Notes:
+        - :math:`\alpha=1` 时等价于不平滑。
+        - EMA 在 twist 层面平滑（策略输出的高频抖动），与 :math:`\Delta t` 在关节增量层面的平滑互补。
+    """
+
+    class_type: type[ActionTerm] = se3.se3dlsEmaAction
+
+    alpha: float = 1.0
+    """EMA 平滑系数 $\alpha \in (0, 1]$。"""
+
+    def __post_init__(self):
+        super().__post_init__()
+        if not (0.0 < self.alpha <= 1.0):
+            raise ValueError("se3dlsEmaActionsCfg.alpha 必须在 (0, 1] 范围内。")
 
 @configclass
 class se3wdlsActionsCfg(se3dlsActionsCfg):

@@ -32,12 +32,12 @@ class body_twists(ManagerTermBase):
 
     坐标系约定：
         - 默认在刚体坐标系 {b} 下表达旋量（use_body_frame=True）。
-        - 若 use_body_frame=False，则在世界坐标系 {w} 下表达旋量。
+        - 若 use_body_frame=False，则在机器人根/基坐标系 {s} 下表达旋量。
 
     Note:
         若动作项使用虚拟 Xform（term.is_xform=True），这里会缓存其伴随矩阵 ``Ad_bprime_b``。
-        该伴随矩阵用于在 {b} 下将旋量转换到虚拟帧 {b'}。
-        因此当 use_body_frame=False（输出 {w}）时，当前实现不会应用该伴随变换，避免产生错误的帧混用。
+        该伴随矩阵仅在输出参考系为 {b} 时可直接用于将旋量从 {b} 转到 {b'}。
+        当 use_body_frame=False（输出 {s}）时，不应用该伴随变换以避免帧混用。
     """
 
     def __init__(self, cfg, env: "ManagerBasedRLEnv") -> None:
@@ -58,7 +58,7 @@ class body_twists(ManagerTermBase):
         # 是否归一化（默认True）
         self._normalize = cfg.params.get("normalize", True)
 
-        # 观测旋量是否在刚体坐标系 {b} 下表达（默认True）。若为 False，则在世界坐标系 {w} 下表达。
+        # 观测旋量是否在刚体坐标系 {b} 下表达（默认True）。若为 False，则在根坐标系 {s} 下表达。
         self._use_body_frame = cfg.params.get("use_body_frame", True)
 
         # 获取要读取的动作项名称列表
@@ -115,16 +115,17 @@ class body_twists(ManagerTermBase):
             lin_vel_w = self._asset.data.body_lin_vel_w[:, body_idx]
             ang_vel_w = self._asset.data.body_ang_vel_w[:, body_idx]
             body_quat_w = self._asset.data.body_quat_w[:, body_idx]
+            root_quat_w = self._asset.data.root_quat_w
 
-            # 根据 use_body_frame 选择输出旋量的表达坐标系
+            # 根据 use_body_frame 选择输出旋量的表达参考系
             if self._use_body_frame:
                 # 将速度从世界坐标系转换到 body 坐标系 {b}
                 lin_vel = quat_apply_inverse(body_quat_w, lin_vel_w)
                 ang_vel = quat_apply_inverse(body_quat_w, ang_vel_w)
             else:
-                # 直接使用世界坐标系 {w} 下的速度
-                lin_vel = lin_vel_w
-                ang_vel = ang_vel_w
+                # 将速度从世界坐标系转换到 root 坐标系 {s}
+                lin_vel = quat_apply_inverse(root_quat_w, lin_vel_w)
+                ang_vel = quat_apply_inverse(root_quat_w, ang_vel_w)
 
             # 归一化
             if self._normalize:
