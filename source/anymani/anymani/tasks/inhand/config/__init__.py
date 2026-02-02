@@ -11,4 +11,4 @@ This package contains robot-specific configurations (LeapHand, Allegro, etc.).
 from isaaclab_tasks.utils import import_packages
 
 # Import all configs in this package
-import_packages(__name__, blacklist=[])
+import_packages(__name__, blacklist_pkgs=[])
