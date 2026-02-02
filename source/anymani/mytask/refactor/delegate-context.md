@@ -2,58 +2,57 @@
 
 ## 背景
 
-用户（科研人员）正在对 AnyRotate 项目进行重构规划。目前处于 `refactor` 分支。
+用户（科研人员）正在对 AnyRotate 项目进行重构。目前处于 `refactor` 分支。
 
-### 当前问题
+### 原始问题
 
-1. **模型复现困难**：过去训练好的 `.pth` 模型，因 `inhand_base_env_cfg.py` 的改动（特别是观察项变动），无法复现训练结果
-
-2. **任务文件繁杂**：`AnyRotate/source/leaphand/leaphand/tasks/manager_based/leaphand` 下的环境配置文件越来越多，基类 `inhand_base_env_cfg.py` 牵一发动全身
-
-3. **命名需更通用**：AnyRotate → AnyMani，leaphand 命名也需调整，以支持未来更多机械手类型
+1. **模型复现困难**：过去训练好的 `.pth` 模型，因 `inhand_base_env_cfg.py` 的改动无法复现
+2. **任务文件繁杂**：基类 `inhand_base_env_cfg.py` 牵一发动全身
+3. **命名需更通用**：AnyRotate → AnyMani
 
 ### 用户长期目标
 
-RL 策略蒸馏 → 模仿学习训练更通用策略。这是用户需要复现过去模型的根本原因。
+RL 策略蒸馏 → 模仿学习训练更通用策略
 
-### 参考架构
+## 重构进度（2026-02-02）
 
-IsaacLab 官方的 `inhand` 任务组织结构：
-```
-manipulation/inhand/
-├── __init__.py
-├── inhand_env_cfg.py      # 通用基类配置
-├── mdp/                   # 模块化 MDP 组件
-└── config/
-    └── allegro_hand/      # 具体手型的配置
-        ├── allegro_env_cfg.py
-        └── agents/
-```
+### ✅ 已完成
 
-### 当前项目结构
+- **Phase 1**: 准备工作 - 创建 `pre-refactor-backup` tag
+- **Phase 2**: 目录重命名 - AnyRotate → AnyMani，leaphand → anymani
+- **Phase 3**: 任务目录重组 - 创建 `tasks/inhand/` 新结构
+- **Phase 5**: 配置组装和环境注册
+- **Phase 7**: 清理与文档更新
+
+### 当前目录结构
 
 ```
-leaphand/tasks/manager_based/leaphand/
-├── inhand_base_env_cfg.py    # 基类，被多个任务继承
-├── inhand_affine_env_cfg.py
-├── inhand_float_env_cfg.py
-├── inhand_rma_env_cfg.py
-├── inhand_round_base_env_cfg.py
-├── inhand_se3_env_cfg.py
-├── inhand_se3_tactile_env_cfg.py
-├── inhand_tactile_env_cfg.py
-├── agents/
-└── mdp/
+AnyMani/source/anymani/anymani/tasks/
+├── inhand/
+│   ├── __init__.py
+│   ├── mdp/                    # MDP 函数实现
+│   │   ├── actions/
+│   │   ├── commands/
+│   │   ├── recorders/
+│   │   ├── observations.py
+│   │   ├── rewards_*.py
+│   │   └── ...
+│   └── config/
+│       ├── leaphand/           # LeapHand 配置
+│       │   ├── agents/
+│       │   ├── inhand_*_env_cfg.py
+│       │   └── leaphand_stable_env_cfg.py  # ⭐ 稳定版本管理
+│       └── leaphand_round/     # 半球指尖变体
+├── direct/
+└── functional/
 ```
 
-## 待澄清问题
+### 稳定版本管理机制
 
-1. 模型复现：git 版本管理 vs 代码架构解耦，哪种方案更适合？
-2. 测试/CI-CD：是否过度工程化？
-3. 重构优先级与范围
+已创建 `leaphand_stable_env_cfg.py`，用于保存训练好的、已验证的配置快照。
 
 ## 历史记录
 
 | 时间 | 委派任务 | 结果 |
 |------|----------|------|
-| 2026-02-02 | 待确认 | - |
+| 2026-02-02 | Coding subagent 执行重构 | ✅ 完成 Phase 1-7，共 6 个 commits |
