@@ -22,7 +22,9 @@ from isaaclab.scene import InteractiveScene
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
-from anymani.tasks.inhand.config.leaphand.inhand_base_env_cfg import InHandSceneCfg
+# NOTE:
+# LeapHand 的环境/场景配置已整合到 leaphand_env_cfg.py。
+from anymani.tasks.inhand.config.leaphand.leaphand_env_cfg import LeapHandSceneCfg
 
 
 def find_contact_bodies(prim, indent=0):
@@ -48,7 +50,7 @@ def main():
     sim.set_camera_view([2.5, 0.0, 4.0], [0.0, 0.0, 2.0])
     
     # 创建场景
-    scene_cfg = InHandSceneCfg(num_envs=1, env_spacing=2.0)
+    scene_cfg = LeapHandSceneCfg(num_envs=1, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)
     
     # 重置仿真
