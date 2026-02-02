@@ -361,7 +361,7 @@ def main() -> None:
 	from isaaclab_tasks.utils import load_cfg_from_registry, parse_env_cfg
 
 	# 导入LeapHand任务定义
-	import anymani.tasks.manager_based.leaphand  # noqa: F401
+	import anymani.tasks.inhand.config.leaphand  # noqa: F401
 	from isaaclab.utils import math as math_utils
 
 	# 确保输出目录存在

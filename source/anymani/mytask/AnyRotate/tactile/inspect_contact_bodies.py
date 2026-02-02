@@ -22,7 +22,7 @@ from isaaclab.scene import InteractiveScene
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
-from anymani.tasks.manager_based.leaphand.inhand_base_env_cfg import InHandSceneCfg
+from anymani.tasks.inhand.config.leaphand.inhand_base_env_cfg import InHandSceneCfg
 
 
 def find_contact_bodies(prim, indent=0):

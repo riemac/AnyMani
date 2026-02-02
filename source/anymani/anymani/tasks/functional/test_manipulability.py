@@ -55,7 +55,7 @@ except ImportError:
     print("[ERROR] 无法导入 launch_with_leaphand.py。请确保该文件在同一目录下。")
     sys.exit(1)
 
-from anymani.tasks.manager_based.leaphand.mdp.utils import math as math_leap
+from anymani.tasks.inhand.mdp.utils import math as math_leap
 
 
 @dataclass

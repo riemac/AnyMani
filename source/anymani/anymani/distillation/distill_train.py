@@ -144,7 +144,7 @@ def _run(env_cfg, agent_cfg):
     from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
     import isaaclab_tasks  # noqa: F401
-    import anymani.tasks.manager_based.leaphand  # noqa: F401
+    import anymani.tasks.inhand.config.leaphand  # noqa: F401
 
     from anymani.distillation.label_wrapper import DistillInfoWrapper
     from anymani.rl_games.distill_a2c_agent import DistillA2CAgent
@@ -313,7 +313,7 @@ if __name__ == "__main__":
     # 注意：hydra_task_config() 通过 gym.spec() 解析配置入口点。
     # 因此，必须在调用 hydra_task_config 之前导入任务包（并执行 gym.register）。
     import isaaclab_tasks  # noqa: F401
-    import anymani.tasks.manager_based.leaphand  # noqa: F401
+    import anymani.tasks.inhand.config.leaphand  # noqa: F401
 
     from isaaclab_tasks.utils.hydra import hydra_task_config
 

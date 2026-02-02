@@ -85,7 +85,7 @@ def _run(env_cfg, agent_cfg):
     from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 
     import isaaclab_tasks  # noqa: F401
-    import anymani.tasks.manager_based.leaphand  # noqa: F401
+    import anymani.tasks.inhand.config.leaphand  # noqa: F401
 
     # Register custom rl_games networks used by this project (e.g. se3_tcn).
     import anymani.rl_games.se3_tcn_network  # noqa: F401
@@ -188,7 +188,7 @@ def _run(env_cfg, agent_cfg):
 
 if __name__ == "__main__":
     import isaaclab_tasks  # noqa: F401
-    import anymani.tasks.manager_based.leaphand  # noqa: F401
+    import anymani.tasks.inhand.config.leaphand  # noqa: F401
 
     from isaaclab_tasks.utils.hydra import hydra_task_config
 

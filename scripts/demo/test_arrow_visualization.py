@@ -29,7 +29,7 @@ simulation_app = app_launcher.app
 
 """其余导入"""
 import time
-from anymani.tasks.manager_based.leaphand.leaphand_continuous_rot_env_cfg import LeaphandContinuousRotEnvCfg
+from anymani.tasks.inhand.config.leaphand.leaphand_continuous_rot_env_cfg import LeaphandContinuousRotEnvCfg
 
 def main():
     """主函数"""

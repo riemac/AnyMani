@@ -73,7 +73,7 @@ from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper  # noqa: E4
 
 import isaaclab_tasks  # noqa: F401, E402
 from isaaclab_tasks.utils import get_checkpoint_path, load_cfg_from_registry, parse_env_cfg  # noqa: E402
-import anymani.tasks.manager_based.leaphand  # noqa: F401, E402
+import anymani.tasks.inhand.config.leaphand  # noqa: F401, E402
 
 
 def _ensure_output_dir(base_dir: str) -> str:

@@ -30,7 +30,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 # 导入其他模块
-import anymani.tasks.manager_based.leaphand  # noqa: F401
+import anymani.tasks.inhand.config.leaphand  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
 
