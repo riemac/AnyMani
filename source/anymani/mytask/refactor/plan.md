@@ -104,14 +104,14 @@ AnyMani/source/anymani/tasks/
 
 | ID | 任务 | 状态 |
 |----|------|------|
-| 4.1 | 设计 `inhand_env_cfg.py`：整理多套 ObsCfg/ActionsCfg 定义 | ⬜ |
-| 4.2 | 从 `inhand_base_env_cfg.py` 提取 `JointSpaceObsCfg` | ⬜ |
-| 4.3 | 从 `inhand_se3_env_cfg.py` 提取 `Se3ObsCfg` | ⬜ |
-| 4.4 | 从 `inhand_base_env_cfg.py` 提取 `JointSpaceActionsCfg` | ⬜ |
-| 4.5 | 从 `inhand_se3_env_cfg.py` 提取 `Se3ActionsCfg` | ⬜ |
-| 4.6 | 从 `inhand_affine_env_cfg.py` 提取 `AffineActionsCfg` | ⬜ |
-| 4.7 | 整理 `CommonRewardsCfg`（合并共享奖励配置） | ⬜ |
-| 4.8 | 从 `inhand_tactile_env_cfg.py` 提取触觉相关配置 | ⬜ |
+| 4.1 | 设计 `inhand_env_cfg.py`：整理多套 ObsCfg/ActionsCfg 定义 | ✅ |
+| 4.2 | 从 `inhand_base_env_cfg.py` 提取 `JointSpaceObsCfg` | ✅ |
+| 4.3 | 从 `inhand_se3_env_cfg.py` 提取 `Se3ObsCfg` | ✅ |
+| 4.4 | 从 `inhand_base_env_cfg.py` 提取 `JointSpaceActionsCfg` | ✅ |
+| 4.5 | 从 `inhand_se3_env_cfg.py` 提取 `Se3ActionsCfg` | ✅ |
+| 4.6 | 从 `inhand_affine_env_cfg.py` 提取 `AffineActionsCfg` | ✅ |
+| 4.7 | 整理 `CommonRewardsCfg`（合并共享奖励配置） | ✅ |
+| 4.8 | 从 `inhand_tactile_env_cfg.py` 提取触觉相关配置 | ✅ |
 
 ### Phase 5: 配置组装 (Day 3)
 
@@ -129,8 +129,8 @@ AnyMani/source/anymani/tasks/
 
 | ID | 任务 | 状态 |
 |----|------|------|
-| 6.1 | 更新 `config/leaphand/__init__.py`：注册所有 Gym 环境 | ⬜ |
-| 6.2 | 验证：`python scripts/list_envs.py` | ⬜ |
+| 6.1 | 更新 `config/leaphand/__init__.py`：注册所有 Gym 环境 | ✅ |
+| 6.2 | 验证：`python scripts/list_envs.py` | ✅ |
 | 6.3 | 验证：`python scripts/random_agent.py --env Isaac-AnyMani-LeapHand-Joint-v0` | ⬜ |
 | 6.4 | 验证：使用稳定版配置加载老模型进行 play | ⬜ |
 
