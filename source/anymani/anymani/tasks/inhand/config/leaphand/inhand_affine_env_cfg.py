@@ -12,7 +12,7 @@
 
 from isaaclab.utils import configclass
 from . import inhand_base_env_cfg
-from . import mdp as leap_mdp
+from anymani.tasks.inhand import mdp as leap_mdp
 
 
 @configclass

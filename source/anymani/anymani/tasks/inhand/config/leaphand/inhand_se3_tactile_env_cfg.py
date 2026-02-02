@@ -23,7 +23,7 @@ from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as Gnoise
 import isaaclab.envs.mdp as mdp
 
 from . import inhand_base_env_cfg
-from . import mdp as leap_mdp
+from anymani.tasks.inhand import mdp as leap_mdp
 from .inhand_se3_env_cfg import RewardsCfg as Se3RewardsCfg
 from .inhand_tactile_env_cfg import (
     InHandTactileSceneCfg,

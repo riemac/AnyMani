@@ -4,13 +4,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """LeapHand连续旋转任务环境配置 - ManagerBasedRLEnv架构
-- 该配置类的奖项参考LEAP_Hand_Isaac_Lab，尽管任务不同
-- 主要增加一个连续旋转目标达成的稀疏奖励项
-- 主要的区别是该文件所使用的leaphand灵巧手的指尖变为了半球型的
+- 这里尝试让Leaphand的基座不再固定，而是浮动起来
 """
 
 import math
-import torch
 from shlex import join
 
 import isaaclab.sim as sim_utils
@@ -38,22 +35,18 @@ from isaaclab.envs.ui import ManagerBasedRLEnvWindow
 from isaaclab.envs.common import ViewerCfg
 from isaaclab.devices.openxr import XrCfg
 
-import isaaclab.utils.math as math_utils
-
 import isaaclab.envs.mdp as mdp
-from anymani.robots.leap_round_tip import LEAP_HAND_CFG
-from . import mdp as leap_mdp
+from anymani.robots.leap import LEAP_HAND_CFG
+from anymani.tasks.inhand import mdp as leap_mdp
 
-# from .mdp.actions import LinearDecayAlphaEMAJointPositionToLimitsActionCfg
+# from anymani.tasks.inhand.mdp.actions import LinearDecayAlphaEMAJointPositionToLimitsActionCfg
 
 # 全局超参数(来源于rl_games_ppo_cfg.yaml)
 horizon_length = 32
 epochs_num = 5 # 与horizon_length配合以确定数据更新频率
-object_pos=(-0.05505, 0.04315, 0.56)  # 物体放置位置
 
 # 使用Isaac Lab内置的cube资产
 object_usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
-# object_usd_path = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Props/YCB/Axis_Aligned_Physics/005_tomato_soup_can.usd"
 
 @configclass
 class InHandSceneCfg(InteractiveSceneCfg):
@@ -71,7 +64,7 @@ class InHandSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.5),
-            rot=(0.0, 1.0, 0.0, 0.0),
+            rot=(0.5, 0.5, -0.5, 0.5),
             joint_pos={
                 "a_1": 0.000, "a_12": 0.500, "a_5": 0.000, "a_9": 0.000,
                 "a_0": -0.750, "a_13": 1.300, "a_4": 0.000, "a_8": 0.750,
@@ -133,7 +126,7 @@ class InHandSceneCfg(InteractiveSceneCfg):
             
             # 缩放系数：(1.2, 1.2, 1.2) 表示在XYZ三个方向都放大1.2倍
             # 让立方体稍大一些，更容易被手抓取和操作
-            scale=(1, 1, 1),
+            scale=(0.1, 0.1, 0.1),
         ),
         
         # 初始状态配置：定义物体在环境重置时的初始位置和姿态
@@ -141,19 +134,11 @@ class InHandSceneCfg(InteractiveSceneCfg):
             # 初始位置：(x=0.0, y=-0.1, z=0.56)
             # z=0.56是在LeapHand手部上方的合适高度
             # y=-0.1稍微偏离中心，给抓取提供更好的角度
-            pos=object_pos,  # root_pos_w -0.05比-0.1稍微更偏近手掌中心，相对更容易抓取
+            pos=(0.0, -0.1, 0.56),  # root_pos_w -0.05比-0.1稍微更偏近手掌中心，相对更容易抓取
             
             # 初始旋转：(w=1.0, x=0.0, y=0.0, z=0.0)
             # 这是单位四元数，表示无旋转（立方体的标准朝向）
-            rot=(1.0, 0.0, 0.0, 0.0),
-            # 通过 quat_from_euler_xyz 生成四元数：传入 torch.Tensor 并取第一个元素转换为 tuple
-            # rot=tuple(
-            #     math_utils.quat_from_euler_xyz(
-            #         torch.tensor([-math.pi / 2], dtype=torch.float),
-            #         torch.tensor([0.0], dtype=torch.float),
-            #         torch.tensor([0.0], dtype=torch.float),
-            #     )[0].tolist()
-            # )
+            rot=(1.0, 0.0, 0.0, 0.0)
         ),
     )
 
@@ -162,6 +147,10 @@ class InHandSceneCfg(InteractiveSceneCfg):
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75)),
     )
+
+    def __post_init__(self):
+        self.robot.spawn.articulation_props.fix_root_link = False # 让基座浮动
+        self.robot.spawn.rigid_props.disable_gravity = False # 让基座受重力影响
  
  
 @configclass
@@ -195,7 +184,7 @@ class ActionsCfg:
                      "a_5", "a_4", "a_6", "a_7",  # middle finger
                      "a_9", "a_8", "a_10", "a_11",  # little finger
                      "a_12", "a_13", "a_14", "a_15"],  # thumb
-        scale=1/10,
+        scale=1/24,
         preserve_order=True
     )
 
@@ -247,8 +236,8 @@ class ObservationsCfg:
         """Critic价值函数观测 - 包含大量仅仿真可用的特权信息"""
 
     # 观测组配置
-    policy: ObsGroup = PrivilegedObsCfg(history_length=3)
-    critic: ObsGroup = CriticCfg(history_length=3)
+    policy: ObsGroup = PrivilegedObsCfg(history_length=2)
+    critic: ObsGroup = CriticCfg(history_length=2)
 
 
 @configclass
@@ -439,7 +428,7 @@ class TerminationsCfg:
     # 物体掉落终止
     object_falling = DoneTerm(
         func=leap_mdp.object_falling_termination,
-        params={"fall_dist": 0.08, "target_pos_offset": object_pos},
+        params={"fall_dist": 0.08, "target_pos_offset": (0.0, -0.1, 0.56)},
     )
 
     # 超时终止
@@ -451,7 +440,7 @@ class CurriculumCfg:
     """课程学习配置 - 提供各种课程学习策略"""
 
 @configclass
-class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
+class InHandFloatEnvCfg(ManagerBasedRLEnvCfg):
     """LeapHand连续旋转任务环境配置类 - ManagerBasedRLEnv架构"""
     ui_window_class_type: type | None = ManagerBasedRLEnvWindow
     is_finite_horizon: bool = True
@@ -508,6 +497,6 @@ class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 30.0
         # simulation settings
         self.sim.dt = 1.0 / 120.0
-        self.sim.render_interval = self.decimation
+        self.sim.render_interval = self.decimation/2
         # change viewer settings
         self.viewer.eye = (2.0, 2.0, 2.0)

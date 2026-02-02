@@ -38,7 +38,7 @@ from isaaclab.devices.openxr import XrCfg
 
 import isaaclab.envs.mdp as mdp
 from anymani.robots.leap import LEAP_HAND_CFG
-from . import mdp as leap_mdp
+from anymani.tasks.inhand import mdp as leap_mdp
 from . import inhand_base_env_cfg
 
 

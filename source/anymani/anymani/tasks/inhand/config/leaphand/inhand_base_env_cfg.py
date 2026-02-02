@@ -4,10 +4,14 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """LeapHand连续旋转任务环境配置 - ManagerBasedRLEnv架构
-- 这里尝试让Leaphand的基座不再固定，而是浮动起来
+- 该配置类的奖项参考LEAP_Hand_Isaac_Lab，尽管任务不同
+- 主要增加一个连续旋转目标达成的稀疏奖励项
+- 训练：python scripts/rl_games/train.py --task=Template-Leaphand-Rot-Manager-v0 --num_envs=2048 --headless
+- 预训练好的模型记录：
 """
 
 import math
+import torch
 from shlex import join
 
 import isaaclab.sim as sim_utils
@@ -23,6 +27,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import RecorderManagerBaseCfg
+from isaaclab.managers import DatasetExportMode
 from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
@@ -34,12 +39,15 @@ from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as Gnoise
 from isaaclab.envs.ui import ManagerBasedRLEnvWindow
 from isaaclab.envs.common import ViewerCfg
 from isaaclab.devices.openxr import XrCfg
+from isaaclab.sensors import ContactSensorCfg
+
+import isaaclab.utils.math as math_utils
 
 import isaaclab.envs.mdp as mdp
 from anymani.robots.leap import LEAP_HAND_CFG
-from . import mdp as leap_mdp
+from anymani.tasks.inhand import mdp as leap_mdp
 
-# from .mdp.actions import LinearDecayAlphaEMAJointPositionToLimitsActionCfg
+# from anymani.tasks.inhand.mdp.actions import LinearDecayAlphaEMAJointPositionToLimitsActionCfg
 
 # 全局超参数(来源于rl_games_ppo_cfg.yaml)
 horizon_length = 32
@@ -47,6 +55,7 @@ epochs_num = 5 # 与horizon_length配合以确定数据更新频率
 
 # 使用Isaac Lab内置的cube资产
 object_usd_path = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
+# object_usd_path = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/Props/YCB/Axis_Aligned_Physics/005_tomato_soup_can.usd"
 
 @configclass
 class InHandSceneCfg(InteractiveSceneCfg):
@@ -126,7 +135,7 @@ class InHandSceneCfg(InteractiveSceneCfg):
             
             # 缩放系数：(1.2, 1.2, 1.2) 表示在XYZ三个方向都放大1.2倍
             # 让立方体稍大一些，更容易被手抓取和操作
-            scale=(0.1, 0.1, 0.1),
+            scale=(1.2, 1.2, 1.2),
         ),
         
         # 初始状态配置：定义物体在环境重置时的初始位置和姿态
@@ -138,7 +147,15 @@ class InHandSceneCfg(InteractiveSceneCfg):
             
             # 初始旋转：(w=1.0, x=0.0, y=0.0, z=0.0)
             # 这是单位四元数，表示无旋转（立方体的标准朝向）
-            rot=(1.0, 0.0, 0.0, 0.0)
+            rot=(1.0, 0.0, 0.0, 0.0),
+            # 通过 quat_from_euler_xyz 生成四元数：传入 torch.Tensor 并取第一个元素转换为 tuple
+            # rot=tuple(
+            #     math_utils.quat_from_euler_xyz(
+            #         torch.tensor([-math.pi / 2], dtype=torch.float),
+            #         torch.tensor([0.0], dtype=torch.float),
+            #         torch.tensor([0.0], dtype=torch.float),
+            #     )[0].tolist()
+            # )
         ),
     )
 
@@ -148,9 +165,50 @@ class InHandSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75)),
     )
 
-    def __post_init__(self):
-        self.robot.spawn.articulation_props.fix_root_link = False # 让基座浮动
-        self.robot.spawn.rigid_props.disable_gravity = False # 让基座受重力影响
+    # ===== 指尖触觉传感器 =====
+    # # 食指指尖
+    # contact_index = ContactSensorCfg(  # 在 ManagerBasedRLEnv 里：sensor = env.scene["contact_index"]
+    #     prim_path="{ENV_REGEX_NS}/Robot/fingertip",
+    #     filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
+    #     update_period=0.0,
+    #     history_length=3,
+    #     track_air_time=True,
+    #     force_threshold=1.0,
+    #     debug_vis=True,
+    # )
+    
+    # # 中指指尖
+    # contact_middle = ContactSensorCfg(
+    #     prim_path="{ENV_REGEX_NS}/Robot/fingertip_2",
+    #     filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
+    #     update_period=0.0,
+    #     history_length=3,
+    #     track_air_time=True,
+    #     force_threshold=1.0,
+    #     debug_vis=True,
+    # )
+    
+    # # 无名指指尖
+    # contact_ring = ContactSensorCfg(
+    #     prim_path="{ENV_REGEX_NS}/Robot/fingertip_3",
+    #     filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
+    #     update_period=0.0,
+    #     history_length=3,
+    #     track_air_time=True,
+    #     force_threshold=1.0,
+    #     debug_vis=True,
+    # )
+    
+    # # 拇指指尖
+    # contact_thumb = ContactSensorCfg(
+    #     prim_path="{ENV_REGEX_NS}/Robot/thumb_fingertip",
+    #     filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
+    #     update_period=0.0,
+    #     history_length=3,
+    #     track_air_time=True,
+    #     force_threshold=1.0,
+    #     debug_vis=True,
+    # )
  
  
 @configclass
@@ -184,7 +242,7 @@ class ActionsCfg:
                      "a_5", "a_4", "a_6", "a_7",  # middle finger
                      "a_9", "a_8", "a_10", "a_11",  # little finger
                      "a_12", "a_13", "a_14", "a_15"],  # thumb
-        scale=1/24,
+        scale=1/10,
         preserve_order=True
     )
 
@@ -207,7 +265,7 @@ class ObservationsCfg:
             func=mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object"), "make_quat_unique": False}
         )
 
-        # -- command terms
+        # -- command terms 这里有冗余，可以只保留 goal_quat_diff
         goal_pose = ObsTerm(func=mdp.generated_commands, params={"command_name": "goal_pose"})
         goal_quat_diff = ObsTerm(
             func=leap_mdp.goal_quat_diff,
@@ -236,8 +294,8 @@ class ObservationsCfg:
         """Critic价值函数观测 - 包含大量仅仿真可用的特权信息"""
 
     # 观测组配置
-    policy: ObsGroup = PrivilegedObsCfg(history_length=2)
-    critic: ObsGroup = CriticCfg(history_length=2)
+    policy: ObsGroup = PrivilegedObsCfg(history_length=3)
+    critic: ObsGroup = CriticCfg(history_length=3)
 
 
 @configclass
@@ -280,7 +338,7 @@ class EventCfg: #
         mode="startup",
         params={ # 从 range 里均匀采样
             "asset_cfg": SceneEntityCfg("object"),
-            "static_friction_range": (0.2, 1.0), # 塑料、橡胶一般这么多
+            "static_friction_range": (0.2, 1.0), # 塑料、橡胶一般这么多（这里的选择会影响 ContactSensorData 的 friction_forces_w（切向力）
             "dynamic_friction_range": (0.15, 0.6),
             "restitution_range": (0.0, 0.1), # 不提供的话默认(0,0)
             "num_buckets": 250,
@@ -399,21 +457,21 @@ class RewardsCfg:
             "position_threshold": 0.025,
         },
     )
-    fingertip_distance = RewTerm(
-        func=leap_mdp.fingertip_distance_penalty,
-        weight=-2.0,
-        params={
-            "robot_cfg": SceneEntityCfg("robot"),
-            "object_cfg": SceneEntityCfg("object"),
-            "fingertip_body_names": ["fingertip", "thumb_fingertip", "fingertip_2", "fingertip_3"],
-        },
-    )
-    pose_diff = RewTerm(func=leap_mdp.pose_diff_penalty, weight=-0.3)
-    fall_penalty = RewTerm(
-        func=leap_mdp.fall_penalty,
-        weight=-10.0,
-        params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "fall_distance": 0.07},
-    )
+    # fingertip_distance = RewTerm(
+    #     func=leap_mdp.fingertip_distance_penalty,
+    #     weight=-2.0,
+    #     params={
+    #         "robot_cfg": SceneEntityCfg("robot"),
+    #         "object_cfg": SceneEntityCfg("object"),
+    #         "fingertip_body_names": ["fingertip", "thumb_fingertip", "fingertip_2", "fingertip_3"],
+    #     },
+    # )
+    # pose_diff = RewTerm(func=leap_mdp.pose_diff_penalty, weight=-0.3)
+    # fall_penalty = RewTerm(
+    #     func=leap_mdp.fall_penalty,
+    #     weight=-10.0,
+    #     params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "fall_distance": 0.07},
+    # )
 
     # -- action
     joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight=-2.5e-5)
@@ -428,7 +486,7 @@ class TerminationsCfg:
     # 物体掉落终止
     object_falling = DoneTerm(
         func=leap_mdp.object_falling_termination,
-        params={"fall_dist": 0.08, "target_pos_offset": (0.0, -0.1, 0.56)},
+        params={"fall_dist": 0.1, "target_pos_offset": (0.0, -0.1, 0.56)},
     )
 
     # 超时终止
@@ -440,7 +498,7 @@ class CurriculumCfg:
     """课程学习配置 - 提供各种课程学习策略"""
 
 @configclass
-class InHandFloatEnvCfg(ManagerBasedRLEnvCfg):
+class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
     """LeapHand连续旋转任务环境配置类 - ManagerBasedRLEnv架构"""
     ui_window_class_type: type | None = ManagerBasedRLEnvWindow
     is_finite_horizon: bool = True
@@ -480,7 +538,14 @@ class InHandFloatEnvCfg(ManagerBasedRLEnvCfg):
     # Recorder settings - 数据录制配置
     # 运行 rl_games play.py 时，RecorderManager 会自动触发数据记录
     # 
-    # 使用示例：启用BC数据录制
+    # 基础观察-动作录制配置
+    # recorders: object = ActionStateRecorderManagerCfg(
+    #     dataset_export_dir_path="./outputs/datasets",
+    #     dataset_filename="leaphand_rollout_data",
+    #     dataset_export_mode=DatasetExportMode.EXPORT_ALL,  # 导出所有episode
+    # )
+    
+    # BC数据录制示例（注释）
     # recorders: object = leap_mdp.LeapHandBCRecorderManagerCfg(
     #     finger_body_names=["fingertip", "fingertip_2", "fingertip_3", "thumb_fingertip"],
     #     finger_xform_names=["index_tip_head", "middle_tip_head", "ring_tip_head", "thumb_tip_head"],
@@ -497,6 +562,6 @@ class InHandFloatEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 30.0
         # simulation settings
         self.sim.dt = 1.0 / 120.0
-        self.sim.render_interval = self.decimation/2
+        self.sim.render_interval = self.decimation
         # change viewer settings
         self.viewer.eye = (2.0, 2.0, 2.0)

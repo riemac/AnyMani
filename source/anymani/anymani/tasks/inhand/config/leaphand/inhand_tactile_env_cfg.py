@@ -31,7 +31,7 @@ from .inhand_base_env_cfg import (
     InHandObjectEnvCfg,
 )
 
-from . import mdp as leap_mdp
+from anymani.tasks.inhand import mdp as leap_mdp
 import isaaclab.envs.mdp as mdp
 
 

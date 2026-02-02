@@ -26,7 +26,7 @@ from isaaclab.utils import configclass
 
 import isaaclab.envs.mdp as mdp
 
-from . import mdp as leap_mdp
+from anymani.tasks.inhand import mdp as leap_mdp
 from .inhand_base_env_cfg import InHandObjectEnvCfg as _BaseInHandObjectEnvCfg
 from .inhand_base_env_cfg import ObservationsCfg as _BaseObservationsCfg
 
