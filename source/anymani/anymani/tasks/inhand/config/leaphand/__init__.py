@@ -1,9 +1,9 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""LeapHand连续旋转任务 - ManagerBasedRLEnv架构"""
+"""LeapHand configuration for in-hand manipulation tasks."""
 
 import gymnasium as gym
 
@@ -13,16 +13,16 @@ from .inhand_se3_env_cfg import InHandse3EnvCfg
 from .inhand_affine_env_cfg import InHandAffineEnvCfg
 from .inhand_float_env_cfg import InHandFloatEnvCfg
 from .inhand_rma_env_cfg import InHandRmaEnvCfg
-from .inhand_round_base_env_cfg import InHandObjectEnvCfg
-from .inhand_tactile_env_cfg import InHandTactileSceneCfg
+from .inhand_tactile_env_cfg import InHandTactileEnvCfg
 from .inhand_se3_tactile_env_cfg import InHandSe3TactileEnvCfg
 
 ##
 # Register Gym environments.
 ##
 
+# Baseline: 关节空间动作
 gym.register(
-    id="Template-Leaphand-Rot-Manager-v0", # Template可被list_envs.py识别（但不影响环境注册与训练）
+    id="AnyMani-LeapHand-Joint-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
@@ -31,8 +31,9 @@ gym.register(
     },
 )
 
+# SE(3) 动作空间
 gym.register(
-    id="Template-Leaphand-se3-Rot-Manager-v0", # Template可被list_envs.py识别（但不影响环境注册与训练）
+    id="AnyMani-LeapHand-SE3-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
@@ -41,42 +42,31 @@ gym.register(
     },
 )
 
-# 仿射编队对比实验环境
+# 仿射编队动作空间
 gym.register(
-    id="Template-Leaphand-Affine-Manager-v0",
+    id="AnyMani-LeapHand-Affine-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.inhand_affine_env_cfg:InHandAffineEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",  # 复用baseline的训练配置
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
     },
 )
 
-# 浮动基座
+# 浮动基座（臂手解耦实验）
 gym.register(
-    id="Template-Leaphand-Float-Manager-v0",
+    id="AnyMani-LeapHand-Float-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.inhand_float_env_cfg:InHandFloatEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_float.yaml",  # 复用baseline的训练配置
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_float.yaml",
     },
 )
 
-# 圆形指尖
+# RMA (Rapid Motor Adaptation)
 gym.register(
-    id="Template-Leaphand-RoundTip-Manager-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.inhand_round_base_env_cfg:InHandObjectEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",  # 复用baseline的训练配置
-    },
-)
-
-# RMA (Rapid Motor Adaptation) 专用环境：与 baseline/float/round-tip 等配置隔离
-gym.register(
-    id="Template-Leaphand-RMA-Manager-v0",
+    id="AnyMani-LeapHand-RMA-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
@@ -85,9 +75,9 @@ gym.register(
     },
 )
 
-# 触觉环境
+# 触觉传感器
 gym.register(
-    id="Template-Leaphand-Tactile-Manager-v0",
+    id="AnyMani-LeapHand-Tactile-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
@@ -96,13 +86,25 @@ gym.register(
     },
 )
 
-# se3 + tactile (student)
+# SE(3) + 触觉
 gym.register(
-    id="Template-Leaphand-se3-Tactile-Manager-v0",
+    id="AnyMani-LeapHand-SE3-Tactile-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.inhand_se3_tactile_env_cfg:InHandSe3TactileEnvCfg",
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_se3_tactile.yaml",
+    },
+)
+
+
+# 兼容旧名称（deprecated，后续版本移除）
+gym.register(
+    id="Template-Leaphand-Rot-Manager-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.inhand_base_env_cfg:InHandObjectEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
     },
 )
