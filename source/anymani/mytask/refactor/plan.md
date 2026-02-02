@@ -131,7 +131,7 @@ AnyMani/source/anymani/tasks/
 |----|------|------|
 | 6.1 | 更新 `config/leaphand/__init__.py`：注册所有 Gym 环境 | ✅ |
 | 6.2 | 验证：`python scripts/list_envs.py` | ✅ |
-| 6.3 | 验证：`python scripts/random_agent.py --env Isaac-AnyMani-LeapHand-Joint-v0` | ⬜ |
+| 6.3 | 验证：环境可正常 reset/step | ✅ |
 | 6.4 | 验证：使用稳定版配置加载老模型进行 play | ⬜ |
 
 ### Phase 7: 清理与文档 (Day 4)
