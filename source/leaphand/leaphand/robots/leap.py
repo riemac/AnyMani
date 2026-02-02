@@ -14,8 +14,9 @@ from pathlib import Path
 
 LEAP_HAND_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{Path(__file__).parent.parent.parent}/assets/leap_hand_v1_right/leap_hand_right.usd",
-        activate_contact_sensors=False,
+        # usd_path=f"{Path(__file__).parent.parent.parent}/assets/leap_hand_v1_right/leap_hand_right.usd",
+        usd_path=f"{Path(__file__).parent.parent.parent}/assets/leap_hand_v1_right/leap_hand_right_edit.usd",
+        activate_contact_sensors=True,  # ← ✅ 启用ContactSensor（原来是False）
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             kinematic_enabled=False,
             disable_gravity=True,
@@ -43,11 +44,11 @@ LEAP_HAND_CFG = ArticulationCfg(
         joint_pos={"a_.*": 0.0},
     ),
     actuators={ # 高度柔顺、低刚度的系统，通常由小型电机、腱驱动或欠驱动机构成，本质上不是“刚性”设备
-        "fingers": ImplicitActuatorCfg(
+        "fingers": ImplicitActuatorCfg(  # 实际决定了底层的PD控制器参数？
             joint_names_expr=[".*"],
             effort_limit=0.5, # N·m NOTE: 来自LEAP_Hand_Sim官方官方URDF里的是0.95，但LEAP_Hand_Isaac_Lab官方里是0.5。现实设备暂不知晓
             velocity_limit=100.0, # rad/s
-            stiffness=3.0, # N/m
+            stiffness=3.0, # N/m 较高刚性
             damping=0.1, # N·s/m
             friction=0.01, # 无单位
             armature=0.001, # kg·m^2，来自LEAP_Hand_Sim官方

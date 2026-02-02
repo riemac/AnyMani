@@ -140,10 +140,10 @@ def randomize_rigid_object_com(
     # 获取对象
     obj: RigidObject = env.scene[asset_cfg.name]
 
-    # 读取并克隆当前 COM，形状期望为 (num_envs, 3)
+    # 读取并克隆当前 COM。
+    # PhysX 可能返回 (num_envs, 3) 的 COM 位置，或 (num_envs, 7) 的 [pos(3), quat(4)]。
     coms = obj.root_physx_view.get_coms().clone()
-    if coms.ndim != 2 or coms.shape[-1] != 3:
-        # 若形状异常，直接返回（保守回退）
+    if coms.ndim != 2 or coms.shape[-1] not in (3, 7):
         return
 
     # 采样随机扰动（逐轴范围）
@@ -157,7 +157,10 @@ def randomize_rigid_object_com(
     )
     noise = lows + torch.rand((len(env_ids), 3), device="cpu") * (highs - lows)
 
-    # 应用扰动到选定环境
-    coms[env_ids] += noise
+    # 应用扰动到选定环境（仅对位置部分）
+    if coms.shape[-1] == 3:
+        coms[env_ids] += noise
+    else:
+        coms[env_ids, 0:3] += noise
     obj.root_physx_view.set_coms(coms, env_ids)
 

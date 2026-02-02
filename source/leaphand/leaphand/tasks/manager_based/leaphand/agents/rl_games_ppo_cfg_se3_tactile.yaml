@@ -1,0 +1,116 @@
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# RL-Games配置文件 - LeapHand连续旋转任务 (SE3 + Tactile)
+# 以 se3 配置为基线：保持非对称 Actor-Critic + GRU；观测侧由 env cfg 决定。
+
+params:
+  seed: 42
+
+  env:
+    clip_observations: 5.0
+    clip_actions: 1.0
+
+  algo:
+    name: a2c_continuous
+
+  model:
+    name: continuous_a2c_logstd
+
+  network:
+    name: se3_tcn
+    tcn:
+      # History window length N
+      seq_len: 50
+      # Per-step feature sizes (must match env policy obs terms)
+      twist_dim: 24
+      act_dim: 24
+      tactile_dim: 4
+      cmd_dim: 7
+      # Causal TCN settings
+      channels: [128, 128, 128, 128, 128]
+      kernel_size: 3
+      dropout: 0.1
+      activation: elu
+      latent_dim: 128
+    mlp:
+      # policy/value heads after concat([Prop_t, tau_t, h_t, c_t])
+      units: [512, 256]
+      activation: elu
+
+  load_checkpoint: False
+  load_path: ''
+
+  config:
+    name: leaphand_se3_tactile_rot
+    env_name: rlgpu
+    device: 'cuda:0'
+    device_name: 'cuda:0'
+    multi_gpu: False
+    ppo: True
+    mixed_precision: False
+    normalize_input: True
+    normalize_value: True
+    value_bootstrap: True
+    num_actors: -1
+
+    reward_shaper:
+      scale_value: 1.0
+
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+
+    learning_rate: 5e-4
+    lr_schedule: adaptive
+    schedule_type: standard
+    kl_threshold: 0.01
+
+    score_to_win: 100000
+    max_epochs: 10000
+    save_best_after: 200
+    save_frequency: 200
+    print_stats: True
+
+    grad_norm: 1.0
+    entropy_coef: 0.002
+    truncate_grads: True
+    e_clip: 0.2
+
+    horizon_length: 48
+    minibatch_size: 1200
+    mini_epochs: 5
+
+    critic_coef: 4
+    clip_value: True
+    clip_actions: False
+
+    # Non-RNN policy: temporal modeling is done by the TCN encoder over observation history.
+    seq_length: 1
+    bounds_loss_coef: 0.0001
+
+    player:
+      deterministic: True
+      games_num: 100000
+      print_stats: True
+
+pbt:
+  enabled: False
+  policy_idx: 0
+  num_policies: 6
+  directory: "."
+  workspace: "pbt_workspace"
+  objective: "episode.Episode_Reward/track_orientation_inv_l2"
+  interval_steps: 2000000
+  threshold_std: 0.1
+  threshold_abs: 0.05
+  mutation_rate: 0.25
+  change_range: [1.1, 2.0]
+  mutation:
+    agent.params.config.learning_rate: "mutate_float"
+    agent.params.config.entropy_coef: "mutate_float"
+    agent.params.config.grad_norm: "mutate_float"
+    agent.params.config.gamma: "mutate_discount"
+    agent.params.config.tau: "mutate_discount"

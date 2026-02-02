@@ -87,7 +87,7 @@ class ContinuousRotationCommand(CommandTerm):
     def command(self) -> torch.Tensor:
         """返回目标位姿 (pos_e, quat_w)。"""
 
-        return torch.cat((self.pos_command_e, self.quat_command_w), dim=-1)
+        return torch.cat((self.pos_command_e, self.quat_command_w), dim=-1)  # 位置是环境坐标系，姿态是世界坐标系，在命令项中返回的是该值
 
     def _update_metrics(self):
         """更新日志指标。"""

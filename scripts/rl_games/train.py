@@ -62,6 +62,21 @@ import os
 import random
 from datetime import datetime
 
+# ----------------------------------------------------------------------------
+# PyTorch 2.x: disable dynamo/inductor cudagraphs by default for Isaac Sim runs.
+#
+# rl_games in this workspace enables torch.compile() (and thus Inductor CUDA
+# graphs) in a few places. With some workloads (e.g., dynamic shapes / allocator
+# behavior over time), this can crash with errors like:
+# "These storage data ptrs are not allocated in pool ...".
+#
+# Users can re-enable compilation by exporting these env vars before running.
+# ----------------------------------------------------------------------------
+# torch.compile / Inductor / CUDA Graph 只作用在神经网络前向/反向（loss、梯度、policy inference）这一段。
+# 仿真物理（PhysX）、环境 reset/step、奖励、观测计算这些逻辑不因为 compile 开关而改变
+os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+os.environ.setdefault("TORCHINDUCTOR_CUDAGRAPHS", "0")
+
 from rl_games.common import env_configurations, vecenv
 from rl_games.common.algo_observer import IsaacAlgoObserver
 from rl_games.torch_runner import Runner
@@ -75,9 +90,9 @@ from isaaclab.envs import (
 )
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.io import dump_pickle, dump_yaml
+from isaaclab.utils.io import dump_yaml
 
-from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
+from isaaclab_rl.rl_games import MultiObserver, PbtAlgoObserver, RlGamesGpuEnv, RlGamesVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -132,7 +147,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # ======= 日志与实验目录设置 =======
     config_name = agent_cfg["params"]["config"]["name"]
     log_root_path = os.path.join("logs", "rl_games", config_name)
-    log_root_path = os.path.abspath(log_root_path)
+    log_root_path = os.path.abspath(log_root_path)  # 基于当前工作目录转换为绝对路径，所以得在终端正确位置运行
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # 如果没有指定完整实验名称，则使用当前时间戳作为标识
     log_dir = agent_cfg["params"]["config"].get("full_experiment_name", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
@@ -142,16 +157,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     wandb_project = config_name if args_cli.wandb_project_name is None else args_cli.wandb_project_name
     experiment_name = log_dir if args_cli.wandb_name is None else args_cli.wandb_name
 
-    # 将 env 和 agent 配置持久化到磁盘，便于复现与调试（YAML + pickle）
+    # 将 env 和 agent 配置持久化到磁盘，便于复现与调试
     dump_yaml(os.path.join(log_root_path, log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_root_path, log_dir, "params", "agent.yaml"), agent_cfg)
-    dump_pickle(os.path.join(log_root_path, log_dir, "params", "env.pkl"), env_cfg)
-    dump_pickle(os.path.join(log_root_path, log_dir, "params", "agent.pkl"), agent_cfg)
 
     # ======= 从 agent_cfg 读取训练相关设置 =======
     rl_device = agent_cfg["params"]["config"]["device"]
     clip_obs = agent_cfg["params"]["env"].get("clip_observations", math.inf)
     clip_actions = agent_cfg["params"]["env"].get("clip_actions", math.inf)
+    # 可选：按观测组传递给 rl-games（用于 RMA 等多路输入网络）
+    obs_groups = agent_cfg["params"].get("env", {}).get("obs_groups")
+    concate_obs_group = agent_cfg["params"].get("env", {}).get("concate_obs_group", True)
 
     # ======= 创建 Isaac 环境（通过 Gym 接口） =======
     # 传入 hydra 解析后的 env_cfg 对象供环境构造使用；若要录像，则 render_mode 为 rgb_array
@@ -177,7 +193,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # ======= 将环境包装成 RL-Games 能够使用的向量化环境 ======= # IDEA: 如果集成第三方RL库，这个可能是要改动的部分
     # RlGamesVecEnvWrapper 负责将单环境或多环境适配成 RL-Games 所需的接口
-    env = RlGamesVecEnvWrapper(env, rl_device, clip_obs, clip_actions)
+    env = RlGamesVecEnvWrapper(
+        env,
+        rl_device,
+        clip_obs,
+        clip_actions,
+        obs_groups=obs_groups,
+        concate_obs_group=concate_obs_group,
+    )
 
     # ======= 向 RL-Games 注册自定义 VecEnv 和环境实例 =======
     # 注册一个名为 "IsaacRlgWrapper" 的 vecenv 工厂函数，返回 RlGamesGpuEnv 实例
@@ -190,8 +213,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # 将实际并行 actor 数量写入 agent 配置，供 RL-Games 运行器使用
     agent_cfg["params"]["config"]["num_actors"] = env.unwrapped.num_envs
+
     # 使用 IsaacAlgoObserver 创建 runner（该 observer 为 rl-games 提供 Isaac/Sim 的统计回调）
-    runner = Runner(IsaacAlgoObserver())
+    if "pbt" in agent_cfg and agent_cfg["pbt"]["enabled"]:
+        observers = MultiObserver([IsaacAlgoObserver(), PbtAlgoObserver(agent_cfg, args_cli)])
+        runner = Runner(observers)
+    else:
+        runner = Runner(IsaacAlgoObserver())
+    
     # 加载 agent 配置（包含算法、网络与训练超参等）
     runner.load(agent_cfg)
 
