@@ -97,7 +97,7 @@ from isaaclab_rl.rl_games import MultiObserver, PbtAlgoObserver, RlGamesGpuEnv, 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-import leaphand.tasks.manager_based.leaphand  # noqa: F401
+import anymani.tasks.manager_based.leaphand  # noqa: F401
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 

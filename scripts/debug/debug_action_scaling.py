@@ -29,7 +29,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.utils.math import scale_transform, unscale_transform
 
 # 导入环境配置
-from leaphand.tasks.manager_based.leaphand.leaphand_continuous_rot_env_cfg import LeaphandContinuousRotEnvCfg
+from anymani.tasks.manager_based.leaphand.leaphand_continuous_rot_env_cfg import LeaphandContinuousRotEnvCfg
 
 
 def debug_action_scaling():

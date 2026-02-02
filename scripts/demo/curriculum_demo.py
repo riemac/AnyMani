@@ -50,7 +50,7 @@ simulation_app = app_launcher.app
 from isaaclab.envs import ManagerBasedRLEnv
 
 # 导入环境配置
-from leaphand.tasks.manager_based.leaphand.leaphand_continuous_rot_env_cfg import (
+from anymani.tasks.manager_based.leaphand.leaphand_continuous_rot_env_cfg import (
     LeaphandContinuousRotEnvCfg,
     LeaphandContinuousRotFullCurriculumEnvCfg,
     LeaphandContinuousRotRewardOnlyEnvCfg,

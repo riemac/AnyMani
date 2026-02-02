@@ -45,7 +45,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.sim import SimulationContext
 
 # 导入环境配置
-from leaphand.tasks.manager_based.leaphand.leaphand_continuous_rot_env_cfg import (
+from anymani.tasks.manager_based.leaphand.leaphand_continuous_rot_env_cfg import (
     LeaphandContinuousRotEnvCfg
 )
 
