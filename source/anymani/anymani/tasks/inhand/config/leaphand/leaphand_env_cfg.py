@@ -8,12 +8,19 @@
 本模块定义所有 LeapHand 手型的环境变体，通过继承通用基类
 并在 __post_init__ 中修改特定配置来实现不同的动作空间和观测设置。
 
-环境变体:
+环境变体（训练）:
     - LeapHandJointEnvCfg: 关节空间动作（16 维）
     - LeapHandSe3EnvCfg: SE(3) 旋量动作（24 维）
     - LeapHandTactileEnvCfg: 关节空间 + 触觉观测
     - LeapHandSe3TactileEnvCfg: SE(3) + 触觉观测
     - LeapHandAffineEnvCfg: 仿射编队动作（9 维）
+
+环境变体（Play/可视化）:
+    - LeapHandJointEnvCfg_PLAY
+    - LeapHandSe3EnvCfg_PLAY
+    - LeapHandTactileEnvCfg_PLAY
+    - LeapHandSe3TactileEnvCfg_PLAY
+    - LeapHandAffineEnvCfg_PLAY
 
 Usage:
     from anymani.tasks.inhand.config.leaphand import LeapHandJointEnvCfg
@@ -104,7 +111,10 @@ class LeapHandSceneCfg(InHandObjectSceneCfg):
 class LeapHandTactileSceneCfg(TactileSceneCfg):
     """LeapHand 触觉场景配置
     
-    在触觉场景基础上指定 LeapHand 机器人，并添加完整的关节接触传感器。
+    在触觉场景基础上指定 LeapHand 机器人。
+
+    注意：该场景只包含指尖 + 手掌的接触传感器（见 :class:`TactileSceneCfg`）。
+    如需包含所有关节（非指尖）的接触传感器，请使用 :class:`LeapHandFullTactileSceneCfg`。
     """
     
     robot: ArticulationCfg = LEAP_HAND_CFG.replace(

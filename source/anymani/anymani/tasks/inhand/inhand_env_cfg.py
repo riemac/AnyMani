@@ -10,7 +10,7 @@
 
 Usage:
     from anymani.tasks.inhand.inhand_env_cfg import (
-        JointSpaceObsCfg,
+        JointSpaceObservationsCfg,
         JointSpaceActionsCfg,
         CommonRewardsCfg,
     )
