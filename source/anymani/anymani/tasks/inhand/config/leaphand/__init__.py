@@ -11,27 +11,43 @@
     - AnyMani-LeapHand-Tactile-v0: 关节空间 + 触觉观测
     - AnyMani-LeapHand-SE3-Tactile-v0: SE(3) + 触觉观测
     - AnyMani-LeapHand-Affine-v0: 仿射编队动作（9 维）
-
-说明：LeapHand 的环境配置已从分散的 `inhand_*_env_cfg.py` 整合到 `leaphand_env_cfg.py`。
-本模块负责：
-1) 重新导出配置类，方便 `from ...config.leaphand import ...`
-2) 注册 gym 环境 id -> env_cfg_entry_point
 """
 
 import gymnasium as gym
 
 from . import agents
+
+# 注册 gym 环境
+"""
+    说明：LeapHand 的环境配置已从分散的 `inhand_*_env_cfg.py` 整合到 `leaphand_env_cfg.py`。
+    本模块负责：
+    1) 重新导出配置类，方便 `from ...config.leaphand import ...`
+    2) 注册 gym 环境 id -> env_cfg_entry_point
+    """
 from .leaphand_env_cfg import (
-    LeapHandAffineEnvCfg,
-    LeapHandAffineEnvCfg_PLAY,
+    # 训练配置
     LeapHandJointEnvCfg,
-    LeapHandJointEnvCfg_PLAY,
     LeapHandSe3EnvCfg,
-    LeapHandSe3EnvCfg_PLAY,
-    LeapHandSe3TactileEnvCfg,
-    LeapHandSe3TactileEnvCfg_PLAY,
     LeapHandTactileEnvCfg,
+    LeapHandSe3TactileEnvCfg,
+    LeapHandAffineEnvCfg,
+    # Play 配置
+    LeapHandJointEnvCfg_PLAY,
+    LeapHandSe3EnvCfg_PLAY,
     LeapHandTactileEnvCfg_PLAY,
+    LeapHandSe3TactileEnvCfg_PLAY,
+    LeapHandAffineEnvCfg_PLAY,
+    # 场景配置
+    LeapHandSceneCfg,
+    LeapHandTactileSceneCfg,
+    LeapHandFullTactileSceneCfg,
+    # 动作配置
+    Se3EmaActionsCfg,
+    # 观测配置
+    Se3TactileObservationsCfg,
+    TactileObservationsCfg,
+    # 奖励配置
+    Se3TactileRewardsCfg,
 )
 
 ##
