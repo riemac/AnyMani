@@ -143,6 +143,46 @@ def success_bonus(
 
     return success_reward
 
+
+def track_pos_l2(
+    env: "ManagerBasedRLEnv",
+    command_name: str = "goal_pose",
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """位置跟踪惩罚：物体位置与目标位置的 L2 距离。
+
+    该项用于“位置约束/别漂移”：
+    - 目标位置来自命令项（RelativeSO3Command / ContinuousRotationCommand 等）的 pos_command_e；
+    - 物体当前位置取 root_pos_w 并减去 env_origins，得到环境坐标系 {e} 下的位置。
+
+    Note:
+        IsaacLab 官方 inhand 任务中也提供了类似的 track_pos_l2（默认在配置里注释掉）。
+        AnyMani 这里保留同名接口，便于直接对齐上游配置风格。
+
+    Returns:
+        (num_envs,) 张量，位置误差的 L2 范数（越大越“坏”，通常配负权重）。
+    """
+
+    asset: RigidObject = env.scene[object_cfg.name]
+
+    goal_pos_e, _ = _resolve_goal_pose_from_command_term(env, command_name)
+    object_pos_e = asset.data.root_pos_w - env.scene.env_origins
+    return torch.norm(object_pos_e - goal_pos_e, p=2, dim=-1)
+
+
+def goal_position_distance(
+    env: "ManagerBasedRLEnv",
+    command_name: str = "goal_pose",
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """兼容接口：goal_position_distance 等价于 track_pos_l2。
+
+    历史原因：部分环境配置（例如 leaphand_round 的早期版本）使用了该函数名。
+    为避免配置失效，这里提供别名。
+    """
+
+    return track_pos_l2(env=env, command_name=command_name, object_cfg=object_cfg)
+
 def fall_penalty(
     env: ManagerBasedRLEnv,
     command_name: str = "goal_pose",

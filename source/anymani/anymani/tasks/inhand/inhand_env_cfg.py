@@ -155,6 +155,14 @@ class JointSpaceObsGroupCfg(ObsGroup):
         params={"command_name": "goal_pose"},
     )
 
+    # NOTE:
+    #   位置目标（pos_command_e）是命令项提供的“别乱跑”约束信号。
+    #   为了保持 policy 观测可部署（不依赖物体绝对位姿），该项仅在 Critic/特权观测组中启用。
+    pos_command = ObsTerm(
+        func=leap_mdp.pos_command,
+        params={"command_name": "goal_pose"},
+    )
+
     # -- action terms
     last_action = ObsTerm(func=mdp.last_action)
 
@@ -216,6 +224,12 @@ class Se3ObsGroupCfg(ObsGroup):
     # -- command terms
     so3_command = ObsTerm(
         func=leap_mdp.so3_command,
+        params={"command_name": "goal_pose"},
+    )
+
+    # NOTE: 同 JointSpaceObsGroupCfg，仅用于 Critic/特权观测。
+    pos_command = ObsTerm(
+        func=leap_mdp.pos_command,
         params={"command_name": "goal_pose"},
     )
 
@@ -494,6 +508,19 @@ class CommonRewardsCfg:
         params={
             "object_cfg": SceneEntityCfg("object"),
             "rot_eps": 0.1,
+            "command_name": "goal_pose",
+        },
+    )
+
+    # NOTE:
+    #   对齐 IsaacLab 官方 inhand 环境：位置跟踪奖励项在上游默认是“可选关闭”的。
+    #   - 该项度量物体位置与 pos_command_e 的 L2 距离（环境系 {e}）。
+    #   - 若希望显式约束“物体别漂移”，将 weight 从 0.0 调整为负值（例如 -10.0）。
+    track_pos_l2 = RewTerm(
+        func=leap_mdp.track_pos_l2,
+        weight=0.0,
+        params={
+            "object_cfg": SceneEntityCfg("object"),
             "command_name": "goal_pose",
         },
     )
@@ -961,6 +988,9 @@ class Se3TactileObservationsCfg:
             params={"asset_cfg": SceneEntityCfg("object"), "make_quat_unique": False},
         )
         so3_command = ObsTerm(func=leap_mdp.so3_command, params={"command_name": "goal_pose"})
+
+        # NOTE: 位置目标仅用于 Critic/特权观测，policy 侧不暴露以保持可部署假设。
+        pos_command = ObsTerm(func=leap_mdp.pos_command, params={"command_name": "goal_pose"})
         last_action = ObsTerm(func=mdp.last_action)
         fingertip_contact_force = ObsTerm(
             func=leap_mdp.fingertip_contact_data,
