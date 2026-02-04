@@ -97,24 +97,21 @@ class RelativeSO3CommandCfg(CommandTermCfg):
     """fixed_goal：是否在成功时重采样新指令。rolling_goal：该字段将被忽略。"""
 
     # NOTE:
-    #   默认把 marker 略微抬高一点：否则 marker 与真实物体完全重合时容易被遮挡/产生 z-fighting，
-    #   用户在 IsaacSim 视口中会误以为“没有可视化”。
-    marker_pos_offset: tuple[float, float, float] = (0.0, 0.0, 0.06)
-    """可视化 marker 相对于目标位置的偏移（避免遮挡物体）。"""
+    #   对齐参考实现（LEAP_Hand_Isaac_Lab）：
+    #   目标 marker 并不叠加到真实物体位置上方，也不使用半透明/改色材质。
+    #   它被放置在每个环境原点附近的一个固定位置，用于“展示目标旋转”。
+    #
+    #   该位置是环境坐标系 {e} 下的常量，最终可视化时会加上 env_origins 变为世界坐标系。
+    goal_marker_pos_e: tuple[float, float, float] = (-0.2, -0.45, 0.68)
+    """目标姿态 marker 的固定位置（环境坐标系 {e}）。"""
 
     goal_pose_visualizer_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
         prim_path="/Visuals/Command/goal_marker",
         markers={
             "goal": sim_utils.UsdFileCfg(
                 usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
-                scale=(1.0, 1.0, 1.0),
-                # 让目标物体看起来像“ghost cube”：绿色 + 半透明，方便和真实物体区分。
-                visual_material=sim_utils.PreviewSurfaceCfg(
-                    diffuse_color=(0.0, 1.0, 0.0),
-                    opacity=0.35,
-                    roughness=0.8,
-                    metallic=0.0,
-                ),
+                # 对齐 LEAP：使用 DexCube 的原生外观（不改色/不改透明度），并使用相同缩放。
+                scale=(1.2, 1.2, 1.2),
             ),
         },
     )

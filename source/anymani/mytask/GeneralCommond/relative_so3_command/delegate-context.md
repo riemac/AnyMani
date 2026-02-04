@@ -40,20 +40,30 @@
 | 2026-02-04 | Coding subagent：command 改为 6D | ✅ 完成，commit b2b621b |
 | 2026-02-04 | Coding subagent：完善位置约束应用 | ✅ 完成，commit 49fb4d5 |
 | 2026-02-04 | Debug subagent：测试 LeapHandJointEnvCfg 训练 | ✅ 完成，commit 2db3908 |
-| 2026-02-04 | Coding subagent：添加目标物体可视化 | ✅ 完成 |
+| 2026-02-04 | Coding subagent：添加目标物体可视化 | ❌ 不符合用户期望，commit 22d8d6a |
+| 2026-02-04 | Coding subagent：修正目标物体可视化 | 进行中 |
 
 ## 当前待解决问题
 
-用户反馈：没有在 IsaacSim 上看到任务指令的可视化物体（目标物体）。
+⚠️ **用户严重不满**：上一次可视化实现完全不符合预期！
 
-参考实现：
-- IsaacLab 官方：有目标物体可视化
-- LEAP_Hand_Isaac_Lab：`LEAP_Hand_Isaac_Lab/source/LEAP_Isaaclab/LEAP_Isaaclab/tasks/leap_hand_reorient/reorientation_env.py` - 操作物体旁边有一个目标物体
+**问题**：
+1. 颜色不对：不是"幽灵绿色"
+2. 位置不对
 
-需要：在场景中添加目标物体的可视化（ghost/透明的目标 DexCube），显示期望的目标姿态。
+**正确参考**：
+- `LEAP_Hand_Isaac_Lab/source/LEAP_Isaaclab/LEAP_Isaaclab/tasks/leap_hand_reorient/leap_hand_env_cfg.py`
+- 必须仔细研究这个文件的实现方式
+
+**要求**：
+1. 仔细研究 LEAP_Hand_Isaac_Lab 的实现
+2. 修改为完全一致的效果
+3. 测试确认
+4. 与用户讨论
 
 落地摘要：
-- `RelativeSO3CommandCfg.goal_pose_visualizer_cfg`：为 DexCube marker 绑定半透明绿色材质（ghost 效果），并默认加 `marker_pos_offset` 减少遮挡/z-fighting。
+- `RelativeSO3CommandCfg.goal_pose_visualizer_cfg`：对齐 LEAP_Hand_Isaac_Lab，使用 DexCube USD 的**原生外观**（不改色/不半透明），并使用同款 scale=(1.2,1.2,1.2)。
+- `RelativeSO3CommandCfg.goal_marker_pos_e`：对齐 LEAP，将 marker 放在每个环境原点附近的固定位置 (-0.2, -0.45, 0.68)（环境系），用于展示目标旋转。
 - `*EnvCfg_PLAY`：默认开启 `self.commands.goal_pose.debug_vis = True`，确保在 IsaacSim 视口里能看到目标姿态 marker。
 
 ## 当前待解决问题

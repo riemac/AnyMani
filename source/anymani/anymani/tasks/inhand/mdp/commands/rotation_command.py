@@ -353,9 +353,13 @@ class RelativeSO3Command(CommandTerm):
         if not hasattr(self, "goal_pose_visualizer"):
             return
 
-        marker_pos = self.pos_command_w + torch.tensor(self.cfg.marker_pos_offset, device=self.device)
-        marker_quat = self.quat_command_w
-        self.goal_pose_visualizer.visualize(translations=marker_pos, orientations=marker_quat)
+        # 对齐 LEAP 参考实现：marker 放在每个 env 原点附近的固定位置（环境系常量 + env_origins）。
+        # 这样 marker 不会与真实物体重合遮挡，且“位置”不会被误解为位置目标。
+        goal_pos_e = torch.tensor(self.cfg.goal_marker_pos_e, device=self.device, dtype=torch.float).unsqueeze(0)
+        marker_pos_w = self._env.scene.env_origins + goal_pos_e
+
+        marker_quat_w = self.quat_command_w
+        self.goal_pose_visualizer.visualize(translations=marker_pos_w, orientations=marker_quat_w)
 
     # ---------------------------------------------------------------------
     # internal helpers

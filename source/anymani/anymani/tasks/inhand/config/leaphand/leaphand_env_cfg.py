@@ -406,7 +406,7 @@ class LeapHandJointEnvCfg_PLAY(LeapHandJointEnvCfg):
         self.scene.num_envs = 50
         self.observations.policy.enable_corruption = False
         self.terminations.time_out = None
-        # 在 Play 模式下默认开启命令项可视化：显示目标物体（goal marker / ghost DexCube）。
+        # 在 Play 模式下默认开启命令项可视化：显示目标物体（goal marker，外观/位置对齐 LEAP 参考实现）。
         # 这不会影响训练环境（训练使用非 PLAY 配置）。
         self.commands.goal_pose.debug_vis = True
 
