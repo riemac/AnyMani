@@ -326,6 +326,16 @@ class RelativeSO3Command(CommandTerm):
         if not self.cfg.update_goal_on_success:
             return
 
+        # NOTE(时序/为什么安全):
+        #   这里读取 self.metrics["orientation_error"] 来做 success 判定。
+        #   在 IsaacLab 的默认实现中，CommandTerm.compute() 的调用顺序是：
+        #       1) _update_metrics()  -> 2) (可选) _resample()  -> 3) _update_command()
+        #   因此在“正常每步更新”场景下，orientation_error 会先被刷新，再进入本函数。
+        #
+        # NOTE(科研约定):
+        #   fixed_goal 模式下我们希望“只在成功时重采样”。为避免 time_left 触发的按时间重采样
+        #   干扰 success-based 重采样，环境配置里通常将 resampling_time_range 设为很大值（如 1e6）。
+
         success_mask = self.metrics["orientation_error"] < self.cfg.orientation_success_threshold
         success_ids = success_mask.nonzero(as_tuple=False).squeeze(-1)
         if len(success_ids) == 0:
