@@ -54,10 +54,19 @@ def goal_quat_diff(
     obj: RigidObject = env.scene[asset_cfg.name]
     current_quat = obj.data.root_quat_w  # (num_envs, 4) in (w, x, y, z)
 
-    # 获取目标姿态（从命令管理器）
-    # goal_pose 通常是 (pos, quat)，我们取后4维作为目标四元数
-    goal_pose = env.command_manager.get_command(command_name)
-    target_quat = goal_pose[:, -4:]  # (num_envs, 4) in (w, x, y, z)
+    # 获取目标姿态：
+    # - RelativeSO3Command 的 command() 是 3D rotvec，不再包含 quat；目标 quat 存在 term.quat_command_w
+    # - 旧命令项仍可能直接输出 (pos, quat) 的 7D pose
+    term = env.command_manager.get_term(command_name)
+    target_quat = getattr(term, "quat_command_w", None)
+    if not (isinstance(target_quat, torch.Tensor) and target_quat.shape[-1] == 4):
+        goal_pose = env.command_manager.get_command(command_name)
+        if not (isinstance(goal_pose, torch.Tensor) and goal_pose.shape[-1] >= 7):
+            raise RuntimeError(
+                f"goal_quat_diff expects command '{command_name}' to provide term.quat_command_w or a pose-like tensor. "
+                f"Got: {type(goal_pose)} {getattr(goal_pose, 'shape', None)}"
+            )
+        target_quat = goal_pose[:, -4:]  # (num_envs, 4)
 
     # 计算四元数差：quat_diff = target ⊗ current^(-1)
     current_quat_inv = math_utils.quat_inv(current_quat)

@@ -244,3 +244,33 @@ def fingertip_contact_data(
     else:
         # (num_envs, num_sensors)
         return torch.stack(forces, dim=1)
+
+
+def so3_command(env: "ManagerBasedRLEnv", command_name: str) -> torch.Tensor:
+    """读取 so(3) 相对增量指令（rotvec）。
+
+    该观测项用于对齐方案：policy 侧只接收 3 维 rotvec 指令，而不依赖物体绝对姿态。
+
+    优先从命令项对象读取 `phi_ref_e`（便于后续扩展为手掌系 {s} 等），若不存在则回退到
+    `env.command_manager.get_command()`。
+
+    Args:
+        env: 强化学习环境实例
+        command_name: CommandManager 中的命令项名称
+
+    Returns:
+        (num_envs, 3) 张量，so(3) 指令 rotvec
+    """
+
+    term = env.command_manager.get_term(command_name)
+    if hasattr(term, "phi_ref_e"):
+        phi = getattr(term, "phi_ref_e")
+        if isinstance(phi, torch.Tensor) and phi.shape[-1] == 3:
+            return phi
+
+    cmd = env.command_manager.get_command(command_name)
+    if not (isinstance(cmd, torch.Tensor) and cmd.shape[-1] == 3):
+        raise RuntimeError(
+            f"so3_command expects command '{command_name}' to provide a (num_envs,3) tensor. Got: {type(cmd)} {getattr(cmd, 'shape', None)}"
+        )
+    return cmd

@@ -128,7 +128,7 @@ class JointSpaceObsGroupCfg(ObsGroup):
     适用于关节位置控制的任务，观测包括：
     - 关节位置（归一化到限位范围）
     - 物体位姿
-    - 目标位姿和姿态差
+    - so(3) 指令（3D rotvec）
     - 上一步动作
     """
     
@@ -150,17 +150,9 @@ class JointSpaceObsGroupCfg(ObsGroup):
     )
 
     # -- command terms
-    goal_pose = ObsTerm(
-        func=mdp.generated_commands,
+    so3_command = ObsTerm(
+        func=leap_mdp.so3_command,
         params={"command_name": "goal_pose"},
-    )
-    goal_quat_diff = ObsTerm(
-        func=leap_mdp.goal_quat_diff,
-        params={
-            "asset_cfg": SceneEntityCfg("object"),
-            "command_name": "goal_pose",
-            "make_quat_unique": True,
-        },
     )
 
     # -- action terms
@@ -183,7 +175,7 @@ class ProprioceptionObsGroupCfg(JointSpaceObsGroupCfg):
         # 移除需要外部感知的项
         self.object_pos = None
         self.object_quat = None
-        self.goal_quat_diff = None
+        # so3_command 是可部署指令输入，保留
 
 
 @configclass
@@ -193,7 +185,7 @@ class Se3ObsGroupCfg(ObsGroup):
     适用于 SE(3) 动作空间的任务，观测包括：
     - 指尖刚体旋量（body_twists）
     - 物体位姿
-    - 目标位姿和姿态差
+    - so(3) 指令（3D rotvec）
     - 上一步动作
     
     Note:
@@ -222,17 +214,9 @@ class Se3ObsGroupCfg(ObsGroup):
     )
 
     # -- command terms
-    goal_pose = ObsTerm(
-        func=mdp.generated_commands,
+    so3_command = ObsTerm(
+        func=leap_mdp.so3_command,
         params={"command_name": "goal_pose"},
-    )
-    goal_quat_diff = ObsTerm(
-        func=leap_mdp.goal_quat_diff,
-        params={
-            "asset_cfg": SceneEntityCfg("object"),
-            "command_name": "goal_pose",
-            "make_quat_unique": True,
-        },
     )
 
     # -- action terms
@@ -244,12 +228,25 @@ class Se3ObsGroupCfg(ObsGroup):
 
 
 @configclass
+class Se3ProprioceptionObsGroupCfg(Se3ObsGroupCfg):
+    """SE(3) 本体感受观测组（无物体绝对位姿）。
+
+    用于 sim2real：policy 不依赖物体的绝对位置/姿态，只读本体感受与 so(3) 指令。
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.object_pos = None
+        self.object_quat = None
+
+
+@configclass
 class JointSpaceObservationsCfg:
     """关节空间完整观测配置（Policy + Critic）"""
     
     @configclass
-    class PolicyCfg(JointSpaceObsGroupCfg):
-        """策略观测"""
+    class PolicyCfg(ProprioceptionObsGroupCfg):
+        """策略观测（可部署）：无物体绝对位姿"""
         pass
     
     @configclass
@@ -266,8 +263,8 @@ class Se3ObservationsCfg:
     """SE(3) 动作空间完整观测配置（Policy + Critic）"""
     
     @configclass
-    class PolicyCfg(Se3ObsGroupCfg):
-        """策略观测"""
+    class PolicyCfg(Se3ProprioceptionObsGroupCfg):
+        """策略观测（可部署）：无物体绝对位姿"""
         pass
     
     @configclass
@@ -740,13 +737,19 @@ class CommonTerminationsCfg:
 
 @configclass
 class ContinuousRotationCommandsCfg:
-    """连续旋转任务命令配置"""
-    goal_pose = leap_mdp.ContinuousRotationCommandCfg(
+    """so(3) 相对增量指令命令配置。
+
+    NOTE:
+        这里保留类名以避免大范围重命名，但内部命令项已替换为 RelativeSO3Command。
+    """
+
+    goal_pose = leap_mdp.RelativeSO3CommandCfg(
         asset_name="object",
         resampling_time_range=(1e6, 1e6),
         init_pos_offset=(0.0, 0.0, 0.0),
-        rotation_axis="z",
-        delta_angle=math.pi / 8.0,
+        theta_min=0.0,
+        theta_max=math.pi / 2.0,
+        mode="fixed_goal",
         make_quat_unique=True,
         update_goal_on_success=True,
     )
@@ -845,7 +848,7 @@ class TactileSceneCfg(InHandObjectSceneCfg):
 
 
 @configclass
-class TactileObsGroupCfg(JointSpaceObsGroupCfg):
+class TactileObsGroupCfg(ProprioceptionObsGroupCfg):
     """触觉增强观测组
     
     在关节空间观测基础上添加二值化触觉信号。
@@ -920,7 +923,7 @@ class Se3TactileObservationsCfg:
             },
             history_length=ENCODER_HISTORY_LENGTH,
         )
-        goal_pose = ObsTerm(func=mdp.generated_commands, params={"command_name": "goal_pose"})
+        so3_command = ObsTerm(func=leap_mdp.so3_command, params={"command_name": "goal_pose"})
         last_action = ObsTerm(func=mdp.last_action, history_length=ENCODER_HISTORY_LENGTH)
         fingertip_contact_binary = ObsTerm(
             func=leap_mdp.fingertip_contact_data,
@@ -957,15 +960,7 @@ class Se3TactileObservationsCfg:
             func=mdp.root_quat_w,
             params={"asset_cfg": SceneEntityCfg("object"), "make_quat_unique": False},
         )
-        goal_pose = ObsTerm(func=mdp.generated_commands, params={"command_name": "goal_pose"})
-        goal_quat_diff = ObsTerm(
-            func=leap_mdp.goal_quat_diff,
-            params={
-                "asset_cfg": SceneEntityCfg("object"),
-                "command_name": "goal_pose",
-                "make_quat_unique": True,
-            },
-        )
+        so3_command = ObsTerm(func=leap_mdp.so3_command, params={"command_name": "goal_pose"})
         last_action = ObsTerm(func=mdp.last_action)
         fingertip_contact_force = ObsTerm(
             func=leap_mdp.fingertip_contact_data,
@@ -1125,6 +1120,8 @@ __all__ = [
     "InHandObjectSceneCfg",
     "TactileSceneCfg",
     # 观测
+    "ProprioceptionObsGroupCfg",
+    "Se3ProprioceptionObsGroupCfg",
     "JointSpaceObservationsCfg",
     "Se3ObservationsCfg",
     "TactileObsGroupCfg",

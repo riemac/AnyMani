@@ -8,11 +8,13 @@ from dataclasses import MISSING
 import math
 from pickle import NONE
 
+import isaaclab.sim as sim_utils
 from isaaclab.managers import CommandTermCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.markers import VisualizationMarkersCfg
 
-from .rotation_command import ContinuousRotationCommand
+from .rotation_command import ContinuousRotationCommand, RelativeSO3Command
 
 
 @configclass
@@ -50,3 +52,83 @@ class ContinuousRotationCommandCfg(CommandTermCfg):
             # 参考 DirectRLEnv 实现，允许约 0.2rad 的姿态误差，同时兼容更大旋转步长
             self.orientation_success_threshold = max(0.2, self.delta_angle / 2.0)
         # print(f"成功阈值: {self.orientation_success_threshold}")
+
+
+@configclass
+class RelativeSO3CommandCfg(CommandTermCfg):
+    """so(3) 相对增量指令（rotvec）命令配置。
+
+    该配置与 :class:`~anymani.tasks.inhand.mdp.commands.rotation_command.RelativeSO3Command` 配套。
+
+    设计动机：
+        - 训练阶段：用 ``fixed_goal`` 将目标冻结，使误差可收敛；
+        - 部署阶段：用 ``rolling_goal`` 保持指令恒定，实现持续旋转。
+
+    Note:
+        - ``theta_max`` 不建议取到 π，以规避 rotvec/quat 表示在 π 附近的数值奇异。
+        - 当前实现默认在环境坐标系 {e} 下解释 rotvec。
+    """
+
+    class_type: type = RelativeSO3Command
+    resampling_time_range: tuple[float, float] = (1e6, 1e6)
+
+    asset_name: str = MISSING
+    """参与旋转指令的物体在场景中的名称。"""
+
+    init_pos_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    """相对于物体默认根姿态的位置偏移（用于保持物体在掌心上方生成）。"""
+
+    theta_min: float = 0.0
+    """采样的最小旋转角（单位: rad）。"""
+
+    theta_max: float = math.pi / 2.0
+    """采样的最大旋转角（单位: rad）。"""
+
+    mode: str = "fixed_goal"
+    """指令模式：`fixed_goal` 或 `rolling_goal`。"""
+
+    make_quat_unique: bool = True
+    """是否将目标四元数约束为唯一表示（实部为正）。"""
+
+    orientation_success_threshold: float = NONE
+    """fixed_goal 下的成功阈值（单位: rad）。rolling_goal 下仅用于日志/指标。"""
+
+    update_goal_on_success: bool = True
+    """fixed_goal：是否在成功时重采样新指令。rolling_goal：该字段将被忽略。"""
+
+    marker_pos_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    """可视化 marker 相对于目标位置的偏移（避免遮挡物体）。"""
+
+    goal_pose_visualizer_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
+        prim_path="/Visuals/Command/goal_marker",
+        markers={
+            "goal": sim_utils.UsdFileCfg(
+                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
+                scale=(1.0, 1.0, 1.0),
+            ),
+        },
+    )
+    """目标姿态可视化 marker 配置（默认使用 DexCube）。"""
+
+    def __post_init__(self):
+        # --- basic validation ---
+        if not (0.0 <= float(self.theta_min) < float(self.theta_max)):
+            raise ValueError(
+                f"RelativeSO3CommandCfg requires 0 <= theta_min < theta_max, got: {self.theta_min}, {self.theta_max}"
+            )
+        # 避免接近 π 的数值不稳定（rotvec 在 π 附近存在等价类，学习信号更噪）
+        if float(self.theta_max) >= math.pi:
+            raise ValueError(
+                f"RelativeSO3CommandCfg.theta_max must be < pi for numerical stability, got: {self.theta_max}"
+            )
+
+        mode = str(self.mode).lower()
+        if mode not in {"fixed_goal", "rolling_goal"}:
+            raise ValueError(
+                f"RelativeSO3CommandCfg.mode must be 'fixed_goal' or 'rolling_goal', got: {self.mode}"
+            )
+        self.mode = mode
+
+        # default success threshold: keep consistent with existing tasks (0.2 rad)
+        if self.orientation_success_threshold == NONE:
+            self.orientation_success_threshold = 0.2

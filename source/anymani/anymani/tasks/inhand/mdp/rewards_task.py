@@ -28,6 +28,42 @@ if TYPE_CHECKING:
 ###
 # 旋转和重定向奖励
 ###
+
+
+def _resolve_goal_pose_from_command_term(
+    env: "ManagerBasedRLEnv", command_name: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """从命令项解析 goal pose（pos_e, quat_w）。
+
+    背景：RelativeSO3Command 的 `command()` 输出是 3 维 rotvec（phi_ref），不再是 7D pose。
+    但任务侧的 success/track 奖励仍需要一个 *内部* 目标姿态用于计算误差。
+
+    兼容策略：
+        1) 优先读取 command term 的内部 buffer（pos_command_e / quat_command_w）。
+        2) 否则回退到旧接口：command tensor 的 (pos, quat) 拼接形式。
+
+    Returns:
+        goal_pos_e: (num_envs, 3)
+        goal_quat_w: (num_envs, 4)
+    """
+
+    term = env.command_manager.get_term(command_name)
+
+    goal_pos_e = getattr(term, "pos_command_e", None)
+    goal_quat_w = getattr(term, "quat_command_w", None)
+
+    if isinstance(goal_pos_e, torch.Tensor) and isinstance(goal_quat_w, torch.Tensor):
+        return goal_pos_e, goal_quat_w
+
+    # fallback to legacy pose command: (pos_e, quat_w)
+    cmd = env.command_manager.get_command(command_name)
+    if not (isinstance(cmd, torch.Tensor) and cmd.shape[-1] >= 7):
+        raise RuntimeError(
+            f"Cannot resolve goal pose from command '{command_name}'. Expected term buffers (pos_command_e/quat_command_w) "
+            f"or a pose-like command tensor with dim>=7. Got: {type(cmd)} {getattr(cmd, 'shape', None)}"
+        )
+    return cmd[:, :3], cmd[:, -4:]
+
 def track_orientation_inv_l2(
     env: ManagerBasedRLEnv,
     command_name: str = "goal_pose",
@@ -53,10 +89,8 @@ def track_orientation_inv_l2(
     # 获取物体资产
     asset: RigidObject = env.scene[object_cfg.name]
 
-    # 获取目标姿态（从命令管理器）
-    # goal_pose 通常是 (pos, quat)，我们取后4维作为目标四元数
-    goal_pose = env.command_manager.get_command(command_name)
-    goal_quat_w = goal_pose[:, -4:]  # (num_envs, 4) in (w, x, y, z)
+    # 获取目标姿态（优先使用 command term 内部 buffer；兼容旧 pose command）
+    _, goal_quat_w = _resolve_goal_pose_from_command_term(env, command_name)
 
     # 计算方向误差（轴角表示的 L2 范数）
     # q_goal ⊖ q_current^(-1) -> 轴角对 -> 角误差（L2范数，单位轴化1，剩下角度）
@@ -90,17 +124,15 @@ def success_bonus(
     # act = env.action_manager.get_term(action_name)
     # act
 
-    # 获取目标姿态（从命令管理器）
-    goal_pose = env.command_manager.get_command(command_name)
-    goal_quat_w = goal_pose[:, -4:]  # (num_envs, 4) in (w, x, y, z)
+    # 获取目标姿态/位置（优先使用 command term 内部 buffer；兼容旧 pose command）
+    goal_pos_e, goal_quat_w = _resolve_goal_pose_from_command_term(env, command_name)
 
     # 计算方向误差（轴角表示的 L2 范数）
     dtheta = math_utils.quat_error_magnitude(goal_quat_w, asset.data.root_quat_w)
 
     # 计算位置误差（目标位置在环境坐标系下）
-    goal_pos = goal_pose[:, :3]
-    object_pos = asset.data.root_pos_w - env.scene.env_origins
-    goal_dist = torch.norm(object_pos - goal_pos, p=2, dim=-1)
+    object_pos_e = asset.data.root_pos_w - env.scene.env_origins
+    goal_dist = torch.norm(object_pos_e - goal_pos_e, p=2, dim=-1)
 
     # 计算成功奖励：姿态和位置双重满足
     success_reward = torch.where(
@@ -130,14 +162,59 @@ def fall_penalty(
     # 获取物体资产
     asset: RigidObject = env.scene[object_cfg.name]
 
-    goal_pose = env.command_manager.get_command(command_name)
-    goal_pos = goal_pose[:, :3]
-
-    object_pos = asset.data.root_pos_w - env.scene.env_origins
-
-    distance = torch.norm(object_pos - goal_pos, p=2, dim=-1)
+    goal_pos_e, _ = _resolve_goal_pose_from_command_term(env, command_name)
+    object_pos_e = asset.data.root_pos_w - env.scene.env_origins
+    distance = torch.norm(object_pos_e - goal_pos_e, p=2, dim=-1)
 
     return torch.where(distance > fall_distance, torch.ones_like(distance), torch.zeros_like(distance))
+
+
+def track_rotation_velocity_alignment(
+    env: "ManagerBasedRLEnv",
+    command_name: str = "goal_pose",
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    eps: float = 1e-6,
+    clamp_negative: bool = True,
+) -> torch.Tensor:
+    """rolling_goal 推荐奖励：角速度与指令轴对齐 + 幅值。
+
+    rolling_goal 下目标会随当前姿态滚动更新，基于姿态误差的 tracking reward 将退化为常数。
+    因此用“执行旋转”的信号更合适：鼓励物体角速度沿指令轴方向旋转，并鼓励一定的角速度幅值。
+
+    计算：
+        - 指令轴：u_ref = phi_ref / ||phi_ref||
+        - 角速度方向：u_omega = omega / ||omega||
+        - reward = ||omega|| * max(0, <u_ref, u_omega>)   (默认)
+
+    Args:
+        env: 环境
+        command_name: 命令项名称（RelativeSO3Command）
+        object_cfg: 物体资产
+        eps: 数值稳定
+        clamp_negative: 是否将反向旋转的 dot 裁剪为 0
+
+    Returns:
+        (num_envs,) reward
+    """
+
+    asset: RigidObject = env.scene[object_cfg.name]
+    omega_w = asset.data.root_ang_vel_w  # (num_envs, 3)
+    omega_norm = torch.linalg.norm(omega_w, dim=-1)
+    omega_hat = omega_w / (omega_norm.unsqueeze(-1) + eps)
+
+    term = env.command_manager.get_term(command_name)
+    phi = getattr(term, "phi_ref_e", None)
+    if not (isinstance(phi, torch.Tensor) and phi.shape[-1] == 3):
+        # fallback: command tensor itself
+        phi = env.command_manager.get_command(command_name)
+
+    phi_norm = torch.linalg.norm(phi, dim=-1)
+    phi_hat = phi / (phi_norm.unsqueeze(-1) + eps)
+
+    dot = torch.sum(phi_hat * omega_hat, dim=-1)
+    if clamp_negative:
+        dot = torch.clamp(dot, min=0.0)
+    return omega_norm * dot
 
 
 ###
