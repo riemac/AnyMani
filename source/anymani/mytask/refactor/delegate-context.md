@@ -67,7 +67,7 @@ JointSpaceActionsCfg, Se3ActionsCfg, AffineActionsCfg
 CommonRewardsCfg, Se3RewardsCfg, TactileRewardsCfg
 
 # 事件/终止/命令
-CommonEventCfg, CommonTerminationsCfg, ContinuousRotationCommandsCfg
+CommonEventCfg, CommonTerminationsCfg, ReorientationCommandsCfg
 ```
 
 ### 已验证的 Gym 环境

@@ -410,15 +410,6 @@ class RewardsCfg:
             "position_threshold": 0.025,
         },
     )
-    fingertip_distance = RewTerm(
-        func=leap_mdp.fingertip_distance_penalty,
-        weight=-2.0,
-        params={
-            "robot_cfg": SceneEntityCfg("robot"),
-            "object_cfg": SceneEntityCfg("object"),
-            "fingertip_body_names": ["fingertip", "thumb_fingertip", "fingertip_2", "fingertip_3"],
-        },
-    )
     pose_diff = RewTerm(func=leap_mdp.pose_diff_penalty, weight=-0.3)
     fall_penalty = RewTerm(
         func=leap_mdp.fall_penalty,

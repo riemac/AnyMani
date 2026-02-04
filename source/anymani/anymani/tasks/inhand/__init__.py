@@ -43,7 +43,7 @@ from .inhand_env_cfg import (
     # 终止
     CommonTerminationsCfg,
     # 命令
-    ContinuousRotationCommandsCfg,
+    ReorientationCommandsCfg,
     # 课程
     EmptyCurriculumCfg,
 )

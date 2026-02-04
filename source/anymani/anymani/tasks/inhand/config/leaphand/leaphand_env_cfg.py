@@ -66,7 +66,7 @@ from anymani.tasks.inhand.inhand_env_cfg import (
     # 终止
     CommonTerminationsCfg,
     # 命令
-    ContinuousRotationCommandsCfg,
+    ReorientationCommandsCfg,
     # 课程
     EmptyCurriculumCfg,
     # 触觉超参数
@@ -302,7 +302,7 @@ class LeapHandJointEnvCfg(ManagerBasedRLEnvCfg):
     # MDP 配置
     observations: JointSpaceObservationsCfg = JointSpaceObservationsCfg()
     actions: JointSpaceActionsCfg = JointSpaceActionsCfg()
-    commands: ContinuousRotationCommandsCfg = ContinuousRotationCommandsCfg()
+    commands: ReorientationCommandsCfg = ReorientationCommandsCfg()
     rewards: CommonRewardsCfg = CommonRewardsCfg()
     terminations: CommonTerminationsCfg = CommonTerminationsCfg()
     events: CommonEventCfg = CommonEventCfg()

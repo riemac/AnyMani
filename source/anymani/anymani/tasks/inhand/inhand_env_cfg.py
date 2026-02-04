@@ -184,6 +184,8 @@ class ProprioceptionObsGroupCfg(JointSpaceObsGroupCfg):
         self.object_pos = None
         self.object_quat = None
         # so3_command 是可部署指令输入，保留
+        # pos_command 属于特权信息（目标位置约束），仅在 Critic/特权观测中启用
+        self.pos_command = None
 
 
 @configclass
@@ -252,6 +254,8 @@ class Se3ProprioceptionObsGroupCfg(Se3ObsGroupCfg):
         super().__post_init__()
         self.object_pos = None
         self.object_quat = None
+        # pos_command 属于特权信息（目标位置约束），仅在 Critic/特权观测中启用
+        self.pos_command = None
 
 
 @configclass
@@ -548,21 +552,10 @@ class Se3RewardsCfg(CommonRewardsCfg):
     """SE(3) 动作空间专用奖励配置
     
     在通用奖励基础上增加：
-    - 指尖距离惩罚
     - 可操作度奖励
     - 动能惩罚
     - 动作平滑奖励
     """
-    
-    fingertip_distance = RewTerm(
-        func=leap_mdp.fingertip_distance_penalty,
-        weight=-2.0,
-        params={
-            "robot_cfg": SceneEntityCfg("robot"),
-            "object_cfg": SceneEntityCfg("object"),
-            "fingertip_body_names": ["fingertip", "thumb_fingertip", "fingertip_2", "fingertip_3"],
-        },
-    )
     
     fall_penalty = RewTerm(
         func=leap_mdp.fall_penalty,
@@ -763,7 +756,7 @@ class CommonTerminationsCfg:
 ##############################################################################
 
 @configclass
-class ContinuousRotationCommandsCfg:
+class ReorientationCommandsCfg:
     """so(3) 相对增量指令命令配置。
 
     NOTE:
@@ -1171,7 +1164,7 @@ __all__ = [
     # 事件/终止/命令/课程
     "CommonEventCfg",
     "CommonTerminationsCfg",
-    "ContinuousRotationCommandsCfg",
+    "ReorientationCommandsCfg",
     "EmptyCurriculumCfg",
     # 触觉超参数
     "TACTILE_FORCE_THRESHOLD",

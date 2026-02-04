@@ -38,7 +38,8 @@
 | 2026-02-04 | General subagent 讨论方案 | ✅ 完成 |
 | 2026-02-04 | Coding subagent 实施 | ✅ 完成，commit 4e06513 |
 | 2026-02-04 | Coding subagent：command 改为 6D | ✅ 完成，commit b2b621b |
-| 2026-02-04 | Coding subagent：完善位置观察项应用 | ✅ 完成 |
+| 2026-02-04 | Coding subagent：完善位置约束应用 | ✅ 完成，commit 49fb4d5 |
+| 2026-02-04 | Debug subagent：测试 LeapHandJointEnvCfg 训练 | 进行中 |
 
 ## 当前待解决问题
 
