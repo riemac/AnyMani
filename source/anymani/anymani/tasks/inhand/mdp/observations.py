@@ -269,8 +269,51 @@ def so3_command(env: "ManagerBasedRLEnv", command_name: str) -> torch.Tensor:
             return phi
 
     cmd = env.command_manager.get_command(command_name)
-    if not (isinstance(cmd, torch.Tensor) and cmd.shape[-1] == 3):
-        raise RuntimeError(
-            f"so3_command expects command '{command_name}' to provide a (num_envs,3) tensor. Got: {type(cmd)} {getattr(cmd, 'shape', None)}"
-        )
-    return cmd
+    # fallback: 假设 command 格式为 (pos_e, phi_ref_e) = 6D，取后 3 维
+    if isinstance(cmd, torch.Tensor):
+        if cmd.shape[-1] == 6:
+            return cmd[:, 3:6]
+        if cmd.shape[-1] == 3:
+            return cmd
+
+    raise RuntimeError(
+        f"so3_command expects command '{command_name}' to provide a (num_envs,3) tensor or a (num_envs,6) tensor (pos_e, phi_ref_e). "
+        f"Got: {type(cmd)} {getattr(cmd, 'shape', None)}"
+    )
+
+
+def pos_command(env: "ManagerBasedRLEnv", command_name: str) -> torch.Tensor:
+    """读取目标位置命令 pos_command_e（环境系 {e}）。
+
+    该观测项用于“位置约束”：命令项可同时输出 (pos_command_e, phi_ref_e) 的 6D command。
+
+    优先从命令项对象读取 `pos_command_e`（更明确的语义）；若不存在则回退到
+    `env.command_manager.get_command()`。
+
+    Args:
+        env: 强化学习环境实例
+        command_name: CommandManager 中的命令项名称
+
+    Returns:
+        (num_envs, 3) 张量，目标位置（环境系）
+    """
+
+    term = env.command_manager.get_term(command_name)
+    if hasattr(term, "pos_command_e"):
+        pos = getattr(term, "pos_command_e")
+        if isinstance(pos, torch.Tensor) and pos.shape[-1] == 3:
+            return pos
+
+    cmd = env.command_manager.get_command(command_name)
+    if isinstance(cmd, torch.Tensor):
+        # 新接口：6D command = (pos_e, phi_ref_e)
+        if cmd.shape[-1] == 6:
+            return cmd[:, 0:3]
+        # 旧接口：pose-like command = (pos_e, quat_w) with dim>=7
+        if cmd.shape[-1] >= 7:
+            return cmd[:, 0:3]
+
+    raise RuntimeError(
+        f"pos_command expects command '{command_name}' to provide term.pos_command_e, a (num_envs,6) tensor (pos_e, phi_ref_e), "
+        f"or a pose-like tensor with dim>=7. Got: {type(cmd)} {getattr(cmd, 'shape', None)}"
+    )

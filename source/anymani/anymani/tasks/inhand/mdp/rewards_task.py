@@ -206,7 +206,21 @@ def track_rotation_velocity_alignment(
     phi = getattr(term, "phi_ref_e", None)
     if not (isinstance(phi, torch.Tensor) and phi.shape[-1] == 3):
         # fallback: command tensor itself
-        phi = env.command_manager.get_command(command_name)
+        cmd = env.command_manager.get_command(command_name)
+        if isinstance(cmd, torch.Tensor):
+            # 兼容 RelativeSO3Command 新接口：6D=(pos_e, phi_ref_e)
+            if cmd.shape[-1] == 6:
+                phi = cmd[:, 3:6]
+            else:
+                phi = cmd
+        else:
+            phi = cmd
+
+    if not (isinstance(phi, torch.Tensor) and phi.shape[-1] == 3):
+        raise RuntimeError(
+            f"track_rotation_velocity_alignment expects command '{command_name}' to provide phi_ref_e as (num_envs,3) "
+            f"or a command tensor with dim=3 (phi_ref_e) / dim=6 (pos_e, phi_ref_e). Got: {type(phi)} {getattr(phi, 'shape', None)}"
+        )
 
     phi_norm = torch.linalg.norm(phi, dim=-1)
     phi_hat = phi / (phi_norm.unsqueeze(-1) + eps)

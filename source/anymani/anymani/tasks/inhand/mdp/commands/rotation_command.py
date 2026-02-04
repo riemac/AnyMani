@@ -191,10 +191,15 @@ class RelativeSO3Command(CommandTerm):
         self.object = env.scene[cfg.asset_name]
 
         # NOTE:
-        #   方案对齐后，policy 侧只应看到 3 维 so(3) 指令（rotvec），而不是绝对目标四元数。
-        #   因此 `command` 属性仅暴露 `phi_ref_e`。
+        #   用户侧需求：不希望物体位置到处漂移，因此希望命令项同时给出“目标位置约束”。
+        #   于是 `command` 属性从 3D 扩展为 6D：
+        #       (pos_command_e, phi_ref_e)
+        #   - 前 3 维 pos_command_e：环境系 {e} 下的位置目标，用于位置约束
+        #   - 后 3 维 phi_ref_e：环境系 {e} 下的 so(3) 指令 rotvec，用于相对旋转
         #
-        #   这里仍保留 pos/quat 相关 buffer 作为 *内部状态*：
+        #   但 policy 观测侧仍只应看到 3 维 so(3) 指令：通过 `so3_command` 观测项取后 3 维。
+        #
+        #   同时仍保留 quat_command_w 等 buffer 作为 *内部状态*：
         #   - fixed_goal 需要用冻结的目标姿态计算误差并触发成功重采样
         #   - debug/metrics（以及后续可选的可视化）可能复用这些量
         init_pos_offset = torch.tensor(cfg.init_pos_offset, dtype=torch.float, device=self.device)
@@ -227,19 +232,24 @@ class RelativeSO3Command(CommandTerm):
 
     def __str__(self) -> str:
         msg = "RelativeSO3Command:\n"
-        msg += f"\t命令维度: {tuple(self.command.shape[1:])} (phi_ref_e)\n"
+        msg += f"\t命令维度: {tuple(self.command.shape[1:])} (pos_command_e, phi_ref_e)\n"
         msg += f"\tmode: {self.cfg.mode}\n"
         msg += f"\ttheta_range: [{self.cfg.theta_min}, {self.cfg.theta_max}] rad"
         return msg
 
     @property
     def command(self) -> torch.Tensor:
-        """返回 so(3) 指令 rotvec（环境系 {e}）。
+        """返回目标位置（环境系）+ so(3) 指令 rotvec（环境系 {e}）。
 
-        形状: (num_envs, 3)
+        形状: (num_envs, 6)
+
+        Note:
+            - 前 3 维为目标位置 pos_command_e，用于约束物体位置
+            - 后 3 维为 so(3) 指令 phi_ref_e，表示期望的相对旋转
+            - policy 观测侧通过 `so3_command` 观测项仅读取后 3 维
         """
 
-        return self.phi_ref_e
+        return torch.cat((self.pos_command_e, self.phi_ref_e), dim=-1)
 
     # ---------------------------------------------------------------------
     # lifecycle hooks
