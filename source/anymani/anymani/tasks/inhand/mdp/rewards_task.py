@@ -140,51 +140,6 @@ def fall_penalty(
     return torch.where(distance > fall_distance, torch.ones_like(distance), torch.zeros_like(distance))
 
 
-def goal_position_distance(
-    env: ManagerBasedRLEnv,
-    command_name: str = "goal_pose",
-    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
-) -> torch.Tensor:
-    """物体与目标位置之间的欧氏距离。"""
-
-    asset: RigidObject = env.scene[object_cfg.name]
-
-    goal_pose = env.command_manager.get_command(command_name)
-    goal_pos = goal_pose[:, :3]
-
-    object_pos = asset.data.root_pos_w - env.scene.env_origins
-
-    return torch.norm(object_pos - goal_pos, p=2, dim=-1)
-
-
-def fingertip_distance_penalty(
-    env: ManagerBasedRLEnv,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
-    fingertip_body_names: Sequence[str] | None = None,
-) -> torch.Tensor:
-    """指尖到物体中心距离的平均值。"""
-
-    if fingertip_body_names is None or len(fingertip_body_names) == 0:
-        raise ValueError("fingertip_body_names 不能为空，需指定指尖 body 名称。")
-
-    robot: Articulation = env.scene[robot_cfg.name]
-    obj: RigidObject = env.scene[object_cfg.name]
-
-    if not hasattr(env, "_leaphand_fingertip_body_ids"):
-        body_ids, _ = robot.find_bodies(list(fingertip_body_names), preserve_order=True)
-        env._leaphand_fingertip_body_ids = torch.as_tensor(body_ids, device=env.device, dtype=torch.long)
-
-    fingertip_pos = robot.data.body_pos_w[:, env._leaphand_fingertip_body_ids]
-    fingertip_pos = fingertip_pos - env.scene.env_origins.unsqueeze(1)
-
-    object_pos = obj.data.root_pos_w - env.scene.env_origins
-
-    distances = torch.norm(fingertip_pos - object_pos.unsqueeze(1), p=2, dim=-1)
-
-    return torch.mean(distances, dim=-1)
-
-
 ###
 #  参考LEAP_Hand_Isaac_Lab奖励项
 ###
@@ -271,7 +226,3 @@ def pose_diff_penalty(
 
     return pose_diff_penalty
 
-
-###
-# 接触奖励
-###

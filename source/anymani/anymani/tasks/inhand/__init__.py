@@ -30,8 +30,6 @@ from .inhand_env_cfg import (
     Se3ObservationsCfg,
     TactileObsGroupCfg,
     TactileCriticObsGroupCfg,
-    RmaPrivInfoObsGroupCfg,
-    RmaProprioHistObsGroupCfg,
     # 动作
     JointSpaceActionsCfg,
     Se3ActionsCfg,

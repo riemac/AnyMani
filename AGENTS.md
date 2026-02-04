@@ -17,10 +17,7 @@
 
 ### 科研背景
 
-用户为科研人员，主要研究方向：
-- 强化学习训练灵巧操作策略
-- 策略蒸馏 → 模仿学习 → 跨手型/跨物体泛化
-- 参考项目：Hora、Get-Zero、TRO-Grasp、DEXTRAH
+用户为科研人员，研究方向：强化学习训练灵巧操作策略，策略蒸馏 → 模仿学习 → 跨手型/跨物体泛化
 
 ---
 
@@ -76,6 +73,7 @@ AnyMani/source/anymani/
 - **事件**：`CommonEventCfg`（域随机化）
 - **终止**：`CommonTerminationsCfg`
 - **命令**：`ContinuousRotationCommandsCfg`
+- **课程**：暂无
 
 #### 2. 手型配置（`config/leaphand/leaphand_env_cfg.py`）
 
@@ -121,10 +119,9 @@ AnyMani/source/anymani/
 
 ### 2. 代码风格
 
+- 主要基于 `ManagerBasedRLEnv` 环境架构开发
+- 部分功能测试验证基于 `standalone app launcher` 开发
 - 继承 Isaac Lab 的配置类风格：`@configclass` + `__post_init__`
-- 注释使用中文，面向科研人员（非专业工程师）
-- MDP 组件名称：描述性命名（如 `JointSpaceObservationsCfg`）
-- 环境变体名称：手型 + 特性（如 `LeapHandSe3EnvCfg`）
 
 ### 3. 模块依赖
 
@@ -166,17 +163,11 @@ python scripts/list_envs.py
 ### 运行环境
 
 ```bash
-# 随机 agent 测试
-python scripts/random_agent.py --task AnyMani-LeapHand-Joint-v0 --num_envs 1024 --headless
+# 随机 agent 测试,验证环境可用性
+python scripts/random_agent.py --task AnyMani-LeapHand-Joint-v0 --num_envs 1 --headless
 
 # RL 训练
-python scripts/rl_games/train.py --task AnyMani-LeapHand-Joint-v0 --num_envs 8192 --headless
-```
-
-### 验证环境可用性
-
-```bash
-timeout 30 python scripts/random_agent.py --task <ENV_ID> --num_envs 1 --headless
+python scripts/rl_games/train.py --task AnyMani-LeapHand-Joint-v0 --num_envs 4096 --headless
 ```
 
 ---
@@ -187,26 +178,4 @@ timeout 30 python scripts/random_agent.py --task <ENV_ID> --num_envs 1 --headles
 |------|------|------|
 | **Isaac Lab** | 上游框架 | `/home/hac/isaac/IsaacLab` |
 | **Hora** | IsaacGym 手内旋转 | `/home/hac/isaac/hora` |
-| **Get-Zero** | 跨手型泛化旋转 | `/home/hac/isaac/get_zero` |
-| **TRO-Grasp** | 跨手型/物体抓取 | `/home/hac/isaac/TRO-Grasp` |
-| **DEXTRAH** | IsaacLab 灵巧抓取 | `/home/hac/isaac/DEXTRAH` |
 | **rl_games** | RL 算法库 | `/home/hac/isaac/rl_games` |
-
----
-
-## 修改历史
-
-| 日期 | 版本 | 说明 |
-|------|------|------|
-| 2026-02-02 | v2.0 | 重构架构：MDP 组件解耦、稳定版本机制 |
-| 2025-xx-xx | v1.x | 早期版本：单一配置文件 |
-
----
-
-## 注意事项
-
-1. **科研角色**：用户不是专业工程师，避免过度工程化（如 CI/CD、单元测试等）
-2. **反馈循环**：使用 `mcp_mcp-feedback-_interactive_feedback` 保持对话，用户未明确说"结束"前持续反馈
-3. **委派机制**：复杂任务委派 subagent，主 agent 负责理解背景和调度
-4. **代码注释**：必须准确反映代码实际行为，删除过时注释
-5. **分支规则**：在 refactor 分支工作，禁止未经用户确认合并到 main

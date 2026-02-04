@@ -501,15 +501,6 @@ class CommonRewardsCfg:
         },
     )
     
-    goal_position_distance = RewTerm(
-        func=leap_mdp.goal_position_distance,
-        weight=-10.0,
-        params={
-            "object_cfg": SceneEntityCfg("object"),
-            "command_name": "goal_pose",
-        },
-    )
-    
     success_bonus = RewTerm(
         func=leap_mdp.success_bonus,
         weight=250.0,
@@ -908,11 +899,6 @@ class TactileObservationsCfg:
     critic: ObsGroup = CriticCfg(history_length=1)
 
 
-##############################################################################
-# SE(3) + 触觉观测配置
-##############################################################################
-
-
 @configclass
 class Se3TactileObservationsCfg:
     """SE(3) + 触觉观测配置
@@ -1051,11 +1037,6 @@ class TactileRewardsCfg(CommonRewardsCfg):
     )
 
 
-##############################################################################
-# SE(3) + 触觉奖励配置
-##############################################################################
-
-
 @configclass
 class Se3TactileRewardsCfg(Se3RewardsCfg):
     """SE(3) + 触觉奖励配置
@@ -1135,58 +1116,6 @@ class Se3TactileRewardsCfg(Se3RewardsCfg):
 
 
 ##############################################################################
-# RMA 观测组件
-##############################################################################
-
-@configclass
-class RmaPrivInfoObsGroupCfg(ObsGroup):
-    """RMA 特权信息观测组（for μ network）
-    
-    包含仿真中可用的物体物理属性。
-    """
-    
-    obj_mass_scale = ObsTerm(
-        func=leap_mdp.object_mass_scale,
-        params={"asset_cfg": SceneEntityCfg("object"), "scale_range": (0.25, 1.2)},
-    )
-    obj_com_offset = ObsTerm(
-        func=leap_mdp.object_com_offset,
-        params={
-            "asset_cfg": SceneEntityCfg("object"),
-            "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.01, 0.01)},
-        },
-    )
-    obj_material = ObsTerm(
-        func=leap_mdp.object_material_properties,
-        params={
-            "asset_cfg": SceneEntityCfg("object"),
-            "static_friction_range": (0.2, 1.0),
-            "dynamic_friction_range": (0.15, 0.6),
-            "restitution_range": (0.0, 0.1),
-        },
-    )
-
-    def __post_init__(self):
-        self.enable_corruption = False
-        self.concatenate_terms = True
-
-
-@configclass
-class RmaProprioHistObsGroupCfg(ObsGroup):
-    """RMA 本体感受历史观测组（for φ network）"""
-    
-    joint_pos = ObsTerm(
-        func=mdp.joint_pos_limit_normalized,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
-    last_action = ObsTerm(func=mdp.last_action)
-
-    def __post_init__(self):
-        self.enable_corruption = True
-        self.concatenate_terms = True
-
-
-##############################################################################
 # 公共导出（供各 hand config 组合使用）
 ##############################################################################
 
@@ -1202,8 +1131,6 @@ __all__ = [
     "TactileCriticObsGroupCfg",
     "TactileObservationsCfg",
     "Se3TactileObservationsCfg",
-    "RmaPrivInfoObsGroupCfg",
-    "RmaProprioHistObsGroupCfg",
     # 动作
     "JointSpaceActionsCfg",
     "Se3ActionsCfg",
