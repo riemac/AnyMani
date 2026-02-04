@@ -406,6 +406,9 @@ class LeapHandJointEnvCfg_PLAY(LeapHandJointEnvCfg):
         self.scene.num_envs = 50
         self.observations.policy.enable_corruption = False
         self.terminations.time_out = None
+        # 在 Play 模式下默认开启命令项可视化：显示目标物体（goal marker / ghost DexCube）。
+        # 这不会影响训练环境（训练使用非 PLAY 配置）。
+        self.commands.goal_pose.debug_vis = True
 
 
 @configclass
@@ -417,6 +420,8 @@ class LeapHandSe3EnvCfg_PLAY(LeapHandSe3EnvCfg):
         self.scene.num_envs = 50
         self.observations.policy.enable_corruption = False
         self.terminations.time_out = None
+        # Play 模式下启用目标姿态 marker 可视化。
+        self.commands.goal_pose.debug_vis = True
 
 
 @configclass
@@ -428,6 +433,8 @@ class LeapHandTactileEnvCfg_PLAY(LeapHandTactileEnvCfg):
         self.scene.num_envs = 50
         self.observations.policy.enable_corruption = False
         self.terminations.time_out = None
+        # Play 模式下启用目标姿态 marker 可视化。
+        self.commands.goal_pose.debug_vis = True
 
 
 @configclass
@@ -439,6 +446,8 @@ class LeapHandSe3TactileEnvCfg_PLAY(LeapHandSe3TactileEnvCfg):
         self.scene.num_envs = 50
         self.observations.policy.enable_corruption = False
         self.terminations.time_out = None
+        # Play 模式下启用目标姿态 marker 可视化。
+        self.commands.goal_pose.debug_vis = True
 
 
 @configclass
@@ -450,3 +459,5 @@ class LeapHandAffineEnvCfg_PLAY(LeapHandAffineEnvCfg):
         self.scene.num_envs = 50
         self.observations.policy.enable_corruption = False
         self.terminations.time_out = None
+        # Play 模式下启用目标姿态 marker 可视化。
+        self.commands.goal_pose.debug_vis = True

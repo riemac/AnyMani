@@ -96,7 +96,10 @@ class RelativeSO3CommandCfg(CommandTermCfg):
     update_goal_on_success: bool = True
     """fixed_goal：是否在成功时重采样新指令。rolling_goal：该字段将被忽略。"""
 
-    marker_pos_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # NOTE:
+    #   默认把 marker 略微抬高一点：否则 marker 与真实物体完全重合时容易被遮挡/产生 z-fighting，
+    #   用户在 IsaacSim 视口中会误以为“没有可视化”。
+    marker_pos_offset: tuple[float, float, float] = (0.0, 0.0, 0.06)
     """可视化 marker 相对于目标位置的偏移（避免遮挡物体）。"""
 
     goal_pose_visualizer_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
@@ -105,6 +108,13 @@ class RelativeSO3CommandCfg(CommandTermCfg):
             "goal": sim_utils.UsdFileCfg(
                 usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
                 scale=(1.0, 1.0, 1.0),
+                # 让目标物体看起来像“ghost cube”：绿色 + 半透明，方便和真实物体区分。
+                visual_material=sim_utils.PreviewSurfaceCfg(
+                    diffuse_color=(0.0, 1.0, 0.0),
+                    opacity=0.35,
+                    roughness=0.8,
+                    metallic=0.0,
+                ),
             ),
         },
     )
