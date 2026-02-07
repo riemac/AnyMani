@@ -43,6 +43,7 @@ class se3Action(ActionTerm):
 
     坐标系符号约定：
         - {w}: 世界坐标系 (world)
+        - {e}: 环境坐标系 (environment)
         - {s}: 机器人根/基坐标系 (root/base)
         - {b}: 末端真实刚体坐标系 (end-effector rigid body)
         - {b'}: 末端虚拟 Xform 坐标系 (virtual fingertip frame)

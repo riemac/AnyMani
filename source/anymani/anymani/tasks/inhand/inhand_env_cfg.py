@@ -272,8 +272,8 @@ class JointSpaceObservationsCfg:
         """Critic 观测（特权信息）"""
         pass
     
-    policy: ObsGroup = PolicyCfg(history_length=3)
-    critic: ObsGroup = CriticCfg(history_length=3)
+    policy: ObsGroup = PolicyCfg(history_length=1)
+    critic: ObsGroup = CriticCfg(history_length=1)
 
 
 @configclass
