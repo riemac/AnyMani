@@ -10,17 +10,11 @@
 
 环境变体（训练）:
     - LeapHandJointEnvCfg: 关节空间动作（16 维）
-    - LeapHandSe3EnvCfg: SE(3) 旋量动作（24 维）
     - LeapHandTactileEnvCfg: 关节空间 + 触觉观测
-    - LeapHandSe3TactileEnvCfg: SE(3) + 触觉观测
-    - LeapHandAffineEnvCfg: 仿射编队动作（9 维）
 
 环境变体（Play/可视化）:
     - LeapHandJointEnvCfg_PLAY
-    - LeapHandSe3EnvCfg_PLAY
     - LeapHandTactileEnvCfg_PLAY
-    - LeapHandSe3TactileEnvCfg_PLAY
-    - LeapHandAffineEnvCfg_PLAY
 
 Usage:
     from anymani.tasks.inhand.config.leaphand import LeapHandJointEnvCfg
@@ -46,21 +40,14 @@ from anymani.tasks.inhand.inhand_env_cfg import (
     TactileSceneCfg,
     # 观测
     JointSpaceObservationsCfg,
-    Se3ObservationsCfg,
     TactileObsGroupCfg,
     TactileCriticObsGroupCfg,
     TactileObservationsCfg,
-    Se3TactileObservationsCfg,
     # 动作
     JointSpaceActionsCfg,
-    Se3ActionsCfg,
-    Se3EmaActionsCfg,
-    AffineActionsCfg,
     # 奖励
     CommonRewardsCfg,
-    Se3RewardsCfg,
     TactileRewardsCfg,
-    Se3TactileRewardsCfg,
     # 事件
     CommonEventCfg,
     # 终止
@@ -318,23 +305,6 @@ class LeapHandJointEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.eye = (2.0, 2.0, 2.0)
 
 
-@configclass
-class LeapHandSe3EnvCfg(LeapHandJointEnvCfg):
-    """LeapHand SE(3) 动作空间环境配置
-    
-    使用 24 维 SE(3) 旋量动作空间（每根手指 6 维）。
-    
-    动作空间: 24 维（4 根手指 × 6 维旋量）
-    观测空间: 末端旋量 + 物体位姿 + 目标位姿
-    """
-    
-    actions: Se3ActionsCfg = Se3ActionsCfg()
-    observations: Se3ObservationsCfg = Se3ObservationsCfg()
-    rewards: Se3RewardsCfg = Se3RewardsCfg()
-    
-    def __post_init__(self):
-        super().__post_init__()
-
 
 @configclass
 class LeapHandTactileEnvCfg(LeapHandJointEnvCfg):
@@ -356,41 +326,6 @@ class LeapHandTactileEnvCfg(LeapHandJointEnvCfg):
         super().__post_init__()
 
 
-@configclass
-class LeapHandSe3TactileEnvCfg(LeapHandJointEnvCfg):
-    """LeapHand SE(3) + 触觉环境配置
-    
-    结合 SE(3) 动作空间和触觉传感，适合 sim2real 迁移。
-    
-    动作空间: 24 维（4 根手指 × 6 维旋量）
-    观测空间: 末端旋量 + 触觉信号 + 目标位姿（带历史）
-    """
-    
-    scene: InteractiveSceneCfg = LeapHandFullTactileSceneCfg(
-        num_envs=4096, env_spacing=0.6, replicate_physics=False
-    )
-    actions: Se3EmaActionsCfg = Se3EmaActionsCfg()
-    observations: Se3TactileObservationsCfg = Se3TactileObservationsCfg()
-    rewards: Se3TactileRewardsCfg = Se3TactileRewardsCfg()
-    
-    def __post_init__(self):
-        super().__post_init__()
-
-
-@configclass
-class LeapHandAffineEnvCfg(LeapHandJointEnvCfg):
-    """LeapHand 仿射编队环境配置
-    
-    使用 9 维仿射编队动作空间控制指尖编队形状。
-    
-    动作空间: 9 维（旋转 3 + 缩放 3 + 平移 3）
-    观测空间: 关节位置 + 物体位姿 + 目标位姿
-    """
-    
-    actions: AffineActionsCfg = AffineActionsCfg()
-    
-    def __post_init__(self):
-        super().__post_init__()
 
 
 ##############################################################################
@@ -412,47 +347,8 @@ class LeapHandJointEnvCfg_PLAY(LeapHandJointEnvCfg):
 
 
 @configclass
-class LeapHandSe3EnvCfg_PLAY(LeapHandSe3EnvCfg):
-    """SE(3) 环境 Play 配置"""
-    
-    def __post_init__(self):
-        super().__post_init__()
-        self.scene.num_envs = 50
-        self.observations.policy.enable_corruption = False
-        self.terminations.time_out = None
-        # Play 模式下启用目标姿态 marker 可视化。
-        self.commands.goal_pose.debug_vis = True
-
-
-@configclass
 class LeapHandTactileEnvCfg_PLAY(LeapHandTactileEnvCfg):
     """触觉环境 Play 配置"""
-    
-    def __post_init__(self):
-        super().__post_init__()
-        self.scene.num_envs = 50
-        self.observations.policy.enable_corruption = False
-        self.terminations.time_out = None
-        # Play 模式下启用目标姿态 marker 可视化。
-        self.commands.goal_pose.debug_vis = True
-
-
-@configclass
-class LeapHandSe3TactileEnvCfg_PLAY(LeapHandSe3TactileEnvCfg):
-    """SE(3) + 触觉环境 Play 配置"""
-    
-    def __post_init__(self):
-        super().__post_init__()
-        self.scene.num_envs = 50
-        self.observations.policy.enable_corruption = False
-        self.terminations.time_out = None
-        # Play 模式下启用目标姿态 marker 可视化。
-        self.commands.goal_pose.debug_vis = True
-
-
-@configclass
-class LeapHandAffineEnvCfg_PLAY(LeapHandAffineEnvCfg):
-    """仿射编队环境 Play 配置"""
     
     def __post_init__(self):
         super().__post_init__()

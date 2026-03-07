@@ -17,9 +17,9 @@ Usage:
 
 组件分类:
     - Scene: 场景配置（地面、光照、物体）
-    - Observations: 观测配置（关节空间/SE3/触觉）
-    - Actions: 动作空间配置（关节/SE3/仿射编队）
-    - Rewards: 奖励配置（通用/任务特定）
+    - Observations: 观测配置（关节空间/触觉）
+    - Actions: 动作空间配置（关节）
+    - Rewards: 奖励配置（通用/触觉）
     - Events: 域随机化配置
     - Terminations: 终止条件
 
@@ -189,76 +189,6 @@ class ProprioceptionObsGroupCfg(JointSpaceObsGroupCfg):
 
 
 @configclass
-class Se3ObsGroupCfg(ObsGroup):
-    """SE(3) 旋量观测组
-    
-    适用于 SE(3) 动作空间的任务，观测包括：
-    - 指尖刚体旋量（body_twists）
-    - 物体位姿
-    - so(3) 指令（3D rotvec）
-    - 上一步动作
-    
-    Note:
-        action_names 参数需要与 ActionsCfg 中的 se3 动作项名称一致
-    """
-    
-    # -- robot terms (SE3 specific)
-    body_twists = ObsTerm(
-        func=leap_mdp.body_twists,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"],
-            "use_body_frame": False,
-        },
-    )
-
-    # -- object terms
-    object_pos = ObsTerm(
-        func=mdp.root_pos_w,
-        noise=Gnoise(std=0.002),
-        params={"asset_cfg": SceneEntityCfg("object")},
-    )
-    object_quat = ObsTerm(
-        func=mdp.root_quat_w,
-        params={"asset_cfg": SceneEntityCfg("object"), "make_quat_unique": False},
-    )
-
-    # -- command terms
-    so3_command = ObsTerm(
-        func=leap_mdp.so3_command,
-        params={"command_name": "goal_pose"},
-    )
-
-    # NOTE: 同 JointSpaceObsGroupCfg，仅用于 Critic/特权观测。
-    pos_command = ObsTerm(
-        func=leap_mdp.pos_command,
-        params={"command_name": "goal_pose"},
-    )
-
-    # -- action terms
-    last_action = ObsTerm(func=mdp.last_action)
-
-    def __post_init__(self):
-        self.enable_corruption = True
-        self.concatenate_terms = True
-
-
-@configclass
-class Se3ProprioceptionObsGroupCfg(Se3ObsGroupCfg):
-    """SE(3) 本体感受观测组（无物体绝对位姿）。
-
-    用于 sim2real：policy 不依赖物体的绝对位置/姿态，只读本体感受与 so(3) 指令。
-    """
-
-    def __post_init__(self):
-        super().__post_init__()
-        self.object_pos = None
-        self.object_quat = None
-        # pos_command 属于特权信息（目标位置约束），仅在 Critic/特权观测中启用
-        self.pos_command = None
-
-
-@configclass
 class JointSpaceObservationsCfg:
     """关节空间完整观测配置（Policy + Critic）"""
     
@@ -274,24 +204,6 @@ class JointSpaceObservationsCfg:
     
     policy: ObsGroup = PolicyCfg(history_length=1)
     critic: ObsGroup = CriticCfg(history_length=1)
-
-
-@configclass
-class Se3ObservationsCfg:
-    """SE(3) 动作空间完整观测配置（Policy + Critic）"""
-    
-    @configclass
-    class PolicyCfg(Se3ProprioceptionObsGroupCfg):
-        """策略观测（可部署）：无物体绝对位姿"""
-        pass
-    
-    @configclass
-    class CriticCfg(Se3ObsGroupCfg):
-        """Critic 观测（特权信息）"""
-        pass
-    
-    policy: ObsGroup = PolicyCfg(history_length=3)
-    critic: ObsGroup = CriticCfg(history_length=3)
 
 
 ##############################################################################
@@ -316,182 +228,6 @@ class JointSpaceActionsCfg:
         preserve_order=True,
     )
 
-
-@configclass
-class Se3ActionsCfg:
-    """SE(3) 旋量动作配置
-    
-    每根手指独立的 se(3) 动作，共 4 × 6 = 24 维动作空间。
-    使用阻尼最小二乘（DLS）逆运动学求解关节增量。
-    """
-    index_se3 = leap_mdp.se3dlsActionsCfg(
-        asset_name="robot",
-        joint_names=["a_1", "a_0", "a_2", "a_3"],
-        preserve_order=True,
-        is_xform=True,
-        use_body_frame=False,
-        target="index_tip_head",
-        parent="fingertip",
-        use_pd=True,
-        angular_limits=2,
-        linear_limits=0.2356,
-        damping=0.01,
-        use_joint_limits=True,
-    )
-    middle_se3 = leap_mdp.se3dlsActionsCfg(
-        asset_name="robot",
-        joint_names=["a_5", "a_4", "a_6", "a_7"],
-        preserve_order=True,
-        is_xform=True,
-        use_body_frame=False,
-        target="middle_tip_head",
-        parent="fingertip_2",
-        use_pd=True,
-        angular_limits=2,
-        linear_limits=0.2356,
-        damping=0.01,
-        use_joint_limits=True,
-    )
-    ring_se3 = leap_mdp.se3dlsActionsCfg(
-        asset_name="robot",
-        joint_names=["a_9", "a_8", "a_10", "a_11"],
-        preserve_order=True,
-        is_xform=True,
-        use_body_frame=False,
-        target="ring_tip_head",
-        parent="fingertip_3",
-        use_pd=True,
-        angular_limits=2,
-        linear_limits=0.2356,
-        damping=0.01,
-        use_joint_limits=True,
-    )
-    thumb_se3 = leap_mdp.se3dlsActionsCfg(
-        asset_name="robot",
-        joint_names=["a_12", "a_13", "a_14", "a_15"],
-        preserve_order=True,
-        is_xform=True,
-        use_body_frame=False,
-        target="thumb_tip_head",
-        parent="thumb_fingertip",
-        use_pd=True,
-        angular_limits=2,
-        linear_limits=0.2356,
-        damping=0.01,
-        use_joint_limits=True,
-    )
-
-
-##############################################################################
-# SE(3) + EMA 动作配置
-##############################################################################
-
-# NOTE:
-# 这里的常量服务于 Se3EmaActionsCfg / Se3TactileObservationsCfg 的内部配置。
-# 它们属于“可复用 MDP 组件”的一部分，因此放在 inhand_env_cfg.py 中统一维护。
-USE_BODY_FRAME_STUDENT = True
-ENCODER_HISTORY_LENGTH = 50
-
-
-@configclass
-class Se3EmaActionsCfg:
-    """SE(3) 旋量动作 + EMA 平滑
-
-    每根手指独立的 se(3) 动作，共 4 × 6 = 24 维动作空间。
-    添加 EMA 平滑以减少动作抖动。
-    """
-
-    index_se3 = leap_mdp.se3dlsEmaActionsCfg(
-        asset_name="robot",
-        joint_names=["a_1", "a_0", "a_2", "a_3"],
-        preserve_order=True,
-        is_xform=True,
-        use_body_frame=USE_BODY_FRAME_STUDENT,
-        target="index_tip_head",
-        parent="fingertip",
-        use_pd=True,
-        angular_limits=2,
-        linear_limits=0.2356,
-        damping=0.01,
-        use_joint_limits=True,
-        alpha=1 / 24,
-    )
-    middle_se3 = leap_mdp.se3dlsEmaActionsCfg(
-        asset_name="robot",
-        joint_names=["a_5", "a_4", "a_6", "a_7"],
-        preserve_order=True,
-        is_xform=True,
-        use_body_frame=USE_BODY_FRAME_STUDENT,
-        target="middle_tip_head",
-        parent="fingertip_2",
-        use_pd=True,
-        angular_limits=2,
-        linear_limits=0.2356,
-        damping=0.01,
-        use_joint_limits=True,
-        alpha=1 / 24,
-    )
-    ring_se3 = leap_mdp.se3dlsEmaActionsCfg(
-        asset_name="robot",
-        joint_names=["a_9", "a_8", "a_10", "a_11"],
-        preserve_order=True,
-        is_xform=True,
-        use_body_frame=USE_BODY_FRAME_STUDENT,
-        target="ring_tip_head",
-        parent="fingertip_3",
-        use_pd=True,
-        angular_limits=2,
-        linear_limits=0.2356,
-        damping=0.01,
-        use_joint_limits=True,
-        alpha=1 / 24,
-    )
-    thumb_se3 = leap_mdp.se3dlsEmaActionsCfg(
-        asset_name="robot",
-        joint_names=["a_12", "a_13", "a_14", "a_15"],
-        preserve_order=True,
-        is_xform=True,
-        use_body_frame=USE_BODY_FRAME_STUDENT,
-        target="thumb_tip_head",
-        parent="thumb_fingertip",
-        use_pd=True,
-        angular_limits=2,
-        linear_limits=0.2356,
-        damping=0.01,
-        use_joint_limits=True,
-        alpha=1 / 24,
-    )
-
-
-@configclass
-class AffineActionsCfg:
-    """仿射编队动作配置
-    
-    9 维动作空间：旋转(3) + 缩放(3) + 平移(3)
-    通过仿射变换控制指尖编队形状。
-    """
-    affine_formation = leap_mdp.AffineFormationActionCfg(
-        asset_name="robot",
-        nominal_joint_angles={
-            "a_1": 0.000, "a_12": 0.500, "a_5": 0.000, "a_9": 0.000,
-            "a_0": -0.750, "a_13": 1.300, "a_4": 0.000, "a_8": 0.750,
-            "a_2": 1.750, "a_14": 1.500, "a_6": 1.750, "a_10": 1.750,
-            "a_3": 0.000, "a_15": 1.000, "a_7": 0.000, "a_11": 0.000,
-        },
-        rotation_limit=0.5,
-        scale_range=(0.7, 1.3),
-        translation_limit=0.05,
-        ik_method="dls",
-        ik_params={"lambda_val": 0.05},
-        finger_joints={
-            "index": ["a_1", "a_0", "a_2", "a_3"],
-            "middle": ["a_5", "a_4", "a_6", "a_7"],
-            "ring": ["a_9", "a_8", "a_10", "a_11"],
-            "thumb": ["a_12", "a_13", "a_14", "a_15"],
-        },
-        finger_bodies=("fingertip", "fingertip_2", "fingertip_3", "thumb_fingertip"),
-        use_body_frame=True,
-    )
 
 
 ##############################################################################
@@ -545,52 +281,6 @@ class CommonRewardsCfg:
     action_l2 = RewTerm(func=mdp.action_l2, weight=-0.0001)
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     torque_l2 = RewTerm(func=leap_mdp.torque_l2_penalty, weight=-1e-5)
-
-
-@configclass
-class Se3RewardsCfg(CommonRewardsCfg):
-    """SE(3) 动作空间专用奖励配置
-    
-    在通用奖励基础上增加：
-    - 可操作度奖励
-    - 动能惩罚
-    - 动作平滑奖励
-    """
-    
-    fall_penalty = RewTerm(
-        func=leap_mdp.fall_penalty,
-        weight=-10.0,
-        params={
-            "object_cfg": SceneEntityCfg("object"),
-            "command_name": "goal_pose",
-            "fall_distance": 0.07,
-        },
-    )
-    
-    pose_diff = RewTerm(func=leap_mdp.pose_diff_penalty, weight=-0.3)
-    
-    # SE(3) 专用
-    manipulability = RewTerm(
-        func=leap_mdp.jacobian_manipulability,
-        weight=1,
-        params={"action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]},
-    )
-    
-    kinetic_energy = RewTerm(
-        func=leap_mdp.se3_kinetic_energy,
-        weight=-1,
-        params={"action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"]},
-    )
-    
-    action_smooth = RewTerm(
-        func=leap_mdp.se3_action_smooth,
-        weight=-0.25,
-        params={
-            "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"],
-            "use_processed": False,
-            "norm": 1,
-        },
-    )
 
 
 ##############################################################################
@@ -923,87 +613,6 @@ class TactileObservationsCfg:
 
 
 @configclass
-class Se3TactileObservationsCfg:
-    """SE(3) + 触觉观测配置
-
-    Policy: 本体感受 (body_twists) + 触觉二值信号 + 历史
-    Critic: 特权信息 (物体位姿) + 连续力触觉
-    """
-
-    @configclass
-    class PolicyCfg(ObsGroup):
-        """策略观测：本体感受 + 二值触觉 + 历史"""
-
-        body_twists = ObsTerm(
-            func=leap_mdp.body_twists,
-            params={
-                "asset_cfg": SceneEntityCfg("robot"),
-                "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"],
-                "use_body_frame": USE_BODY_FRAME_STUDENT,
-            },
-            history_length=ENCODER_HISTORY_LENGTH,
-        )
-        so3_command = ObsTerm(func=leap_mdp.so3_command, params={"command_name": "goal_pose"})
-        last_action = ObsTerm(func=mdp.last_action, history_length=ENCODER_HISTORY_LENGTH)
-        fingertip_contact_binary = ObsTerm(
-            func=leap_mdp.fingertip_contact_data,
-            params={
-                "sensor_names": ["contact_index", "contact_middle", "contact_ring", "contact_thumb"],
-                "output_type": "binary",
-                "force_threshold": TACTILE_FORCE_THRESHOLD,
-            },
-            history_length=ENCODER_HISTORY_LENGTH,
-        )
-
-        def __post_init__(self):
-            self.enable_corruption = True
-            self.concatenate_terms = True
-
-    @configclass
-    class CriticCfg(ObsGroup):
-        """Critic 观测：特权信息 + 连续力"""
-
-        body_twists = ObsTerm(
-            func=leap_mdp.body_twists,
-            params={
-                "asset_cfg": SceneEntityCfg("robot"),
-                "action_names": ["index_se3", "middle_se3", "ring_se3", "thumb_se3"],
-                "use_body_frame": USE_BODY_FRAME_STUDENT,
-            },
-        )
-        object_pos = ObsTerm(
-            func=mdp.root_pos_w,
-            noise=Gnoise(std=0.002),
-            params={"asset_cfg": SceneEntityCfg("object")},
-        )
-        object_quat = ObsTerm(
-            func=mdp.root_quat_w,
-            params={"asset_cfg": SceneEntityCfg("object"), "make_quat_unique": False},
-        )
-        so3_command = ObsTerm(func=leap_mdp.so3_command, params={"command_name": "goal_pose"})
-
-        # NOTE: 位置目标仅用于 Critic/特权观测，policy 侧不暴露以保持可部署假设。
-        pos_command = ObsTerm(func=leap_mdp.pos_command, params={"command_name": "goal_pose"})
-        last_action = ObsTerm(func=mdp.last_action)
-        fingertip_contact_force = ObsTerm(
-            func=leap_mdp.fingertip_contact_data,
-            params={
-                "sensor_names": ["contact_index", "contact_middle", "contact_ring", "contact_thumb"],
-                "output_type": "force",
-            },
-            clip=(-50.0, 50.0),
-            scale=0.1,
-        )
-
-        def __post_init__(self):
-            self.enable_corruption = True
-            self.concatenate_terms = True
-
-    policy: ObsGroup = PolicyCfg(history_length=None)
-    critic: ObsGroup = CriticCfg(history_length=1)
-
-
-@configclass
 class TactileRewardsCfg(CommonRewardsCfg):
     """触觉增强奖励配置
     
@@ -1055,84 +664,6 @@ class TactileRewardsCfg(CommonRewardsCfg):
     )
 
 
-@configclass
-class Se3TactileRewardsCfg(Se3RewardsCfg):
-    """SE(3) + 触觉奖励配置
-
-    在 SE(3) 奖励基础上添加触觉接触 shaping。
-    """
-
-    load_distribution = RewTerm(
-        func=leap_mdp.load_distribution_reward,
-        weight=1.0,
-        params={
-            "fingertip_sensor_names": ["contact_index", "contact_middle", "contact_ring", "contact_thumb"],
-            "palm_sensor_names": [
-                "contact_palm",
-                "contact_index_mcp",
-                "contact_index_pip",
-                "contact_index_dip",
-                "contact_middle_mcp",
-                "contact_middle_pip",
-                "contact_middle_dip",
-                "contact_ring_mcp",
-                "contact_ring_pip",
-                "contact_ring_dip",
-                "contact_thumb_base",
-                "contact_thumb_pip",
-                "contact_thumb_dip",
-            ],
-            "gravity_axis": 2,
-            "epsilon": 1e-3,
-        },
-    )
-
-    good_fingertip_contact = RewTerm(
-        func=leap_mdp.good_fingertip_contact,
-        weight=1.0,
-        params={
-            "sensor_names": ["contact_index", "contact_middle", "contact_ring", "contact_thumb"],
-            "min_contacts": 2,
-            "force_threshold": TACTILE_FORCE_THRESHOLD,
-            "reward_type": TACTILE_CONTACT_REWARD_TYPE,
-            "use_curriculum": TACTILE_USE_REWARD_CURRICULUM,
-            "command_name": "goal_pose",
-            "g_min": TACTILE_G_MIN,
-            "g_max": TACTILE_G_MAX,
-            "metric_key": TACTILE_CURRICULUM_METRIC_KEY,
-        },
-    )
-
-    bad_palm_contact = RewTerm(
-        func=leap_mdp.bad_palm_contact,
-        weight=-1.0,
-        params={
-            "sensor_names": [
-                "contact_palm",
-                "contact_index_mcp",
-                "contact_index_pip",
-                "contact_index_dip",
-                "contact_middle_mcp",
-                "contact_middle_pip",
-                "contact_middle_dip",
-                "contact_ring_mcp",
-                "contact_ring_pip",
-                "contact_ring_dip",
-                "contact_thumb_base",
-                "contact_thumb_pip",
-                "contact_thumb_dip",
-            ],
-            "force_threshold": TACTILE_FORCE_THRESHOLD,
-            "reward_type": TACTILE_CONTACT_REWARD_TYPE,
-            "use_curriculum": TACTILE_USE_REWARD_CURRICULUM,
-            "command_name": "goal_pose",
-            "g_min": TACTILE_G_MIN,
-            "g_max": TACTILE_G_MAX,
-            "metric_key": TACTILE_CURRICULUM_METRIC_KEY,
-        },
-    )
-
-
 ##############################################################################
 # 公共导出（供各 hand config 组合使用）
 ##############################################################################
@@ -1144,23 +675,15 @@ __all__ = [
     "TactileSceneCfg",
     # 观测
     "ProprioceptionObsGroupCfg",
-    "Se3ProprioceptionObsGroupCfg",
     "JointSpaceObservationsCfg",
-    "Se3ObservationsCfg",
     "TactileObsGroupCfg",
     "TactileCriticObsGroupCfg",
     "TactileObservationsCfg",
-    "Se3TactileObservationsCfg",
     # 动作
     "JointSpaceActionsCfg",
-    "Se3ActionsCfg",
-    "Se3EmaActionsCfg",
-    "AffineActionsCfg",
     # 奖励
     "CommonRewardsCfg",
-    "Se3RewardsCfg",
     "TactileRewardsCfg",
-    "Se3TactileRewardsCfg",
     # 事件/终止/命令/课程
     "CommonEventCfg",
     "CommonTerminationsCfg",
@@ -1173,7 +696,4 @@ __all__ = [
     "TACTILE_CURRICULUM_METRIC_KEY",
     "TACTILE_G_MIN",
     "TACTILE_G_MAX",
-    # SE(3)+EMA / SE(3)+触觉超参数
-    "USE_BODY_FRAME_STUDENT",
-    "ENCODER_HISTORY_LENGTH",
 ]
