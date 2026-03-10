@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "task": "Template-Leaphand-Rot-Manager-v0",
+    "checkpoint": "/home/hac/isaac/AnyRotate/logs/rl_games/leaphand_object_rot/2026-01-10_17-12-54/nn/leaphand_object_rot.pth",
+    "num_envs": 4,
+    "episodes_per_env": 1,
+    "force_threshold": 0.5,
+    "track_contact_points": true,
+    "rl_device": "cuda:0",
+    "dt": 0.03333333333333333,
+    "steps": 900
+  },
+  "sensors": {
+    "contact_index": {
+      "force": {
+        "n": 3600,
+        "min": 0.0,
+        "max": 10.3368501663208,
+        "mean": 0.8463626440324717,
+        "std": 1.2757207933797854
+      },
+      "contact_rate": 0.4583333333333333
+    },
+    "contact_thumb": {
+      "force": {
+        "n": 3600,
+        "min": 0.0,
+        "max": 15.540336608886719,
+        "mean": 1.2650557817187573,
+        "std": 1.6117580939516638
+      },
+      "contact_rate": 0.48194444444444445
+    }
+  }
+}

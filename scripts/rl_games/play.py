@@ -60,16 +60,12 @@ from rl_games.torch_runner import Runner
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
-
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
+from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path, load_cfg_from_registry, parse_env_cfg
-import leaphand.tasks.manager_based.leaphand  # noqa: F401
-
-# Register custom rl_games networks used by this project (e.g. se3_tcn).
-import leaphand.rl_games.se3_tcn_network  # noqa: F401
+import anymani.tasks  # noqa: F401
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 

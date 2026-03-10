@@ -97,7 +97,7 @@ from isaaclab_rl.rl_games import MultiObserver, PbtAlgoObserver, RlGamesGpuEnv, 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-import leaphand.tasks.manager_based.leaphand  # noqa: F401
+import anymani.tasks  # noqa: F401
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
@@ -213,6 +213,47 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # 将实际并行 actor 数量写入 agent 配置，供 RL-Games 运行器使用
     agent_cfg["params"]["config"]["num_actors"] = env.unwrapped.num_envs
+
+    # ---------------------------------------------------------------------
+    # 兼容“小规模 num_envs 的快速冒烟测试”
+    #
+    # rl_games 的 batch_size 在内部由 num_actors * horizon_length 计算。
+    # 我们的默认配置面向大规模并行（例如 4096 envs），因此 minibatch_size
+    # 可能会大于小规模测试时的 batch_size，导致直接报错：
+    #   ValueError: batch_size must be divisible by minibatch_size
+    #
+    # 这里在 runner.load() 前做一次防护性修正：
+    # - 若 minibatch_size > batch_size，则降到 batch_size
+    # - 若 batch_size % minibatch_size != 0，则用 gcd 找到可整除的值
+    #
+    # 该修正仅在“不合法配置”时触发，不影响正常的大规模训练。
+    # ---------------------------------------------------------------------
+    cfg = agent_cfg["params"]["config"]
+    try:
+        horizon_length = int(cfg.get("horizon_length", 1))
+        num_actors = int(cfg.get("num_actors", env.unwrapped.num_envs))
+        batch_size = max(1, num_actors * horizon_length)
+        minibatch_size = int(cfg.get("minibatch_size", batch_size))
+
+        if minibatch_size > batch_size:
+            print(
+                f"[WARN]: rl_games minibatch_size ({minibatch_size}) > computed batch_size ({batch_size}). "
+                f"Auto-setting minibatch_size={batch_size} for this run (num_actors={num_actors}, horizon_length={horizon_length})."
+            )
+            minibatch_size = batch_size
+            cfg["minibatch_size"] = minibatch_size
+
+        if batch_size % minibatch_size != 0:
+            new_minibatch = math.gcd(batch_size, minibatch_size)
+            new_minibatch = new_minibatch if new_minibatch > 0 else batch_size
+            print(
+                f"[WARN]: rl_games batch_size ({batch_size}) is not divisible by minibatch_size ({minibatch_size}). "
+                f"Auto-setting minibatch_size={new_minibatch} (gcd) for this run."
+            )
+            cfg["minibatch_size"] = new_minibatch
+    except Exception as e:
+        # 防御性：即便自动修正失败，也不阻塞训练，让 rl_games 报出原始错误更易定位
+        print(f"[WARN]: Failed to auto-adjust rl_games minibatch_size: {e}")
 
     # 使用 IsaacAlgoObserver 创建 runner（该 observer 为 rl-games 提供 Isaac/Sim 的统计回调）
     if "pbt" in agent_cfg and agent_cfg["pbt"]["enabled"]:

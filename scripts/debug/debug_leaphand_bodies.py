@@ -22,7 +22,7 @@ import torch
 from isaaclab.assets import Articulation
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg, SimulationContext
-from leaphand.robots.leap import LEAP_HAND_CFG
+from anymani.robots.leap import LEAP_HAND_CFG
 
 def main():
     """主函数"""

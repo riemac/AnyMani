@@ -1,16 +1,17 @@
-# Template for Isaac Lab Projects
+# AnyMani - Dexterous Manipulation Extension for Isaac Lab
 
 ## Overview
 
-This project/repository serves as a template for building projects or extensions based on Isaac Lab.
-It allows you to develop in an isolated environment, outside of the core Isaac Lab repository.
+AnyMani is a dexterous manipulation extension for Isaac Lab, focused on in-hand object manipulation using various robotic hands (LeapHand, Allegro, etc.).
 
 **Key Features:**
 
-- `Isolation` Work outside the core Isaac Lab repository, ensuring that your development efforts remain self-contained.
-- `Flexibility` This template is set up to allow your code to be run as an extension in Omniverse.
+- `In-hand Manipulation` Various action spaces: joint-space, SE(3), affine formation
+- `Multi-hand Support` Modular design supports different dexterous hands
+- `Reproducibility` Stable configuration snapshots for model reproducibility
+- `Extensibility` Easy to add new tasks, hands, and MDP components
 
-**Keywords:** extension, template, isaaclab
+**Keywords:** dexterous, manipulation, isaaclab, reinforcement learning
 
 ## Installation
 
@@ -23,19 +24,22 @@ It allows you to develop in an isolated environment, outside of the core Isaac L
 
     ```bash
     # use 'PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-    python -m pip install -e source/leaphand
+    python -m pip install -e source/anymani
 
 - Verify that the extension is correctly installed by:
 
     - Listing the available tasks:
 
-        Note: It the task name changes, it may be necessary to update the search pattern `"Template-"`
-        (in the `scripts/list_envs.py` file) so that it can be listed.
-
         ```bash
         # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
         python scripts/list_envs.py
         ```
+
+        Available environments include:
+        - `AnyMani-LeapHand-Joint-v0`: Joint-space action (baseline)
+        - `AnyMani-LeapHand-SE3-v0`: SE(3) action space
+        - `AnyMani-LeapHand-Tactile-v0`: With tactile sensors
+        - `AnyMani-LeapHand-RoundTip-v0`: Hemispherical fingertips
 
     - Running a task:
 
@@ -74,7 +78,7 @@ This helps in indexing all the python modules for intelligent suggestions while 
 
 ### Setup as Omniverse Extension (Optional)
 
-We provide an example UI extension that will load upon enabling your extension defined in `source/leaphand/leaphand/ui_extension_example.py`.
+We provide an example UI extension that will load upon enabling your extension defined in `source/anymani/anymani/ui_extension_example.py`.
 
 To enable your extension, follow these steps:
 

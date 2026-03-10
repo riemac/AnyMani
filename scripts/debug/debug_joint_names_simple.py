@@ -22,7 +22,7 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.sim import SimulationContext
-from leaphand.robots.leap import LEAP_HAND_CFG
+from anymani.robots.leap import LEAP_HAND_CFG
 
 
 def main():
