@@ -25,18 +25,14 @@ from .inhand_env_cfg import (
     # 观测
     JointSpaceObsGroupCfg,
     ProprioceptionObsGroupCfg,
-    Se3ObsGroupCfg,
     JointSpaceObservationsCfg,
-    Se3ObservationsCfg,
     TactileObsGroupCfg,
     TactileCriticObsGroupCfg,
+    TactileObservationsCfg,
     # 动作
     JointSpaceActionsCfg,
-    Se3ActionsCfg,
-    AffineActionsCfg,
     # 奖励
     CommonRewardsCfg,
-    Se3RewardsCfg,
     TactileRewardsCfg,
     # 事件
     CommonEventCfg,

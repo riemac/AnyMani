@@ -13,23 +13,12 @@ from . import agents
 
 
 gym.register(
-    id="Template-Leaphand-Direct-v0",
-    entry_point=f"{__name__}.leaphand_env:LeaphandEnv",
+    id="AnyMani-LeapHand-Direct-v0",
+    entry_point=f"{__name__}.reorientation_env:ReorientationEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.leaphand_env_cfg:LeaphandEnvCfg",
-        "skrl_amp_cfg_entry_point": f"{agents.__name__}:skrl_amp_cfg.yaml",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
-    },
-)
-
-gym.register(
-    id="Template-Leaphand-ContinuousRot-Direct-v0",
-    entry_point=f"{__name__}.leaphand_continuous_rot_env:LeaphandContinuousRotEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.leaphand_continuous_rot_env_cfg:LeaphandContinuousRotEnvCfg",
-        "skrl_amp_cfg_entry_point": f"{agents.__name__}:skrl_amp_cfg.yaml",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+        "env_cfg_entry_point": f"{__name__}.leap_hand_env_cfg:LeapHandEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LeapHandPPORunnerCfg",
     },
 )

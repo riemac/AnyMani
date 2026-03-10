@@ -10,7 +10,6 @@
 
 ### 核心特性
 
-- **多动作空间**：关节空间、SE(3) 旋量、仿射编队等
 - **多手型支持**：LeapHand、LeapHand-Round、未来扩展 Allegro、Shadow 等
 - **模型复现**：稳定版本快照机制，解决训练模型无法复现问题
 - **模块化设计**：MDP 组件解耦，便于组合新环境
@@ -47,9 +46,8 @@ AnyMani/source/anymani/
 │   │   │       └── leaphand_round/        # 半球指尖变体
 │   │   ├── direct/             # Direct workflow 任务
 │   │   └── functional/         # Functional workflow 任务
-│   ├── robots/                 # 机器人资产定义
-│   │   └── leap/               # LeapHand URDF/USD
-│   └── distillation/           # 在线蒸馏框架
+│   └── robots/                 # 机器人资产定义
+│       └── leap/               # LeapHand URDF/USD
 ├── assets/                     # USD 资产文件
 ├── config/                     # 全局配置
 └── docs/                       # 文档
