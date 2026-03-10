@@ -11,6 +11,7 @@
 3. Tao 等 - 2023 - A Multi-Agent Approach for Adaptive Finger Cooperation in Learning-based In-Hand Manipulation.pdf (正文1-6页，选读)
 4. Yang 等 - 2024 - AnyRotate Gravity-Invariant In-Hand Object Rotation with Sim-to-Real Touch.pdf (正文1-8页，附录13-21页)
 5. Patel和Song - 2024 - GET-Zero Graph Embodiment Transformer for Zero-shot Embodiment Generalization.pdf (正文1-6页)
+> 现有问题：只能迁移到Leaphand家族的不同embodiment，无法迁移到不同的leaphand以外的手型
 6. Liu 等 - 2025 - DexNDM Closing the Reality Gap for Dexterous In-Hand Rotation via Joint-Wise Neural Dynamics Model.pdf (正文1-9页，附录14-47页)
 
 ## 灵巧抓取
