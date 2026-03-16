@@ -75,35 +75,46 @@
 - **应用**：静态抓取生成，support closed-loop
 - **局限**：只做抓取，不做动态操作
 
-## 讨论任务
+## 第四轮讨论任务（当前）
 
-基于以上背景，和用户讨论以下核心问题：
+### 重大方向调整
 
-1. **Per-finger RMA 的合理性**
-   - 标准 RMA（如 Hora）的 extrinsics 是全局的（一个 latent 代表整个物体）
-   - DexNDM 的 joint-wise factorization 证明了"per-joint 信息足够预测自身下一状态"
-   - 那 per-finger adaptation latent 是否合理？每根手指感受到的物体属性确实不同（局部曲率、摩擦、载荷）
-   - 和全局 RMA 的对比：什么场景下 per-finger 比全局更好？
+用户决定**暂时放弃物体泛化**，只专注手型（embodiment）泛化。理由：
+> "如果一口气去做物体-手双向泛化，有点过于贪婪。仅能实现手型的手内操作任务真正泛化，便已能超越 GET-Zero 并产出一篇成果了。物体泛化放到后续工作。"
 
-2. **图结构设计**
-   - 用户想法：4 finger nodes + 1 object node
-   - 可能的变体：finger nodes + object node + palm node + contact edge
-   - 和 GET-Zero 的区别：GET-Zero 只编码 robot 图（joint 级别），不包含 object
-   - 和 T(R,O) 的区别：T(R,O) 是 link-patch 级别，用于静态抓取
-   - 这里是 finger 级别，用于动态策略
+这意味着前三轮中关于 object memory slots、hand↔object cross-attention、per-finger local latent 等设计**暂时搁置**，架构大幅简化。
 
-3. **方法的独特优势在哪？（导师的核心要求）**
-   - 需要明确：这个方法在什么场景下比现有方法（全局 RMA、纯 DR、无图结构策略）更好？
-   - 可能的场景：不对称物体、部分接触丢失、跨物体泛化、多轴旋转时不同手指的角色差异
+### 本轮核心问题
 
-4. **是否足以支撑一篇 paper？**
-   - 需要评估：per-finger RMA + graph attention 是否只是"又一种策略网络设计"，还是有更深的洞见
-   - 和 MAGCLA 的对比：MAGCLA 也是 per-finger 思路，但用 MARL 而非图
+在只做手型泛化的前提下，讨论：
+
+1. **GET-Zero 的哪些不足需要补？**
+   - GET-Zero 只在 LEAP family（删/加关节）上验证，没跨过 hand family（如 Allegro → Shadow）
+   - GET-Zero 用 BC 蒸馏，RL 端到端是否更合适？
+   - GET-Zero 没有 adaptation module（无 RMA），面对 sim2real gap 和物理差异时会如何？
+
+2. **架构简化后的最小有效方案**
+   - 去掉 object-side 后，主干就是纯 GET-Zero 式 Graph Transformer + 什么改进？
+   - per-finger/per-joint adaptation latent 在没有物体泛化时还有意义吗？
+   - self-modeling loss（FK 预测）是否还保留？
+
+3. **超越 GET-Zero 的切入点（导师要求的"方法优势"）**
+   - 可能的方向：更强的图编码、更好的 embodiment tokenization、RMA-style adaptation、端到端 RL vs BC
+   - 需要锁定 1-2 个最有说服力的改进点
+
+4. **实验设计初步**
+   - 用哪些手型？LEAP family 内变体 vs 跨 family（Allegro, Shadow 等）
+   - Baseline 是什么？GET-Zero, Amorpheus, MetaMorph, vanilla MLP
+
+### 参考文件
+- 前三轮讨论：`/home/hac/isaac/AnyMani/source/anymani/ideas/graph/discussion2.ipynb`
+- 用户个人构思：`/home/hac/isaac/AnyMani/source/anymani/ideas/graph/mine.ipynb`
 
 ## 委派要求
 
 - 使用 `askQuestion` 和用户保持循环反馈
-- 长段分析写入 `/home/hac/isaac/AnyMani/source/anymani/ideas/graph/discusion.ipynb`（已创建，有初始内容）
+- 长段分析写入 `/home/hac/isaac/AnyMani/source/anymani/ideas/graph/discuss3.ipynb`（已创建，空白）
+- 遵守 discussion skill 的 cell 格式规范
 - 用户是科研人员，不需要解释基础概念，但需要帮助理清方法定位
 - 讨论应聚焦在"方法导向"的框架下：方法的核心优势 → 在什么新场景/新组合下发挥独特价值
 - 不要让讨论发散到太多方向，帮用户收敛

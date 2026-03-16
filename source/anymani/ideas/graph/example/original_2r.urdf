@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  简单 2R 平面机器人（两个旋转关节）
+  - base_link: 固定底座
+  - link1: 第一段连杆，长 0.3m，沿 Z 轴方向
+  - link2: 第二段连杆，长 0.2m，沿 Z 轴方向
+
+  注意：visual 和 collision 使用相同的 geometry 和 origin，保证对齐。
+  几何体使用 URDF 原生 primitive（cylinder），无需外部 mesh 文件。
+-->
+<robot name="simple_2r">
+
+  <!-- ==================== Base Link ==================== -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.05"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.5 0.5 0.5 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.05" length="0.05"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- ==================== Joint 1 ==================== -->
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.05" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.57" upper="1.57" effort="10" velocity="3.14"/>
+  </joint>
+
+  <!-- ==================== Link 1 ==================== -->
+  <!--
+    连杆参数：
+      长度 L1 = 0.3m
+      半径 R1 = 0.02m
+      密度假设 rho = 2700 kg/m^3 (铝)
+      质量 m1 = rho * pi * R1^2 * L1 = 2700 * 3.14159 * 0.0004 * 0.3 = 1.018 kg
+      惯量（圆柱绕质心）:
+        Ixx = Iyy = m*(3*R^2 + L^2)/12 = 1.018*(3*0.0004 + 0.09)/12 = 0.00775
+        Izz = m*R^2/2 = 1.018*0.0004/2 = 0.000204
+    visual/collision origin: 圆柱质心在连杆中点 (0, 0, L1/2) = (0, 0, 0.15)
+  -->
+  <link name="link1">
+    <visual>
+      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.02" length="0.3"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0.2 0.4 0.8 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.02" length="0.3"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+      <mass value="1.018"/>
+      <inertia ixx="0.00775" ixy="0" ixz="0" iyy="0.00775" iyz="0" izz="0.000204"/>
+    </inertial>
+  </link>
+
+  <!-- ==================== Joint 2 ==================== -->
+  <!--
+    joint2 位于 link1 末端，即 z = L1 = 0.3（在 link1 坐标系下）
+  -->
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0 0 0.3" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.57" upper="1.57" effort="10" velocity="3.14"/>
+  </joint>
+
+  <!-- ==================== Link 2 ==================== -->
+  <!--
+    连杆参数：
+      长度 L2 = 0.2m
+      半径 R2 = 0.015m
+      密度 rho = 2700 kg/m^3
+      质量 m2 = 2700 * pi * 0.015^2 * 0.2 = 0.382 kg
+      惯量:
+        Ixx = Iyy = m*(3*R^2 + L^2)/12 = 0.382*(3*0.000225 + 0.04)/12 = 0.00130
+        Izz = m*R^2/2 = 0.382*0.000225/2 = 0.0000430
+    visual/collision origin: (0, 0, L2/2) = (0, 0, 0.1)
+  -->
+  <link name="link2">
+    <visual>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.015" length="0.2"/>
+      </geometry>
+      <material name="red">
+        <color rgba="0.8 0.2 0.2 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.015" length="0.2"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+      <mass value="0.382"/>
+      <inertia ixx="0.00130" ixy="0" ixz="0" iyy="0.00130" iyz="0" izz="0.0000430"/>
+    </inertial>
+  </link>
+
+</robot>
