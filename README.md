@@ -143,3 +143,8 @@ Some examples of packages that can likely be excluded are:
 All project docs are consolidated under `source/leaphand/docs/`. Start here:
 
 - source/leaphand/docs/README.md
+
+Additional technical notes in `docs/`:
+
+- [docs/control_frequency.md](docs/control_frequency.md) — Motor control command transmission frequency analysis (30 Hz, decimation=4, sim 120 Hz)
+- [docs/physx_buffer_sizing_guide.md](docs/physx_buffer_sizing_guide.md) — PhysX GPU buffer sizing guide
