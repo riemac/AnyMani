@@ -44,8 +44,8 @@ AnyMani/source/anymani/
 │   │   │       │   ├── leaphand_stable_env_cfg.py  # 稳定版本快照
 │   │   │       │   └── agents/            # RL 算法配置
 │   │   │       └── leaphand_round/        # 半球指尖变体
-│   │   ├── direct/             # Direct workflow 任务
-│   │   └── functional/         # Functional workflow 任务
+│   │   ├── direct/             # Direct workflow 任务，用于科研idea的快速原型设计
+│   │   └── functional/         # 机制检验
 │   └── robots/                 # 机器人资产定义
 │       └── leap/               # LeapHand URDF/USD
 ├── assets/                     # USD 资产文件
@@ -65,6 +65,7 @@ AnyMani/source/anymani/
 ### 2. 代码风格
 
 - 主要基于 `ManagerBasedRLEnv` 环境架构开发
+- 目前基于 `DirectRLEnv` 环境架构开发，用于科研idea的快速原型设计
 - 部分功能测试验证基于 `standalone app launcher` 开发
 - 继承 Isaac Lab 的声明式配置风格：`@configclass` + `__post_init__`
 
