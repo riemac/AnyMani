@@ -81,6 +81,7 @@
 
 本目录遵循 `annotation` skill 的风格：
 
+- 采用中文
 - 方法 docstring 优先采用 Google Doc String 风格
 - 数学表达统一使用 `$...$` / `$$...$$`
 - 不使用 `:math:` 作为主要数学表达方式

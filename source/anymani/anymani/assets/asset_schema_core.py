@@ -1,16 +1,17 @@
-"""Core schema and helper utilities for hand-asset declaration.
+"""手部资产声明的底层 schema 与辅助工具。
 
-This module contains the lower-level schema objects that are shared by the
-embodiment-level asset description:
+本模块承载的是更靠近“基础语言”的那一层声明式对象，供 embodiment
+层复用。它主要包含：
 
-- generic dataclass helpers
-- pose/material primitives
-- geometry schema
-- inertial schema
-- low-level normalization helpers
+- 通用 dataclass 辅助方法
+- 位姿 / 材质等基础描述
+- 几何体 schema
+- 惯量与惯性 schema
+- 底层规范化辅助函数
 
-It deliberately does not define `JointCfg` / `FingerCfg` / `PalmCfg` /
-`HandCfg`. Those live in `asset_schema_embodiment.py`.
+它**故意**不定义 `JointCfg` / `FingerCfg` / `PalmCfg` / `HandCfg`。
+这些更贴近“手部结构”的对象被放在 `asset_schema_embodiment.py`
+中，以保持“基础描述”和“embodiment 结构描述”之间的边界清晰。
 """
 
 from __future__ import annotations
@@ -24,13 +25,13 @@ from typing import Any, ClassVar, Literal, cast, overload
 
 
 def _class_to_dict(value: Any) -> Any:
-    r"""Recursively convert dataclass-based asset configs into Python containers.
+    r"""递归地把 dataclass 资产配置转成原生 Python 容器。
 
     Args:
-        value (Any): The object to convert.
+        value (Any): 待转换对象。
 
     Returns:
-        Any: A recursively converted Python container.
+        Any: 递归展开后的 Python 原生对象。
     """
 
     if is_dataclass(value):
@@ -45,14 +46,14 @@ def _class_to_dict(value: Any) -> Any:
 
 
 def _update_from_dict(obj: Any, data: dict[str, Any]) -> None:
-    r"""Update dataclass fields in-place and rerun normalization.
+    r"""原地更新 dataclass 字段，并重新执行规范化。
 
     Args:
-        obj (Any): The dataclass instance to update.
-        data (dict[str, Any]): The new field values.
+        obj (Any): 待更新的 dataclass 实例。
+        data (dict[str, Any]): 新字段值。
 
     Raises:
-        KeyError: If `data` contains unknown fields.
+        KeyError: 当 `data` 中出现未知字段时抛出。
     """
 
     for key, value in data.items():
@@ -68,14 +69,14 @@ def _update_from_dict(obj: Any, data: dict[str, Any]) -> None:
 
 
 def _validate_missing(obj: Any, prefix: str = "") -> list[str]:
-    r"""Collect all unresolved required-field paths.
+    r"""收集所有尚未解析完成的必填字段路径。
 
     Args:
-        obj (Any): The object to inspect.
-        prefix (str): Current recursive prefix.
+        obj (Any): 待检查对象。
+        prefix (str): 当前递归前缀。
 
     Returns:
-        list[str]: All missing-field paths.
+        list[str]: 所有缺失字段的路径。
     """
 
     missing: list[str] = []
@@ -94,94 +95,94 @@ def _validate_missing(obj: Any, prefix: str = "") -> list[str]:
 
 
 class AssetCfgBase:
-    r"""Shared helper mixin for asset declaration dataclasses."""
+    r"""资产声明 dataclass 的通用辅助 mixin。"""
 
     def to_dict(self) -> dict[str, Any]:
-        r"""Serialize the config into native Python containers.
+        r"""把配置序列化为原生 Python 容器。
 
         Returns:
-            dict[str, Any]: Recursive dictionary representation.
+            dict[str, Any]: 递归字典表示。
         """
 
         return _class_to_dict(self)
 
     def from_dict(self, data: dict[str, Any]) -> None:
-        r"""Update the config in-place from a dictionary.
+        r"""根据输入字典原地更新配置。
 
         Args:
-            data (dict[str, Any]): Input mapping.
+            data (dict[str, Any]): 输入映射。
         """
 
         _update_from_dict(self, data)
 
     def copy(self):
-        r"""Create a deep copy.
+        r"""创建深拷贝。
 
         Returns:
-            Any: Deep-copied instance.
+            Any: 深拷贝后的实例。
         """
 
         return deepcopy(self)
 
     def replace(self, **kwargs):
-        r"""Return a new config with selected fields replaced.
+        r"""返回一个替换了部分字段的新配置实例。
 
         Args:
-            **kwargs: Replacement fields.
+            **kwargs: 待替换字段。
 
         Returns:
-            Any: Replaced copy.
+            Any: 替换后的新实例。
         """
 
         return replace(cast(Any, self), **kwargs)
 
     def validate(self) -> list[str]:
-        r"""Return unresolved required-field paths.
+        r"""返回尚未解析完成的必填字段路径。
 
         Returns:
-            list[str]: Missing required-field paths.
+            list[str]: 缺失字段路径列表。
         """
 
         return _validate_missing(self)
 
 
 Vector2 = tuple[float, float]
-"""Two-dimensional float tuple."""
+"""二维浮点 tuple。"""
 
 Vector3 = tuple[float, float, float]
-"""Three-dimensional float tuple."""
+"""三维浮点 tuple。"""
 
 Vector4 = tuple[float, float, float, float]
-"""Four-dimensional float tuple."""
+"""四维浮点 tuple。"""
 
 Vector6 = tuple[float, float, float, float, float, float]
-"""Six-dimensional float tuple."""
+"""六维浮点 tuple。"""
 
 JointType = Literal["revolute", "fixed"]
-"""Supported URDF joint types in the current project scope."""
+"""当前项目范围内支持的 URDF joint 类型。"""
 
 Handedness = Literal["left", "right", "unknown"]
-"""Handedness tag; `unknown` is reserved for non-typical or undecided embodiments."""
+"""左右手标签；`unknown` 预留给非典型或暂未决定 handedness 的结构。"""
 
 PrimitiveGeometryType = Literal["box", "cylinder", "sphere"]
-"""Supported primitive geometry kinds."""
+"""支持的基础几何 primitive 类型。"""
 
 _FLOAT_TOLERANCE = 1e-12
-"""Unified near-zero tolerance for geometry and axis checks."""
+"""几何与轴向检查统一使用的近零容差。"""
 
 
 def _sanitize_identifier(name: str, *, field_name: str) -> str:
-    r"""Normalize string identifiers used in schema objects.
+    r"""规范化 schema 中使用的字符串标识符。
 
     Args:
-        name (str): Raw identifier.
-        field_name (str): Logical field name for error messages.
+        name (str): 原始名称。
+        field_name (str): 用于报错的逻辑字段名。
 
     Returns:
-        str: Normalized identifier.
+        str: 规范化后的名称。
 
     Raises:
-        ValueError: If the identifier is empty.
+        ValueError: 当名称为空时抛出。
     """
 
     if not isinstance(name, str) or not name.strip():
@@ -213,19 +214,19 @@ def _ensure_tuple(value: Any, *, length: int, field_name: str) -> tuple[float, .
 
 
 def _ensure_tuple(value: Any, *, length: int, field_name: str) -> tuple[float, ...]:
-    r"""Convert sequence-like input into a fixed-length float tuple.
+    r"""把类序列输入转成定长浮点 tuple。
 
     Args:
-        value (Any): Input object.
-        length (int): Required tuple length.
-        field_name (str): Field name used in diagnostics.
+        value (Any): 输入对象。
+        length (int): 期望 tuple 长度。
+        field_name (str): 报错时使用的字段名。
 
     Returns:
-        tuple[float, ...]: Float tuple of fixed length.
+        tuple[float, ...]: 定长浮点 tuple。
 
     Raises:
-        TypeError: If the input is not a valid sequence.
-        ValueError: If the input length mismatches the requested length.
+        TypeError: 当输入不是合法序列时抛出。
+        ValueError: 当长度与要求不符时抛出。
     """
 
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
@@ -236,16 +237,16 @@ def _ensure_tuple(value: Any, *, length: int, field_name: str) -> tuple[float, .
 
 
 def _normalize_axis(axis: Vector3) -> Vector3:
-    r"""Normalize a joint axis into a unit vector.
+    r"""把关节轴向规范化为单位向量。
 
     Args:
-        axis (Vector3): Raw axis vector.
+        axis (Vector3): 原始轴向。
 
     Returns:
-        Vector3: Unit axis.
+        Vector3: 单位轴向。
 
     Raises:
-        ValueError: If the vector norm is zero.
+        ValueError: 当向量范数为零时抛出。
     """
 
     x, y, z = _ensure_tuple(axis, length=3, field_name="axis")
@@ -256,14 +257,14 @@ def _normalize_axis(axis: Vector3) -> Vector3:
 
 
 def _ensure_list(value: Any, *, field_name: str) -> list[Any]:
-    r"""Normalize single object / tuple input into a list.
+    r"""把单对象 / tuple / `None` 统一规范为 list。
 
     Args:
-        value (Any): Object, tuple, list or `None`.
-        field_name (str): Reserved for future diagnostics.
+        value (Any): 单对象、tuple、list 或 `None`。
+        field_name (str): 预留给未来更细的诊断信息。
 
     Returns:
-        list[Any]: Normalized list.
+        list[Any]: 规范化后的列表。
     """
 
     if value is None:
@@ -277,16 +278,18 @@ def _ensure_list(value: Any, *, field_name: str) -> list[Any]:
 
 @dataclass
 class PoseCfg(AssetCfgBase):
-    r"""Local pose represented by `pos` + `rpy`.
+    r"""由 `pos` + `rpy` 表示的局部位姿。
 
-    This mirrors the URDF `<origin xyz="" rpy="">` semantics directly.
+    这一层直接对应 URDF 中 `<origin xyz="" rpy="">` 的语义，
+    方便把“代码中的局部几何参数”与“URDF 中的 link / joint 参考系”
+    一一对齐。
     """
 
     pos: Vector3 = (0.0, 0.0, 0.0)
-    """Local translation $(x, y, z)$."""
+    """局部平移 $(x, y, z)$。"""
 
     rpy: Vector3 = (0.0, 0.0, 0.0)
-    """Local Euler angles $(roll, pitch, yaw)$."""
+    """局部欧拉角 $(roll, pitch, yaw)$。"""
 
     def __post_init__(self):
         self.pos = _ensure_tuple(self.pos, length=3, field_name="pos")
@@ -294,16 +297,16 @@ class PoseCfg(AssetCfgBase):
 
     @classmethod
     def from_value(cls, value: PoseCfg | Sequence[float] | Mapping[str, Any] | None) -> PoseCfg:
-        r"""Construct a `PoseCfg` from common input forms.
+        r"""把常见输入形式收敛成一个 `PoseCfg`。
 
         Args:
-            value (PoseCfg | Sequence[float] | Mapping[str, Any] | None): Input pose.
+            value (PoseCfg | Sequence[float] | Mapping[str, Any] | None): 输入位姿。
 
         Returns:
-            PoseCfg: Normalized pose.
+            PoseCfg: 规范化位姿。
 
         Raises:
-            TypeError: If the input form is unsupported.
+            TypeError: 当输入形式不被支持时抛出。
         """
 
         if value is None:
@@ -325,10 +328,10 @@ class PoseCfg(AssetCfgBase):
 
     @property
     def packed(self) -> Vector6:
-        r"""Pack translation and Euler angles into a 6D tuple.
+        r"""把平移和欧拉角打包为 6D tuple。
 
         Returns:
-            Vector6: `(*pos, *rpy)`.
+            Vector6: `(*pos, *rpy)`。
         """
 
         return (*self.pos, *self.rpy)
@@ -336,13 +339,13 @@ class PoseCfg(AssetCfgBase):
 
 @dataclass
 class MaterialCfg(AssetCfgBase):
-    r"""Optional material/color descriptor."""
+    r"""可选的材质 / 颜色描述。"""
 
     name: str | None = None
-    """Material name, mainly for visual/recolored export."""
+    """材质名称，主要用于 visual 或重着色导出。"""
 
     rgba: Vector4 = (0.7, 0.7, 0.7, 1.0)
-    """RGBA color and alpha."""
+    """颜色分量 RGBA 与透明度。"""
 
     def __post_init__(self):
         self.rgba = _ensure_tuple(self.rgba, length=4, field_name="rgba")
@@ -352,30 +355,36 @@ class MaterialCfg(AssetCfgBase):
 
 @dataclass
 class GeometryCfg(AssetCfgBase):
-    r"""Base class for geometry description.
+    r"""几何描述的基类。
 
-    Geometry and geometry instances are deliberately split:
-    `GeometryCfg` describes shape parameters, while `GeometryElementCfg`
-    adds placement and optional material.
+    我们刻意把“几何本体”和“几何实例”分开：
+    `GeometryCfg` 描述形状参数，而 `GeometryElementCfg`
+    负责叠加位姿与可选材质。
     """
 
     geometry_type: ClassVar[str] = "geometry"
-    """Geometry type tag for derived-class dispatch."""
+    """供派生类分发使用的几何类型标签。"""
 
     @property
     def kind(self) -> str:
+        r"""返回当前几何的类型名。"""
+
         return self.geometry_type
 
     @property
     def is_primitive(self) -> bool:
+        r"""判断当前几何是否属于 primitive 家族。"""
+
         return self.geometry_type in {"box", "cylinder", "sphere"}
 
 
 @dataclass
 class BoxGeometryCfg(GeometryCfg):
+    r"""盒状 primitive 几何。"""
+
     geometry_type: ClassVar[str] = "box"
     size: Vector3
-    """Box side lengths $(s_x, s_y, s_z)$."""
+    """盒子的三边长度 $(s_x, s_y, s_z)$。"""
 
     def __post_init__(self):
         self.size = _ensure_tuple(self.size, length=3, field_name="box.size")
@@ -385,12 +394,14 @@ class BoxGeometryCfg(GeometryCfg):
 
 @dataclass
 class CylinderGeometryCfg(GeometryCfg):
+    r"""圆柱 primitive 几何。"""
+
     geometry_type: ClassVar[str] = "cylinder"
     radius: float
-    """Cylinder radius $r$."""
+    """圆柱半径 $r$。"""
 
     length: float
-    """Cylinder length $l$."""
+    """圆柱长度 $l$。"""
 
     def __post_init__(self):
         self.radius = float(self.radius)
@@ -401,9 +412,11 @@ class CylinderGeometryCfg(GeometryCfg):
 
 @dataclass
 class SphereGeometryCfg(GeometryCfg):
+    r"""球体 primitive 几何。"""
+
     geometry_type: ClassVar[str] = "sphere"
     radius: float
-    """Sphere radius $r$."""
+    """球体半径 $r$。"""
 
     def __post_init__(self):
         self.radius = float(self.radius)
@@ -413,12 +426,14 @@ class SphereGeometryCfg(GeometryCfg):
 
 @dataclass
 class MeshGeometryCfg(GeometryCfg):
+    r"""网格几何。"""
+
     geometry_type: ClassVar[str] = "mesh"
     file_path: str
-    """Mesh file path; exporter decides relative vs absolute interpretation."""
+    """网格文件路径；相对还是绝对由导出层决定。"""
 
     scale: Vector3 = (1.0, 1.0, 1.0)
-    """Mesh local scale $(s_x, s_y, s_z)$."""
+    """网格局部缩放 $(s_x, s_y, s_z)$。"""
 
     def __post_init__(self):
         if not isinstance(self.file_path, str) or not self.file_path.strip():
@@ -434,22 +449,22 @@ class MeshGeometryCfg(GeometryCfg):
 
 
 GeometryValue = GeometryCfg | str | Mapping[str, Any]
-"""Loose geometry input accepted by schema normalization."""
+"""规范化可接受的宽松几何输入。"""
 
 
 def make_geometry_cfg(value: GeometryValue) -> GeometryCfg:
-    r"""Normalize loose geometry input into a `GeometryCfg`.
+    r"""把宽松几何输入规范化成一个 `GeometryCfg`。
 
     Args:
-        value (GeometryValue): Loose geometry input.
+        value (GeometryValue): 宽松几何输入。
 
     Returns:
-        GeometryCfg: Normalized geometry object.
+        GeometryCfg: 规范化后的几何对象。
 
     Raises:
-        TypeError: If the input type is unsupported.
-        KeyError: If a dictionary input misses the geometry-type key.
-        ValueError: If the geometry type value is unsupported.
+        TypeError: 当输入类型不受支持时抛出。
+        KeyError: 当字典输入缺少几何类型字段时抛出。
+        ValueError: 当几何类型值不受支持时抛出。
     """
 
     if isinstance(value, GeometryCfg):
@@ -479,19 +494,19 @@ def make_geometry_cfg(value: GeometryValue) -> GeometryCfg:
 
 @dataclass
 class GeometryElementCfg(AssetCfgBase):
-    r"""Concrete geometry instance with local pose and optional material."""
+    r"""带局部位姿与可选材质的具体几何实例。"""
 
     geometry: GeometryCfg
-    """Underlying geometry descriptor."""
+    """底层几何描述对象。"""
 
     name: str | None = None
-    """Optional instance name for debugging/export."""
+    """可选实例名，主要用于调试 / 导出。"""
 
     origin: PoseCfg | Sequence[float] | Mapping[str, Any] | None = field(default_factory=PoseCfg)
-    """Local pose relative to the owning joint/child-link frame."""
+    """相对于所属 joint / child link 参考系的局部位姿。"""
 
     material: MaterialCfg | Mapping[str, Any] | None = None
-    """Optional material, only consumed by visual/recolored flows."""
+    """可选材质，仅由 visual / 重着色流程消费。"""
 
     def __post_init__(self):
         if self.name is not None:
@@ -506,18 +521,17 @@ class GeometryElementCfg(AssetCfgBase):
 
 @dataclass
 class CollisionGeometryCfg(GeometryElementCfg):
-    r"""Collision geometry instance."""
+    r"""用于 collision 的几何实例。"""
 
 
 @dataclass
 class VisualGeometryCfg(GeometryElementCfg):
-    r"""Visual geometry instance."""
+    r"""用于 visual 的几何实例。"""
 
 
 @dataclass
 class InertiaTensorCfg(AssetCfgBase):
-    r"""URDF-style symmetric inertia tensor.
-
+    r"""符合 URDF 风格的对称惯量张量。
     $$
     \mathbf{I} =
     \begin{bmatrix}
@@ -529,22 +543,22 @@ class InertiaTensorCfg(AssetCfgBase):
     """
 
     ixx: float
-    """Diagonal entry $i_{xx}$."""
+    """对角项 $i_{xx}$。"""
 
     iyy: float
-    """Diagonal entry $i_{yy}$."""
+    """对角项 $i_{yy}$。"""
 
     izz: float
-    """Diagonal entry $i_{zz}$."""
+    """对角项 $i_{zz}$。"""
 
     ixy: float = 0.0
-    """Off-diagonal entry $i_{xy}$."""
+    """非对角项 $i_{xy}$。"""
 
     ixz: float = 0.0
-    """Off-diagonal entry $i_{xz}$."""
+    """非对角项 $i_{xz}$。"""
 
     iyz: float = 0.0
-    """Off-diagonal entry $i_{yz}$."""
+    """非对角项 $i_{yz}$。"""
 
     def __post_init__(self):
         self.ixx = float(self.ixx)
@@ -559,19 +573,35 @@ class InertiaTensorCfg(AssetCfgBase):
 
 @dataclass
 class InertialCfg(AssetCfgBase):
-    r"""Inertial descriptor for one link-level rigid body."""
+    r"""单个 link 级刚体的惯性描述。
+
+    在 URDF 里，惯性通常不是只给一个标量，而是要同时给出质量 $m$、
+    惯性参考系的位置，以及在该参考系下表达的对称惯量张量：
+
+    $$
+    \mathbf{I} =
+    \begin{bmatrix}
+    i_{xx} & i_{xy} & i_{xz} \\
+    i_{xy} & i_{yy} & i_{yz} \\
+    i_{xz} & i_{yz} & i_{zz}
+    \end{bmatrix}.
+    $$
+
+    这里 `inertia_padding` 不是物理项，而是工程性稳定化项，用来避免
+    极薄、极小或近退化几何导致的数值不稳定。
+    """
 
     mass: float
-    """Link mass $m$."""
+    """刚体质量 $m$。"""
 
     inertia: InertiaTensorCfg | Mapping[str, Any]
-    """Inertia tensor descriptor."""
+    """惯量张量描述。"""
 
     origin: PoseCfg | Sequence[float] | Mapping[str, Any] | None = field(default_factory=PoseCfg)
-    """Pose of the inertial frame relative to the link frame."""
+    """惯性参考系相对于 link frame 的位姿。"""
 
     inertia_padding: float = 0.0
-    """Engineering padding applied to tensor diagonal for numerical robustness."""
+    """为数值稳定性附加到对角项上的工程性 padding。"""
 
     def __post_init__(self):
         self.mass = float(self.mass)
@@ -586,6 +616,7 @@ class InertialCfg(AssetCfgBase):
         if self.inertia_padding < 0.0:
             raise ValueError("inertia_padding must be >= 0")
         if self.inertia_padding > 0.0:
+            # 这里仅对对角项施加稳定化 padding，不修改理论惯量的结构。
             self.inertia = InertiaTensorCfg(
                 ixx=self.inertia.ixx + self.inertia_padding,
                 iyy=self.inertia.iyy + self.inertia_padding,
@@ -605,24 +636,44 @@ class InertialCfg(AssetCfgBase):
         min_mass: float = 1e-4,
         inertia_padding: float = 1e-8,
     ) -> InertialCfg:
-        r"""Construct inertial parameters from a uniform box primitive.
+        r"""由均匀 box primitive 构造惯性参数。
+
+        理论上，一个均匀长方体的质量与质心惯量为：
+
+        $$
+        m = \rho s_x s_y s_z,
+        $$
+
+        $$
+        \mathbf{I}_C =
+        \mathrm{diag}\left(
+        \frac{m}{12}(s_y^2 + s_z^2),
+        \frac{m}{12}(s_x^2 + s_z^2),
+        \frac{m}{12}(s_x^2 + s_y^2)
+        \right).
+        $$
+
+        这里的 `min_mass` 只是工程下限，不改变几何本身的解析公式；
+        `inertia_padding` 则用于给对角项增加数值缓冲。
 
         Args:
-            size (Vector3): Box side lengths $(s_x, s_y, s_z)$.
-            density (float): Density $\rho$.
-            origin (PoseCfg | Sequence[float] | Mapping[str, Any] | None): Inertial-frame pose.
-            min_mass (float): Lower bound for mass stabilization.
-            inertia_padding (float): Diagonal padding for numerical robustness.
+            size (Vector3): box 三边长度 $(s_x, s_y, s_z)$。
+            density (float): 密度 $\rho$。
+            origin (PoseCfg | Sequence[float] | Mapping[str, Any] | None): 惯性参考系位姿。
+            min_mass (float): 质量下限，用于数值稳定。
+            inertia_padding (float): 惯量对角项 padding。
 
         Returns:
-            InertialCfg: Box-derived inertial descriptor.
+            InertialCfg: box 推导出的惯性描述。
         """
 
         sx, sy, sz = _ensure_tuple(size, length=3, field_name="size")
         density = float(density)
         if density <= 0.0:
             raise ValueError("density must be positive")
+        # 理论质量公式 $m = \rho V$；`min_mass` 只用于数值稳定。
         mass = max(density * sx * sy * sz, min_mass)
+        # box 在质心坐标系下的主惯量。
         ixx = mass * (sy * sy + sz * sz) / 12.0
         iyy = mass * (sx * sx + sz * sz) / 12.0
         izz = mass * (sx * sx + sy * sy) / 12.0
@@ -645,19 +696,31 @@ class InertialCfg(AssetCfgBase):
         min_mass: float = 1e-4,
         inertia_padding: float = 1e-8,
     ) -> InertialCfg:
-        r"""Construct inertial parameters from a uniform cylinder primitive.
+        r"""由均匀 cylinder primitive 构造惯性参数。
+
+        理论上，一个均匀圆柱的体积、质量与主惯量为：
+
+        $$
+        V = \pi r^2 l, \qquad m = \rho V,
+        $$        $$
+        I_{\parallel} = \frac{1}{2}mr^2, \qquad
+        I_{\perp} = \frac{1}{12}m(3r^2 + l^2).
+        $$
+
+        如果 `principal_axis` 取 `x / y / z`，则只是把主惯量在三个轴向
+        之间重新排列；公式本身不变。
 
         Args:
-            radius (float): Cylinder radius $r$.
-            length (float): Cylinder length $l$.
-            density (float): Density $\rho$.
-            origin (PoseCfg | Sequence[float] | Mapping[str, Any] | None): Inertial-frame pose.
-            principal_axis (Literal["x", "y", "z"]): Local cylinder longitudinal axis.
-            min_mass (float): Lower bound for mass stabilization.
-            inertia_padding (float): Diagonal padding for numerical robustness.
+            radius (float): 圆柱半径 $r$。
+            length (float): 圆柱长度 $l$。
+            density (float): 密度 $\rho$。
+            origin (PoseCfg | Sequence[float] | Mapping[str, Any] | None): 惯性参考系位姿。
+            principal_axis (Literal["x", "y", "z"]): 圆柱主轴方向。
+            min_mass (float): 质量下限，用于数值稳定。
+            inertia_padding (float): 惯量对角项 padding。
 
         Returns:
-            InertialCfg: Cylinder-derived inertial descriptor.
+            InertialCfg: cylinder 推导出的惯性描述。
         """
 
         radius = float(radius)
@@ -665,10 +728,14 @@ class InertialCfg(AssetCfgBase):
         density = float(density)
         if radius <= 0.0 or length <= 0.0 or density <= 0.0:
             raise ValueError("radius, length and density must be positive")
+        # 理论体积公式 $V = \pi r^2 l$；`min_mass` 只用于稳定极小体积近似。
         volume = math.pi * radius * radius * length
         mass = max(density * volume, min_mass)
+        # 平行主轴方向的惯量 $I_{\parallel}$。
         i_parallel = 0.5 * mass * radius * radius
+        # 垂直主轴方向的惯量 $I_{\perp}$。
         i_perp = mass * (3.0 * radius * radius + length * length) / 12.0
+        # 这里只是主惯量的轴向重排，不改变圆柱本身的解析公式。
         if principal_axis == "x":
             ixx, iyy, izz = i_parallel, i_perp, i_perp
         elif principal_axis == "y":
@@ -692,25 +759,38 @@ class InertialCfg(AssetCfgBase):
         min_mass: float = 1e-4,
         inertia_padding: float = 1e-8,
     ) -> InertialCfg:
-        r"""Construct inertial parameters from a uniform sphere primitive.
+        r"""由均匀 sphere primitive 构造惯性参数。
+
+        理论上，均匀球体的体积、质量与惯量为：
+
+        $$
+        V = \frac{4}{3}\pi r^3, \qquad m = \rho V,
+        $$
+        $$
+        I_C = \frac{2}{5}mr^2 \mathbf{I}.
+        $$
+
+        这里 `min_mass` 仍然只是工程下限，不改变球体的解析惯量关系。
 
         Args:
-            radius (float): Sphere radius $r$.
-            density (float): Density $\rho$.
-            origin (PoseCfg | Sequence[float] | Mapping[str, Any] | None): Inertial-frame pose.
-            min_mass (float): Lower bound for mass stabilization.
-            inertia_padding (float): Diagonal padding for numerical robustness.
+            radius (float): 球体半径 $r$。
+            density (float): 密度 $\rho$。
+            origin (PoseCfg | Sequence[float] | Mapping[str, Any] | None): 惯性参考系位姿。
+            min_mass (float): 质量下限，用于数值稳定。
+            inertia_padding (float): 惯量对角项 padding。
 
         Returns:
-            InertialCfg: Sphere-derived inertial descriptor.
+            InertialCfg: sphere 推导出的惯性描述。
         """
 
         radius = float(radius)
         density = float(density)
         if radius <= 0.0 or density <= 0.0:
             raise ValueError("radius and density must be positive")
+        # 理论体积公式 $V = \frac{4}{3}\pi r^3$；`min_mass` 只是数值稳定项。
         volume = 4.0 / 3.0 * math.pi * radius**3
         mass = max(density * volume, min_mass)
+        # 均匀球体三轴惯量完全相同，$I = \frac{2}{5}mr^2$。
         diagonal = 0.4 * mass * radius * radius
         return cls(
             mass=mass,
@@ -722,19 +802,19 @@ class InertialCfg(AssetCfgBase):
 
 @dataclass
 class JointLimitCfg(AssetCfgBase):
-    r"""Joint limits and optional drive bounds."""
+    r"""关节限位及可选驱动边界。"""
 
     lower: float
-    r"""Joint lower bound $q_{\min}$."""
+    r"""关节下界 $q_{\min}$。"""
 
     upper: float
-    r"""Joint upper bound $q_{\max}$."""
+    r"""关节上界 $q_{\max}$。"""
 
     effort: float | None = None
-    """Optional torque/force upper bound."""
+    """可选的力矩 / 力上界。"""
 
     velocity: float | None = None
-    """Optional velocity upper bound."""
+    """可选的速度上界。"""
 
     def __post_init__(self):
         self.lower = float(self.lower)
@@ -749,16 +829,16 @@ class JointLimitCfg(AssetCfgBase):
 
 @dataclass
 class MimicCfg(AssetCfgBase):
-    r"""URDF mimic-joint schema."""
+    r"""用于 URDF mimic 关节的 schema。"""
 
     joint: str
-    """The parent joint referenced by the mimic relation."""
+    """父关节，供 mimic 关系引用。"""
 
     multiplier: float = 1.0
-    """Linear multiplier $\alpha$."""
+    """线性乘子 $\alpha$。"""
 
     offset: float = 0.0
-    """Linear offset $\beta$."""
+    """线性偏移 $\beta$。"""
 
     def __post_init__(self):
         self.joint = _sanitize_identifier(self.joint, field_name="mimic.joint")
@@ -767,16 +847,16 @@ class MimicCfg(AssetCfgBase):
 
 
 def _make_collision_cfg(value: Any) -> CollisionGeometryCfg:
-    r"""Normalize loose input into `CollisionGeometryCfg`.
+    r"""把宽松输入规范化成 `CollisionGeometryCfg`。
 
     Args:
-        value (Any): Loose collision-geometry input.
+        value (Any): 宽松的 collision 几何输入。
 
     Returns:
-        CollisionGeometryCfg: Normalized collision geometry.
+        CollisionGeometryCfg: 规范化后的 collision 几何实例。
 
     Raises:
-        TypeError: If the input cannot be interpreted as collision geometry.
+        TypeError: 当输入无法解释为 collision 几何时抛出。
     """
 
     if isinstance(value, CollisionGeometryCfg):
@@ -796,16 +876,16 @@ def _make_collision_cfg(value: Any) -> CollisionGeometryCfg:
 
 
 def _make_visual_cfg(value: Any) -> VisualGeometryCfg:
-    r"""Normalize loose input into `VisualGeometryCfg`.
+    r"""把宽松输入规范化成 `VisualGeometryCfg`。
 
     Args:
-        value (Any): Loose visual-geometry input.
+        value (Any): 宽松的 visual 几何输入。
 
     Returns:
-        VisualGeometryCfg: Normalized visual geometry.
+        VisualGeometryCfg: 规范化后的 visual 几何实例。
 
     Raises:
-        TypeError: If the input cannot be interpreted as visual geometry.
+        TypeError: 当输入无法解释为 visual 几何时抛出。
     """
 
     if isinstance(value, VisualGeometryCfg):
