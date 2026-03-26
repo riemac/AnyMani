@@ -3,4 +3,5 @@
    - 难点之一: <inertial> 的计算（资产生成）
    > 在实际工程中，为了防止物理引擎（如 Gazebo, PyBullet）在计算微小物体时出现除以接近 0 的数值导致崩溃，开发者经常会故意把 inertial 的值写得比实际大一些（这被称为 Inertia Padding 惯性填充）
    - 坐标系语义对齐？主要是不同<joint>和child link的<collision>坐标系（网络架构）
-3. recolored urdf区分不同的link，从base/palm的树根节点开始，同层级的link color mesh颜色相同
+   - 难点之二：我们怎么才能确保生成的资产不仅物理合理而且分布多样？足以再后续训练中提升模型的泛化能力？
+3. recolored urdf区分不同的手指link，从base/palm的树根节点开始，同层级的link color mesh颜色相同

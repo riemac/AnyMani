@@ -8,12 +8,6 @@
 
 **AnyMani** 是基于 Isaac Lab 的灵巧操作研究框架，专注于手内物体操作（in-hand manipulation）任务。
 
-### 核心特性
-
-- **多手型支持**：LeapHand、LeapHand-Round、未来扩展 Allegro、Shadow 等
-- **模型复现**：稳定版本快照机制，解决训练模型无法复现问题
-- **模块化设计**：MDP 组件解耦，便于组合新环境
-
 ---
 
 ## 项目架构（重构后）
@@ -67,9 +61,10 @@ AnyMani/source/anymani/
 - 主要基于 `ManagerBasedRLEnv` 环境架构开发
 - 目前基于 `DirectRLEnv` 环境架构开发，用于科研idea的快速原型设计
 - 部分功能测试验证基于 `standalone app launcher` 开发
-- 继承 Isaac Lab 的声明式配置风格：`@configclass` + `__post_init__`
+- 继承 Isaac Lab 的声明式配置驱动的设计风格：`@configclass` / `@dataclass` + `__post_init__`等
+> 这种风格很适合科研任务,用声明式配置把结构先立起来,用清晰的层次把“对象是什么”和“系统怎么运行”分开，做到配置分层与职责分离，让人可以边想边搭，而不是一开始就陷进一大堆过程式细节
 
-### 3. 模块依赖
+### 3. 模块依赖（ManagerBasedRLEnv）
 
 ```
 inhand_env_cfg.py (组件库)
@@ -88,15 +83,20 @@ __init__.py (Gym 注册)
 - 环境配置只组合组件，不定义新组件
 - 禁止循环依赖
 
-### 4. 命名规范
+### 4. 任务命名规范
 
 - **任务**：`inhand`、`grasp`（未来）
-- **手型**：`leaphand`、`leaphand_round`、`allegro`（未来）
 - **Gym ID**：`AnyMani-<Hand>-<Feature>-v0`
 
 ---
 
 ## 常用操作
+
+### 环境激活
+
+```bash
+source ~/isaac/env_isaaclab/bin/activate
+```
 
 ### 列出所有环境
 
