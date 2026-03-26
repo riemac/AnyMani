@@ -1,80 +1,152 @@
-"""生成后手部资产的 exporter 侧运行时对象。
+"""手部资产生成的 Exporter 层空骨架。
 
-exporter v1 刻意保持保守。当前阶段项目还在收敛“生成语义”，所以
-exporter 代码主要服务于检查、调试和轻量序列化，而不是过早把项目锁进
-一套很重的 URDF 写出抽象栈里。
+这一层只保留“导出职责”本身，不再内置任何默认导出行为。当前不再默认：
+
+- 把 `HandCfg` 序列化成 JSON
+- 自动落盘调试文件
+- 替你决定正式导出的 URDF / yaml / 附带资产格式细节
+
+这里保留四个导出层级，服务你后续自己定义的导出策略：
+
+- `JointExporter`
+- `FingerExporter`
+- `PalmExporter`
+- `HandExporter`
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
-
-from .asset_schema_core import AssetCfgBase
-from .asset_schema_embodiment import HandCfg
-
-
-@dataclass
-class ExporterCfg(AssetCfgBase):
-    r"""导出器运行时对象的配置。
-
-    当前 exporter 的目标很简单：把 canonical :class:`HandCfg`
-    转成普通 Python 字典，并在需要时额外落一个 JSON 方便调试或记录实验。
-    """
-
-    class_type: type["Exporter"] | None = None
-    """关联的 exporter 运行时类。"""
-
-    output_dir: str | None = None
-    """可选输出目录。"""
-
-    dump_json: bool = False
-    """是否额外导出一份 `HandCfg` 的 JSON 快照。"""
-
-    json_file_name: str = "hand.json"
-    """在 `dump_json=True` 时使用的输出文件名。"""
-
-    def __post_init__(self):
-        if self.class_type is None:
-            self.class_type = Exporter
+from .asset_base import AssetCfgBase
+from .asset_base import FingerCfg, HandCfg, JointCfg, PalmCfg
 
 
 class Exporter:
-    r"""用于序列化生成结果的基础运行时对象。"""
+    r"""导出器基类。
 
-    def __init__(self, cfg: ExporterCfg):
-        self.cfg = cfg
+    这里的 `export()` 只说明“从资产配置导出外部文件或附带资产”这一职责，
+    但不再提供默认实现。
+    """
 
-    def serialize(self, hand: HandCfg) -> dict[str, Any]:
-        r"""把 hand 序列化成普通字典。
+    def __init__(self):
+        pass
+
+    def export(self, target: AssetCfgBase) -> None:
+        r"""导出资产对象。
 
         Args:
-            hand (HandCfg): canonical hand schema 对象。
+            target (AssetCfgBase): 待导出的资产对象。
 
-        Returns:
-            dict[str, Any]: 转换后的嵌套映射。
+        Raises:
+            NotImplementedError: 当前只是导出入口骨架，尚未填入真实实现。
         """
 
-        return hand.to_dict()
+        raise NotImplementedError("Exporter 骨架已保留，但具体导出逻辑需后续实现。")
 
-    def export(self, hand: HandCfg) -> dict[str, Any]:
-        r"""根据 exporter 配置导出 hand。
 
-        v1 的 exporter 行为刻意保持克制：
-        其主要工作是序列化 `HandCfg`，并可选地写出一份 JSON 调试产物。
+class JointExporter(Exporter):
+    r"""关节级导出器。
+
+    预期职责：
+
+    - 从 `JointCfg` 导出自包含的最小调试资产
+    - 在需要时生成快速检验用的局部 URDF / yaml / 附带资源
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def export(self, target: AssetCfgBase) -> None:
+        r"""导出一个 `JointCfg`。
+
+        Args:
+            target (AssetCfgBase): 待导出的资产对象，预期应为 `JointCfg`。
+
+        Raises:
+            NotImplementedError: 关节级导出逻辑尚未实现。
         """
 
-        payload = self.serialize(hand)
-        if self.cfg.dump_json and self.cfg.output_dir is not None:
-            output_dir = Path(self.cfg.output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = output_dir / self.cfg.json_file_name
-            # 落盘的 JSON 主要用于人工检查和实验留痕。
-            # 它还不是最终的 URDF / SDF 权威导出路径。
-            output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-        return payload
+        raise NotImplementedError("JointExporter 目前只保留骨架，等待 joint-level 导出实现。")
 
 
-__all__ = ["ExporterCfg", "Exporter"]
+class FingerExporter(Exporter):
+    r"""手指级导出器。
+
+    预期职责：
+
+    - 从 `FingerCfg` 导出 finger 级自包含资产
+    - 在需要时生成快速检验用 finger-level URDF
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def export(self, target: AssetCfgBase) -> None:
+        r"""导出一个 `FingerCfg`。
+
+        Args:
+            target (AssetCfgBase): 待导出的资产对象，预期应为 `FingerCfg`。
+
+        Raises:
+            NotImplementedError: 手指级导出逻辑尚未实现。
+        """
+
+        raise NotImplementedError("FingerExporter 目前只保留骨架，等待 finger-level 导出实现。")
+
+
+class PalmExporter(Exporter):
+    r"""掌级导出器。
+
+    预期职责：
+
+    - 从 `PalmCfg` 导出掌级自包含资产
+    - 在需要时生成快速检验用 palm-level URDF
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def export(self, target: AssetCfgBase) -> None:
+        r"""导出一个 `PalmCfg`。
+
+        Args:
+            target (AssetCfgBase): 待导出的资产对象，预期应为 `PalmCfg`。
+
+        Raises:
+            NotImplementedError: 掌级导出逻辑尚未实现。
+        """
+
+        raise NotImplementedError("PalmExporter 目前只保留骨架，等待 palm-level 导出实现。")
+
+
+class HandExporter(Exporter):
+    r"""手级导出器。
+
+    预期职责：
+
+    - 从 `HandCfg` 导出正式 URDF / yaml / 附带资产
+    - 在需要时导出整手级自包含 URDF 用于快速检验
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def export(self, target: AssetCfgBase) -> None:
+        r"""导出一个 `HandCfg`。
+
+        Args:
+            target (AssetCfgBase): 待导出的资产对象，预期应为 `HandCfg`。
+
+        Raises:
+            NotImplementedError: 手级导出逻辑尚未实现。
+        """
+
+        raise NotImplementedError("HandExporter 目前只保留骨架，等待 hand-level 导出实现。")
+
+
+__all__ = [
+    "Exporter",
+    "JointExporter",
+    "FingerExporter",
+    "PalmExporter",
+    "HandExporter",
+]

@@ -1,110 +1,188 @@
-"""生成后手部资产的 validator 侧运行时对象。
+"""手部资产生成的 Validator 层空骨架。
 
-validation 放在 pipeline 层，而不是塞进每个 schema 类内部，是因为并非
-所有检查都同等“基础”。有些检查属于 schema 的内禀约束，有些则属于
-当前科研阶段的策略性规则，比如“generator v1 暂时拒绝 mimic joint”。
-把这两类都显式放在这里，后续才能按需放松或收紧规则。
+本文件只保留你主导的验证器框架，不再默认内置验证规则。尤其是：
+
+- 不再默认拒绝 mimic joint
+- 不再默认把 `HandCfg.validate()` 包装成运行时流程
+- 不再替你预设“物理合理性”具体由哪些规则组成
+
+这里现在只负责声明：未来验证算法将被分布在 joint / finger / palm / hand
+四个层级里。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from .asset_schema_core import AssetCfgBase
-from .asset_schema_embodiment import HandCfg
-
-HandRule = Callable[[HandCfg], None]
-
-
-def reject_mimic_joints(hand: HandCfg) -> None:
-    r"""在 generator v1 中拒绝 mimic joint。
-
-    Args:
-        hand (HandCfg): 待检查的手资产。
-
-    Raises:
-        NotImplementedError: 当任何 joint 使用 `mimic` 时抛出。
-    """
-
-    mimic_joints = [joint.name for joint in hand.iter_joints() if joint.mimic is not None]
-    if mimic_joints:
-        raise NotImplementedError(
-            "Generator v1 does not support automatic mimic-hand generation; "
-            f"found mimic joints: {mimic_joints}"
-        )
+from .asset_base import AssetCfgBase, FingerCfg, HandCfg, JointCfg, PalmCfg
 
 
 @dataclass
 class ValidatorCfg(AssetCfgBase):
-    r"""验证器运行时对象的配置。
-
-    validator 同时承担三类检查：
-
-    - 交给 :class:`HandCfg` 的内禀完整性检查；
-    - 当前 pipeline 阶段定义的策略性检查；
-    - 用户额外注入的规则函数。
-    """
+    r"""验证器配置基类。"""
 
     class_type: type["Validator"] | None = None
-    """关联的 validator 运行时类。"""
+    """关联的验证器运行时类。"""
 
-    require_complete: bool = True
-    """尚未解析完成的必填字段是否应当直接报错。"""
 
-    reject_mimic: bool = True
-    """第一版是否拒绝 mimic joint。"""
+@dataclass
+class JointValidatorCfg(ValidatorCfg):
+    r"""关节级验证器配置。"""
 
-    rules: list[HandRule] = field(default_factory=list)
-    """额外的自定义验证规则。"""
+    class_type: type["Validator"] | None = None
+    """关联的关节级验证器类。"""
 
     def __post_init__(self):
         if self.class_type is None:
-            self.class_type = Validator
+            self.class_type = JointValidator
+
+
+@dataclass
+class FingerValidatorCfg(ValidatorCfg):
+    r"""手指级验证器配置。"""
+
+    class_type: type["Validator"] | None = None
+    """关联的手指级验证器类。"""
+
+    def __post_init__(self):
+        if self.class_type is None:
+            self.class_type = FingerValidator
+
+
+@dataclass
+class PalmValidatorCfg(ValidatorCfg):
+    r"""掌级验证器配置。"""
+
+    class_type: type["Validator"] | None = None
+    """关联的掌级验证器类。"""
+
+    def __post_init__(self):
+        if self.class_type is None:
+            self.class_type = PalmValidator
+
+
+@dataclass
+class HandValidatorCfg(ValidatorCfg):
+    r"""手级验证器配置。"""
+
+    class_type: type["Validator"] | None = None
+    """关联的手级验证器类。"""
+
+    def __post_init__(self):
+        if self.class_type is None:
+            self.class_type = HandValidator
 
 
 class Validator:
-    r"""用于验证生成结果的基础运行时对象。"""
+    r"""验证器基类。
+
+    这里的 `validate()` 只保留接口，表示“这里将来会放置物理合理性规则”，
+    但当前不替你决定任何默认规则。
+    """
+
+    cfg: ValidatorCfg
 
     def __init__(self, cfg: ValidatorCfg):
         self.cfg = cfg
 
-    def _run_builtin_checks(self, hand: HandCfg) -> None:
-        r"""在自定义规则之前运行内置验证。
+    def validate(self, target: AssetCfgBase) -> None:
+        r"""验证一个资产对象。
 
         Args:
-            hand (HandCfg): 待验证的候选手资产。
+            target (AssetCfgBase): 待验证资产。
 
         Raises:
-            ValueError: 当必填字段仍未解析完成时抛出。
-            NotImplementedError: 当当前 pipeline 配置拒绝某些特性时抛出，
-                例如 v1 中的 mimic joint。
+            NotImplementedError: 当前只是规则入口骨架，尚未填入真实实现。
         """
 
-        if self.cfg.require_complete:
-            missing = hand.validate()
-            if missing:
-                raise ValueError(f"HandCfg contains unresolved required fields: {missing}")
-        if self.cfg.reject_mimic:
-            reject_mimic_joints(hand)
+        raise NotImplementedError("Validator 骨架已保留，但具体验证规则需后续实现。")
 
-    def validate(self, hand: HandCfg) -> HandCfg:
-        r"""验证一个已生成的 hand，并在成功时原样返回。
+
+class JointValidator(Validator):
+    r"""关节级验证器。"""
+
+    def __init__(self, cfg: JointValidatorCfg):
+        super().__init__(cfg)
+
+    def validate(self, target: AssetCfgBase) -> None:
+        r"""验证一个 `JointCfg`。
 
         Args:
-            hand (HandCfg): 候选手资产。
+            target (AssetCfgBase): 待验证资产，预期应为 `JointCfg`。
 
-        Returns:
-            HandCfg: 原样返回的同一个 hand 对象，便于 pipeline 串联。
+        Raises:
+            NotImplementedError: joint-level 验证规则尚未实现。
         """
 
-        # 从调用者视角看，validation 维持函数式风格：
-        # 返回同一个 hand 对象，这样 generator 代码就能保持
-        # “构建 -> 验证 -> 导出”的清晰流水线读法。
-        self._run_builtin_checks(hand)
-        for rule in self.cfg.rules:
-            rule(hand)
-        return hand
+        raise NotImplementedError("JointValidator 目前只保留骨架，等待 joint-level 规则实现。")
 
 
-__all__ = ["HandRule", "ValidatorCfg", "Validator", "reject_mimic_joints"]
+class FingerValidator(Validator):
+    r"""手指级验证器。"""
+
+    def __init__(self, cfg: FingerValidatorCfg):
+        super().__init__(cfg)
+
+    def validate(self, target: AssetCfgBase) -> None:
+        r"""验证一个 `FingerCfg`。
+
+        Args:
+            target (AssetCfgBase): 待验证资产，预期应为 `FingerCfg`。
+
+        Raises:
+            NotImplementedError: finger-level 验证规则尚未实现。
+        """
+
+        raise NotImplementedError("FingerValidator 目前只保留骨架，等待 finger-level 规则实现。")
+
+
+class PalmValidator(Validator):
+    r"""掌级验证器。"""
+
+    def __init__(self, cfg: PalmValidatorCfg):
+        super().__init__(cfg)
+
+    def validate(self, target: AssetCfgBase) -> None:
+        r"""验证一个 `PalmCfg`。
+
+        Args:
+            target (AssetCfgBase): 待验证资产，预期应为 `PalmCfg`。
+
+        Raises:
+            NotImplementedError: palm-level 验证规则尚未实现。
+        """
+
+        raise NotImplementedError("PalmValidator 目前只保留骨架，等待 palm-level 规则实现。")
+
+
+class HandValidator(Validator):
+    r"""手级验证器。"""
+
+    def __init__(self, cfg: HandValidatorCfg):
+        super().__init__(cfg)
+
+    def validate(self, target: AssetCfgBase) -> None:
+        r"""验证一个 `HandCfg`。
+
+        Args:
+            target (AssetCfgBase): 待验证资产，预期应为 `HandCfg`。
+
+        Raises:
+            NotImplementedError: hand-level 验证规则尚未实现。
+        """
+
+        raise NotImplementedError("HandValidator 目前只保留骨架，等待 hand-level 规则实现。")
+
+
+__all__ = [
+    "ValidatorCfg",
+    "JointValidatorCfg",
+    "FingerValidatorCfg",
+    "PalmValidatorCfg",
+    "HandValidatorCfg",
+    "Validator",
+    "JointValidator",
+    "FingerValidator",
+    "PalmValidator",
+    "HandValidator",
+]

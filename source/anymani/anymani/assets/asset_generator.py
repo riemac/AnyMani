@@ -1,54 +1,43 @@
-"""手部资产生成的顶层编排入口。
+"""手部资产生成器的空骨架。
 
-本模块刻意保持很薄：
+本文件回到你主导的顶层生成器定义，不再默认实现 build / validate /
+export 的完整运行流程。当前只保留：
 
-- `asset_schema_*` 定义 canonical 声明层；
-- `asset_builders.py` 负责组装 `HandCfg`；
-- `asset_validators.py` 负责检查生成结果；
-- `asset_exporters.py` 负责序列化生成结果。
+- 生成器配置对象 `AssetGeneratorCfg`
+- 生成器运行时对象 `AssetGenerator`
 
-`asset_generator.py` 只负责把这些子系统串起来。
-
-这种拆分是架构性的，不是为了形式好看。把问题拆开之后，我们就能在
-不同文件里分别回答下面四个问题：
-
-- 什么是合法的 hand 描述？ -> schema
-- 怎么组装出一个 hand？    -> builder
-- 它需要满足哪些策略？    -> validator
-- 怎么检查或落盘？        -> exporter
+以及它们与 Builder / Validator / Exporter 三类子系统的关系占位。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
-from .asset_builders import HandBuilder, HandBuilderCfg
-from .asset_exporters import Exporter, ExporterCfg
-from .asset_schema_core import AssetCfgBase
-from .asset_schema_embodiment import HandCfg
-from .asset_validators import Validator, ValidatorCfg
+from .asset_base import AssetCfgBase
+from .asset_builders import HandBuilderCfg
+from .asset_exporters import HandExporter
+from .asset_validators import HandValidatorCfg
 
 
 @dataclass
 class AssetGeneratorCfg(AssetCfgBase):
-    r"""生成器编排层的顶层配置。
+    r"""资产生成器配置类。
 
-    这个配置是 pipeline 的入口。它不会重新定义底层 schema 概念，
-    只是把三个运行时阶段串起来，共同作用于 canonical :class:`HandCfg`。
+    当前只保留生成器的骨架接口，不在这里默认决定批量生成算法、导出策略
+    或验证规则之间的编排细节。
     """
 
     class_type: type["AssetGenerator"] | None = None
-    """关联的 asset generator 运行时类。"""
+    """关联的资产生成器类。"""
 
-    builder: HandBuilderCfg = field(default_factory=HandBuilderCfg)
-    """顶层 hand builder 配置。"""
+    Build: HandBuilderCfg = field(default_factory=HandBuilderCfg)
+    """手级构建器配置入口。"""
 
-    validator: ValidatorCfg = field(default_factory=ValidatorCfg)
-    """顶层 validator 配置。"""
+    Validate: HandValidatorCfg = field(default_factory=HandValidatorCfg)
+    """手级验证器配置入口。"""
 
-    exporter: ExporterCfg = field(default_factory=ExporterCfg)
-    """顶层 exporter 配置。"""
+    Export: type[HandExporter] = HandExporter
+    """手级导出器类入口。"""
 
     def __post_init__(self):
         if self.class_type is None:
@@ -56,74 +45,28 @@ class AssetGeneratorCfg(AssetCfgBase):
 
 
 class AssetGenerator:
-    r"""负责构建、验证并导出 hand 资产的顶层运行时对象。
+    r"""资产生成器。
 
-    整个 pipeline 的返回值仍然是 :class:`HandCfg`。导出在这里被视为
-    一种带副作用的检查 / 调试步骤，而不是新的权威表示。这样可以让
-    canonical object 始终留在 schema 层，避免“runtime hand”和
-    “declaration hand”之间悄悄漂移。
+    这里预期承担的是规模化资产生成职责，也就是把 Builder、Validator
+    和 Exporter 组织起来，最终批量产出 `HandCfg`、URDF、yaml 以及
+    相关附带资产。
+
+    但当前阶段，这些编排细节仍由你主导，因此这里只保留运行时壳子。
     """
 
     cfg: AssetGeneratorCfg
 
     def __init__(self, cfg: AssetGeneratorCfg):
         self.cfg = cfg
-        # 运行时类保持可配置，这样流水线可以在不改编排外壳的情况下
-        # 被替换或扩展。
-        builder_type = cfg.builder.class_type or HandBuilder
-        validator_type = cfg.validator.class_type or Validator
-        exporter_type = cfg.exporter.class_type or Exporter
-        self.builder = builder_type(cfg.builder)
-        self.validator = validator_type(cfg.validator)
-        self.exporter = exporter_type(cfg.exporter)
 
-    def build(self) -> HandCfg:
-        r"""从配置好的 builder 构建一个 :class:`HandCfg`。
+    def generate(self) -> None:
+        r"""生成一组手部资产。
 
-        Returns:
-            HandCfg: 已构建但尚未通过 validator 的 hand 资产。
+        Raises:
+            NotImplementedError: 当前只是生成器入口骨架，尚未填入真实实现。
         """
 
-        return self.builder.build()
-
-    def validate(self, hand: HandCfg) -> HandCfg:
-        r"""验证一个已构建的 :class:`HandCfg`。
-
-        Args:
-            hand (HandCfg): 已构建的 hand 资产。
-
-        Returns:
-            HandCfg: 通过验证的 hand 资产。
-        """
-
-        return self.validator.validate(hand)
-
-    def export(self, hand: HandCfg) -> dict[str, Any]:
-        r"""导出一个已经通过验证的 :class:`HandCfg`。
-
-        Args:
-            hand (HandCfg): 已验证的 hand 资产。
-
-        Returns:
-            dict[str, Any]: 由配置的 exporter 生成的导出载荷。
-        """
-
-        return self.exporter.export(hand)
-
-    def generate(self) -> HandCfg:
-        r"""运行完整的 build -> validate -> export 流水线。
-
-        Returns:
-            HandCfg: 最终通过验证的 hand 对象。
-        """
-
-        hand = self.build()
-        hand = self.validate(hand)
-        # 导出目前只是一个带副作用的调试 / 序列化落点。
-        # 流水线仍然返回经过验证的 canonical hand object，这样研究代码
-        # 的其余部分可以继续直接围绕声明层对象工作。
-        _ = self.export(hand)
-        return hand
+        raise NotImplementedError("AssetGenerator 目前只保留骨架，等待你的生成算法实现。")
 
 
 __all__ = ["AssetGeneratorCfg", "AssetGenerator"]
