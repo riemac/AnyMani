@@ -5,3 +5,7 @@
    - 坐标系语义对齐？主要是不同<joint>和child link的<collision>坐标系（网络架构）
    - 难点之二：我们怎么才能确保生成的资产不仅物理合理而且分布多样？足以再后续训练中提升模型的泛化能力？
 3. recolored urdf区分不同的手指link，从base/palm的树根节点开始，同层级的link color mesh颜色相同
+4. 新想法：旋转轴附近加 cyliner mesh（可选）
+   ![alt text](85802976-f1dd-4b08-b82a-4596b74409e2.png)
+5. mesh 提取特征的现实考虑。并不是所有mesh都有用（参与物理仿真的有效性）。例如leaphand背后那坨电机mesh,在手背一侧，几乎不和物体发生交互，很难说它的形状特征对模型学习有帮助。这点需要在后续网络架构设计上考虑
+   ![alt text](eb294fc8-d776-4849-8322-54a5b2b16d81.png)

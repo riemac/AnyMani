@@ -1,6 +1,6 @@
 # C++
 **/cmake-build*/
-**/build*/
+# **/build*/
 **/*.so
 **/*.log*
 
@@ -78,9 +78,6 @@ tests/
 
 # LEAP_Hand_Sim
 /LEAP_Hand_Sim/
-
-# assets
-**/source/leaphand/assets/**
 
 # ideas
 **/source/leaphand/leaphand/ideas/*

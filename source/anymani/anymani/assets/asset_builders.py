@@ -47,6 +47,9 @@ class JointBuilderCfg(BuilderCfg):
     class_type: type["Builder"] | None = None
     """关联的关节级构建器类。"""
 
+    is_customized: bool = None
+    """mesh是否自定义，即非URDF默认的box/cylinder/sphere。"""
+
     def __post_init__(self):
         if self.class_type is None:
             self.class_type = JointBuilder
@@ -118,7 +121,7 @@ class Builder:
         raise NotImplementedError("Builder 骨架已保留，但具体构建算法需后续实现。")
 
 
-class JointBuilder(Builder):
+class JointBuilder(Builder):  # TODO:预计打算Primitive / Custom子类，然后再对每种子类用工厂模式，避免过度类膨胀
     r"""关节级构建器。
 
     预期职责是：根据 joint-level 的显式参数与规则，生成一个 `JointCfg`。

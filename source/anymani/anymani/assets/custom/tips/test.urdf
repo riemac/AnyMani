@@ -9,7 +9,7 @@
       </geometry>
       <origin xyz="0 0 0.02"/>
     </visual>
-    <!-- <collision>
+    <collision>
       <geometry>
         <sphere radius="0.5"/>
       </geometry>
@@ -20,7 +20,7 @@
         <cylinder radius="0.5" length="0.5"/>
       </geometry>
       <origin xyz="0 0 0.25"/>
-    </collision> -->
+    </collision>
     <!-- <collision>
       <geometry>
         <mesh filename="wedge_finger_tip_soft.stl" scale="0.001 0.001 0.001" />
