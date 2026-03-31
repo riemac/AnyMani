@@ -37,6 +37,12 @@ class PrimJointBuilderCfg(JointBuilderCfg):
     需要注意的是，关节级构建器并不涉对该字段的处理，而是手指级/手掌级构建器中的算法处理该字段。
     """
 
+    axis: Vector3 = None
+    """旋转轴，仅在 joint_type 为 revolute 时需要。
+    
+    该值的赋予也处在手指级/手掌级构建器中的算法中，而非关节级构建器中。
+    """
+
     is_customized: bool = False
     """mesh是否自定义，即非URDF默认的box/cylinder/sphere。"""
 
@@ -65,7 +71,7 @@ class PrimJointBuilder(JointBuilder):
         表示和构建库。
         """
         pass
-    # 这里看是采用工厂方法模式，还是直接在 `__init__` 里根据 `mesh_type` 来构建不同类型的 mesh
+    # 这里看是采用工厂方法模式，还是采用子类分化
     # --- TODO:算法之一: Box（最常用，一般用作手指link/palm的构成） --- 
     # 用 box mesh 来构造 joint/child link 的骨肉，这里最主要关注的是 box 的尺寸与相对于 joint frame的偏移
     # 输入: 偏移量 $d=(d_x, d_y, d_z)\in \mathbb{R}^3$, box 尺寸 $s=(s_x, s_y, s_z)\in \mathbb{R}^3$，以及 joint frame 的定义（旋转轴和坐标系语义）

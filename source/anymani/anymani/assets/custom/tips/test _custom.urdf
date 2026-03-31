@@ -2,26 +2,30 @@
 <!-- 真正的风险不在“它们彼此撞上了”，而在“它们一起和外界接触时，接触法向、接触点数量、等效接触刚度变脏” -->
 <!-- <inertial> 不写，Isaac Lab/Isaac Sim 不会简单把 link 变成“零质量不可动”，但会进入 importer/PhysX 的兜底逻辑；对指尖这种接触敏感部件，我不建议依赖这个兜底。 -->
 <robot name="test">
-  <link name="base_link"/>
-
-  <joint name="tip_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="tip"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-  </joint>
-
-  <link name="tip">
+  <link name="base_link">
     <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="round_finger_tip.stl" scale="0.001 0.001 0.001"/>
+        <box size="0.04 0.04 0.04"/>
       </geometry>
+      <origin xyz="0 0 0.02"/>
     </visual>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="round_finger_tip.stl" scale="0.001 0.001 0.001"/>
+        <sphere radius="0.5"/>
       </geometry>
+      <origin xyz="0 0 0.5"/>
     </collision>
+    <collision>
+      <geometry>
+        <cylinder radius="0.5" length="0.5"/>
+      </geometry>
+      <origin xyz="0 0 0.25"/>
+    </collision>
+    <!-- <collision>
+      <geometry>
+        <mesh filename="wedge_finger_tip_soft.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <origin xyz="0 0 0" rpy="1.5707 0 0" />
+    </collision> -->
   </link>
 </robot>

@@ -60,3 +60,6 @@ class CustomJointBuilder(JointBuilder):
         这里的返回值类型暂时用 `Any` 占位，具体类型取决于你选择的 mesh 表示和构建库。
         """
     # NOTE:这里的算法具有相当的 “定制性” ，不同的指尖mesh,因为是从CAD等处导出来的，mesh origin位置和 joint frame 的关系可能都不一样，因此需要每个指尖mesh单独设计构建算法，来正确处理 `origin` 字段，并把 mesh 放到正确的位置。
+
+    # --- TODO:算法之一 ---：`AnyMani/source/anymani/anymani/assets/custom/tips/round_finger_tip.stl` 定制
+    
