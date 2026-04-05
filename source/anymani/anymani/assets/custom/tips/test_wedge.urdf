@@ -1,0 +1,30 @@
+<!-- 同一 link 下多个 collision 几何重叠，本身通常不会触发“自碰撞”；它们会一起构成这个 link 的复合碰撞体 -->
+<!-- 真正的风险不在“它们彼此撞上了”，而在“它们一起和外界接触时，接触法向、接触点数量、等效接触刚度变脏” -->
+<!-- <inertial> 不写，Isaac Lab/Isaac Sim 不会简单把 link 变成“零质量不可动”，但会进入 importer/PhysX 的兜底逻辑；对指尖这种接触敏感部件，我不建议依赖这个兜底。 -->
+<robot name="test">
+  <link name="base_link"/>
+
+  <joint name="tip_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="tip"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="tip">
+    <visual>
+      <!-- wedge tip 语义：较平坦的一侧是底部，底部中心对齐 joint 原点；y 轴从底部指向指尖。
+           当前网格的“斜坡朝向”沿原始 +x，因此这里绕 y 轴转 -pi/2，把斜面侧向约定为 +z，x 轴由右手系确定。
+           同时把孔径标定到 2mm：原始圆孔半径约 1.45 个网格单位，故 scale 取 0.000689655...。 -->
+      <origin xyz="-0.0113793103448 0 -0.00655172413793" rpy="0 -1.57079632679 0"/>
+      <geometry>
+        <mesh filename="/home/hac/isaac/AnyMani/source/anymani/anymani/assets/custom/tips/wedge_finger_tip_soft.stl" scale="0.0006896551724 0.0006896551724 0.0006896551724"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.0113793103448 0 -0.00655172413793" rpy="0 -1.57079632679 0"/>
+      <geometry>
+        <mesh filename="/home/hac/isaac/AnyMani/source/anymani/anymani/assets/custom/tips/wedge_finger_tip_soft.stl" scale="0.0006896551724 0.0006896551724 0.0006896551724"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

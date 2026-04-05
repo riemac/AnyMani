@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="test_thumb">
+	<!-- 仅保留拇指链：root 只是为了保持 URDF 合法，其他部分全部移除。 -->
+	<link name="base_link"/>
+
+	<link name="thumb_temp_base">
+		<visual>
+			<origin xyz="-0.0053 0.0003 0.00078" rpy="-1.57079 -1.57079 0"/>
+			<geometry>
+				<mesh filename="/home/hac/isaac/AnyMani/source/anymani/anymani/assets/hands/leap_hand/meshes/visual/pip.obj"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0.0075 -0.0002 -0.011" rpy="0 0 0"/>
+			<geometry>
+				<box size="0.034 0.026 0.022"/>
+			</geometry>
+		</collision>
+		<inertial>
+			<origin xyz="0 0 0" rpy="0 0 0"/>
+			<mass value="0.032"/>
+			<inertia ixx="0.000004798" ixy="0.000000012" ixz="0.000000004" iyy="0.000002862" iyz="0.000000011" izz="0.000004234"/>
+		</inertial>
+	</link>
+
+	<link name="thumb_pip">
+		<visual>
+			<origin xyz="0.01196 0 -0.0158" rpy="1.57079 0 0"/>
+			<geometry>
+				<mesh filename="/home/hac/isaac/AnyMani/source/anymani/anymani/assets/hands/leap_hand/meshes/visual/thumb_pip.obj"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0 0 -0.0015" rpy="0 0 0"/>
+			<geometry>
+				<box size="0.018 0.033 0.004"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="0 -0.015 -0.013" rpy="0 0 0"/>
+			<geometry>
+				<box size="0.014 0.004 0.02"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="0 0.015 -0.013" rpy="0 0 0"/>
+			<geometry>
+				<box size="0.014 0.004 0.02"/>
+			</geometry>
+		</collision>
+		<inertial>
+			<origin xyz="0 0 0" rpy="0 0 0"/>
+			<mass value="0.003"/>
+			<inertia ixx="0.000000593" ixy="0" ixz="0" iyy="0.000000549" iyz="0" izz="0.000000224"/>
+		</inertial>
+	</link>
+
+	<link name="thumb_dip">
+		<visual>
+			<origin xyz="0.0439 0.0579 -0.0086" rpy="0 0 0"/>
+			<geometry>
+				<mesh filename="/home/hac/isaac/AnyMani/source/anymani/anymani/assets/hands/leap_hand/meshes/visual/thumb_dip.obj"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0 0.0105 -0.014" rpy="0 0 0"/>
+			<geometry>
+				<box size="0.02 0.04 0.024"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="0 0.031 -0.015" rpy="0 0 0"/>
+			<geometry>
+				<box size="0.02 0.004 0.032"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="0 0.042 0.001" rpy="0 0 0"/>
+			<geometry>
+				<box size="0.014 0.02 0.004"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="0 0.042 -0.029" rpy="0 0 0"/>
+			<geometry>
+				<box size="0.014 0.02 0.004"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="-0.0135 0.0175 -0.011656" rpy="0 0 0"/>
+			<geometry>
+				<box size="0.01 0.024 0.018"/>
+			</geometry>
+		</collision>
+		<inertial>
+			<origin xyz="0 0 0" rpy="0 0 0"/>
+			<mass value="0.038"/>
+			<inertia ixx="0.000008474" ixy="0.000000241" ixz="0.000000026" iyy="0.000003841" iyz="0.000000025" izz="0.000007679"/>
+		</inertial>
+	</link>
+
+	<link name="thumb_fingertip">
+		<visual>
+			<origin xyz="0.0625 0.0784 0.0489" rpy="0 0 0"/>
+			<geometry>
+				<mesh filename="/home/hac/isaac/AnyMani/source/anymani/anymani/assets/hands/leap_hand/meshes/visual/thumb_fingertip.obj"/>
+			</geometry>
+		</visual>
+		<collision>
+			<origin xyz="0 -0.0085 -0.015" rpy="0 0 0"/>
+			<geometry>
+				<box size="0.02 0.036 0.024"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="0 -0.029 -0.014" rpy="0 0 0"/>
+			<geometry>
+				<box size="0.02 0.004 0.03"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="0.015 -0.0175 -0.0115" rpy="0 0 0"/>
+			<geometry>
+				<box size="0.008 0.024 0.018"/>
+			</geometry>
+		</collision>
+		<collision>
+			<origin xyz="0 0 0" rpy="0 0 0"/>
+			<geometry>
+				<mesh filename="/home/hac/isaac/AnyMani/source/anymani/anymani/assets/hands/leap_hand/meshes/collision/white_tip_thumb.obj"/>
+			</geometry>
+		</collision>
+		<inertial>
+			<origin xyz="0 0 0" rpy="0 0 0"/>
+			<mass value="0.049"/>
+			<inertia ixx="0.000020372" ixy="-0.000000489" ixz="-0.00000003" iyy="0.000004336" iyz="-0.000000097" izz="0.000019845"/>
+		</inertial>
+	</link>
+
+	<joint name="12" type="revolute">
+		<origin xyz="-0.0693 -0.0012 -0.0216" rpy="0 1.57079 0"/>
+		<parent link="base_link"/>
+		<child link="thumb_temp_base"/>
+		<axis xyz="0 0 -1"/>
+		<limit effort="0.95" velocity="8.48" lower="-0.349" upper="2.094"/>
+		<joint_properties friction="0.0"/>
+	</joint>
+
+	<joint name="13" type="revolute">
+		<origin xyz="0 0.0143 -0.013" rpy="1.57079 -1.57079 0"/>
+		<parent link="thumb_temp_base"/>
+		<child link="thumb_pip"/>
+		<axis xyz="0 0 -1"/>
+		<limit effort="0.95" velocity="8.48" lower="-0.47" upper="2.443"/>
+		<joint_properties friction="0.0"/>
+	</joint>
+
+	<joint name="14" type="revolute">
+		<origin xyz="0 0.0145 -0.017" rpy="-1.57079 0 0"/>
+		<parent link="thumb_pip"/>
+		<child link="thumb_dip"/>
+		<axis xyz="0 0 -1"/>
+		<limit effort="0.95" velocity="8.48" lower="-1.20" upper="1.90"/>
+		<joint_properties friction="0.0"/>
+	</joint>
+
+	<joint name="15" type="revolute">
+		<origin xyz="0 0.0466 0.0002" rpy="0 0 3.14159"/>
+		<parent link="thumb_dip"/>
+		<child link="thumb_fingertip"/>
+		<axis xyz="0 0 -1"/>
+		<limit effort="0.95" velocity="8.48" lower="-1.34" upper="1.88"/>
+		<joint_properties friction="0.0"/>
+	</joint>
+
+	<!-- virtual auxiliary link: 保留指尖标记，便于录制和接触查询。 -->
+	<link name="thumb_tip_head"/>
+	<joint name="thumb_tip" type="fixed">
+		<parent link="thumb_fingertip"/>
+		<child link="thumb_tip_head"/>
+		<origin rpy="0 0 0" xyz="0 -0.06 -0.015"/>
+	</joint>
+</robot>

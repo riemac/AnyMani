@@ -34,7 +34,7 @@ class PrimJointBuilderCfg(JointBuilderCfg):
     origin: Vector6 | dict[str, Vector3] = field(default_factory=lambda: Vector6(0, 0, 0, 0, 0, 0))
     """joint frame 相对于父 link 坐标系的位姿，包含位置和平移两部分。
 
-    需要注意的是，关节级构建器并不涉对该字段的处理，而是手指级/手掌级构建器中的算法处理该字段。
+    需要注意的是，关节级构建器并不涉对该字段的处理，而是手指级/手掌级构建器中的算法处理该字段。FIXME：所以我认为该字段可取消，如无必要，勿增实体
     """
 
     axis: Vector3 = None
@@ -65,20 +65,23 @@ class PrimJointBuilder(JointBuilder):
         self.cfg = cfg
 
     def build(self) -> JointCfg:
-        r"""根据 `PrimJointBuilderCfg` 构建对应的基础几何 mesh。
+        r"""根据 `PrimJointBuilderCfg` 构建对应的基础几何 mesh。主要是 mesh size 和 frame
 
         这里的返回值类型暂时用 `Any` 占位，具体类型取决于你选择的 mesh
         表示和构建库。
         """
         pass
     # 这里看是采用工厂方法模式，还是采用子类分化
-    # --- TODO:算法之一: Box（最常用，一般用作手指link/palm的构成） --- 
+    # 我们知道 urdf 中偏移量默认为0时，即 mesh 的 origin 全为0时，基础形状的中心及坐标系和 joint frame是完全重合的，我称之为 “旧约”
+    # 但以下算法则修改来偏移量为0时的mesh origin行为，我称之为 “新约”，更符合我对手指构建的想象 
+    # --- TODO:算法之一: Box（最常用，一般用作手指link/palm的构成）
     # 用 box mesh 来构造 joint/child link 的骨肉，这里最主要关注的是 box 的尺寸与相对于 joint frame的偏移
     # 输入: 偏移量 $d=(d_x, d_y, d_z)\in \mathbb{R}^3$, box 尺寸 $s=(s_x, s_y, s_z)\in \mathbb{R}^3$，以及 joint frame 的定义（旋转轴和坐标系语义）
     # 输出: joint frame 下的 box mesh frame，即 mesh frame 相对于 joint frame 的位置, $x_{mesh} = d_x, y_{mesh} = s_y/2 + d_y, z_{mesh} = d_z$
     # 补充: 这个语义可结合 `AnyMani/source/anymani/anymani/assets/平面示意.png` 来理解。我这里默认用 x-y 轴来建立手指的运动学树的平面图
     # 就是假设 $d = 0$，那么 box 的底面就和 joint frame 的 x-z 平面重合，box 的中心在 joint frame 的 y 轴延伸上，距离为 $s_y/2$
     # 如果 $d$ 不为零，那么就是在这个基础上进行平移，例如 $d_y > 0$ 就是把 box 往 joint frame 的 y 轴正方向平移，$d_y < 0$ 就是往 y 轴负方向平移
+    # --- NOTE:再补上 rpy 偏移量，由于 finger_buiders.py 的关系；再补上 CMC1 joint mesh 特例，和 RegularThumbBuilderCfg 对应
 
     # --- TODO:算法之二: Cyliner（Box下的替代，一般也用作手指link的构成）---
     # 用 cylinder mesh 来构造 joint/child link 的骨肉，这里最主要关注的是 cylinder 的半径与高度，以及相对于 joint frame的偏移

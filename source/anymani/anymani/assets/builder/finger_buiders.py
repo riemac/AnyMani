@@ -66,7 +66,7 @@ from __future__ import annotations
 
 from assets.asset_builders import FingerBuilderCfg, FingerBuilder
 from assets.asset_base import FingerCfg
-from assets.asset_schema_core import Vector6, Vector3
+from assets.asset_schema_core import Vector6, Vector3, Vector2
 
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -105,6 +105,8 @@ class RegularFingerBuilderCfg(FingerBuilderCfg):
 
     mesh_offsets: list | list[Vector3] | list[Vector6] = field(default_factory=list)
     """每个关节mesh相对于joint frame的偏移。
+    
+    这里的偏移主要指 box/cylinder/sphere mesh 等相对于 joint frame 的偏移，而且和 PrimJointBuilder 中的行为一致。
 
         渐进式精度设计，支持三种精度的输入，内部统一解析为 list[Vector6]：
         - list[float]   : 仅沿手指伸长方向(y轴)的偏移，最常用。默认情况下
@@ -187,13 +189,72 @@ class LeapFingerBuilderCfg(RegularFingerBuilderCfg):
     r"""Leap 非拇指类型手指的几何构建器配置类。
     """
 
+    width: float = None
 
+    height: float = None
 
+    radius: float = None
+
+    length: list[float] = field(default_factory=lambda: [1.8, 5.4, 3.8, 2.2])
+
+    fixed_part: float = None 
+    """固定部分长度。
+
+    leap 手指的第一个关节轴到手根底部不是同平面，而是有一块较短长度的固定mesh 连接着。对此虚设一虚拟关节 mesh来代表此部分，长度自定义，宽度、高度和手指其他关节mesh一致。
+    该虚拟关节不参与运动学计算，仅作为构建时的一个参考点，来帮助正确组织后续关节mesh的构建和连接。
+    """
 
 @dataclass
 class RegularThumbBuilderCfg(RegularFingerBuilderCfg):
     r"""基础几何构建器配置类。
     """
+
+    cmc1_width: float = None
+    """拇指 CMC 关节的第一个关节（对应 allegro/leap 的 12 号关节）的宽度"""
+
+    cmc1_height: float = None
+    """拇指 CMC 关节的第一个关节（对应 allegro/leap 的 12 号关节）的高度"""
+
+    width: float = None
+    """拇指其他关节mesh的宽度。该字段对除 tip 外的所有非CMC1 joint mesh 都设置了相同的宽度"""
+
+    height: float = None
+    """拇指其他关节mesh的高度。该字段对除 tip 外的所有非CMC1 joint mesh 都设置了相同的高度"""
+
+    lengths: list[float] = field(default_factory=lambda: [3.2, 3.3, 4.0, 5.0])
+
+    cmc1_offset: float | Vector2 | Vector3 = Vector2(0, 0)
+    r"""拇指 CMC 关节的第一个关节（对应 allegro/leap 的 12 号关节）mesh 相对于本 joint frame 的位置偏移 (y), (y, z)，或 (x, y, z)。
+    
+    一般使用 (y, z)，默认 x 为0，因为对于 CMC1 一般是绕 x 轴旋转，与具体的 x 点值关系不大。就算需要调整 CMC1 mesh 在手中位置，也是先定下 joint frame。
+    
+    这里的 joint mesh frame 和 joint frame 的关系约定和其他类型不一样。这里的惯例和 urdf 中保持一致，即偏移为0时，两者重合。
+
+    否则 $\prescript{m}{}{x}=d_{x}, \prescript{m}{}{y}=d_{y}, \prescript{m}{}{z}=d_{z}$
+    """
+
+    non_cmc1_offset: list | list[Vector3] | list[Vector6] = field(default_factory=list)
+    """拇指除 CMC1 的其他 joint mesh 相对于各自 joint frame 的偏移。
+    
+        这里的偏移主要指 box/cylinder/sphere mesh 等相对于 joint frame 的偏移，而且和 PrimJointBuilder 中的行为一致。
+
+        渐进式精度设计，支持三种精度的输入，内部统一解析为 list[Vector6]：
+        - list[float]   : 仅沿手指伸长方向(y轴)的偏移，最常用。默认情况下
+        - list[Vector3]  : xyz 位置偏移
+        - list[Vector6]  : 完整 6D 位姿 (x, y, z, roll, pitch, yaw)
+
+        示例::
+    
+            mesh_offsets = [0.0, -0.6, 0.0, 0.0]          # 仅 y 轴
+            mesh_offsets = [(0,0,0), (0,-0.6,0.1), ...]    # xyz
+            mesh_offsets = [(0,0,0,0,0,0), ...]            # 完整 6D
+    """
+
+    def __post_init__(self):
+        # 解析参数后再调用
+        super().__post_init__()
+        pass
+
 
 
 @dataclass
@@ -218,6 +279,8 @@ class SphericalFingerBuilderCfg(FingerBuilderCfg):
 # --- 手指的运行时构建类 --- #
 # TODO：该文件开头详细介绍了不同手指的情况。它们各自的坐标系约定相异。在这里，我们按照 `AnyMani/source/anymani/anymani/assets/平面示意.png` 统一约定（Coding时读取该图片理解我的意图）
 # 具体来说，手指伸长的方向为joint y轴，面向手心朝外的一侧为joint z轴，最后由右手法则确定侧向为joint x轴。无论thumb/non-thumb等最受此约定。由其带来的旋转轴语义性问题后续交由网络架构层考虑解决
+# 手指构建算法的核心在与正确组织串联好每个关节 joint frame（child link 与 parent link之间的相对位姿）和 joint frame 与 joint mesh 的位置关系
+# 不同的构建思路可对比图示来理解
 class RegularFingerBuilder(FingerBuilder):
     r"""常规/非球类关节的手指构建器。
 
@@ -240,9 +303,12 @@ class RegularFingerBuilder(FingerBuilder):
         """
         pass
 
-    # NOTE:以下算法的输入输出并不和构建器的输入输出完全一致，而是更贴近于我个人的心流过程。以下算法目前不完全偏向工厂方法，而是根据不同 Cfg 来统一构建？但部分参数用分发逻辑可能更清晰
+    # NOTE:以下算法的输入输出并不和构建器的输入输出完全一致，也不完整，而是更贴近于我个人的心流过程。以下算法目前不完全偏向工厂方法，而是根据不同 Cfg 来统一构建？但部分参数用分发逻辑可能更清晰
+    # joint mesh frame 是相对于本 joint frame 的，joint frame 是child link相对于 parent link的。所谓手指构建算法主要围绕这两层关系展开
+    # joint mesh frame 可复用 PrimJointBuilder 的构建逻辑，joint frame 则在这里处理
     # --- TODO:算法之一 ---：allegro 非拇指型手指构造
     # 输入：手指关节数 $N$（2~4)，joint mesh 长度 $l\in \mathbb{R}^N$，mesh 偏移 $d\in\mathbb{R}^{N}$，指尖类型及其参数
+    # coding 前需读示意图 `AnyMani/source/anymani/anymani/assets/doc/Allegro-Non-Thumb.png`。算法核心在于不同 link 间 joint frame 的组织解算
     # > 关于数量，采用和 allegro 非拇指型手指一致对齐的路子。如果是 2, 则为 mcp joints。如果是 3, 则为 mcp joints + pip joint。如果是 4，则为 mcp joints + pip joint + dip joint
     # > 实际上除了 mcp joints 的第一个关节旋转轴为 $y$, 其余的都为 $x$，这些在文件开头说明过。因而后3个关节类型是完全同构的
     # > 因此，至少需要2个关节，如果只保留一个关节，即 mcp joints 的第一个，意义不大，它和物体的交互能力非常有限
@@ -250,10 +316,33 @@ class RegularFingerBuilder(FingerBuilder):
     # > 第一版先实现 cylinder/box + sphere 复合指尖，自定义指尖留作接口，待整体实现、基础功能得以完善后补充
     # > 对 cylinder + sphere，需提供指尖参数 $r, h, d_{tip}$，对 box + sphere，需提供 $r, h, w, d_{tip}$
     # preset：根据前面的手指分析，allegro 的非拇指型手指官方 preset 为：$N=4$，$r=(1.8, 5.4, 3.8, 2.2)$cm，$d=(0, 0, -0.6, 0)$cm，指尖类型为 cylinder + sphere，指尖参数为 $r=1.2$cm, $h=1$cm, $d_{tip}=0$cm
-    # 输出：构建时调用配置好 JointBuilderCfg 的 JointBuilder 方法，来构建每个 JointCfg，并把它们按照正确的 kinematic chain 组织起来，最后输出 FingerCfg
+    # 输出：
+    # - 构建时调用配置好 JointBuilderCfg 的 JointBuilder 方法，来构建每个 JointCfg。这一块负责构建每个 joint mesh 相对于 joint frame 的关系等
+    # - 并把它们按照正确的 kinematic chain 组织起来，最后输出 FingerCfg。这一块构建 joint frame 相对上一 joint frame,或者说 child link 相对 parent link frame 的关系等
 
-    # --- TODO:算法之二 ---：allegro 拇指型手指构造
 
-    # --- TODO:算法之三 ---：leap 非拇指型手指构造
+    # --- TODO:算法之二 ---：leap 非拇指型手指构造
+    # 输入：手指关节数 $N$(1~4)，joint mesh 长度 $l\in \mathbb{R}^N$，宽度 $w$，高度 $h$，或半径 $r$，mesh 偏移 $d\in\mathbb{R}^{N}$，指尖类型及其参数，固定部分长度 $l_f$
+    # 输出：
+    # - $y_0=l_f,\ z_0=0,\ x_0=0$
+    # - $y_i=l_{i-1}+d_{i-1},\ z_i=0,\ x_i=0,\ 1\le i\le N-1$，$\prescript{m}{}{y}_i=l_i/2+d_i,\ \prescript{m}{}{z}_i=0,\ \prescript{m}{}{x}_i=0,\ 0\le i\le N-1$，这里可以复用 PrimJointBuilder 的 joint mesh 构造逻辑
+    # - $y_{tip}=y_N=l_{N-1}+d_{N-1},\ z_{tip}=0,\ x_{tip}=0$，指尖 joint frame
+    # - $\prescript{m}{}{y}_{tip}=d_{N}=d_{tip},\ \prescript{m}{}{z}_{tip}=0,\ \prescript{m}{}{x}_{tip}=0$，指尖 mesh frame
+    # - N=4 时, axis0 为 x轴，axis1 为 z轴， axis2 为 x轴，axis3 为 x轴；N=1 时，axis0 为 x轴；N=2 时，axis0 为 x轴， axis1 允许为 x轴/z轴；
+    # - N=3 时，axis0 为 x轴， axis1 为 z轴， axis2 为 x轴
+    # preset：本算法对原始 leap 构造形状进行大大简化。$N=4,\ l=(3.9,1.5,3.6,2.0)cm,\ w=3.4cm,\ h=2.05cm,\ d=(0,0,0,0), l_f=1.3cm$。
+    # 指尖类型为 leap_cube，自定义类型，scale为1,偏置为0。此处可调用 CustomJointBuilder 处理指尖mesh 的构造，同时本层处理指尖 joint frame 的构造
 
-    # --- TODO:算法之四 ---：leap 拇指型手指构造
+
+    # --- TODO:算法之三与算法之四 ---：allegro 和 leap 拇指型手指构造（preset区分）这里暂时用 box 作为 mesh 形状，先不考虑 cylinder
+    # 输入：手指关节数 $N$（3~4），CMC1 宽度和高度 $w_{cmc1}, h_{cmc1}$，CMC1 mesh 偏移 $d_{cmc1,y}, d_{cmc1,z}$，其他手指宽度和高度 $w, h$，其他 joint mesh 偏移 $d\in\mathbb{R}^{N-1}$（编号从1开始，0号视作 $d_{CMC}$），长度 $l\in\mathbb{R}^N$，指尖类型及其参数
+    # 输出：coding前对照图示示例 `AnyMani/source/anymani/anymani/assets/doc/Thumb.png`理解实现
+    # - $\prescript{m}{}{y}_0=d_{cmc1,y}=d_{0y},\prescript{m}{}{z}_0=d_{cmc1,z}=d_{0z}, \prescript{m}{}{x}_0=0=d_{0x}$，0关节/CMC1旋转轴为x轴
+    # - $y_1=d_{cmc1,y} + l_0/2,\ z_1=d_{cmc1,z} - (h_{cmc1}-h)/2,\ x_1=(w_{cmc1}-w)/2$，1关节/CMC2旋转轴为y轴
+    # - $\prescript{m}{}{y}_i=l_i/2+d_i,\ \prescript{m}{}{z}_i=0,\ \prescript{m}{}{x}_i=0,\ 1\le i\le N-1$，这里除 CMC1 joint mesh的构造逻辑和 allegro 非拇指型手指其实是一致的，可以复用/调用 PrimJointBuilder 
+    # - $y_i=l_{i-1}+d_{i-1,y},\ z_i=0,\ x_i=0,\ 2\le i\le N-1$，其他关节旋转轴为z轴
+    # - $y_{tip}=y_N=l_{N-1}+d_{N-1},\ z_{tip}=0,\ x_{tip}=0$，指尖 joint frame
+    # - $\prescript{m}{}{y}_{tip}=d_{N}=d_{tip},\ \prescript{m}{}{z}_{tip}=0,\ \prescript{m}{}{x}_{tip}=0$，指尖 mesh frame
+    # preset：
+    # - allegro：$N=4,\ w_{cmc1}=3.5cm,\ h_{cmc1}=3.4cm,\ d_{cm1,y}=0.9cm,\ d_{cm1,z}=1.45cm,\ w=1.9cm,\ h=2.7cm,\ d=(-0.2,0,-0.9)cm,\ l=(4.5,1.7,4.3,4.0)$，指尖类型为 cylinder + sphere, $d_{tip}=0,\ r_{tip}=1.2cm,\ h_{tip}=1cm$
+    # - leap: $N=4,\ h_{cmc1}=2.67cm,\ w_{cmc1}=2.30cm,\ d_{cm1,z}=-0.33cm,\ d_{cm1,y}=0,\ w=2.3cm,\ h=3.47cm,\ d=(0,0,0),\ l=(2.8,1.7,4.7,2.3)$，指尖类型为 custom 的 leap_cube，scale默认为1,偏移为0

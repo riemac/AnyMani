@@ -1,0 +1,28 @@
+<!-- 同一 link 下多个 collision 几何重叠，本身通常不会触发“自碰撞”；它们会一起构成这个 link 的复合碰撞体 -->
+<!-- 真正的风险不在“它们彼此撞上了”，而在“它们一起和外界接触时，接触法向、接触点数量、等效接触刚度变脏” -->
+<!-- <inertial> 不写，Isaac Lab/Isaac Sim 不会简单把 link 变成“零质量不可动”，但会进入 importer/PhysX 的兜底逻辑；对指尖这种接触敏感部件，我不建议依赖这个兜底。 -->
+<robot name="test">
+  <link name="base_link"/>
+
+  <joint name="tip_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="tip"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="tip">
+    <visual>
+      <!-- 这一版对应 `joint_builders_custom.py` 里的算法之三：`round_finger_tip_soft.stl` 的 0.001 基准标定，底部中心对齐 joint 原点。 -->
+      <origin xyz="-0.0164913187022 0 -0.00950986387389" rpy="0 -1.57079632679 0"/>
+      <geometry>
+        <mesh filename="round_finger_tip_soft.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.0164913187022 0 -0.00950986387389" rpy="0 -1.57079632679 0"/>
+      <geometry>
+        <mesh filename="round_finger_tip_soft.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>
