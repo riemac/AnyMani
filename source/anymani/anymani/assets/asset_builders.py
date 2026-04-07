@@ -23,9 +23,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from .asset_base import AssetCfgBase, FingerCfg, HandCfg, JointCfg, PalmCfg
+
+if TYPE_CHECKING:
+    from .asset_schema_core import WristJointSpec
 
 
 @dataclass
@@ -73,6 +76,15 @@ class PalmBuilderCfg(BuilderCfg):
 
     class_type: type["Builder"] | None = None
     """关联的掌级构建器类。"""
+
+    wrist_joints: list["WristJointSpec"] | None = None
+    r"""可选的前溯腕关节声明列表。
+
+    从 palm frame 出发、向 parent 方向声明旋转自由度。
+    所有空间量在 palm frame 下表达，builder 负责反推 URDF 链式 origin。
+    列表顺序为 **从 palm 到 base** 的方向（索引 0 最近 palm）。
+    若为 ``None`` 或空列表，则 palm 直接作为基座的 child。
+    """
 
     def __post_init__(self):
         if self.class_type is None:

@@ -904,6 +904,32 @@ def _make_visual_cfg(value: Any) -> VisualGeometryCfg:
     raise TypeError(f"Unsupported visual geometry mapping: {value!r}")
 
 
+@dataclass
+class WristJointSpec(AssetCfgBase):
+    r"""前溯腕关节的运动学声明。
+
+    用于在 ``PalmBuilderCfg`` 中描述 palm 上方可选的腕关节自由度。
+    所有空间量均在 **palm frame** 下表达，builder 负责将其反推为
+    URDF 父→子链式 origin。
+
+    前溯关节生成的中间 link 是纯运动学占位（无几何、无碰撞、无惯性），
+    仅用于引入旋转自由度。
+    """
+
+    axis: Vector3
+    r"""旋转轴方向（palm frame 下），会被自动规范化为单位向量。"""
+
+    position: Vector3 = (0.0, 0.0, 0.0)
+    r"""关节旋转中心相对于 palm origin 的位置偏移（palm frame 下）。"""
+
+    limits: JointLimitCfg | None = None
+    r"""可选的关节限位。若为 ``None``，则 builder 写出时不指定限位。"""
+
+    def __post_init__(self):
+        self.axis = _normalize_axis(self.axis)
+        self.position = _ensure_tuple(self.position, length=3, field_name="wrist_joint.position")
+
+
 __all__ = [
     "AssetCfgBase",
     "Vector2",
@@ -936,4 +962,5 @@ __all__ = [
     "_ensure_list",
     "_make_collision_cfg",
     "_make_visual_cfg",
+    "WristJointSpec",
 ]

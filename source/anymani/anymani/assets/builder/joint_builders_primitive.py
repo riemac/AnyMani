@@ -81,7 +81,9 @@ class PrimJointBuilder(JointBuilder):
     # 补充: 这个语义可结合 `AnyMani/source/anymani/anymani/assets/平面示意.png` 来理解。我这里默认用 x-y 轴来建立手指的运动学树的平面图
     # 就是假设 $d = 0$，那么 box 的底面就和 joint frame 的 x-z 平面重合，box 的中心在 joint frame 的 y 轴延伸上，距离为 $s_y/2$
     # 如果 $d$ 不为零，那么就是在这个基础上进行平移，例如 $d_y > 0$ 就是把 box 往 joint frame 的 y 轴正方向平移，$d_y < 0$ 就是往 y 轴负方向平移
-    # --- NOTE:再补上 rpy 偏移量，由于 finger_buiders.py 的关系；再补上 CMC1 joint mesh 特例，和 RegularThumbBuilderCfg 对应
+    # --- NOTE:再补上 rpy 偏移量，由于 finger_buiders.py 的关系；
+    # 再补上 CMC1 joint mesh 特例，和 RegularThumbBuilderCfg 对应
+    # 再补上 
 
     # --- TODO:算法之二: Cyliner（Box下的替代，一般也用作手指link的构成）---
     # 用 cylinder mesh 来构造 joint/child link 的骨肉，这里最主要关注的是 cylinder 的半径与高度，以及相对于 joint frame的偏移
