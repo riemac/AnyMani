@@ -36,6 +36,7 @@ from typing import Literal
 from ..asset_base import PalmCfg
 from ..asset_builders import PalmBuilder, PalmBuilderCfg
 from ..asset_schema_core import CollisionGeometryCfg, InertialCfg, PoseCfg, VisualGeometryCfg
+from ._mount_presets import get_mount_preset
 
 
 _DEFAULT_PALM_DENSITY = 700.0
@@ -47,26 +48,6 @@ _DEFAULT_PALM_DENSITY = 700.0
 """
 
 
-_SINGLE_PALM_BOX_PRESETS = {
-    "allegro": {"width": 0.112, "length": 0.0944, "height": 0.042},
-    "leap": {"width": 0.12, "length": 0.08, "height": 0.046},
-}
-"""单一 box palm 的参考 preset 尺寸 [m]。
-
-这组数值对应你原始 TODO 里写的“box preset”，它们目前不是
-`SinglePalmBuilderCfg` 的显式字段，而是保留为“参数化手掌的参考锚点”：
-
-- `allegro`: $w=11.2\\text{cm}, l=9.44\\text{cm}, h=4.2\\text{cm}$
-- `leap`: $w=12\\text{cm}, l=8\\text{cm}, h=4.6\\text{cm}$
-
-之所以这次实现里没有把它们做成 `preset=` 字段，是因为 `SinglePalmBuilderCfg`
-当前强调的是“连续参数化空间”，而不是离散 preset 选择。
-但这些参考值本身是重要的建模上下文，所以应该明确保留下来，方便后续：
-
-1. 做 box palm 的参数初始化；
-2. 做 human-like fallback mount 的比例拟合；
-3. 对照真实 hand family 的量级。
-"""
 
 
 def _box_inertia(width: float, length: float, height: float, mass: float) -> dict[str, float]:
@@ -210,6 +191,8 @@ class CustomPalmBuilderCfg(PalmBuilderCfg):
     """
 
 
+
+
 class SinglePalmBuilder(PalmBuilder):
     r"""单一基础几何掌部构建器。"""
 
@@ -349,6 +332,30 @@ class SinglePalmBuilder(PalmBuilder):
         )
 
 
+# ============================================================================
+#  Single palm preset
+# ============================================================================
+#
+# 这里不再把 single palm preset 藏在一个裸字典里，而是和 finger preset 一样，
+# 显式写成具名常量。这样读代码时可以直接看到具体数值，不会只看到一个抽象名字。
+
+# Allegro 单体 box palm preset
+ALLEGRO_SINGLE_PALM_BOX_PRESET = SinglePalmBuilderCfg(
+    shape="box",
+    width=0.112,
+    length=0.0944,
+    height=0.042,
+)
+
+# LEAP 单体 box palm preset
+LEAP_SINGLE_PALM_BOX_PRESET = SinglePalmBuilderCfg(
+    shape="box",
+    width=0.12,
+    length=0.08,
+    height=0.046,
+)
+
+
 _COM_PALM_PRESETS: dict[str, dict[str, object]] = {
     "allegro": {
         "collisions": [
@@ -361,12 +368,7 @@ _COM_PALM_PRESETS: dict[str, dict[str, object]] = {
             "origin": (0.0, 0.0, 0.0),
             "inertia": {"ixx": 1.0e-4, "iyy": 1.0e-4, "izz": 1.0e-4},
         },
-        "finger_mounts": {
-            "index": {"pos": (0.0, 0.0435, -0.001542), "rpy": (-0.0873, 0.0, 0.0)},
-            "middle": {"pos": (0.0, 0.0, 0.0007), "rpy": (0.0, 0.0, 0.0)},
-            "ring": {"pos": (0.0, -0.0435, -0.001542), "rpy": (0.0873, 0.0, 0.0)},
-            "thumb": {"pos": (-0.0182, 0.019333, -0.045987), "rpy": (0.0, -1.6581, -1.5708)},
-        },
+        "mount_preset": "allegro",
     },
     "leap": {
         "collisions": [
@@ -393,12 +395,7 @@ _COM_PALM_PRESETS: dict[str, dict[str, object]] = {
                 "izz": 5.29257e-4,
             },
         },
-        "finger_mounts": {
-            "index": {"pos": (-0.0070, 0.0230, -0.0187), "rpy": (1.5708, 1.5708, 0.0)},
-            "middle": {"pos": (-0.0071, -0.0224, -0.0187), "rpy": (1.5708, 1.5708, 0.0)},
-            "ring": {"pos": (-0.00709, -0.0678, -0.0187), "rpy": (1.5708, 1.5708, 0.0)},
-            "thumb": {"pos": (-0.0693, -0.0012, -0.0216), "rpy": (0.0, 1.5708, 0.0)},
-        },
+        "mount_preset": "leap",
     },
 }
 
@@ -410,11 +407,14 @@ def get_single_palm_box_preset(name: str) -> SinglePalmBuilderCfg:
     `ComPalmBuilder` 的真实碰撞体 preset。
     """
 
+    single_preset_registry = {
+        "allegro": ALLEGRO_SINGLE_PALM_BOX_PRESET,
+        "leap": LEAP_SINGLE_PALM_BOX_PRESET,
+    }
     try:
-        dims = _SINGLE_PALM_BOX_PRESETS[name]  # 先取参考锚点尺寸
+        return single_preset_registry[name].copy()  # 返回副本，避免调用方污染模块级 preset 常量
     except KeyError as exc:
         raise KeyError(f"Unknown single palm box preset: {name!r}") from exc
-    return SinglePalmBuilderCfg(shape="box", **dims)  # 返回一份新的 cfg，避免外部污染模块常量
 
 
 def get_com_palm_preset(name: str) -> ComPalmBuilderCfg:
@@ -426,8 +426,8 @@ def get_com_palm_preset(name: str) -> ComPalmBuilderCfg:
 
 
 PALM_PRESET_REGISTRY = {
-    "single_box_allegro": lambda: get_single_palm_box_preset("allegro"),
-    "single_box_leap": lambda: get_single_palm_box_preset("leap"),
+    "single_box_allegro": lambda: ALLEGRO_SINGLE_PALM_BOX_PRESET.copy(),
+    "single_box_leap": lambda: LEAP_SINGLE_PALM_BOX_PRESET.copy(),
     "com_allegro": lambda: get_com_palm_preset("allegro"),
     "com_leap": lambda: get_com_palm_preset("leap"),
 }
@@ -478,8 +478,13 @@ class ComPalmBuilder(PalmBuilder):
             )
             for index, entry in enumerate(preset["collisions"])
         ]
-        mounts = {name: PoseCfg.from_value(value) for name, value in preset["finger_mounts"].items()}  # palm 自带 finger mounts
-        metadata = {"preset": self.cfg.preset, "finger_mounts": mounts}  # hand builder 会继续读取这些 mount
+        mount_preset_name = str(preset["mount_preset"])  # palm 只记录挂载点 preset 名
+        mounts = get_mount_preset(mount_preset_name)  # hand builder 最终消费的是显式 mount 字典
+        metadata = {
+            "preset": self.cfg.preset,
+            "mount_preset": mount_preset_name,
+            "finger_mounts": mounts,
+        }  # hand builder 会继续读取这些 mount
         return PalmCfg(
             name="palm",
             inertial=InertialCfg(**preset["inertial"]),
@@ -495,6 +500,8 @@ __all__ = [
     "CustomPalmBuilderCfg",
     "SinglePalmBuilder",
     "ComPalmBuilder",
+    "ALLEGRO_SINGLE_PALM_BOX_PRESET",
+    "LEAP_SINGLE_PALM_BOX_PRESET",
     "PALM_PRESET_REGISTRY",
     "get_single_palm_box_preset",
     "get_com_palm_preset",

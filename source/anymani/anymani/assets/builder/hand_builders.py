@@ -32,8 +32,14 @@ from typing import Literal
 from ..asset_base import HandCfg
 from ..asset_builders import FingerBuilderCfg, HandBuilder, HandBuilderCfg
 from ..asset_schema_core import PoseCfg
+from ._mount_presets import (
+    ALLEGRO_MOUNT_PRESET,
+    LEAP_MOUNT_PRESET,
+    MOUNT_PRESET_REGISTRY,
+    get_mount_preset,
+)
 from .finger_buiders import RegularFingerBuilderCfg, get_finger_builder_preset
-from .palm_builders import SinglePalmBuilderCfg
+from .palm_builders import ComPalmBuilderCfg, SinglePalmBuilderCfg
 
 
 NON_THUMB_FINGER_NAMES: tuple[str, ...] = ("index", "middle", "ring", "little")  # 统一非拇指命名顺序
@@ -62,6 +68,7 @@ class HumanLikeHandBuilderCfg(HandBuilderCfg):
     finger_cfg: FingerBuilderCfg | str | dict[str, FingerBuilderCfg | str] | None = None  # 非拇指配置，可共享、可分指、可直接写 preset 名
     thumb_cfg: FingerBuilderCfg | str | None = None  # 拇指配置，也允许直接写 preset 名
     num_non_thumb: int = 3  # 默认 index/middle/ring 三根非拇指
+    mount_preset: str | None = None  # 显式挂载点 preset 名；优先于自动推断
     mounts: dict[str, PoseCfg] = field(default_factory=dict)  # 显式挂载点覆盖
 
     def __post_init__(self):
@@ -143,12 +150,7 @@ class HumanLikeHandBuilder(HandBuilder):
         palm_builder = self.cfg.palm_cfg.class_type(self.cfg.palm_cfg)  # palm 的具体几何由 palm builder 自己负责
         palm = palm_builder.build()  # hand-level 这里只消费已经构建好的 PalmCfg
 
-        # 先读取 palm preset 中记录的基准挂载点。
-        # 对 Allegro / LEAP 来说，这些值直接来自真实 URDF 的 palm frame。
-        preset_mounts = {
-            name: PoseCfg.from_value(value)
-            for name, value in palm.metadata.get("finger_mounts", {}).items()
-        }
+        preset_mounts = self._preset_mounts()
         # mount 优先级：fallback < preset < 显式 cfg.mounts
         mounts = {**self._fallback_mounts(palm), **preset_mounts, **self.cfg.mounts}  # 优先级：fallback < preset < 显式 cfg.mounts
 
@@ -196,6 +198,31 @@ class HumanLikeHandBuilder(HandBuilder):
         finger_builder = built_cfg.class_type(built_cfg)
         finger = finger_builder.build()
         return finger.replace(name=finger_name, mount=mount, parent_link="palm")  # 最终再把 mount 写进 FingerCfg
+
+    def _preset_mounts(self) -> dict[str, PoseCfg]:
+        r"""解析 hand-level 挂载点 preset。
+
+        优先级：
+        1. `cfg.mount_preset`
+        2. 从 palm cfg 推断
+        3. 从 hand family 推断
+        """
+
+        if self.cfg.mount_preset is not None:
+            return get_mount_preset(self.cfg.mount_preset)  # 用户显式指定优先
+
+        palm_cfg = self.cfg.palm_cfg
+        if isinstance(palm_cfg, ComPalmBuilderCfg):
+            return get_mount_preset(f"com_{palm_cfg.preset}")  # 复合 palm 直接按 recipe 名推断
+
+        if isinstance(palm_cfg, SinglePalmBuilderCfg) and palm_cfg.shape == "box":
+            if self.cfg.family in {"allegro", "leap"}:
+                return get_mount_preset(f"single_box_{self.cfg.family}")  # 单体 box palm 按 hand family 推断
+
+        if self.cfg.family in {"allegro", "leap"}:
+            return get_mount_preset(self.cfg.family)  # 最后再退到 family 级默认挂载点
+
+        return {}
 
     def _fallback_mounts(self, palm) -> dict[str, PoseCfg]:
         r"""在没有显式 mount 也没有 preset mount 时，生成参数化挂载点。
@@ -253,6 +280,10 @@ class GripperLikeHandBuilder(HandBuilder):
 
 __all__ = [
     "NON_THUMB_FINGER_NAMES",
+    "ALLEGRO_MOUNT_PRESET",
+    "LEAP_MOUNT_PRESET",
+    "MOUNT_PRESET_REGISTRY",
+    "get_mount_preset",
     "HumanLikeHandBuilderCfg",
     "GripperLikeHandBuilderCfg",
     "HumanLikeHandBuilder",

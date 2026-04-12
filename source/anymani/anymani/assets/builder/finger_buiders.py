@@ -39,85 +39,22 @@ r"""TODO:自定义手指构建器配置类 `FingerBuilderCfg` 和运行时类 `F
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Sequence
+from typing import Any, Literal
 
 from ..asset_base import FingerCfg
 from ..asset_builders import FingerBuilder, FingerBuilderCfg
-from ..asset_schema_core import JointLimitCfg, PoseCfg, Vector2, Vector3, Vector6, _ensure_tuple, _normalize_axis
+from ..asset_schema_core import PoseCfg, Vector2, Vector3, Vector6, _ensure_tuple, _normalize_axis
+from ._utils import (
+    _build_box_mesh,
+    _build_cylinder_mesh,
+    _mesh_cross_section,
+    _mesh_length,
+    _normalize_joint_limits,
+    _normalize_pose_list,
+    _normalize_pose_value,
+    _to_si,
+)
 from .joint_builders_primitive import PrimJointBuilderCfg
-
-
-def _to_si(value: float | int) -> float:
-    r"""把“疑似厘米输入”转换为米制。
-
-    当前很多 preset 仍沿用你注释里的 cm 直觉值，因此这里做一个轻量兼容：
-    若量级明显更像 cm，就除以 100；若本来就是 m，则原样保留。
-    """
-
-    value = float(value)  # 统一先压成 float，避免 dataclass 里混入 int 语义
-    return value / 100.0 if abs(value) > 0.5 else value  # 经验规则：大于 0.5 更像 cm 量纲
-
-
-def _normalize_pose_value(value: float | Sequence[float] | None, *, field_name: str) -> Vector6:
-    r"""把偏移输入统一解析为 6D pose。
-
-    支持三种写法：
-
-    - `float`：只写沿 finger 生长方向的 $y$ 偏移
-    - `xyz`
-    - `xyzrpy`
-    """
-
-    if value is None:
-        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)  # 空值视作无平移、无转角的零位姿
-    if isinstance(value, (int, float)):
-        return (0.0, _to_si(value), 0.0, 0.0, 0.0, 0.0)  # 标量默认只表达沿 finger 生长方向的 $y$ 偏移
-    packed = _ensure_tuple(value, length=len(value), field_name=field_name)  # 接受 tuple/list/Vector 等宽松写法
-    if len(packed) == 2:
-        return (0.0, _to_si(packed[0]), _to_si(packed[1]), 0.0, 0.0, 0.0)  # CMC1 常用 $(y, z)$ 二元偏移
-    if len(packed) == 3:
-        return (_to_si(packed[0]), _to_si(packed[1]), _to_si(packed[2]), 0.0, 0.0, 0.0)
-    if len(packed) == 6:
-        return (
-            _to_si(packed[0]),
-            _to_si(packed[1]),
-            _to_si(packed[2]),
-            float(packed[3]),
-            float(packed[4]),
-            float(packed[5]),
-        )
-    raise ValueError(f"{field_name} must be scalar / xyz / xyzrpy, got {value!r}")
-
-
-def _normalize_pose_list(values: Sequence[Any], *, count: int, field_name: str) -> list[Vector6]:
-    r"""把多段 mesh 偏移规范为定长 `list[Vector6]`。"""
-
-    if not values:
-        return [(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) for _ in range(count)]  # 空输入等价于所有 joint mesh 都贴标准位
-    if len(values) != count:
-        raise ValueError(f"{field_name} length must be {count}, got {len(values)}")
-    return [_normalize_pose_value(value, field_name=f"{field_name}[{idx}]") for idx, value in enumerate(values)]
-
-
-def _normalize_joint_limits(values: Sequence[Any] | None, *, count: int) -> list[JointLimitCfg | None]:
-    r"""把逐关节限位输入规范化。"""
-
-    if not values:
-        return [(-3.141592653589793, 3.141592653589793) for _ in range(count)]  # 首轮用对称大范围限位兜底
-    if len(values) != count:
-        raise ValueError(f"joint_limits length must be {count}, got {len(values)}")
-    limits: list[JointLimitCfg | None] = []
-    for value in values:
-        if value is None:
-            limits.append(None)
-        elif isinstance(value, JointLimitCfg):
-            limits.append(value.copy())
-        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-            low, high = _ensure_tuple(value, length=2, field_name="joint_limits")
-            limits.append(JointLimitCfg(lower=float(low), upper=float(high)))
-        else:
-            raise TypeError(f"Unsupported joint limit value: {value!r}")
-    return limits
 
 
 def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
@@ -148,47 +85,6 @@ def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
     return normalized
 
 
-def _mesh_length(mesh: dict[str, Any]) -> float:
-    if mesh["type"] == "box":
-        return float(mesh["length"])
-    if mesh["type"] == "cylinder":
-        return float(mesh["length"])
-    raise ValueError(f"Unsupported mesh type for length inference: {mesh['type']}")
-
-
-def _mesh_cross_section(mesh: dict[str, Any]) -> tuple[float, float]:
-    if mesh["type"] == "box":
-        return float(mesh["width"]), float(mesh["height"])
-    radius = float(mesh["radius"])
-    diameter = radius * 2.0
-    return diameter, diameter
-
-
-def _build_box_mesh(*, length: float, width: float, height: float, offset: Vector6, center_on_joint: bool = False) -> dict[str, Any]:
-    r"""构造 box primitive recipe。
-
-    这里只生成 canonical recipe，不直接生成 `JointCfg`。真正的 geometry / inertia
-    lower 交给 `PrimJointBuilder` 处理。
-    """
-    return {
-        "type": "box",
-        "length": length,
-        "width": width,
-        "height": height,
-        "offset": offset,
-        "center_on_joint": center_on_joint,
-    }
-
-
-def _build_cylinder_mesh(*, length: float, radius: float, offset: Vector6, center_on_joint: bool = False) -> dict[str, Any]:
-    r"""构造 cylinder primitive recipe。"""
-    return {
-        "type": "cylinder",
-        "length": length,
-        "radius": radius,
-        "offset": offset,
-        "center_on_joint": center_on_joint,
-    }
 
 # --- 手指的声明式配置类 --- #
 # TODO: 经过大量手指调研，决定先划分为：
@@ -293,19 +189,6 @@ class RegularFingerBuilderCfg(FingerBuilderCfg):
             raise ValueError(f"mesh_shape length must equal num_joints={self.num_joints}")
         self.class_type = RegularFingerBuilder  # 所有 regular family 先统一走一个 builder 骨干
 
-    @property
-    def preset_name(self) -> str | None:
-        r"""可选 preset 名。
-
-        这里不把 preset 名作为强制字段，是因为很多参数化 finger 是运行时
-        临时合成出来的，没有必要都去占一个注册表名字；但对稳定锚点 preset，
-        记录名字有助于后续 generator / exporter 做 provenance。
-        """
-
-        value = self.metadata.get("preset_name") if hasattr(self, "metadata") else None
-        return str(value) if value is not None else None
-
-
 @dataclass
 class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
     r"""Allegro 非拇指配置。
@@ -321,9 +204,45 @@ class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
     """
 
     width: float | None = None
+    """关节 mesh 的统一宽度。
+
+    这里的宽度对应统一 finger frame 下的 $x$ 方向尺寸。
+    对 Allegro 非拇指而言，若走 box 路线，则除 tip 外的各段通常都共用这一个宽度。
+    默认值按你原始 TODO 里的经验值取约 $2.7$cm。
+    """
+
     height: float | None = None
+    """关节 mesh 的统一高度。
+
+    这里的高度对应统一 finger frame 下的 $z$ 方向尺寸。
+    对 Allegro 非拇指而言，若走 box 路线，则除 tip 外的各段通常都共用这一个高度。
+    默认值按你原始 TODO 里的经验值取约 $2.0$cm。
+    """
+
     radius: float | None = None
+    """关节 mesh 的统一半径。
+
+    这是给 cylinder 路线保留的替代参数。也就是说：
+
+    - 若显式给出 `radius` 且未给 `width/height`，则当前实现可切到 cylinder primitive；
+    - 若给了 `width/height`，则仍优先按 box primitive 处理。
+
+    这样做是为了保留“规整块体”和“圆柱近似”两条 regular finger 路线。
+    """
+
     length: list[float] = field(default_factory=lambda: [1.8, 5.4, 3.8, 2.2])
+    """各段 joint mesh 沿 finger 生长方向的长度列表。
+
+    默认值对应你原始 TODO 里的 Allegro 非拇指四段经验长度：
+
+    $$
+    l=(1.8, 5.4, 3.8, 2.2)\text{cm}.
+    $$
+
+    它表达的是几何段长，而不是 joint-to-joint 纯运动学长度；
+    真正用于推进下一 joint 的量，会在 builder 中进一步结合 `mesh_offsets`
+    变成有效长度。
+    """
 
     def __post_init__(self):
         lengths = [_to_si(value) for value in self.length[: self.num_joints]]  # 长度列表 $l_i$
@@ -361,14 +280,44 @@ class LeapFingerBuilderCfg(RegularFingerBuilderCfg):
     """
 
     width: float | None = None
+    """关节 mesh 的统一宽度。
+
+    这里对应简化后 LEAP 非拇指 box 近似下的 $x$ 向尺寸。
+    默认值按当前第一版近似取约 $3.4$cm。
+    """
+
     height: float | None = None
+    """关节 mesh 的统一高度。
+
+    这里对应简化后 LEAP 非拇指 box 近似下的 $z$ 向尺寸。
+    默认值按当前第一版近似取约 $2.05$cm。
+    """
+
     radius: float | None = None
+    """关节 mesh 的统一半径。
+
+    和 `AllegroFingerBuilderCfg.radius` 一样，这是给 cylinder 路线保留的替代参数。
+    当前 LEAP 默认仍走 box 简化近似，但保留 cylinder 路线是为了不把 regular
+    family 的参数空间过早锁死。
+    """
+
     length: list[float] = field(default_factory=lambda: [3.9, 1.5, 3.6, 2.0])
+    """各段 joint mesh 沿 finger 生长方向的长度列表。
+
+    默认值对应你原始 TODO 里 LEAP 非拇指的第一版简化近似：
+
+    $$
+    l=(3.9, 1.5, 3.6, 2.0)\text{cm}.
+    $$
+
+    这些量描述的是“每段 mesh 的主长度”，而不是完整 fingertip 合并后的真实 mesh。
+    """
     fixed_part: float | None = None
     """固定部分长度 $l_f$。
 
     LEAP 非拇指中，第一个运动关节轴到 palm 边缘之间通常还有一小段固定部分。
-    当前实现不把它单独建成一个 fixed joint，而是把它折算成 first gap。
+    当前实现不把它单独建成一个 fixed joint，而是把它直接折算为
+    “从 palm 到第一个 joint frame 的前置 $y$ 向长度”。
     """
 
     def __post_init__(self):
@@ -409,12 +358,62 @@ class RegularThumbBuilderCfg(RegularFingerBuilderCfg):
     """
 
     cmc1_width: float | None = None
+    """CMC1 这一特例块体的宽度。
+
+    它对应 thumb 第一段、也就是你原始说明里的 12 号关节/CMC1 那个“大块体”。
+    该段通常明显不同于后续各段，因此单独给宽度字段，而不和其他段共用 `width`。
+    """
+
     cmc1_height: float | None = None
+    """CMC1 这一特例块体的高度。
+
+    和 `cmc1_width` 一样，这里单独给出是因为 CMC1 几何外形通常更厚、更嵌入 palm。
+    """
+
     width: float | None = None
+    """除 CMC1 外，其余 thumb joint mesh 的统一宽度。
+
+    该字段主要作用于 CMC2/MCP/IP 等后续段，使它们共享一套更细长的截面尺寸。
+    """
+
     height: float | None = None
+    """除 CMC1 外，其余 thumb joint mesh 的统一高度。"""
+
     lengths: list[float] = field(default_factory=lambda: [4.5, 1.7, 4.3, 4.0])
+    """thumb 各段长度列表。
+
+    默认值当前更偏向 Allegro 风格的 thumb 近似：
+
+    $$
+    l=(4.5, 1.7, 4.3, 4.0)\text{cm}.
+    $$
+
+    这里用复数 `lengths` 而不是单数 `length`，是为了和 non-thumb 的 cfg 在阅读上
+    做出一点区分，提醒读者：thumb 的第一段 `CMC1` 在几何语义上并不是普通串联段。
+    """
+
     cmc1_offset: float | Vector2 | Vector3 = (0.9, 1.45)
+    r"""CMC1 mesh 相对于本 joint frame 的位置偏移。
+
+    这是 thumb 最关键的特例字段之一。它支持三种精度：
+
+    - `float`：只写 $y$ 偏移
+    - `Vector2`：写 $(y, z)$ 偏移
+    - `Vector3`：写 $(x, y, z)$ 偏移
+
+    之所以单独保留这个字段，而不是把它塞进通用 `mesh_offsets`，是因为：
+
+    1. `CMC1` 的零偏移语义与普通 joint 不同；
+    2. 研究者在调 thumb 时，通常会首先思考 CMC1 在 palm 内部的嵌入位置。
+    """
+
     non_cmc1_offset: list[Any] = field(default_factory=lambda: [-0.2, 0.0, -0.9])
+    """除 CMC1 外，其余 thumb joint mesh 的偏移列表。
+
+    该字段只负责 CMC2 及之后的各段，因此长度应为 `num_joints - 1`。
+    它支持和 `mesh_offsets` 相同的渐进式输入精度，但把 CMC1 单独拆出来后，
+    thumb 的建模语义会更清晰，不容易把“CMC1 特例”和“普通串联段”混在一起。
+    """
 
     def __post_init__(self):
         self.num_joints = len(self.lengths)  # thumb 段数直接由 lengths 决定
@@ -491,8 +490,8 @@ class RegularFingerBuilder(FingerBuilder):
         if isinstance(self.cfg, RegularThumbBuilderCfg):
             joints = self._build_thumb_chain()  # thumb 不能完全套普通 serial chain
         else:
-            first_gap = self.cfg.fixed_part if isinstance(self.cfg, LeapFingerBuilderCfg) else 0.0
-            joints = self._build_serial_chain(first_gap=first_gap)  # LEAP 用 fixed_part 承接 palm 侧固定段
+            root_fixed_length = self.cfg.fixed_part if isinstance(self.cfg, LeapFingerBuilderCfg) else 0.0
+            joints = self._build_serial_chain(root_fixed_length=root_fixed_length)  # LEAP 用 `l_f` 表达 palm 到第一个 joint frame 的前置长度
         return FingerCfg(
             name=self.cfg.name,  # finger 名会继续传播到 exporter / validator / sidecar
             parent_link=self.cfg.parent_link,  # hand-level 装配前的默认 parent
@@ -501,7 +500,7 @@ class RegularFingerBuilder(FingerBuilder):
             metadata={"builder": self.cfg.__class__.__name__},  # 保留 provenance 便于追溯
         )
 
-    def _build_serial_chain(self, *, first_gap: float) -> list[Any]:
+    def _build_serial_chain(self, *, root_fixed_length: float) -> list[Any]:
         r"""构建普通串联链。
 
         这里对应 Allegro / LEAP 非拇指的共同主干。推进下一关节时，真正使用的
@@ -521,13 +520,13 @@ class RegularFingerBuilder(FingerBuilder):
         # 指尖类型及其参数，固定部分长度 $l_f$。
         #
         # 当前实现让 Allegro / LEAP 共用同一条 serial-chain 骨干：
-        # - Allegro：`first_gap = 0`
-        # - LEAP：`first_gap = l_f`
+        # - Allegro：从 palm 到第一个 joint frame 的前置长度为 $0$
+        # - LEAP：从 palm 到第一个 joint frame 的前置长度为 $l_f$
         joints = []
         parent_link = self.cfg.parent_link  # 第一个 joint 默认挂在 palm 上
-        previous_valid_length = first_gap  # LEAP 用它承接固定段；Allegro 则为 0
+        previous_valid_length = root_fixed_length  # 先吃掉 palm 侧固定部分长度；Allegro 情况下该值为 0
         for index in range(self.cfg.num_joints):
-            origin = PoseCfg(pos=(0.0, previous_valid_length, 0.0)) if index > 0 or first_gap > 0.0 else PoseCfg()
+            origin = PoseCfg(pos=(0.0, previous_valid_length, 0.0)) if index > 0 or root_fixed_length > 0.0 else PoseCfg()
             joint = self._build_joint(index=index, parent_link=parent_link, origin=origin)  # 本 joint frame 相对上一 child link 的位姿
             joints.append(joint)
             parent_link = joint.child  # 下一关节继续接在当前 child link 后
@@ -629,19 +628,6 @@ class RegularFingerBuilder(FingerBuilder):
         return builder.build()
 
 
-def _with_preset_name(cfg: RegularFingerBuilderCfg, preset_name: str) -> RegularFingerBuilderCfg:
-    r"""给 preset cfg 打上稳定名字，并返回一份副本。
-
-    之所以返回副本而不是原地改，是为了让模块级常量既能被当作模板复用，
-    又不会因为调用方 `replace()` / `from_dict()` 而互相污染。
-    """
-
-    copied = cfg.copy()  # 返回副本而不是原对象，避免模块级模板被外部 replace 污染
-    # `metadata` 不是 schema 强制字段，因此这里用最轻量的附加方式记录。
-    setattr(copied, "metadata", {**getattr(copied, "metadata", {}), "preset_name": preset_name})
-    return copied
-
-
 def get_finger_builder_preset(name: str) -> RegularFingerBuilderCfg:
     r"""按名字返回一份 finger builder preset 副本。
 
@@ -677,15 +663,41 @@ def get_finger_builder_preset(name: str) -> RegularFingerBuilderCfg:
 # 2. 批量枚举时的稳定节点；
 # 3. sidecar / provenance 可回溯的语义标签。
 
-ALLEGRO_FINGER_PRESET = _with_preset_name(
-    AllegroFingerBuilderCfg(name="index"),
-    "allegro_non_thumb_v1",
+ALLEGRO_FINGER_PRESET = AllegroFingerBuilderCfg(
+    name="index",
+    num_joints=4,
+    width=2.7,
+    height=2.0,
+    length=[1.8, 5.4, 3.8, 2.2],
+    mesh_offsets=[0.0, 0.0, -0.6, 0.0],
+    axes=[(0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+    tip={"type": "cs", "radius": 1.2, "height": 1.0},
 )
-"""Allegro 非拇指执行型 preset。"""
+"""Allegro 非拇指执行型 preset。
 
-LEAP_FINGER_PRESET = _with_preset_name(
-    LeapFingerBuilderCfg(name="index"),
-    "leap_non_thumb_v1",
+这里刻意把 preset 的几何参数完整展开写在本地，而不是只写一个抽象名字，
+这样读代码时一眼就能看到：
+
+- 长度
+- 截面尺寸
+- 偏移
+- 旋转轴
+- 指尖类型
+
+注册表名 `allegro_non_thumb_v1` 只保留在 `FINGER_PRESET_REGISTRY` 里，作为
+外部查找键，而不是反向塞回 cfg 内部。
+"""
+
+LEAP_FINGER_PRESET = LeapFingerBuilderCfg(
+    name="index",
+    num_joints=4,
+    width=3.4,
+    height=2.05,
+    length=[3.9, 1.5, 3.6, 2.0],
+    mesh_offsets=[0.0, 0.0, 0.0, 0.0],
+    fixed_part=1.3,
+    axes=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+    tip={"type": "cs", "radius": 1.2, "height": 1.0},
 )
 """LEAP 非拇指执行型 preset。
 
@@ -694,33 +706,31 @@ LEAP_FINGER_PRESET = _with_preset_name(
 先打通 pre-made 闭环，执行路径仍采用 `cylinder + sphere` primitive tip。
 """
 
-ALLEGRO_THUMB_PRESET = _with_preset_name(
-    RegularThumbBuilderCfg(
-        name="thumb",
-        lengths=[4.5, 1.7, 4.3, 4.0],
-        cmc1_width=3.5,
-        cmc1_height=3.4,
-        width=1.9,
-        height=2.7,
-        cmc1_offset=(0.9, 1.45),
-        non_cmc1_offset=[-0.2, 0.0, -0.9],
-    ),
-    "allegro_thumb_v1",
+ALLEGRO_THUMB_PRESET = RegularThumbBuilderCfg(
+    name="thumb",
+    lengths=[4.5, 1.7, 4.3, 4.0],
+    cmc1_width=3.5,
+    cmc1_height=3.4,
+    width=1.9,
+    height=2.7,
+    cmc1_offset=(0.9, 1.45),
+    non_cmc1_offset=[-0.2, 0.0, -0.9],
+    axes=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0)],
+    tip={"type": "cs", "radius": 1.2, "height": 1.0},
 )
 """Allegro 拇指执行型 preset。"""
 
-LEAP_THUMB_PRESET = _with_preset_name(
-    RegularThumbBuilderCfg(
-        name="thumb",
-        lengths=[2.8, 1.7, 4.7, 2.3],
-        cmc1_width=2.30,
-        cmc1_height=2.67,
-        width=2.3,
-        height=3.47,
-        cmc1_offset=(0.0, -0.33),
-        non_cmc1_offset=[0.0, 0.0, 0.0],
-    ),
-    "leap_thumb_v1",
+LEAP_THUMB_PRESET = RegularThumbBuilderCfg(
+    name="thumb",
+    lengths=[2.8, 1.7, 4.7, 2.3],
+    cmc1_width=2.30,
+    cmc1_height=2.67,
+    width=2.3,
+    height=3.47,
+    cmc1_offset=(0.0, -0.33),
+    non_cmc1_offset=[0.0, 0.0, 0.0],
+    axes=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0)],
+    tip={"type": "cs", "radius": 1.2, "height": 1.0},
 )
 """LEAP 拇指执行型 preset。"""
 

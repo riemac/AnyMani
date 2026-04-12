@@ -173,9 +173,17 @@ class HandGeneratorCfg(AssetCfgBase):
     Export: HandExporterCfg = field(default_factory=HandExporterCfg)
     """手级导出器配置入口；用于把 HandCfg 导出为 URDF / sidecar / tree 文件等产物。"""
 
+    output_dir: Path | str = field(default_factory=lambda: Path(__file__).resolve().parents[1] / "generated")
+    """产物落盘根目录。
+
+    默认写到 `assets/generated/`，与当前子项目的目录约定保持一致；
+    测试或批量脚本也可以显式覆盖成临时目录。
+    """
+
     def __post_init__(self):
         if self.class_type is None:
             self.class_type = HandGenerator
+        self.output_dir = Path(self.output_dir)
 
 
 # ============================================================================
@@ -231,7 +239,7 @@ class HandGenerator:
         if self.cfg.artifact_level != "hand_cfg":
             export_cfg = self.cfg.Export.replace(artifact_level=self.cfg.artifact_level)
             exporter = HandExporter(export_cfg)
-            exporter.export(result, output_dir=Path("outputs"))
+            exporter.export(result, output_dir=self.cfg.output_dir)
 
         return result
 
