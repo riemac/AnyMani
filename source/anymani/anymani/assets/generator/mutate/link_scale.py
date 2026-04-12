@@ -38,9 +38,12 @@ $$
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
+import random
 from typing import Literal
 
 from ...asset_base import AssetCfgBase, HandCfg
+from ...asset_schema_core import PoseCfg
 from ._base import MutatorBase
 
 
@@ -113,7 +116,42 @@ class LinkScaleMutator(MutatorBase):
             HandCfg | None: 缩放后的整手配置；若所有关节长度为零则返回 ``None``。
         """
 
-        pass
+        mutated = target.copy()  # 连杆缩放不改拓扑，因此深拷贝后原地改 `origin.pos` 即可
+        target_names = set(self.cfg.target_joints)  # 空集语义：作用于全部非 fixed joint
+        saw_scalable_joint = False  # 用于实现“若所有关节长度都为零则返回 None”的契约
+
+        for joint in mutated.iter_joints():
+            if joint.joint_type == "fixed":
+                continue
+            if target_names and joint.name not in target_names:
+                continue
+
+            x, y, z = joint.origin.pos  # 原始位移向量 $\mathbf{p}$
+            length = math.sqrt(x * x + y * y + z * z)  # 原始长度 $l=\|\mathbf{p}\|_2$
+            if length <= 1e-9:
+                continue  # 零长度 joint 无法定义缩放方向，直接跳过
+
+            saw_scalable_joint = True
+            sigma = float(self.cfg.per_joint_sigma.get(joint.name, self.cfg.sigma))  # 每关节允许独立覆盖扰动强度
+
+            if self.cfg.scale_mode == "relative":
+                epsilon = random.gauss(0.0, sigma)  # 比例扰动 $\varepsilon$
+                epsilon = max(min(epsilon, self.cfg.clip_ratio), -self.cfg.clip_ratio)
+                new_length = length * (1.0 + epsilon)  # $l' = l(1+\varepsilon)$
+            else:
+                delta = random.gauss(0.0, sigma)  # 绝对扰动 $\Delta l$
+                if self.cfg.clip_absolute is not None:
+                    clip_abs = float(self.cfg.clip_absolute)
+                    delta = max(min(delta, clip_abs), -clip_abs)
+                new_length = max(length + delta, 1e-9)  # $l'=\max(l+\Delta l,\varepsilon)$
+
+            scale = new_length / length  # 方向保持不变，只缩放模长
+            joint.origin = PoseCfg(
+                pos=(x * scale, y * scale, z * scale),
+                rpy=joint.origin.rpy,
+            )
+
+        return mutated if saw_scalable_joint else None
 
         # TODO:算法之一（link length perturbation）
         # ────────────────────────────────────────

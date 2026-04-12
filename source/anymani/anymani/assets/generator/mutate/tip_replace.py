@@ -41,9 +41,12 @@ r"""指尖替换工具：对 finger 末端做几何级别的替换或扰动。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
+import random
 from typing import Literal
 
 from ...asset_base import AssetCfgBase, HandCfg
+from ...asset_schema_core import CollisionGeometryCfg, MeshGeometryCfg, PoseCfg, VisualGeometryCfg
 from ._base import MutatorBase
 
 
@@ -119,7 +122,20 @@ class TipReplaceMutator(MutatorBase):
             HandCfg | None: 替换指尖几何后的整手配置。
         """
 
-        pass
+        mutated = target.copy()  # 指尖替换只改末端几何，因此深拷贝即可
+        target_names = set(self.cfg.target_fingers)  # 空集语义：作用于全部 finger
+
+        for finger in mutated.fingers:
+            if target_names and finger.name not in target_names:
+                continue
+
+            tip_joint = finger.tip_joint  # 当前约定下末端 joint 就是 tip joint
+            if self.cfg.mode == "geometry_swap":
+                self._swap_tip_geometry(tip_joint)
+            else:
+                self._perturb_mesh_tip_origin(tip_joint)
+
+        return mutated
 
         # TODO:算法之一（tip geometry swap）
         # ────────────────────────────────────────
@@ -160,6 +176,120 @@ class TipReplaceMutator(MutatorBase):
         #
         # IDEA：几何替换是纯参数级操作，风险低；但 mesh_perturb 的偏移量若过大
         # 可能导致视觉 / 碰撞不一致，建议在 validator 里对偏移上限做检查。
+
+    def _swap_tip_geometry(self, tip_joint) -> None:
+        r"""在 `box` 与 `cylinder` 之间替换 tip 主体几何。
+
+        当前把“主体几何”定义为：tip joint 的 collision / visual 列表里，
+        第一个非 `sphere` 的 primitive。这样可以兼容当前两种 pre-made tip：
+
+        - `cs`：主体是 cylinder，球帽保持 sphere
+        - `bs`：主体是 box，球帽保持 sphere
+        """
+
+        body_collision_index = _find_tip_body_index(tip_joint.collisions)
+        body_visual_index = _find_tip_body_index(tip_joint.visuals)
+        if body_collision_index is None or body_visual_index is None:
+            return  # 当前 tip 没有可替换的 primitive 主体时，不做 silent fallback 以外的越权处理
+
+        body_collision = tip_joint.collisions[body_collision_index]
+        body_visual = tip_joint.visuals[body_visual_index]
+        source_geometry = body_collision.geometry
+        source_kind = source_geometry.kind
+        target_kind = self.cfg.target_geometry or ("box" if source_kind == "cylinder" else "cylinder")
+
+        if source_kind == target_kind:
+            return  # 显式要求的目标几何和当前相同，则本次 mutate 为空操作
+        if source_kind not in {"box", "cylinder"} or target_kind not in {"box", "cylinder"}:
+            return  # mesh / sphere tip 当前不走 geometry swap
+
+        geometry, origin = _swap_geometry_and_origin(source_geometry, body_collision.origin, target_kind, self.cfg.size_sigma)
+        tip_joint.collisions[body_collision_index] = CollisionGeometryCfg(
+            name=body_collision.name,
+            geometry=geometry,
+            origin=origin,
+        )
+        tip_joint.visuals[body_visual_index] = VisualGeometryCfg(
+            name=body_visual.name,
+            geometry=geometry,
+            origin=origin,
+        )
+
+    def _perturb_mesh_tip_origin(self, tip_joint) -> None:
+        r"""对 mesh tip 的局部原点做比例扰动。
+
+        这里不改 mesh 文件路径，也不改 scale，只对 origin.pos 做：
+
+        $$
+        p_i' = p_i (1 + \varepsilon_i), \quad \varepsilon_i \sim U(-r, r).
+        $$
+
+        绝对值很接近零的分量保持不动，避免“本来就想贴在轴上”的量被噪声抬起来。
+        """
+
+        for collection_name in ("collisions", "visuals"):
+            collection = getattr(tip_joint, collection_name)
+            updated = []
+            for element in collection:
+                if not isinstance(element.geometry, MeshGeometryCfg):
+                    updated.append(element)
+                    continue
+
+                pos_new = []
+                for value in element.origin.pos:
+                    if abs(value) <= 1e-12:
+                        pos_new.append(value)
+                        continue
+                    epsilon = random.uniform(-self.cfg.mesh_perturb_ratio, self.cfg.mesh_perturb_ratio)
+                    pos_new.append(value * (1.0 + epsilon))
+
+                updated.append(
+                    element.replace(
+                        origin=PoseCfg(pos=tuple(pos_new), rpy=element.origin.rpy),
+                    )
+                )
+            setattr(tip_joint, collection_name, updated)
+
+
+def _find_tip_body_index(elements) -> int | None:
+    r"""找到 tip 复合几何里“主体几何”的索引。"""
+
+    for index, element in enumerate(elements):
+        if element.geometry.kind != "sphere":
+            return index
+    return None
+
+
+def _swap_geometry_and_origin(source_geometry, source_origin: PoseCfg, target_kind: str, size_sigma: float):
+    r"""根据目标几何类型构造替换后的 `(geometry, origin)`。
+
+    这里采用一个保守规则：
+
+    1. `cylinder → box` 时，保留原有局部旋转 `rpy`，这样当前项目里沿 $+y$
+       的圆柱轴语义会继续通过 `origin.rpy=(-\pi/2,0,0)` 体现在 box 上；
+    2. `box → cylinder` 时，在原 box `rpy` 基础上额外叠加 `(-\pi/2,0,0)`，
+       把 URDF 默认沿 $z$ 的圆柱轴转到当前 box 主长度方向；
+    3. 尺寸若启用 `size_sigma`，则逐维叠加一个小的绝对扰动，但仍保证正值。
+    """
+
+    if source_geometry.kind == "cylinder":
+        radius = float(source_geometry.radius)
+        length = float(source_geometry.length)
+        width = max(2.0 * radius + random.gauss(0.0, size_sigma), 1e-9)
+        depth = max(2.0 * radius + random.gauss(0.0, size_sigma), 1e-9)
+        body_length = max(length + random.gauss(0.0, size_sigma), 1e-9)
+        return {"type": "box", "size": (width, depth, body_length)}, source_origin
+
+    size = tuple(float(value) for value in source_geometry.size)
+    radius = max(min(size[0], size[2]) / 2.0 + random.gauss(0.0, size_sigma), 1e-9)
+    length = max(size[1] + random.gauss(0.0, size_sigma), 1e-9)
+    return (
+        {"type": "cylinder", "radius": radius, "length": length},
+        PoseCfg(
+            pos=source_origin.pos,
+            rpy=(source_origin.rpy[0] - math.pi / 2.0, source_origin.rpy[1], source_origin.rpy[2]),
+        ),
+    )
 
 
 __all__ = ["TipReplaceCfg", "TipReplaceMutator"]
