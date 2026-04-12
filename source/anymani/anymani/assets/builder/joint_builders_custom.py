@@ -1,180 +1,489 @@
-r"""TODO:自定义关节构建器配置类 `JointBuilderCfg` 和运行时类 `JointBuilder`
-- 这里构建关节类型的mesh是自定义stl/obj等文件
-- 主要是来自指尖的 mesh 需要精细调整
+r"""自定义指尖关节构建器：把 mesh tip recipe 落为 `JointCfg`。
+
+这一层对应你原始草稿里“custom fingertip v1”的入口，但当前实现刻意只做
+**指尖**，不抢跑到一般 joint-level custom mesh。原因有三条：
+
+1. 当前 pre-made 主链已经用 primitive regular link 跑稳，真正需要提高表达力的
+   首先是 tip，而不是整根 finger 的每一段；
+2. 指尖是主要接触部位，自定义 mesh 在这里最有物理意义；
+3. 你在草稿里已经给出了三个很具体的 mesh tip 锚点算法：
+   - `leap_cube`
+   - `wedge`
+   - `round`
+
+因此本文件的职责非常窄：
+
+- 读取一个“tip 类型 + mesh 锚点 + scale + offset”的声明式配置；
+- 把 visual / collision 都写成 `mesh` 几何；
+- 用一个**显式标注的近似外包盒**来补 inertial，避免依赖 importer 的兜底逻辑。
+
+这最后一点尤其重要。你在测试 URDF 注释里已经明确提醒：
+“不写 inertial 不代表就没事，只是把问题交给 importer/PhysX 兜底。”
+对于接触敏感的 tip，我们不应把这个语义空着。
 """
+
 from __future__ import annotations
 
-from assets.asset_builders import JointBuilderCfg, JointBuilder
-from assets.asset_base import JointCfg
-from assets.asset_schema_core import Vector6, Vector3
-
 from dataclasses import dataclass, field
-from typing import Any
+import math
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from ..asset_base import JointCfg
+from ..asset_builders import JointBuilder, JointBuilderCfg
+from ..asset_schema_core import (
+    CollisionGeometryCfg,
+    InertialCfg,
+    JointLimitCfg,
+    PoseCfg,
+    Vector3,
+    VisualGeometryCfg,
+    _ensure_tuple,
+)
+from .joint_builders_primitive import _add_rpy, _box_inertia, _estimate_mass
+
+
+_DEFAULT_DENSITY = 650.0
+"""默认密度 $\rho$ [kg/m^3]。
+
+这里继续沿用 primitive joint builder 的量级，避免 custom tip 因为密度体系切换
+而突然出现不连续的质量尺度。
+"""
+
+
+_CUSTOM_TIP_DIR = Path(__file__).resolve().parents[1] / "custom" / "tips"
+"""当前项目内 custom tip mesh 的默认目录。"""
+
+
+_DEFAULT_BASE_RPY = (0.0, -math.pi / 2.0, 0.0)
+r"""custom tip 的默认 canonical 朝向。
+
+你在 `test_round.urdf`、`test_wedge.urdf` 和 `test_leap_cube.urdf` 里都把
+底→tip 的主方向规约到 joint 的 $+y$ 轴，且都采用了：
+
+$$
+R = R_y(-\pi/2).
+$$
+
+这意味着：
+
+- 原始 mesh 的“前向/厚度语义”会被旋到当前 finger builder 采用的 $+y$ 生长方向；
+- x/z 侧向则由右手系自动闭合。
+"""
+
+
+_CUSTOM_TIP_PRESETS: dict[str, dict[str, object]] = {
+    "leap_cube": {
+        "file_name": "finger_tip_soft.stl",
+        "anchor_point": (9.48570692492, 0.0, -16.4999999586),
+        "unit_scale": 0.001,
+        "base_rpy": _DEFAULT_BASE_RPY,
+        "approx_size": (0.019, 0.020, 0.019),
+    },
+    "round": {
+        "file_name": "round_finger_tip_soft.stl",
+        "anchor_point": (9.50986387389, 0.0, -16.4913187022),
+        "unit_scale": 0.001,
+        "base_rpy": _DEFAULT_BASE_RPY,
+        "approx_size": (0.019, 0.020, 0.019),
+    },
+    "wedge": {
+        "file_name": "wedge_finger_tip_soft.stl",
+        "anchor_point": (9.5, 0.0, -16.5),
+        "unit_scale": 0.001,
+        "base_rpy": _DEFAULT_BASE_RPY,
+        "approx_size": (0.019, 0.020, 0.017),
+    },
+}
+r"""custom tip 预定义锚点库。
+
+字段语义：
+
+- `file_name`：默认 mesh 文件名
+- `anchor_point`：mesh 局部坐标系中的语义锚点 $p^\*$
+- `unit_scale`：从 mesh 文件单位到米制世界的基准换算
+- `base_rpy`：canonical 朝向
+- `approx_size`：用于 inertial 的近似外包盒尺寸（米）
+
+# Question:
+`wedge` 的测试 URDF 里出现过一个“按孔径 2mm 反推”的特殊统一缩放
+`0.000689655...`；而草稿算法注释里又把 canonical configuration 写成
+`0.001 I`。当前实现默认采用草稿算法里的 canonical `0.001`，并允许用户
+通过 `scale` 显式覆写，不在这里偷偷替你选边站。
+"""
+
+
+def _pose_from_value(value: PoseCfg | Sequence[float] | Mapping[str, Any] | None) -> PoseCfg:
+    r"""把宽松位姿输入统一规范为 `PoseCfg`。"""
+
+    return PoseCfg.from_value(value)  # 兼容 tuple / dict / PoseCfg，和 primitive builder 保持一致
+
+
+def _scale_to_vector(value: float | Sequence[float]) -> Vector3:
+    r"""把用户给的 scale 规约为三轴缩放向量。
+
+    这里的 `scale` 是**无量纲**的用户级缩放，而不是最终写进 URDF 的 mesh scale。
+    真正进入 URDF 的量是：
+
+    $$
+    \mathbf{s}_{\text{urdf}} = s_u \cdot \mathbf{s}_{\text{unit}}
+    $$
+
+    或逐轴形式：
+
+    $$
+    \mathbf{s}_{\text{urdf}} =
+    (s_x, s_y, s_z) \odot \mathbf{s}_{\text{unit}}.
+    $$
+    """
+
+    if isinstance(value, (int, float)):
+        scale = float(value)  # uniform scale $s_u$
+        if scale <= 0.0:
+            raise ValueError(f"scale must be positive, got {value}")
+        return (scale, scale, scale)
+    scale = _ensure_tuple(value, length=3, field_name="custom_tip.scale")
+    if any(component <= 0.0 for component in scale):
+        raise ValueError(f"custom tip scale must be positive, got {scale}")
+    return scale
+
+
+def _rpy_rotation_matrix(rpy: Vector3) -> tuple[Vector3, Vector3, Vector3]:
+    r"""构造 URDF 风格 `rpy` 的旋转矩阵。
+
+    这里采用和 URDF 一致的固定轴旋转解释：
+
+    $$
+    R(\phi,\theta,\psi) = R_z(\psi) R_y(\theta) R_x(\phi).
+    $$
+
+    返回值按行存储，后续只需要做 `R p` 这种向量旋转，因此不引入额外矩阵类。
+    """
+
+    roll, pitch, yaw = rpy  # $(\phi,\theta,\psi)$
+    cr, sr = math.cos(roll), math.sin(roll)  # $\cos\phi,\sin\phi$
+    cp, sp = math.cos(pitch), math.sin(pitch)  # $\cos\theta,\sin\theta$
+    cy, sy = math.cos(yaw), math.sin(yaw)  # $\cos\psi,\sin\psi$
+
+    return (
+        (cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr),
+        (sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr),
+        (-sp, cp * sr, cp * cr),
+    )
+
+
+def _apply_rotation(matrix: tuple[Vector3, Vector3, Vector3], point: Vector3) -> Vector3:
+    r"""把旋转矩阵作用到一个 3D 点上。"""
+
+    return (
+        matrix[0][0] * point[0] + matrix[0][1] * point[1] + matrix[0][2] * point[2],
+        matrix[1][0] * point[0] + matrix[1][1] * point[1] + matrix[1][2] * point[2],
+        matrix[2][0] * point[0] + matrix[2][1] * point[1] + matrix[2][2] * point[2],
+    )
+
+
+def _resolve_tip_preset(tip_type: str) -> dict[str, object]:
+    r"""按 tip 名返回预定义 custom tip 锚点。"""
+
+    try:
+        return dict(_CUSTOM_TIP_PRESETS[tip_type])
+    except KeyError as exc:
+        raise KeyError(f"Unknown custom tip preset: {tip_type!r}") from exc
 
 
 @dataclass
 class CustomJointBuilderCfg(JointBuilderCfg):
-    r"""自定义关节构建器配置类。
+    r"""自定义 mesh 关节构建器配置基类。
 
-    该声明式配置类包含的字段为构建类算法所需，而非单纯照搬 `JointCfg` 的所有字段
-
-    核心思想是 “算法里人易理解和显式控制的参数” 映射到 `JointCfg` 的字段上
+    当前虽然只真正执行到 tip，但字段仍然故意做成 joint-centric，保持和
+    `PrimJointBuilderCfg` 一致的接口肌理。这样 finger builder 在“primitive tip”
+    与 “custom mesh tip” 之间切换时，不需要重写整套 joint-level 装配逻辑。
     """
 
     class_type: type["CustomJointBuilder"] | None = None
-    """关联的自定义关节构建器类。"""
+    """关联的自定义 mesh 关节构建器类。"""
 
-    mesh: dict[str, Any] = field(default_factory=dict)  # default_factory 是 @dataclass 专属的“补丁”，用来模拟普通类 __init__ 里每次创建新对象的行为。普通类里直接在 __init__ 里赋值就行了，不需要 default_facto
-    """自定义 mesh 的参数字典。包括 mesh 路径，偏移和缩放参数"""
+    name: str = "joint"
+    """输出到 `JointCfg` 中的 joint 名。"""
 
-    origin: Vector6 | dict[str, Vector3] = field(default_factory=lambda: (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-    """joint frame 相对于父 link 坐标系的位姿，包含位置和平移两部分。
+    parent: str = "palm"
+    """输出到 `JointCfg` 中的 parent link 名。"""
 
-    需要注意的是，关节级构建器并不涉对该字段的处理，而是手指级/手掌级构建器中的算法处理该字段。
-    """
+    child: str | None = None
+    """可选显式 child link 名。"""
 
-    mesh_offset: float | Vector3 | Vector6 | dict[str, Vector3] = 0
-    """mesh的偏移参数，相对于其 joint frame，类型可以是单个float（均匀缩放），Vector3（xyz轴缩放）或者 Vector6（包含位置和姿态的全位姿偏移）。
+    joint_type: str = "fixed"
+    """当前 custom tip 首轮统一采用 `fixed` 关节。"""
 
-    这里的偏移并不是指 mesh frame 相对于 joint frame 的固定变换，而是一个方便配置的参数，构建算法会根据这个参数和类型参数计算出最终的 mesh frame 位姿。
-    由于是自定义 mesh，即使 mesh frame 为0,视觉上也不代表它的底部就和 joint frame 的 z-x 平面重合。mesh_offset 设为0,语义上即代表我们期盼 mesh 底部应和 joint frame 的 z-x 平面重合。
-    剩余的就交予构建算法去解决。
-    
-    渐进式精度设计，支持三种精度的输入，内部统一解析为 list[Vector6]：
-    - list[float]   : 仅沿手指伸长方向(y轴)的偏移，最常用。默认情况下
-    - list[Vector3]  : xyz 位置偏移
-    - list[Vector6]  : 完整 6D 位姿 (x, y, z, roll, pitch, yaw)
-    """
+    origin: PoseCfg | Sequence[float] | Mapping[str, Any] | None = field(default_factory=PoseCfg)
+    """tip joint frame 相对 parent link frame 的位姿。"""
 
-    _mesh_offset_6d: Vector6 = field(default_factory=lambda: (0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-    """内部解析后的 mesh 偏移，统一为 Vector6 形式，方便构建算法使用。"""
+    axis: Vector3 = (0.0, 0.0, 0.0)
+    """fixed joint 默认允许零轴输入。"""
+
+    limit: JointLimitCfg | Sequence[float] | Mapping[str, Any] | None = None
+    """fixed joint 默认没有限位。"""
+
+    density: float = _DEFAULT_DENSITY
+    """未显式给出质量时，用于近似外包盒估质量的默认密度。"""
+
+    mass: float | None = None
+    """可选显式质量覆盖。"""
+
+    is_tip: bool = True
+    """该 joint/link 是否应被标记为指尖相关。"""
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+    """附加 metadata，会原样转发到结果 `JointCfg`。"""
 
     is_customized: bool = True
-    """mesh是否自定义，即非URDF默认的box/cylinder/sphere。"""
+    """明确标记该 joint 使用的是 custom mesh，而不是 URDF primitive。"""
 
     def __post_init__(self):
-        # 解析 _mesh_offset_6d
-        raise NotImplementedError()
+        super().__post_init__()
+        self.origin = _pose_from_value(self.origin)  # joint frame 先规约到标准 `PoseCfg`
+        self.axis = _ensure_tuple(self.axis, length=3, field_name="custom_joint.axis")  # fixed joint 允许零轴
+        self.density = float(self.density)
+        if self.density <= 0.0:
+            raise ValueError("density must be positive")
+        if self.mass is not None:
+            self.mass = float(self.mass)
+            if self.mass <= 0.0:
+                raise ValueError("mass must be positive")
+        if self.class_type in {None, JointBuilder}:
+            self.class_type = CustomJointBuilder  # custom mesh 路线统一走 `CustomJointBuilder`
 
 
+@dataclass
 class CustomTipBuilderCfg(CustomJointBuilderCfg):
-    r"""指尖专用的自定义关节构建器配置类。
+    r"""指尖专用的自定义 mesh 构建配置。
 
-    该声明式配置类包含的字段为构建类算法所需，而非单纯照搬 `JointCfg` 的所有字段
+    当前首轮只实现三类显式锚点：
 
-    核心思想是 “算法里人易理解和显式控制的参数” 映射到 `JointCfg` 的字段上
-    """
+    - `round`
+    - `wedge`
+    - `leap_cube`
 
-    scale: float | Vector3 = 1
-    """缩放参数，默认为1。对应 urdf 中的 mesh scale 字段。
-    
-    为float时表示沿 xyz 轴的均匀缩放；为 Vector3 时表示沿 xyz 轴的各自比例缩放。
+    它们共享同一个核心公式：
+
+    $$
+    p_{\text{joint}} = R\,S\,p_{\text{mesh}} + t
+    $$
+
+    其中：
+
+    - $R$：canonical 朝向与用户附加 `rpy` 的合成旋转
+    - $S$：`unit_scale` 与用户 `scale` 合成后的缩放
+    - $p^\*$：mesh 局部坐标里的“底面中心锚点”
+    - $t$：把锚点对齐到目标 joint frame 的平移
+
+    更准确地说，平移是通过“让锚点落到 `mesh_offset.pos` 指定的位置”来求得：
+
+    $$
+    t = p_{\text{target}} - R\,S\,p^\*.
+    $$
     """
 
     tip_type: str = "round"
-    """指尖类型，用于区分不同的指尖构建算法。比如 "leap_cube"、"round"、"wedge" 等。"""
+    """指尖类型；当前支持 `round` / `wedge` / `leap_cube`。"""
+
+    mesh_path: str | Path | None = None
+    """可选显式 mesh 路径。
+
+    若为 `None`，则按 `tip_type` 从当前项目内的 preset 表查默认文件。
+    """
+
+    mesh_offset: PoseCfg | Sequence[float] | Mapping[str, Any] | None = field(default_factory=PoseCfg)
+    """mesh 锚点目标位姿。
+
+    这里不是“mesh 原点相对 joint frame 的直接位姿”，而是：
+    `anchor_point` 在 joint frame 下希望落到哪里。
+
+    当 `mesh_offset.pos=(0,0,0)` 时，语义是“底面中心锚点对齐到 tip joint 原点”。
+    """
+
+    scale: float | Sequence[float] = 1.0
+    """用户级无量纲缩放。
+
+    - 标量：uniform scale
+    - 三元组：逐轴 non-uniform scale
+    """
+
+    unit_scale: float | None = None
+    """mesh 文件单位到米制世界的基准缩放。
+
+    例如 STL 以 mm 存储时，通常取 `0.001`。
+    """
+
+    anchor_point: Vector3 | Sequence[float] | None = None
+    r"""mesh 局部坐标里的语义锚点 $p^\*$。"""
+
+    base_rpy: Vector3 | Sequence[float] | None = None
+    """canonical 朝向；默认由 tip preset 给出。"""
+
+    approx_size: Vector3 | Sequence[float] | None = None
+    """用于近似 inertial 的外包盒尺寸（米，canonical scale 下）。"""
+
+    _mesh_scale_xyz: Vector3 = field(init=False, default=(1.0, 1.0, 1.0))
+    """最终写入 URDF `<mesh scale>` 的三轴缩放。"""
+
+    _approx_size_xyz: Vector3 = field(init=False, default=(0.01, 0.01, 0.01))
+    """应用用户缩放之后的近似外包盒尺寸（米）。"""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        preset = _resolve_tip_preset(str(self.tip_type).lower())  # 先拿当前 tip 类型的默认锚点表
+        self.tip_type = str(self.tip_type).lower()
+        self.mesh_offset = _pose_from_value(self.mesh_offset)  # `p_target` 的位姿入口
+        user_scale = _scale_to_vector(self.scale)  # 用户级无量纲 scale
+
+        default_mesh_path = _CUSTOM_TIP_DIR / str(preset["file_name"])
+        self.mesh_path = Path(self.mesh_path) if self.mesh_path is not None else default_mesh_path
+        self.unit_scale = float(self.unit_scale if self.unit_scale is not None else preset["unit_scale"])
+        if self.unit_scale <= 0.0:
+            raise ValueError("unit_scale must be positive")
+
+        self.anchor_point = _ensure_tuple(
+            self.anchor_point if self.anchor_point is not None else preset["anchor_point"],
+            length=3,
+            field_name="custom_tip.anchor_point",
+        )
+        self.base_rpy = _ensure_tuple(
+            self.base_rpy if self.base_rpy is not None else preset["base_rpy"],
+            length=3,
+            field_name="custom_tip.base_rpy",
+        )
+        canonical_size = _ensure_tuple(
+            self.approx_size if self.approx_size is not None else preset["approx_size"],
+            length=3,
+            field_name="custom_tip.approx_size",
+        )
+        if any(edge <= 0.0 for edge in canonical_size):
+            raise ValueError(f"approx_size must be positive, got {canonical_size}")
+
+        # 真正进 URDF 的 mesh scale = 单位换算 × 用户级缩放。
+        self._mesh_scale_xyz = tuple(self.unit_scale * component for component in user_scale)
+        # 惯量外包盒只需要吃“相对 canonical 形状”的用户级缩放；`canonical_size`
+        # 已经在米制下，因此这里不再重复乘 `unit_scale`。
+        self._approx_size_xyz = tuple(canonical_size[index] * user_scale[index] for index in range(3))
 
 
 class CustomJointBuilder(JointBuilder):
-    r"""自定义关节构建器。
+    r"""自定义 mesh 关节构建器。
 
-    这里预期承担的职责是：根据 `CustomJointBuilderCfg` 里的显式参数，构建出
-    对应的自定义 mesh。当前阶段，这些算法细节仍由你主导，因此这里只
-    保留运行时壳子。
+    当前运行时只真正服务于 `CustomTipBuilderCfg`。之所以仍保留更一般的
+    `CustomJointBuilder` 命名，是为了不把未来“custom palm / custom finger link”
+    的扩展空间提前堵死。
     """
 
     cfg: CustomJointBuilderCfg
 
     def __init__(self, cfg: CustomJointBuilderCfg):
+        super().__init__(cfg)
         self.cfg = cfg
 
     def build(self) -> JointCfg:
-        r"""根据 `CustomJointBuilderCfg` 构建对应的自定义 mesh。
+        r"""根据 `CustomTipBuilderCfg` 构建对应的 custom mesh tip。
 
-        这里的返回值类型暂时用 `Any` 占位，具体类型取决于你选择的 mesh 表示和构建库。
+        Returns:
+            JointCfg: 以 joint-centric 形式表达的 custom mesh tip。
+
+        Raises:
+            NotImplementedError: 当前若传入的不是 `CustomTipBuilderCfg`，说明调用方
+                试图把一般 custom joint 路线提前接进来；这不在本轮范围内。
         """
-        raise NotImplementedError()
-    # NOTE:这里的算法具有相当的 “定制性” ，不同的指尖mesh,因为是从CAD等处导出来的，mesh origin位置和 joint frame 的关系可能都不一样，因此需要每个指尖mesh单独设计构建算法，来正确处理 `origin` 字段，并把 mesh 放到正确的位置。
-    # 因此对于 mesh_offset，它并不是等同于 mesh frame 相对于 joint frame 的偏移，而是方便配置声明。
 
-    # --- TODO:算法之一 ---：`AnyMani/source/anymani/anymani/assets/custom/tips/finger_tip_soft.stl` 定制
-    # 输入：tip_type: leap_cube / ...，配置层 scale_cfg（默认 $(1,1,1)$），内部实际缩放 $S=0.001\,\mathrm{diag}(s_x,s_y,s_z)$（mm→m），偏移 $d\in\mathbb{R}$
-    # 输出：使 leap-cube 指尖的底层平面与 joint frame 的 x-z 平面平行；当 $d=0$ 时，底层中心与 joint 原点重合；当 $d\neq 0$ 时，沿 y 轴方向额外平移 $d$，但底层仍保持与 x-z 平面平行；
-    #       同时保证 y 轴从底部指向指尖，x 轴映射到 +z，剩下的 z 轴由右手系确定
-    # 处理流程：
-    # - 第一步：读取 `finger_tip_soft.stl`；该 STL 以 mm 级网格坐标存储，因此 builder 内部先乘 0.001 做 mm→m 转换
-    # - 第二步：确定语义锚点 $p^*$ 为最底层的中心；对当前 leap-cube，原始网格里底层中心约为 $(9.485707,0,-16.5)$（STL 单位）
-    # - 第三步：构造旋转矩阵 $R=R_y(-\pi/2)$，保持 y 轴为底→tip，同时把原始 x 轴映射到 joint 的 +z 方向
-    # - 第四步：构造缩放矩阵 $S=0.001\,\mathrm{diag}(s_x,s_y,s_z)$；若配置层 scale_cfg=(1,1,1)，则 $S=0.001I$，这就是当前 leap-cube 的 canonical configuration
-    # - 第五步：求平移 $t$，使锚点在变换后落到 joint 原点；若没有额外偏移，则 $t=-R\,S\,p^*$，若有额外偏移，则 $t=d\,\mathbf{e}_y-R\,S\,p^*$
-    # - 第六步：将同一套 $R,t$ 同时写入 visual / collision；底部的 6 个圆孔作为 STL 几何的一部分保留，不把它额外解释成“必须 2mm”的工艺孔
-    # 公式：
-    # $$p_{joint}=R\,S\,p_{mesh}+t$$
-    # $$t=d\,\mathbf{e}_y-R\,S\,p^*$$
-    # - $R$: 旋转矩阵，对应 `rpy`
-    # - $t$: 平移向量，对应 `xyz`
-    # - $p^*$: leap-cube mesh 局部坐标里的语义锚点，不是几何中心本身
-    # preset: 当配置层 scale_cfg=(1,1,1),\ d=0 时（mm→m canonical configuration）
-    # - $\prescript{m}{}{x}=-1.6499999959cm,\ \prescript{m}{}{y}=0cm,\ \prescript{m}{}{z}=-0.9485706925cm$
-    # - $\prescript{m}{}{roll}=0,\ \prescript{m}{}{pitch}=-\pi/2,\ \prescript{m}{}{yaw}=0$
-    # 当配置层 scale_cfg\neq(1,1,1) 时
-    # - 若为 uniform scale $s_u$，则实际缩放是 $S=0.001\,s_u I$，`R` 不变，`t` 按同一公式重算
-    # - 若为 non-uniform scale $S=0.001\,\mathrm{diag}(s_x,s_y,s_z)$，则按 $t(S)=d\,\mathbf{e}_y-R\,S\,p^*$ 重算平移，`rpy` 不变
-    # 当 $d\neq 0$ 时
-    # - 在 tip 的 $y$ 轴方向额外加偏移 $d$，即 $p_{tip}$ 在 joint frame 下整体平移 $d$
-    # - 先按 scale 算出基准位姿，再叠加 $d$ 的轴向平移；视觉和碰撞几何保持同一套位姿
+        if not isinstance(self.cfg, CustomTipBuilderCfg):
+            raise NotImplementedError("CustomJointBuilder v1 currently only supports CustomTipBuilderCfg.")
 
-    # --- TODO:算法之二 ---：`AnyMani/source/anymani/anymani/assets/custom/tips/wedge_finger_tip_soft.stl` 定制
-    # 输入：tip_type: wedge / ...，配置层 scale_cfg（默认 $(1,1,1)$），内部实际缩放 $S=0.001\,\mathrm{diag}(s_x,s_y,s_z)$（mm→m），偏移 $d\in\mathbb{R}$
-    # 输出：使 wedge tip 的底面与 joint frame 的 x-z 平面平行；当 $d=0$ 时，底部中心与 joint 原点重合；当 $d\neq 0$ 时，沿 y 轴方向额外平移 $d$，但底面仍保持与 x-z 平面平行；
-    #       同时保证 y 轴从底部指向指尖，斜面朝向约定为 +z，x 轴由右手系确定
-    # 处理流程：
-    # - 第一步：读取 wedge STL；注意该 STL 以 mm 级网格坐标存储，因此 builder 内部先乘 0.001 做 mm→m 转换
-    # - 第二步：确定语义锚点 $p^*$ 为平底面的中心；对当前 wedge，原始网格里平底中心约为 $(9.5,0,-16.5)$（STL 单位）
-    # - 第三步：构造旋转矩阵 $R=R_y(-\pi/2)$，把原始 +x 方向的斜坡朝向映射到 joint 的 +z 方向，同时保持 y 轴为底→tip
-    # - 第四步：构造缩放矩阵 $S=0.001\,\mathrm{diag}(s_x,s_y,s_z)$；若配置层 scale=(1,1,1)，则 $S=0.001I$，这就是当前 wedge 的 canonical configuration
-    # - 第五步：求平移 $t$，使锚点在变换后落到 joint 原点；若没有额外偏移，则 $t=-R\,S\,p^*$，若有额外偏移，则 $t=d\,\mathbf{e}_y-R\,S\,p^*$
-    # - 第六步：将同一套 $R,t$ 写入 visual / collision；孔洞默认保留 STL 几何，不把它额外解释成“必须 2mm”的工艺孔
-    # 公式：
-    # $$p_{joint}=R\,S\,p_{mesh}+t$$
-    # $$t=d\,\mathbf{e}_y-R\,S\,p^*$$
-    # - $R$: 旋转矩阵，对应 `rpy`
-    # - $t$: 平移向量，对应 `xyz`
-    # - $p^*$: wedge mesh 局部坐标里的语义锚点，不是几何中心本身
-    # preset: 当配置层 scale_cfg=(1,1,1),\ d=0 时（mm→m canonical configuration）
-    # - $\prescript{m}{}{x}=-1.65cm,\ \prescript{m}{}{y}=0cm,\ \prescript{m}{}{z}=-0.95cm$
-    # - $\prescript{m}{}{roll}=0,\ \prescript{m}{}{pitch}=-\pi/2,\ \prescript{m}{}{yaw}=0$
-    # 当配置层 scale_cfg\neq(1,1,1) 时
-    # - 若为 uniform scale $s_u$，则实际缩放是 $S=0.001\,s_u I$，`R` 不变，`t` 按同一公式重算
-    # - 若为 non-uniform scale $S=0.001\,\mathrm{diag}(s_x,s_y,s_z)$，则按 $t(S)=d\,\mathbf{e}_y-R\,S\,p^*$ 重算平移，`rpy` 不变
-    # 当 $d\neq 0$ 时
-    # - 在 tip 的 $y$ 轴方向额外加偏移 $d$，即 $p_{tip}$ 在 joint frame 下整体平移 $d$
-    # - 先按 scale 算出基准位姿，再叠加 $d$ 的轴向平移；视觉和碰撞几何保持同一套位姿
+        mesh_origin = self._build_mesh_origin()  # 先解出真正写入 visual/collision 的 mesh frame
+        geometry = {"type": "mesh", "file_path": str(self.cfg.mesh_path), "scale": self.cfg._mesh_scale_xyz}
+        mass = _estimate_mass(
+            volume=self.cfg._approx_size_xyz[0] * self.cfg._approx_size_xyz[1] * self.cfg._approx_size_xyz[2],
+            cfg_mass=self.cfg.mass,
+            density=self.cfg.density,
+        )
+        inertial = InertialCfg(
+            mass=mass,
+            origin=mesh_origin,
+            inertia=_box_inertia(self.cfg._approx_size_xyz, mass),  # 当前用外包盒近似 inertial
+        )
 
-    # --- TODO:算法之三 ---：`AnyMani/source/anymani/anymani/assets/custom/tips/round_finger_tip_soft.stl` 定制
-    # 这是刚才 `test_round.urdf` 对应的具体展开版；用于把 round tip 接到 URDF / Isaac 的 m 制世界，并保持底部中心与 joint 原点重合。
-    # 输入：tip_type: round / ...，配置层 scale_cfg（默认 $(1,1,1)$），内部实际缩放 $S=0.001\,\mathrm{diag}(s_x,s_y,s_z)$，偏移 $d\in\mathbb{R}$
-    # 输出：使 round tip 的底面与 joint frame 的 x-z 平面平行；当 $d=0$ 时，底部中心与 joint 原点重合；当 $d\neq 0$ 时，沿 y 轴方向额外平移 $d$，但底面仍保持与 x-z 平面平行；
-    #       同时保证 y 轴从底部指向指尖，x/z 侧向按右手系确定
-    # 处理流程：
-    # - 第一步：读取 round_finger_tip_soft.stl；该 STL 仍按网格单位存储，builder 内部通过固定 scale 把它放到 URDF/Isaac 的 m 制世界
-    # - 第二步：确定语义锚点 $p^*$ 为平底面的中心；对当前 round tip，原始网格里平底中心约为 $(9.509864,0,-16.491319)$（STL 单位）
-    # - 第三步：构造旋转矩阵 $R=R_y(-\pi/2)$，让底→tip 的方向落到 joint 的 +y 轴，同时保留 x/z 的右手系约定
-    # - 第四步：构造缩放矩阵 $S=0.001\,\mathrm{diag}(s_x,s_y,s_z)$；若配置层 scale_cfg=(1,1,1)，则 $S=0.001I$，这就是当前 round tip 的 canonical configuration
-    # - 第五步：求平移 $t$，使锚点在变换后落到 joint 原点；若没有额外偏移，则 $t=-R\,S\,p^*$，若有额外偏移，则 $t=d\,\mathbf{e}_y-R\,S\,p^*$
-    # - 第六步：将同一套 $R,t$ 写入 visual / collision；几何本体保持 STL 原始形状，scale 只承担单位与尺寸标定
-    # 公式：
-    # $$p_{joint}=R\,S\,p_{mesh}+t$$
-    # $$t=d\,\mathbf{e}_y-R\,S\,p^*$$
-    # - $R$: 旋转矩阵，对应 `rpy`
-    # - $t$: 平移向量，对应 `xyz`
-    # - $p^*$: round mesh 局部坐标里的语义锚点，不是几何中心本身
-    # preset: 当配置层 scale_cfg=(1,1,1),\ d=0 时（即 $S=0.001I$）
-    # - $\prescript{m}{}{x}\approx-0.01649132\,m,\ \prescript{m}{}{y}=0,\ \prescript{m}{}{z}\approx-0.00950986\,m$
-    # - $\prescript{m}{}{roll}=0,\ \prescript{m}{}{pitch}=-\pi/2,\ \prescript{m}{}{yaw}=0$
-    # 当配置层 scale_cfg\neq(1,1,1) 时
-    # - 若为 uniform scale $s_u$，则实际缩放是 $S=0.001\,s_u I$，`R` 不变，`t` 按同一公式重算
-    # - 若为 non-uniform scale $S=0.001\,\mathrm{diag}(s_x,s_y,s_z)$，则按 $t(S)=d\,\mathbf{e}_y-R\,S\,p^*$ 重算平移，`rpy` 不变
-    # 当 $d\neq 0$ 时
-    # - 在 tip 的 $y$ 轴方向额外加偏移 $d$，即 $p_{tip}$ 在 joint frame 下整体平移 $d$
-    # - 先按 scale 算出基准位姿，再叠加 $d$ 的轴向平移；视觉和碰撞几何保持同一套位姿
+        collisions = [
+            CollisionGeometryCfg(
+                name=f"{self.cfg.name}_mesh_col",
+                geometry=geometry,
+                origin=mesh_origin,
+            )
+        ]
+        visuals = [
+            VisualGeometryCfg(
+                name=f"{self.cfg.name}_mesh_vis",
+                geometry=geometry,
+                origin=mesh_origin,
+            )
+        ]
+
+        metadata = {
+            **self.cfg.metadata,
+            "custom_tip_type": self.cfg.tip_type,
+            "mesh_path": str(self.cfg.mesh_path),
+            "approximation": "box_inertia_envelope",
+            "anchor_point": self.cfg.anchor_point,
+            "mesh_scale": self.cfg._mesh_scale_xyz,
+        }
+        return JointCfg(
+            name=self.cfg.name,
+            parent=self.cfg.parent,
+            child=self.cfg.child,
+            joint_type=self.cfg.joint_type,
+            axis=self.cfg.axis,
+            limit=self.cfg.limit,
+            origin=self.cfg.origin,
+            inertial=inertial,
+            collisions=collisions,
+            visuals=visuals,
+            is_tip=self.cfg.is_tip,
+            metadata=metadata,
+        )
+
+    def _build_mesh_origin(self) -> PoseCfg:
+        r"""计算 mesh geometry 相对 tip joint frame 的最终位姿。
+
+        设：
+
+        - $p^\*$：mesh 局部坐标中的语义锚点
+        - $S$：最终三轴缩放
+        - $R$：canonical 朝向与附加 `rpy` 的组合旋转
+        - $p_{\text{target}}$：锚点在 joint frame 下希望落到的位置
+
+        则：
+
+        $$
+        t = p_{\text{target}} - R\,S\,p^\*.
+        $$
+
+        这正是你在 custom tip 草稿里一直强调的“对齐的是底面中心锚点，而不是
+        mesh 原点本身”的语义。
+        """
+
+        assert isinstance(self.cfg, CustomTipBuilderCfg)
+        total_rpy = _add_rpy(self.cfg.base_rpy, self.cfg.mesh_offset.rpy)  # 当前仍采用小角度/声明式的分量叠加
+        scaled_anchor = (
+            self.cfg.anchor_point[0] * self.cfg._mesh_scale_xyz[0],
+            self.cfg.anchor_point[1] * self.cfg._mesh_scale_xyz[1],
+            self.cfg.anchor_point[2] * self.cfg._mesh_scale_xyz[2],
+        )
+        rotated_anchor = _apply_rotation(_rpy_rotation_matrix(total_rpy), scaled_anchor)
+        return PoseCfg(
+            pos=(
+                self.cfg.mesh_offset.pos[0] - rotated_anchor[0],
+                self.cfg.mesh_offset.pos[1] - rotated_anchor[1],
+                self.cfg.mesh_offset.pos[2] - rotated_anchor[2],
+            ),
+            rpy=total_rpy,
+        )
+
+
+__all__ = ["CustomJointBuilderCfg", "CustomTipBuilderCfg", "CustomJointBuilder"]

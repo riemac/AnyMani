@@ -54,19 +54,29 @@ from ._utils import (
     _normalize_pose_value,
     _to_si,
 )
+from .joint_builders_custom import CustomTipBuilderCfg
 from .joint_builders_primitive import PrimJointBuilderCfg
 
 
 def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
     r"""规范化指尖 recipe，并把长度统一成米制。
 
-    当前首轮只支持两类 primitive 复合指尖：
+    当前 v1 支持三条 tip 路线：
 
     - `cs`: cylinder + sphere
     - `bs`: box + sphere
+    - `mesh`: custom mesh tip（当前已接通 `round` / `wedge` / `leap_cube`）
 
-    这和你原始 TODO 里的“第一版先实现 cylinder/box + sphere，自定义指尖留接口”
-    是一致的。
+    这对应的是一个非常保守的扩展策略：
+
+    1. 旧的 `cs/bs` 语义完全不改；
+    2. custom tip 只接到 `fixed tip joint` 这一处；
+    3. regular finger / thumb 的串联算法不因为 custom tip 而改写。
+
+    # Question:
+    `white_tip.obj` 在用户背景里是 LEAP 语义上很重要的对象，但当前草稿里并没有
+    给出它的明确锚点 $p^\*$。因此本轮先实现已经有明确锚点算法说明的
+    `round` / `wedge` / `leap_cube` 三类，`white_tip` 继续留待你 review 后定夺。
     """
 
     tip = dict(tip or {"type": "cs", "radius": 0.012, "height": 0.01})  # 默认走最常见的圆柱+半球指尖
@@ -80,8 +90,31 @@ def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
         normalized["height"] = _to_si(tip.get("height", 0.01))
         normalized["width"] = _to_si(tip.get("width", tip.get("depth", 0.02)))
         normalized["depth"] = _to_si(tip.get("depth", tip.get("width", 0.02)))
+    elif tip_type in {"mesh", "custom"}:
+        normalized["type"] = "mesh"  # 统一收口到 custom mesh tip 路线
+        normalized["tip_type"] = str(tip.get("tip_type", tip.get("preset", "round"))).lower()
+        if "path" in tip:
+            normalized["path"] = str(tip["path"])
+        if "file_path" in tip:
+            normalized["path"] = str(tip["file_path"])
+        if "scale" in tip:
+            scale_value = tip["scale"]
+            normalized["scale"] = (
+                float(scale_value)
+                if isinstance(scale_value, (int, float))
+                else _ensure_tuple(scale_value, length=3, field_name="tip.scale")
+            )
+        if "unit_scale" in tip:
+            normalized["unit_scale"] = float(tip["unit_scale"])  # mesh 文件单位到米制世界的基准换算
+        if "anchor_point" in tip:
+            normalized["anchor_point"] = _ensure_tuple(tip["anchor_point"], length=3, field_name="tip.anchor_point")
+        if "base_rpy" in tip:
+            normalized["base_rpy"] = _ensure_tuple(tip["base_rpy"], length=3, field_name="tip.base_rpy")
+        if "approx_size" in tip:
+            approx_size = _ensure_tuple(tip["approx_size"], length=3, field_name="tip.approx_size")
+            normalized["approx_size"] = tuple(_to_si(value) for value in approx_size)  # 外包盒尺寸仍统一压到米制
     else:
-        raise ValueError(f"Only cs/bs tip recipes are supported in v1, got {tip_type!r}")
+        raise ValueError(f"Only cs/bs/mesh tip recipes are supported in v1, got {tip_type!r}")
     return normalized
 
 
@@ -612,18 +645,37 @@ class RegularFingerBuilder(FingerBuilder):
         """
         tip_recipe = dict(self.cfg.tip)  # 指尖 recipe 先复制，避免污染 cfg
         tip_recipe["offset"] = self.cfg._tip_offset_6d  # 指尖 mesh 相对 tip joint frame 的位姿
-        builder_cfg = PrimJointBuilderCfg(
-            name=f"{self.cfg.name}_tip",  # tip joint 命名稳定，便于 exporter / validator 识别
-            parent=parent_link,  # tip 接在最后一个运动关节之后
-            child=f"{self.cfg.name}_tip_link",  # tip link 也独立命名
-            joint_type="fixed",  # 指尖关节为 fixed
-            origin=PoseCfg(pos=(0.0, tip_origin_y, 0.0)),  # tip joint frame 落在最后一段有效长度末端
-            axis=(0.0, 0.0, 0.0),  # fixed joint 不需要有效转轴
-            limit=None,  # fixed joint 不需要限位
-            mesh=tip_recipe,
-            is_tip=True,
-            metadata={"finger_name": self.cfg.name, "joint_index": "tip"},
-        )
+        common_kwargs = {
+            "name": f"{self.cfg.name}_tip",  # tip joint 命名稳定，便于 exporter / validator 识别
+            "parent": parent_link,  # tip 接在最后一个运动关节之后
+            "child": f"{self.cfg.name}_tip_link",  # tip link 也独立命名
+            "joint_type": "fixed",  # 指尖关节为 fixed
+            "origin": PoseCfg(pos=(0.0, tip_origin_y, 0.0)),  # tip joint frame 落在最后一段有效长度末端
+            "axis": (0.0, 0.0, 0.0),  # fixed joint 不需要有效转轴
+            "limit": None,  # fixed joint 不需要限位
+            "is_tip": True,
+            "metadata": {"finger_name": self.cfg.name, "joint_index": "tip"},
+        }
+
+        if tip_recipe["type"] == "mesh":
+            # custom mesh tip 不改变 finger 级串联算法，只在 tip joint 这一层
+            # 把“primitive 几何 lowering”替换为“锚点驱动的 mesh lowering”。
+            builder_cfg = CustomTipBuilderCfg(
+                tip_type=str(tip_recipe.get("tip_type", "round")),
+                mesh_path=tip_recipe.get("path"),
+                mesh_offset=tip_recipe["offset"],
+                scale=tip_recipe.get("scale", 1.0),
+                unit_scale=tip_recipe.get("unit_scale"),
+                anchor_point=tip_recipe.get("anchor_point"),
+                base_rpy=tip_recipe.get("base_rpy"),
+                approx_size=tip_recipe.get("approx_size"),
+                **common_kwargs,
+            )
+        else:
+            builder_cfg = PrimJointBuilderCfg(
+                mesh=tip_recipe,
+                **common_kwargs,
+            )
         builder = builder_cfg.class_type(builder_cfg)
         return builder.build()
 
