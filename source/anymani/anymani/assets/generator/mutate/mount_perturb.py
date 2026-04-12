@@ -37,8 +37,10 @@ $$
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import random
 
 from ...asset_base import AssetCfgBase, HandCfg
+from ...asset_schema_core import PoseCfg
 from ._base import MutatorBase
 
 
@@ -116,7 +118,46 @@ class MountPerturbMutator(MutatorBase):
             HandCfg | None: 挂载点微调后的整手配置。
         """
 
-        pass
+        mutated = target.copy()  # 挂载点微扰不改拓扑，因此深拷贝后原地改 mount 即可
+        target_names = set(self.cfg.target_fingers)  # 空集语义：作用于全部 finger
+
+        for finger in mutated.fingers:
+            if target_names and finger.name not in target_names:
+                continue
+
+            sigma_t = float(self.cfg.per_finger_translation_sigma.get(finger.name, self.cfg.translation_sigma))
+            delta_pos = []
+            for _ in range(3):
+                value = random.gauss(0.0, sigma_t)  # palm frame 下的平移扰动分量
+                if self.cfg.clip_translation is not None:
+                    clip_t = float(self.cfg.clip_translation)
+                    value = max(min(value, clip_t), -clip_t)
+                delta_pos.append(value)
+
+            # 旋转默认关闭；这符合“先稳住位置扰动，再按需放开姿态搜索”的保守策略。
+            delta_rpy = [0.0, 0.0, 0.0]
+            if self.cfg.perturb_rotation:
+                for axis_index in range(3):
+                    value = random.gauss(0.0, self.cfg.rotation_sigma)  # `roll/pitch/yaw` 独立扰动
+                    if self.cfg.clip_rotation is not None:
+                        clip_r = float(self.cfg.clip_rotation)
+                        value = max(min(value, clip_r), -clip_r)
+                    delta_rpy[axis_index] = value
+
+            finger.mount = PoseCfg(
+                pos=(
+                    finger.mount.pos[0] + delta_pos[0],
+                    finger.mount.pos[1] + delta_pos[1],
+                    finger.mount.pos[2] + delta_pos[2],
+                ),
+                rpy=(
+                    finger.mount.rpy[0] + delta_rpy[0],
+                    finger.mount.rpy[1] + delta_rpy[1],
+                    finger.mount.rpy[2] + delta_rpy[2],
+                ),
+            )
+
+        return mutated
 
         # TODO:算法之一（mount perturb）
         # ────────────────────────────────────────

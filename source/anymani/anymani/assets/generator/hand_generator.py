@@ -46,7 +46,7 @@ from ..exporter import HandExporter, HandExporterCfg
 from ..validator import HandValidator, HandValidatorCfg
 
 try:
-    from .mutate import HandMutatorCfg
+    from .mutate import HandMutator, HandMutatorCfg
 except Exception:
     @dataclass
     class HandMutatorCfg(AssetCfgBase):
@@ -62,6 +62,15 @@ except Exception:
         limit_tweak: object | None = None
         mount_perturb: object | None = None
         finger_replace: object | None = None
+
+    class HandMutator:
+        r"""Fallback mutator used when the mutate package is unavailable."""
+
+        def __init__(self, cfg: HandMutatorCfg):
+            self.cfg = cfg
+
+        def mutate(self, target: HandCfg) -> HandCfg | None:
+            raise NotImplementedError("mutate runtime is unavailable in the current environment")
 
 
 def _has_enabled_mutation(cfg: HandMutatorCfg) -> bool:
@@ -220,7 +229,9 @@ class HandGenerator:
         hand_cfg = builder.build()
 
         if self.cfg.mode == "full" and _has_enabled_mutation(self.cfg.Mutate):
-            raise NotImplementedError("post-mutate remains out of scope for the first implementation slice.")
+            hand_cfg = HandMutator(self.cfg.Mutate).mutate(hand_cfg)
+            if hand_cfg is None:
+                return None
 
         validator = HandValidator(self.cfg.Validate)
         validation = validator.validate(hand_cfg)

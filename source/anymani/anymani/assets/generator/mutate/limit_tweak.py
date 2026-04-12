@@ -28,6 +28,7 @@ r"""关节限位微调工具：在已有 HandCfg 上对 joint limit 做小范围
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import random
 from typing import Literal
 
 from ...asset_base import AssetCfgBase, HandCfg
@@ -100,7 +101,50 @@ class LimitTweakMutator(MutatorBase):
             HandCfg | None: 限位微调后的整手配置。
         """
 
-        pass
+        mutated = target.copy()  # 后序工具始终在深拷贝上操作，避免污染前序锚点 hand
+        target_names = set(self.cfg.target_joints)  # 空集语义：作用于全部非 fixed joint
+
+        for joint in mutated.iter_joints():
+            # fixed joint 没有限位语义；limit 缺失时也不做“自动补限位”的越权操作。
+            if joint.joint_type == "fixed" or joint.limit is None:
+                continue
+            if target_names and joint.name not in target_names:
+                continue
+
+            sigma = float(self.cfg.per_joint_sigma.get(joint.name, self.cfg.sigma))  # 每关节允许单独覆盖扰动强度
+            if sigma == 0.0:
+                continue  # 零扰动强度显式表示“不改这个 joint”
+
+            lower = float(joint.limit.lower)  # 原始下限 $l$
+            upper = float(joint.limit.upper)  # 原始上限 $u$
+            joint_range = upper - lower  # 当前限位范围 $r=u-l$
+
+            # 根据模式确定当前 joint 的扰动量纲：
+            # - absolute：直接以 rad 采样
+            # - relative：以现有范围 $r$ 为基准采样比例扰动
+            if self.cfg.mode == "absolute":
+                delta_scale = sigma  # $\delta \sim \mathcal{N}(0,\sigma)$
+            else:
+                delta_scale = sigma * joint_range  # $\delta \sim \mathcal{N}(0,\sigma r)$
+
+            delta_lower = random.gauss(0.0, delta_scale)  # 下限扰动 $\delta_l$
+            delta_upper = -delta_lower if self.cfg.symmetric else random.gauss(0.0, delta_scale)  # 对称模式下保持中心不动
+
+            if self.cfg.clip is not None:
+                clip = float(self.cfg.clip)  # 单步扰动裁剪半径
+                delta_lower = max(min(delta_lower, clip), -clip)
+                delta_upper = max(min(delta_upper, clip), -clip)
+
+            lower_new = lower + delta_lower  # $l' = l + \delta_l$
+            upper_new = upper + delta_upper  # $u' = u + \delta_u$
+
+            # 保护约束：若新限位区间塌缩或反向，则回退到原值。
+            if lower_new >= upper_new:
+                continue
+
+            joint.limit = joint.limit.replace(lower=lower_new, upper=upper_new)
+
+        return mutated
 
         # TODO:算法之一（joint limit perturbation）
         # ────────────────────────────────────────

@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from ...asset_base import AssetCfgBase, HandCfg
+from ...validator import HandValidator, HandValidatorCfg
 from ._base import MutatorBase
 from .finger_replace import FingerReplaceCfg, FingerReplaceMutator
 from .joint_delete import JointDeleteCfg, JointDeleteMutator
@@ -143,7 +144,26 @@ class HandMutator(MutatorBase):
             中途遇到拒绝，则返回 ``None``。
         """
 
-        pass
+        current = target  # 流水线始终把上一步输出显式传给下一步，不在层间隐藏状态
+        validator = HandValidator(HandValidatorCfg()) if self.cfg.step_validate else None
+
+        for tool_key, tool in self._build_tools():
+            result = tool.mutate(current)
+            if result is None:
+                if self.cfg.on_reject == "abort":
+                    return None
+                continue  # `skip` 语义：保留当前状态，直接进入下一工具
+
+            if validator is not None:
+                validation = validator.validate(result)  # 这里用默认 validator 做轻量结构闸门
+                if not validation:
+                    if self.cfg.on_reject == "abort":
+                        return None
+                    continue
+
+            current = result  # 只有通过 mutate + 可选 step_validate 后才推进流水线状态
+
+        return current
 
         # TODO:算法之一（pipeline orchestration）
         # ────────────────────────────────────────
@@ -199,7 +219,24 @@ class HandMutator(MutatorBase):
             list[tuple[str, MutatorBase]]: 按执行顺序排列的 (工具名, 工具实例) 对。
         """
 
-        pass
+        tool_table = {
+            "joint_delete": (JointDeleteMutator, self.cfg.joint_delete),
+            "link_scale": (LinkScaleMutator, self.cfg.link_scale),
+            "tip_replace": (TipReplaceMutator, self.cfg.tip_replace),
+            "limit_tweak": (LimitTweakMutator, self.cfg.limit_tweak),
+            "mount_perturb": (MountPerturbMutator, self.cfg.mount_perturb),
+            "finger_replace": (FingerReplaceMutator, self.cfg.finger_replace),
+        }
+
+        tools: list[tuple[str, MutatorBase]] = []
+        for key in self.cfg.order:
+            if key not in tool_table:
+                raise ValueError(f"Unknown mutator key in order: {key!r}")
+            tool_class, tool_cfg = tool_table[key]
+            if tool_cfg is None:
+                continue  # 未启用的工具不进入执行列表
+            tools.append((key, tool_class(tool_cfg)))
+        return tools
 
         # TODO:算法之二（tool instantiation）
         # ────────────────────────────────────────
