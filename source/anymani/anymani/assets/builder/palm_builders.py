@@ -1,176 +1,281 @@
-r"""掌心级构建器相关的配置类和构建类。
-
-"""
+r"""Palm builders for the pre-made hand asset pipeline."""
 
 from __future__ import annotations
 
-from assets.asset_builders import PalmBuilder, PalmBuilderCfg
-from assets.asset_base import PalmCfg
-from assets.asset_schema_core import Vector6, Vector3, Vector2
+from dataclasses import dataclass
+import math
+from typing import Literal
 
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from ..asset_base import PalmCfg
+from ..asset_builders import PalmBuilder, PalmBuilderCfg
+from ..asset_schema_core import CollisionGeometryCfg, InertialCfg, PoseCfg, VisualGeometryCfg
 
-# --- 手掌的声明式配置类 --- #
+
+_DEFAULT_PALM_DENSITY = 700.0
+"""A slightly denser default than finger links to keep inertial values positive."""
+
+
+def _box_inertia(width: float, length: float, height: float, mass: float) -> dict[str, float]:
+    return {
+        "ixx": mass * (length * length + height * height) / 12.0,
+        "iyy": mass * (width * width + height * height) / 12.0,
+        "izz": mass * (width * width + length * length) / 12.0,
+    }
+
+
+def _cylinder_inertia(radius: float, height: float, mass: float) -> dict[str, float]:
+    return {
+        "ixx": mass * (3.0 * radius * radius + height * height) / 12.0,
+        "iyy": mass * (3.0 * radius * radius + height * height) / 12.0,
+        "izz": mass * radius * radius / 2.0,
+    }
+
+
+def _sphere_inertia(radius: float, mass: float) -> dict[str, float]:
+    moment = 2.0 * mass * radius * radius / 5.0
+    return {"ixx": moment, "iyy": moment, "izz": moment}
+
+
+def _estimate_mass(volume: float) -> float:
+    return max(volume * _DEFAULT_PALM_DENSITY, 1e-5)
+
+
 @dataclass
 class SinglePalmBuilderCfg(PalmBuilderCfg):
-    """基础几何形状构成的手掌配置类。
+    r"""Single primitive palm configuration.
+
+    The palm frame follows the drawing in ``assets/doc/Single-Palm.jpg``:
+    the origin lies at the bottom center, ``+y`` points toward the fingers,
+    ``+x`` spans palm width, and ``+z`` spans thickness.
     """
+
     shape: Literal["box", "cylinder", "sphere", "ellipse"] = "box"
-    """手掌的基础几何形状类型，目前支持 "box"（最常用）、"cylinder" 、 "sphere"（很少用） 和 "ellipse"，与 URDF 默认支持的一致。
-    
-    其中 "ellipse" 的类型也是 "sphere"，但在构建算法里会根据 `a` 和 `b` 的值调整为椭球体，这一点通过 urdf scale 字段来决定。
-    """
+    """Primitive palm family."""
 
-    length: float = None
-    """手掌长度，仅在 shape 为 "box" 时需要。沿 y轴 表示"""
+    length: float | None = None
+    """Palm length along ``+y`` for box / ellipse palms."""
 
-    width: float = None
-    """手掌宽度，仅在 shape 为 "box" 时需要。沿 x轴 表示"""
+    width: float | None = None
+    """Palm width along ``+x`` for box palms."""
 
-    height: float = None
-    """手掌高度。所有形状都必填的字段。沿 z轴 表示"""
+    height: float | None = None
+    """Palm thickness along ``+z`` for every supported shape."""
 
-    radius: float = None
-    """手掌半径，仅在 shape 为 "cylinder" 和 "sphere" 时需要"""
+    radius: float | None = None
+    """Palm radius for cylinder / sphere palms."""
 
-    a: float = None
-    """椭圆体长轴，仅在 shape 为 "ellipse" 时需要。沿 x轴 表示"""
+    a: float | None = None
+    """Ellipse semi-axis along ``+x``."""
 
-    b: float = None
-    """椭圆体短轴，仅在 shape 为 "ellipse" 时需要。沿 y轴 表示"""
+    b: float | None = None
+    """Ellipse semi-axis along ``+y``."""
 
     def __post_init__(self):
-        return super().__post_init__()
+        super().__post_init__()
+        if self.shape == "box":
+            for field_name in ("width", "length", "height"):
+                value = getattr(self, field_name)
+                if value is None or float(value) <= 0.0:
+                    raise ValueError(f"{field_name} must be positive for box palms")
+        elif self.shape in {"cylinder", "sphere"}:
+            if self.radius is None or float(self.radius) <= 0.0:
+                raise ValueError(f"radius must be positive for {self.shape} palms")
+            if self.height is None or float(self.height) <= 0.0:
+                raise ValueError(f"height must be positive for {self.shape} palms")
+        elif self.shape == "ellipse":
+            if self.a is None or float(self.a) <= 0.0 or self.b is None or float(self.b) <= 0.0:
+                raise ValueError("ellipse palms require positive a and b")
+            if self.height is None or float(self.height) <= 0.0:
+                raise ValueError("ellipse palms require positive height")
+        else:
+            raise ValueError(f"unsupported palm shape: {self.shape}")
+        self.class_type = SinglePalmBuilder
+
 
 @dataclass
 class ComPalmBuilderCfg(PalmBuilderCfg):
-    """多基础几何形状复合而成的手掌配置类。
-    """
+    r"""Preset composite palm configuration."""
+
+    preset: Literal["leap", "allegro"] = "allegro"
+    """Composite palm preset family."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.class_type = ComPalmBuilder
 
 
 @dataclass
 class CustomPalmBuilderCfg(PalmBuilderCfg):
-    """自定义手掌 mesh的配置类。
-
-    主要从 CAD/Blender 等软件导出
-    """
+    r"""Placeholder config for future mesh-authored palm presets."""
 
 
-# --- 手掌的构建运行时类 --- #
 class SinglePalmBuilder(PalmBuilder):
-    """基础几何形状构成的手掌构建类。
-    """
+    r"""Builder for palms made from one primitive."""
+
+    cfg: SinglePalmBuilderCfg
 
     def __init__(self, cfg: SinglePalmBuilderCfg):
         super().__init__(cfg)
+        self.cfg = cfg
 
     def build(self) -> PalmCfg:
-        """构建手掌配置。
+        r"""Build one primitive palm.
 
-        Returns:
-            PalmCfg: 构建完成的手掌配置。
+        # Question:
+        The current canonical schema does not support a scaled primitive directly,
+        so ``ellipse`` is exported as a sphere-envelope approximation while keeping
+        the ellipsoid inertia formula. This is sufficient for the first vertical
+        slice but should be revisited if ellipsoid palms become a training target.
         """
-    
-    # ================================================================
-    #  Palm 设计帧约定（方案 C，与 PrimJointBuilder 同构）
-    # ================================================================
-    # 原点：形体底部中心，z 方向居中于厚度 (z = h/2)
-    #   x → 右（宽度方向）
-    #   y → 上（朝指方向，即 palm 的"生长方向"）
-    #   z → 右手定则（朝外）
-    #
-    # 与 PrimJointBuilder 的 box 算法数学同构：
-    #   底面 ≡ palm frame 的 x‑z 平面，几何沿 +y 生长。
-    #
-    # 注：腕关节前溯（wrist_joints）是 PalmBuilderCfg 基类的职责，
-    #     由外层或 HandBuilder 统一消费，本 build() 不处理。
-    # 可参考 `AnyMani/source/anymani/anymani/assets/doc/Single-Palm.jpg``
-    # ================================================================
 
-    # --- TODO:算法之一：box（像 leap, allegro 这类手比较常用）
-    # 输入：宽 $w$ (x), 长 $l$ (y), 高 $h$ (z), 质量 $m$
-    #
-    # 几何中心（collision / visual origin）：
-    #   $\mathbf{c} = (0,\; l/2,\; 0)$
-    #
-    # URDF 输出：<box size="w l h"/>，origin = $\mathbf{c}$
-    #
-    # 惯量（均质长方体，COM = $\mathbf{c}$）：
+        if self.cfg.shape == "box":
+            width = float(self.cfg.width)
+            length = float(self.cfg.length)
+            height = float(self.cfg.height)
+            origin = PoseCfg(pos=(0.0, length / 2.0, 0.0))
+            mass = _estimate_mass(width * length * height)
+            inertia = _box_inertia(width, length, height, mass)
+            geometry = {"type": "box", "size": (width, length, height)}
+        elif self.cfg.shape == "cylinder":
+            radius = float(self.cfg.radius)
+            height = float(self.cfg.height)
+            origin = PoseCfg()
+            mass = _estimate_mass(math.pi * radius * radius * height)
+            inertia = _cylinder_inertia(radius, height, mass)
+            geometry = {"type": "cylinder", "radius": radius, "length": height}
+        elif self.cfg.shape == "sphere":
+            radius = float(self.cfg.radius)
+            origin = PoseCfg(pos=(0.0, radius, 0.0))
+            mass = _estimate_mass(4.0 * math.pi * radius**3 / 3.0)
+            inertia = _sphere_inertia(radius, mass)
+            geometry = {"type": "sphere", "radius": radius}
+        else:
+            a = float(self.cfg.a)
+            b = float(self.cfg.b)
+            c = float(self.cfg.height) / 2.0
+            radius = max(a, b, c)
+            origin = PoseCfg(pos=(0.0, b, 0.0))
+            mass = _estimate_mass(4.0 * math.pi * a * b * c / 3.0)
+            inertia = {
+                "ixx": mass * (b * b + c * c) / 5.0,
+                "iyy": mass * (a * a + c * c) / 5.0,
+                "izz": mass * (a * a + b * b) / 5.0,
+            }
+            geometry = {"type": "sphere", "radius": radius}
 
-    #   $I_{xx} = \frac{m}{12}(l^2 + h^2)$
+        collision = CollisionGeometryCfg(name="palm_collision", geometry=geometry, origin=origin)
+        visual = VisualGeometryCfg(name="palm_visual", geometry=geometry, origin=origin)
+        metadata = {"shape": self.cfg.shape}
+        if self.cfg.shape == "ellipse":
+            metadata["ellipse_axes"] = {"a": float(self.cfg.a), "b": float(self.cfg.b), "c": float(self.cfg.height) / 2.0}
+            metadata["approximation"] = "sphere_envelope"
+        return PalmCfg(
+            name="palm",
+            inertial=InertialCfg(mass=mass, origin=origin, inertia=inertia),
+            collisions=[collision],
+            visuals=[visual],
+            metadata=metadata,
+        )
 
-    #   $I_{yy} = \frac{m}{12}(w^2 + h^2)$
 
-    #   $I_{zz} = \frac{m}{12}(w^2 + l^2)$
-
-    # 如有可复用的惯量计算方法则直接调用，否则待后续 coding 实现。
-
-    # --- TODO:算法之二：cylinder（比较适合夹爪手）
-    # 输入：半径 $r$, 高 $h$ (z), 质量 $m$
-    #
-    # 圆柱轴沿 z（与 URDF <cylinder> 默认一致），x‑y 截面为圆。
-    # 因径向对称且 z 已居中，palm frame 直接落在几何中心。
-    #
-    # 几何中心：$\mathbf{c} = (0,\; 0,\; 0)$
-    #
-    # URDF 输出：<cylinder radius="r" length="h"/>，origin = $\mathbf{c}$
-    # 手指在圆周面上的 $(r\cos\theta,\; r\sin\theta)$ 处挂载。
-    #
-    # 惯量（均质圆柱，COM = $\mathbf{c}$）：
-
-    #   $I_{xx} = I_{yy} = \frac{m}{12}(3r^2 + h^2)$
-
-    #   $I_{zz} = \frac{m}{2} r^2$
-
-    # 如有可复用的惯量计算方法则直接调用，否则待后续 coding 实现。
-
-    # --- TODO:算法之三：ellipse（夹爪手和类人手都可以用）
-    # 输入：x 半轴 $a$, y 半轴 $b$, 高 $h$ (z), 质量 $m$
-    #
-    # 在 URDF 中用 <sphere radius="1.0"> + scale $(a, b, c)$ 模拟，$c = h/2$。
-    # 原点在椭球底部（y 最低点），沿 +y 从 0 到 2b。
-    #
-    # 几何中心：$\mathbf{c} = (0,\; b,\; 0)$
-    #
-    # URDF 输出：sphere + scale $(a, b, h/2)$；origin = $\mathbf{c}$
-    #
-    # 惯量（均质椭球体，半轴 $a, b, c = h/2$，COM = $\mathbf{c}$）：
-
-    #   $I_{xx} = \frac{m}{5}(b^2 + c^2)$
-
-    #   $I_{yy} = \frac{m}{5}(a^2 + c^2)$
-
-    #   $I_{zz} = \frac{m}{5}(a^2 + b^2)$
-
-    # 如有可复用的惯量计算方法则直接调用，否则待后续 coding 实现。
-
-    # --- TODO:算法之四：sphere（仅保留接口，这个很少用）
-    # 输入：半径 $r$, 质量 $m$
-    #
-    # 原点在球体底极点，球沿 +y 延伸。
-    #
-    # 几何中心：$\mathbf{c} = (0,\; r,\; 0)$
-    #
-    # URDF 输出：<sphere radius="r"/>，origin = $\mathbf{c}$
-    #
-    # 惯量（均质球体，COM = $\mathbf{c}$）：
-
-    #   $I_{xx} = I_{yy} = I_{zz} = \frac{2m}{5} r^2$
-
-    # 如有可复用的惯量计算方法则直接调用，否则待后续 coding 实现。
+_COM_PALM_PRESETS: dict[str, dict[str, object]] = {
+    "allegro": {
+        "collisions": [
+            {"size": (0.0414, 0.1120, 0.0448), "origin": (-0.0090, 0.0000, -0.0230)},
+            {"size": (0.0414, 0.0538, 0.0428), "origin": (-0.0090, -0.0253, -0.0667)},
+            {"size": (0.0414, 0.0720, 0.0130), "origin": (-0.0093, -0.00557, -0.08874)},
+        ],
+        "inertial": {
+            "mass": 0.4154,
+            "origin": (0.0, 0.0, 0.0),
+            "inertia": {"ixx": 1.0e-4, "iyy": 1.0e-4, "izz": 1.0e-4},
+        },
+        "finger_mounts": {
+            "index": {"pos": (0.0, 0.0435, -0.001542), "rpy": (-0.0873, 0.0, 0.0)},
+            "middle": {"pos": (0.0, 0.0, 0.0007), "rpy": (0.0, 0.0, 0.0)},
+            "ring": {"pos": (0.0, -0.0435, -0.001542), "rpy": (0.0873, 0.0, 0.0)},
+            "thumb": {"pos": (-0.0182, 0.019333, -0.045987), "rpy": (0.0, -1.6581, -1.5708)},
+        },
+    },
+    "leap": {
+        "collisions": [
+            {"size": (0.022, 0.026, 0.034), "origin": (-0.009, 0.008, -0.011)},
+            {"size": (0.022, 0.026, 0.034), "origin": (-0.009, -0.037, -0.011)},
+            {"size": (0.022, 0.026, 0.034), "origin": (-0.009, -0.082, -0.011)},
+            {"size": (0.058, 0.020, 0.046), "origin": (-0.066, -0.078, -0.0115), "rpy": (0.0, 0.0, -0.2967)},
+            {"size": (0.020, 0.120, 0.030), "origin": (-0.030, -0.035, -0.003)},
+            {"size": (0.010, 0.120, 0.020), "origin": (-0.032, -0.035, -0.024), "rpy": (0.0, 0.785, 0.0)},
+            {"size": (0.024, 0.116, 0.046), "origin": (-0.048, -0.033, -0.0115)},
+            {"size": (0.044, 0.052, 0.046), "origin": (-0.078, -0.053, -0.0115)},
+            {"size": (0.004, 0.036, 0.034), "origin": (-0.098, -0.009, -0.006)},
+            {"size": (0.044, 0.056, 0.004), "origin": (-0.078, -0.003, 0.010)},
+        ],
+        "inertial": {
+            "mass": 0.237,
+            "origin": (0.0, 0.0, 0.0),
+            "inertia": {
+                "ixx": 3.54094e-4,
+                "ixy": -1.193e-6,
+                "ixz": -2.445e-6,
+                "iyy": 2.60915e-4,
+                "iyz": -2.905e-6,
+                "izz": 5.29257e-4,
+            },
+        },
+        "finger_mounts": {
+            "index": {"pos": (-0.0070, 0.0230, -0.0187), "rpy": (1.5708, 1.5708, 0.0)},
+            "middle": {"pos": (-0.0071, -0.0224, -0.0187), "rpy": (1.5708, 1.5708, 0.0)},
+            "ring": {"pos": (-0.00709, -0.0678, -0.0187), "rpy": (1.5708, 1.5708, 0.0)},
+            "thumb": {"pos": (-0.0693, -0.0012, -0.0216), "rpy": (0.0, 1.5708, 0.0)},
+        },
+    },
+}
 
 
 class ComPalmBuilder(PalmBuilder):
-    """多基础几何形状复合而成的手掌构建类。
-    """
+    r"""Builder for composite preset palms."""
+
+    cfg: ComPalmBuilderCfg
 
     def __init__(self, cfg: ComPalmBuilderCfg):
         super().__init__(cfg)
+        self.cfg = cfg
 
     def build(self) -> PalmCfg:
-        """构建手掌配置。
+        r"""Build a preset palm with multiple primitive collisions."""
 
-        Returns:
-            PalmCfg: 构建完成的手掌配置。
-        """
+        preset = _COM_PALM_PRESETS[self.cfg.preset]
+        collisions = [
+            CollisionGeometryCfg(
+                name=f"{self.cfg.preset}_col_{index}",
+                geometry={"type": "box", "size": entry["size"]},
+                origin=PoseCfg(pos=entry["origin"], rpy=entry.get("rpy", (0.0, 0.0, 0.0))),
+            )
+            for index, entry in enumerate(preset["collisions"])
+        ]
+        visuals = [
+            VisualGeometryCfg(
+                name=f"{self.cfg.preset}_vis_{index}",
+                geometry={"type": "box", "size": entry["size"]},
+                origin=PoseCfg(pos=entry["origin"], rpy=entry.get("rpy", (0.0, 0.0, 0.0))),
+            )
+            for index, entry in enumerate(preset["collisions"])
+        ]
+        mounts = {name: PoseCfg.from_value(value) for name, value in preset["finger_mounts"].items()}
+        metadata = {"preset": self.cfg.preset, "finger_mounts": mounts}
+        return PalmCfg(
+            name="palm",
+            inertial=InertialCfg(**preset["inertial"]),
+            collisions=collisions,
+            visuals=visuals,
+            metadata=metadata,
+        )
+
+
+__all__ = [
+    "SinglePalmBuilderCfg",
+    "ComPalmBuilderCfg",
+    "CustomPalmBuilderCfg",
+    "SinglePalmBuilder",
+    "ComPalmBuilder",
+]

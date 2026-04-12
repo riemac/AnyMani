@@ -1,0 +1,109 @@
+r"""验证器基础协议：ValidationResult + ValidatorBase。
+
+这里定义的是整个验证层的最小公共语言：一个结果对象和一个接口约定。
+所有层级的验证器（joint / finger / hand）都基于这两个类型工作。
+
+设计说明
+--------
+
+### ValidationResult 的设计
+
+验证结果分三类：
+
+- ``errors``：严重违规，必须拒绝（如运动学链断裂、关节数为 0）
+- ``warnings``：潜在问题，默认放行但可被 ``strict`` 模式升级为错误
+  （如关节限位范围超出建议值、link 长度接近零）
+- ``passed``：``True`` 当且仅当 ``errors`` 为空（warnings 不影响 passed）
+
+在 ``strict=True`` 模式下，调用方可自行把 warnings 并入 errors 后重判 passed。
+
+### 与 schema 层 __post_init__ 的分工
+
+schema 层（`JointCfg.__post_init__` 等）已经捕获"明显非法"的输入（如
+关节类型不合法、链断裂等）并立即抛出异常，属于**构造时硬校验**。
+
+验证器层处理的是"物理/工程上的软约束"：
+
+- 关节限位范围是否在建议区间内
+- 整手 DOF 是否在合理范围
+- link 长度是否在允许的最小/最大值之间
+
+这类约束不会被嵌入 schema（避免限制太死），而是作为可配置规则放在验证器里。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ValidationResult:
+    r"""一次验证调用的结果包。
+
+    ``passed`` 仅反映 ``errors``（严重违规）是否为空；
+    ``warnings`` 的有无不影响 ``passed``。
+    在 ``strict`` 调用模式下，调用方自行把 warnings 合并后重判 passed。
+    """
+
+    passed: bool = True
+    """严重错误为空时为 ``True``。"""
+
+    errors: list[str] = field(default_factory=list)
+    """必须拒绝的严重违规消息列表。"""
+
+    warnings: list[str] = field(default_factory=list)
+    """潜在问题消息列表；默认放行，``strict`` 模式下升级为错误。"""
+
+    def merge(self, other: "ValidationResult") -> "ValidationResult":
+        r"""把另一个验证结果并入自身（就地合并）。
+
+        Args:
+            other (ValidationResult): 待合并的验证结果。
+
+        Returns:
+            ValidationResult: 合并后的自身（支持链式调用）。
+        """
+
+        self.errors.extend(other.errors)
+        self.warnings.extend(other.warnings)
+        self.passed = len(self.errors) == 0
+        return self
+
+    def as_strict(self) -> "ValidationResult":
+        r"""返回一个把 warnings 升级为 errors 的新结果（不修改自身）。
+
+        Returns:
+            ValidationResult: 升级后的新 ValidationResult。
+        """
+
+        return ValidationResult(
+            passed=len(self.errors) + len(self.warnings) == 0,
+            errors=self.errors + self.warnings,
+            warnings=[],
+        )
+
+    def __bool__(self) -> bool:
+        return self.passed
+
+
+class ValidatorBase:
+    r"""所有验证器的最小基类。
+
+    子类只需实现对应层级的 ``validate()``，结果通过 ``ValidationResult``
+    统一表达，而不是直接抛出异常（抛错由调用方根据 passed 决定）。
+    """
+
+    def validate(self, target: object) -> ValidationResult:
+        r"""对目标对象执行验证。
+
+        Args:
+            target (object): 待验证的资产对象（JointCfg / FingerCfg / HandCfg 等）。
+
+        Returns:
+            ValidationResult: 验证结果包。
+        """
+
+        raise NotImplementedError
+
+
+__all__ = ["ValidationResult", "ValidatorBase"]

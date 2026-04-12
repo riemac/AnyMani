@@ -1,129 +1,431 @@
-r"""TODO:基础几何构建器配置类 `JointBuilderCfg` 和运行时类 `JointBuilder`。构造时默认 visual 和 collision 一致。包含的类型有
-- box
-- cylinder
-- sphere
-与 URDF 默认支持的一致
-"""
+"""Primitive joint builders for joint-centric hand asset generation."""
+
 from __future__ import annotations
 
-from assets.asset_builders import JointBuilderCfg, JointBuilder
-from assets.asset_base import JointCfg
-from assets.asset_base import Vector6, Vector3
-
 from dataclasses import dataclass, field
-from typing import Any, Literal
+import math
+from typing import Any, Literal, Mapping, Sequence
+
+from ..asset_base import JointCfg
+from ..asset_builders import JointBuilder, JointBuilderCfg
+from ..asset_schema_core import (
+    CollisionGeometryCfg,
+    InertialCfg,
+    JointLimitCfg,
+    PoseCfg,
+    Vector3,
+    Vector6,
+    VisualGeometryCfg,
+    _ensure_tuple,
+)
+
+
+_DEFAULT_DENSITY = 650.0
+"""A light-weight default density used to synthesize inertial values."""
+
+
+def _pose_from_value(value: PoseCfg | Sequence[float] | Mapping[str, Any] | None) -> PoseCfg:
+    r"""Normalize a pose-like input into ``PoseCfg``."""
+
+    return PoseCfg.from_value(value)
+
+
+def _add_rpy(lhs: Vector3, rhs: Vector3) -> Vector3:
+    r"""Compose two tiny Euler adjustments with direct component-wise addition.
+
+    The primitive builders only need simple axis-aligned rotations, so a full SO(3)
+    composition utility would be unnecessary complexity at this stage.
+    """
+
+    return (lhs[0] + rhs[0], lhs[1] + rhs[1], lhs[2] + rhs[2])
+
+
+def _make_geometry_pose(
+    *,
+    offset: PoseCfg,
+    default_pos: Vector3,
+    default_rpy: Vector3 = (0.0, 0.0, 0.0),
+    center_on_joint: bool = False,
+) -> PoseCfg:
+    r"""Construct a primitive geometry pose under the current joint convention.
+
+    For regular links, when the offset is zero, the geometry grows from the joint
+    frame's ``x-z`` plane toward ``+y``. For ``CMC1``-like cases, callers may set
+    ``center_on_joint=True`` to keep the mesh frame coincident with the joint frame.
+    """
+
+    if center_on_joint:
+        base = offset.pos
+    else:
+        base = default_pos
+    return PoseCfg(pos=base, rpy=_add_rpy(default_rpy, offset.rpy))
+
+
+def _box_inertia(size: Vector3, mass: float) -> dict[str, float]:
+    sx, sy, sz = size
+    return {
+        "ixx": mass * (sy * sy + sz * sz) / 12.0,
+        "iyy": mass * (sx * sx + sz * sz) / 12.0,
+        "izz": mass * (sx * sx + sy * sy) / 12.0,
+    }
+
+
+def _cylinder_inertia(radius: float, length: float, mass: float) -> dict[str, float]:
+    return {
+        "ixx": mass * (3.0 * radius * radius + length * length) / 12.0,
+        "iyy": mass * radius * radius / 2.0,
+        "izz": mass * (3.0 * radius * radius + length * length) / 12.0,
+    }
+
+
+def _sphere_inertia(radius: float, mass: float) -> dict[str, float]:
+    moment = 2.0 * mass * radius * radius / 5.0
+    return {"ixx": moment, "iyy": moment, "izz": moment}
+
+
+def _estimate_mass(*, volume: float, cfg_mass: float | None, density: float) -> float:
+    r"""Estimate mass when the cfg does not pin a specific value."""
+
+    return float(cfg_mass) if cfg_mass is not None else max(volume * density, 1e-6)
 
 
 @dataclass
 class PrimJointBuilderCfg(JointBuilderCfg):
-    r"""基础几何构建器配置类。
+    r"""Primitive joint builder configuration.
 
-    该声明式配置类包含的字段为构建类算法所需，而非单纯照搬 `JointCfg` 的所有字段
-
-    核心思想是 “算法里人易理解和显式控制的参数” 映射到 `JointCfg` 的字段上
+    The cfg intentionally exposes the joint-centric fields that later builder stages
+    need to wire into a ``JointCfg`` directly, so that finger builders can delegate
+    geometry construction to this layer without reimplementing primitive handling.
     """
 
-    class_type: type["PrimJointBuilder"] | type["ComPrimJointBuilder"] |None = None
-    """关联的基础几何构建器类。"""
+    class_type: type["PrimJointBuilder"] | type["ComPrimJointBuilder"] | None = None
+    """Associated runtime builder type."""
 
-    mesh: dict[str, Any] = field(default_factory=dict)  # default_factory 是 @dataclass 专属的“补丁”，用来模拟普通类 __init__ 里每次创建新对象的行为。普通类里直接在 __init__ 里赋值就行了，不需要 default_facto
-    
+    name: str = "joint"
+    """Joint name used in the emitted ``JointCfg``."""
+
+    parent: str = "palm"
+    """Parent link name in the emitted ``JointCfg``."""
+
+    child: str | None = None
+    """Optional explicit child link name."""
+
+    mesh: dict[str, Any] = field(default_factory=dict)
+    """Primitive mesh recipe.
+
+    Supported ``type`` values:
+    - ``box``: expects ``length``/``width``/``height`` or ``size``
+    - ``cylinder``: expects ``length`` and ``radius``
+    - ``sphere``: expects ``radius``
+    - ``cs``: cylinder + sphere composite tip
+    - ``bs``: box + sphere composite tip
+    """
+
     joint_type: Literal["revolute", "fixed"] = "revolute"
-    """"""
+    """Joint type emitted into the resulting ``JointCfg``."""
 
-    origin: Vector6 | dict[str, Vector3] = field(default_factory=lambda: Vector6(0, 0, 0, 0, 0, 0))
-    """joint frame 相对于父 link 坐标系的位姿，包含位置和平移两部分。
+    origin: PoseCfg | Sequence[float] | Mapping[str, Any] | None = field(default_factory=PoseCfg)
+    """Joint frame pose relative to the parent link."""
 
-    需要注意的是，关节级构建器并不涉对该字段的处理，而是手指级/手掌级构建器中的算法处理该字段。FIXME：所以我认为该字段可取消，如无必要，勿增实体
-    """
+    axis: Vector3 = (0.0, 0.0, 1.0)
+    """Joint axis used for ``revolute`` joints."""
 
-    axis: Vector3 = None
-    """旋转轴，仅在 joint_type 为 revolute 时需要。
-    
-    该值的赋予也处在手指级/手掌级构建器中的算法中，而非关节级构建器中。
-    """
+    limit: JointLimitCfg | Sequence[float] | Mapping[str, Any] | None = (-math.pi, math.pi)
+    """Optional joint limit information."""
 
-    is_customized: bool = False
-    """mesh是否自定义，即非URDF默认的box/cylinder/sphere。"""
+    density: float = _DEFAULT_DENSITY
+    """Fallback density used to derive inertial mass from primitive volume."""
+
+    mass: float | None = None
+    """Optional explicit mass override for the synthesized child link."""
+
+    is_tip: bool = False
+    """Whether the emitted joint/link should be marked as fingertip related."""
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+    """Additional metadata forwarded to the resulting ``JointCfg``."""
 
     def __post_init__(self):
-        if self.class_type is None:
-            self.class_type = PrimJointBuilder
+        super().__post_init__()
+        self.origin = _pose_from_value(self.origin)
+        self.axis = _ensure_tuple(self.axis, length=3, field_name="prim_joint.axis")
+        self.density = float(self.density)
+        if self.density <= 0.0:
+            raise ValueError("density must be positive")
+        if self.mass is not None:
+            self.mass = float(self.mass)
+            if self.mass <= 0.0:
+                raise ValueError("mass must be positive")
+        if self.class_type in {None, JointBuilder}:
+            mesh_kind = str(self.mesh.get("type", self.mesh.get("kind", "box"))).lower()
+            self.class_type = ComPrimJointBuilder if mesh_kind in {"cs", "bs"} else PrimJointBuilder
 
 
 class PrimJointBuilder(JointBuilder):
-    r"""基础几何构建器。
-
-    这里预期承担的职责是：根据 `PrimJointBuilderCfg` 里的显式参数，构建出
-    对应的基础几何 mesh。当前阶段，这些算法细节仍由你主导，因此这里只
-    保留运行时壳子。
-    """
+    r"""Builder that turns one primitive recipe into one ``JointCfg``."""
 
     cfg: PrimJointBuilderCfg
 
     def __init__(self, cfg: PrimJointBuilderCfg):
+        super().__init__(cfg)
         self.cfg = cfg
 
     def build(self) -> JointCfg:
-        r"""根据 `PrimJointBuilderCfg` 构建对应的基础几何 mesh。主要是 mesh size 和 frame
+        r"""Build a single-primitive ``JointCfg``.
 
-        这里的返回值类型暂时用 `Any` 占位，具体类型取决于你选择的 mesh
-        表示和构建库。
+        The emitted collision and visual geometry share the same primitive recipe so
+        that later URDF export remains deterministic and easy to inspect.
         """
-        pass
-    # 这里看是采用工厂方法模式，还是采用子类分化
-    # 我们知道 urdf 中偏移量默认为0时，即 mesh 的 origin 全为0时，基础形状的中心及坐标系和 joint frame是完全重合的，我称之为 “旧约”
-    # 但以下算法则修改来偏移量为0时的mesh origin行为，我称之为 “新约”，更符合我对手指构建的想象 
-    # --- TODO:算法之一: Box（最常用，一般用作手指link/palm的构成）
-    # 用 box mesh 来构造 joint/child link 的骨肉，这里最主要关注的是 box 的尺寸与相对于 joint frame的偏移
-    # 输入: 偏移量 $d=(d_x, d_y, d_z)\in \mathbb{R}^3$, box 尺寸 $s=(s_x, s_y, s_z)\in \mathbb{R}^3$，以及 joint frame 的定义（旋转轴和坐标系语义）
-    # 输出: joint frame 下的 box mesh frame，即 mesh frame 相对于 joint frame 的位置, $x_{mesh} = d_x, y_{mesh} = s_y/2 + d_y, z_{mesh} = d_z$
-    # 补充: 这个语义可结合 `AnyMani/source/anymani/anymani/assets/平面示意.png` 来理解。我这里默认用 x-y 轴来建立手指的运动学树的平面图
-    # 就是假设 $d = 0$，那么 box 的底面就和 joint frame 的 x-z 平面重合，box 的中心在 joint frame 的 y 轴延伸上，距离为 $s_y/2$
-    # 如果 $d$ 不为零，那么就是在这个基础上进行平移，例如 $d_y > 0$ 就是把 box 往 joint frame 的 y 轴正方向平移，$d_y < 0$ 就是往 y 轴负方向平移
-    # --- NOTE:再补上 rpy 偏移量，由于 finger_buiders.py 的关系；
-    # 再补上 CMC1 joint mesh 特例，和 RegularThumbBuilderCfg 对应
-    # 再补上 
 
-    # --- TODO:算法之二: Cyliner（Box下的替代，一般也用作手指link的构成）---
-    # 用 cylinder mesh 来构造 joint/child link 的骨肉，这里最主要关注的是 cylinder 的半径与高度，以及相对于 joint frame的偏移
-    # 输入: 偏移量 $d=(d_x, d_y, d_z)\in \mathbb{R}^3$, cylinder 尺寸 $s=(r, h)\in \mathbb{R}^2$，以及 joint frame 的定义（旋转轴和坐标系语义）
-    # 输出: joint frame 下的 cylinder mesh frame，即 mesh frame 相对于 joint frame 的位置, $x_{mesh} = d_x, y_{mesh} = h/2 + d_y, z_{mesh} = d_z$
-    # 就是假设 $d = 0$，那么 cylinder 的底面就和 joint frame 的 x-z 平面重合，cylinder 的中心在 joint frame 的 y 轴延伸上，距离为 $h/2$
-    # 如果 $d$ 不为零，那么就是在这个基础上进行平移，例如 $d_y > 0$ 就是把 cylinder 往 joint frame 的 y 轴正方向平移，$d_y < 0$ 就是往 y 轴负方向平移
+        geom_kind = str(self.cfg.mesh.get("type", self.cfg.mesh.get("kind", "box"))).lower()
+        if geom_kind == "box":
+            collisions, visuals, inertial = self._build_box()
+        elif geom_kind == "cylinder":
+            collisions, visuals, inertial = self._build_cylinder()
+        elif geom_kind == "sphere":
+            collisions, visuals, inertial = self._build_sphere()
+        else:
+            raise ValueError(f"Unsupported primitive joint mesh type: {geom_kind}")
 
-    # --- TODO:算法之三: Sphere（特殊情况，我没想到它怎么用于组成手指或手背。情况很少，一种是球型关节 mesh,但这个也要复合 Box 或 Cyliner，且我目前关于手型泛化的idea暂不涉及球型关节的手，这里预留一个接口，未来再实现）---
+        return JointCfg(
+            name=self.cfg.name,
+            parent=self.cfg.parent,
+            child=self.cfg.child,
+            joint_type=self.cfg.joint_type,
+            axis=self.cfg.axis,
+            limit=self.cfg.limit,
+            origin=self.cfg.origin,
+            inertial=inertial,
+            collisions=collisions,
+            visuals=visuals,
+            is_tip=self.cfg.is_tip,
+            metadata=self.cfg.metadata.copy(),
+        )
+
+    def _build_box(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
+        mesh = self.cfg.mesh
+        if "size" in mesh:
+            size = _ensure_tuple(mesh["size"], length=3, field_name="box.size")
+        else:
+            size = (
+                float(mesh["width"]),
+                float(mesh["length"]),
+                float(mesh["height"]),
+            )
+
+        offset = _pose_from_value(mesh.get("offset", mesh.get("origin")))
+        center_on_joint = bool(mesh.get("center_on_joint", False))
+        origin = _make_geometry_pose(
+            offset=offset,
+            default_pos=(offset.pos[0], size[1] / 2.0 + offset.pos[1], offset.pos[2]),
+            center_on_joint=center_on_joint,
+        )
+        mass = _estimate_mass(volume=size[0] * size[1] * size[2], cfg_mass=self.cfg.mass, density=self.cfg.density)
+        inertial = InertialCfg(mass=mass, origin=origin, inertia=_box_inertia(size, mass))
+        collision = CollisionGeometryCfg(
+            name=f"{self.cfg.name}_col",
+            geometry={"type": "box", "size": size},
+            origin=origin,
+        )
+        visual = VisualGeometryCfg(
+            name=f"{self.cfg.name}_vis",
+            geometry={"type": "box", "size": size},
+            origin=origin,
+        )
+        return [collision], [visual], inertial
+
+    def _build_cylinder(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
+        mesh = self.cfg.mesh
+        radius = float(mesh["radius"])
+        length = float(mesh["length"])
+        offset = _pose_from_value(mesh.get("offset", mesh.get("origin")))
+        center_on_joint = bool(mesh.get("center_on_joint", False))
+        # URDF cylinders are aligned with +z by default, so we rotate them into +y.
+        origin = _make_geometry_pose(
+            offset=offset,
+            default_pos=(offset.pos[0], length / 2.0 + offset.pos[1], offset.pos[2]),
+            default_rpy=(-math.pi / 2.0, 0.0, 0.0),
+            center_on_joint=center_on_joint,
+        )
+        mass = _estimate_mass(
+            volume=math.pi * radius * radius * length,
+            cfg_mass=self.cfg.mass,
+            density=self.cfg.density,
+        )
+        inertial = InertialCfg(mass=mass, origin=origin, inertia=_cylinder_inertia(radius, length, mass))
+        geometry = {"type": "cylinder", "radius": radius, "length": length}
+        collision = CollisionGeometryCfg(name=f"{self.cfg.name}_col", geometry=geometry, origin=origin)
+        visual = VisualGeometryCfg(name=f"{self.cfg.name}_vis", geometry=geometry, origin=origin)
+        return [collision], [visual], inertial
+
+    def _build_sphere(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
+        mesh = self.cfg.mesh
+        radius = float(mesh["radius"])
+        offset = _pose_from_value(mesh.get("offset", mesh.get("origin")))
+        center_on_joint = bool(mesh.get("center_on_joint", False))
+        origin = _make_geometry_pose(
+            offset=offset,
+            default_pos=(offset.pos[0], radius + offset.pos[1], offset.pos[2]),
+            center_on_joint=center_on_joint,
+        )
+        mass = _estimate_mass(
+            volume=4.0 * math.pi * radius**3 / 3.0,
+            cfg_mass=self.cfg.mass,
+            density=self.cfg.density,
+        )
+        inertial = InertialCfg(mass=mass, origin=origin, inertia=_sphere_inertia(radius, mass))
+        geometry = {"type": "sphere", "radius": radius}
+        collision = CollisionGeometryCfg(name=f"{self.cfg.name}_col", geometry=geometry, origin=origin)
+        visual = VisualGeometryCfg(name=f"{self.cfg.name}_vis", geometry=geometry, origin=origin)
+        return [collision], [visual], inertial
+
 
 class ComPrimJointBuilder(JointBuilder):
-    r"""基础几何复合构建器
-
-    非单个基础图形构建 joint mesh,而是由至少2个及以上 mesh 构建复合 mesh，一般用作指尖的构建，如 cylinder + sphere 的组合，或者 box + sphere 的组合等
-    """
+    r"""Builder for composite primitive tips such as cylinder+sphere."""
 
     cfg: PrimJointBuilderCfg
 
     def __init__(self, cfg: PrimJointBuilderCfg):
+        super().__init__(cfg)
         self.cfg = cfg
 
     def build(self) -> JointCfg:
-        r"""根据 `PrimJointBuilderCfg` 构建对应的复合 mesh。
+        r"""Build a composite-tip ``JointCfg``."""
 
-        这里的返回值类型暂时用 `Any` 占位，具体类型取决于你选择的 mesh 表示和构建库。
-        """
-        pass
+        mesh_kind = str(self.cfg.mesh.get("type", self.cfg.mesh.get("kind"))).lower()
+        if mesh_kind == "cs":
+            collisions, visuals, inertial = self._build_cylinder_sphere_tip()
+        elif mesh_kind == "bs":
+            collisions, visuals, inertial = self._build_box_sphere_tip()
+        else:
+            raise ValueError(f"Unsupported composite primitive mesh type: {mesh_kind}")
 
-    # --- TODO:算法之一 ---：cylinder + sphere 构造指尖的复合 mesh（最常用）
-    # 输入: 半径 $r$，高度 $h$，偏移 $d \in \mathbb{R}^3$，表示 cylinder 尺寸为 $(r, h)$，sphere 尺寸为 $r$
-    # 输出: joint frame 下的复合 mesh frame，即 cylinder mesh frame 和 sphere mesh frame 相对于 joint frame 的位置
-    # <续> $x_c = d_x, y_c = d_y + h/2, z_c = d_z$，而 $x_s = d_x, y_s = d_y + h, z_s = d_z$
-    # 补充: 这个语义同样可结合 `AnyMani/source/anymani/anymani/assets/平面示意.png` 来理解。我这里默认用 x-y 轴来建立手指的运动学树的平面图
-    # <续> 就是假设 $d = 0$，那么 cylinder 的底面就和 joint frame 的 x-z 平面重合，cylinder 的中心在 joint frame 的 y 轴延伸上，距离为 $h/2$
-    # <续> sphere 的中心在 joint frame 的 y 轴延伸上，距离为 $h$，也就是 cylinder 的顶面。这样保证球面最大截面和圆柱顶面重合，从而形成比较自然的指尖形状
+        return JointCfg(
+            name=self.cfg.name,
+            parent=self.cfg.parent,
+            child=self.cfg.child,
+            joint_type=self.cfg.joint_type,
+            axis=self.cfg.axis,
+            limit=self.cfg.limit,
+            origin=self.cfg.origin,
+            inertial=inertial,
+            collisions=collisions,
+            visuals=visuals,
+            is_tip=self.cfg.is_tip,
+            metadata=self.cfg.metadata.copy(),
+        )
 
-    # --- TODO:算法之二 ---：box + sphere 构造指尖的复合 mesh
-    # 输入: 半径 $r$，高度 $h$，宽度 $w$，表示 box 尺寸为 $(r, w, h)$，sphere 尺寸为 $r$，偏移 $d \in \mathbb{R}^3$
-    # 输出: joint frame 下的复合 mesh frame，即 box mesh frame 和 sphere mesh frame 相对于 joint frame 的位置
-    # <续> $x_b = d_x, y_b = d_y + h/2, z_b = d_z$，而 $x_s = d_x, y_s = d_y + h, z_s = d_z$
-    # 补充: 这个语义同样可结合 `AnyMani/source/anymani/anymani/assets/平面示意.png` 来理解。我这里默认用 x-y 轴来建立手指的运动学树的平面图
-    # <续> 就是假设 $d = 0$，那么 box 的底面就和 joint frame 的 x-z 平面重合，box 的中心在 joint frame 的 y 轴延伸上，距离为 $h/2$
-    # <续> sphere 的中心在 joint frame 的 y 轴延伸上，距离为 $h$，也就是 box 的顶面。这样保证球面最大截面和盒子顶面重合，从而形成比较自然的指尖形状
+    def _build_cylinder_sphere_tip(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
+        mesh = self.cfg.mesh
+        radius = float(mesh["radius"])
+        length = float(mesh["height"])
+        offset = _pose_from_value(mesh.get("offset", mesh.get("origin")))
+
+        cyl_origin = PoseCfg(
+            pos=(offset.pos[0], length / 2.0 + offset.pos[1], offset.pos[2]),
+            rpy=_add_rpy((-math.pi / 2.0, 0.0, 0.0), offset.rpy),
+        )
+        sph_origin = PoseCfg(pos=(offset.pos[0], length + offset.pos[1], offset.pos[2]), rpy=offset.rpy)
+
+        cyl_mass = _estimate_mass(
+            volume=math.pi * radius * radius * length,
+            cfg_mass=None if self.cfg.mass is None else self.cfg.mass * 0.55,
+            density=self.cfg.density,
+        )
+        sph_mass = _estimate_mass(
+            volume=4.0 * math.pi * radius**3 / 3.0,
+            cfg_mass=None if self.cfg.mass is None else self.cfg.mass * 0.45,
+            density=self.cfg.density,
+        )
+        total_mass = cyl_mass + sph_mass
+        com_y = (cyl_mass * cyl_origin.pos[1] + sph_mass * sph_origin.pos[1]) / total_mass
+
+        equivalent_length = length + 2.0 * radius
+        inertial = InertialCfg(
+            mass=total_mass,
+            origin=PoseCfg(pos=(offset.pos[0], com_y, offset.pos[2])),
+            inertia=_cylinder_inertia(radius, equivalent_length, total_mass),
+        )
+        collisions = [
+            CollisionGeometryCfg(
+                name=f"{self.cfg.name}_body_col",
+                geometry={"type": "cylinder", "radius": radius, "length": length},
+                origin=cyl_origin,
+            ),
+            CollisionGeometryCfg(
+                name=f"{self.cfg.name}_cap_col",
+                geometry={"type": "sphere", "radius": radius},
+                origin=sph_origin,
+            ),
+        ]
+        visuals = [
+            VisualGeometryCfg(
+                name=f"{self.cfg.name}_body_vis",
+                geometry={"type": "cylinder", "radius": radius, "length": length},
+                origin=cyl_origin,
+            ),
+            VisualGeometryCfg(
+                name=f"{self.cfg.name}_cap_vis",
+                geometry={"type": "sphere", "radius": radius},
+                origin=sph_origin,
+            ),
+        ]
+        return collisions, visuals, inertial
+
+    def _build_box_sphere_tip(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
+        mesh = self.cfg.mesh
+        radius = float(mesh["radius"])
+        height = float(mesh["height"])
+        width = float(mesh["width"])
+        depth = float(mesh.get("depth", width))
+        offset = _pose_from_value(mesh.get("offset", mesh.get("origin")))
+
+        box_origin = PoseCfg(pos=(offset.pos[0], height / 2.0 + offset.pos[1], offset.pos[2]), rpy=offset.rpy)
+        sph_origin = PoseCfg(pos=(offset.pos[0], height + offset.pos[1], offset.pos[2]), rpy=offset.rpy)
+
+        box_mass = _estimate_mass(
+            volume=width * height * depth,
+            cfg_mass=None if self.cfg.mass is None else self.cfg.mass * 0.55,
+            density=self.cfg.density,
+        )
+        sph_mass = _estimate_mass(
+            volume=4.0 * math.pi * radius**3 / 3.0,
+            cfg_mass=None if self.cfg.mass is None else self.cfg.mass * 0.45,
+            density=self.cfg.density,
+        )
+        total_mass = box_mass + sph_mass
+        com_y = (box_mass * box_origin.pos[1] + sph_mass * sph_origin.pos[1]) / total_mass
+
+        inertial = InertialCfg(
+            mass=total_mass,
+            origin=PoseCfg(pos=(offset.pos[0], com_y, offset.pos[2])),
+            inertia=_box_inertia((width, height + 2.0 * radius, depth), total_mass),
+        )
+        collisions = [
+            CollisionGeometryCfg(
+                name=f"{self.cfg.name}_body_col",
+                geometry={"type": "box", "size": (width, height, depth)},
+                origin=box_origin,
+            ),
+            CollisionGeometryCfg(
+                name=f"{self.cfg.name}_cap_col",
+                geometry={"type": "sphere", "radius": radius},
+                origin=sph_origin,
+            ),
+        ]
+        visuals = [
+            VisualGeometryCfg(
+                name=f"{self.cfg.name}_body_vis",
+                geometry={"type": "box", "size": (width, height, depth)},
+                origin=box_origin,
+            ),
+            VisualGeometryCfg(
+                name=f"{self.cfg.name}_cap_vis",
+                geometry={"type": "sphere", "radius": radius},
+                origin=sph_origin,
+            ),
+        ]
+        return collisions, visuals, inertial
+
+
+__all__ = ["PrimJointBuilderCfg", "PrimJointBuilder", "ComPrimJointBuilder"]
