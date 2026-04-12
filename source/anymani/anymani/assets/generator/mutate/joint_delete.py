@@ -37,9 +37,11 @@ r"""关节删除工具：从 finger 运动学链中裁剪 joint，并做合理�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import random
 from typing import Literal
 
 from ...asset_base import AssetCfgBase, HandCfg
+from ...asset_schema_core import CollisionGeometryCfg, InertialCfg, PoseCfg, VisualGeometryCfg
 from ._base import MutatorBase
 
 
@@ -107,7 +109,53 @@ class JointDeleteMutator(MutatorBase):
             HandCfg | None: 变异后的整手配置；若删除请求违反约束则返回 ``None``。
         """
 
-        pass
+        if self.cfg.regroup_strategy == "keep":
+            raise NotImplementedError(
+                "regroup_strategy='keep' requires orphan sub-link support, which current schema does not provide."
+            )
+
+        mutated = target.copy()  # joint delete 会重写 finger 链，因此必须在深拷贝上操作
+        if not mutated.fingers:
+            return None
+
+        if self.cfg.target_finger is None:
+            finger_index = random.randrange(len(mutated.fingers))  # 未显式指定时才随机选 finger
+        else:
+            finger_index = next((index for index, finger in enumerate(mutated.fingers) if finger.name == self.cfg.target_finger), -1)
+            if finger_index < 0:
+                return None
+
+        finger = mutated.fingers[finger_index]
+        deletable = [
+            joint.name
+            for joint in finger.joints
+            if not (self.cfg.keep_terminal_joint and joint.is_tip)
+        ]
+        if not deletable:
+            return None
+
+        requested = list(self.cfg.deleted_joints) or [random.choice(deletable)]  # 空列表语义：运行时随机删一段
+        delete_set = {name for name in requested if name in deletable}
+        if not delete_set:
+            return None
+
+        # `respect_preset=True` 当前只能先落实到“至少保留一个 revolute joint”这条最小保护。
+        # 这是因为更细的 preset-level 不可删列表还未沉到 metadata / schema。
+        remaining_revolute = sum(
+            1 for joint in finger.joints if joint.name not in delete_set and joint.joint_type == "revolute"
+        )
+        if self.cfg.respect_preset and remaining_revolute < 1:
+            return None
+
+        rebuilt = self._delete_from_finger(mutated, finger, delete_set)
+        if rebuilt is None:
+            return None
+
+        mutated.fingers[finger_index] = rebuilt
+        try:
+            return mutated.replace(fingers=mutated.fingers)
+        except Exception:
+            return None
 
         # TODO:算法之一（joint delete + relink + regroup）
         # ────────────────────────────────────────
@@ -156,6 +204,123 @@ class JointDeleteMutator(MutatorBase):
         #
         # IDEA：joint delete 是后序工具里拓扑改变最大的操作；其输出必须
         # 能通过 HandValidator 的全局链式一致性检查，建议在此处嵌入轻量预检。
+
+    def _delete_from_finger(self, hand: HandCfg, finger, delete_set: set[str]):
+        r"""在单根 finger 上执行 joint 删除 + 重连。"""
+
+        new_joints = []
+        last_kept_parent = finger.parent_link  # 当前保留下来的链尾 link 名
+        last_kept_container = hand.palm  # 用于 `merge` 时接收被删 joint 的几何
+        pending_origin = PoseCfg()  # 从 `last_kept_parent` 到“下一个原始 joint parent”的累计位姿
+
+        for joint in finger.joints:
+            composed_origin = _compose_pose(pending_origin, joint.origin)  # 当前 joint 相对最近保留 link 的位姿
+
+            if joint.name in delete_set:
+                if self.cfg.regroup_strategy == "merge":
+                    _merge_deleted_joint_into_container(last_kept_container, joint, composed_origin)
+                pending_origin = composed_origin  # 下一关节需要继续把这一步的位姿吃进去
+                continue
+
+            kept_joint = joint.replace(parent=last_kept_parent, origin=composed_origin)
+            new_joints.append(kept_joint)
+            last_kept_parent = kept_joint.child
+            last_kept_container = kept_joint
+            pending_origin = PoseCfg()  # 一旦保留了当前 joint，累计位姿就重新归零
+
+        if not new_joints:
+            return None
+        return finger.replace(joints=new_joints)
+
+
+def _compose_pose(lhs: PoseCfg, rhs: PoseCfg) -> PoseCfg:
+    r"""用当前项目一贯的“小角度/声明式叠加”语义组合两个位姿。"""
+
+    return PoseCfg(
+        pos=(lhs.pos[0] + rhs.pos[0], lhs.pos[1] + rhs.pos[1], lhs.pos[2] + rhs.pos[2]),
+        rpy=(lhs.rpy[0] + rhs.rpy[0], lhs.rpy[1] + rhs.rpy[1], lhs.rpy[2] + rhs.rpy[2]),
+    )
+
+
+def _merge_deleted_joint_into_container(container, joint, joint_pose_in_container: PoseCfg) -> None:
+    r"""把被删 joint 的几何与惯量近似并入保留容器。
+
+    当前容器可能是：
+
+    - `PalmCfg`
+    - 前一个保留下来的 `JointCfg`
+
+    由于当前 schema 是 joint-centric，`merge` 的可实现语义是：
+
+    1. 把被删 joint 的 collision / visual 变换到容器 frame；
+    2. 用显式近似把 inertial 也并入容器，而不是只并几何不并质量。
+    """
+
+    container.collisions.extend(
+        [
+            CollisionGeometryCfg(
+                name=collision.name,
+                geometry=collision.geometry.copy(),
+                origin=_compose_pose(joint_pose_in_container, collision.origin),
+            )
+            for collision in joint.collisions
+        ]
+    )
+    container.visuals.extend(
+        [
+            VisualGeometryCfg(
+                name=visual.name,
+                geometry=visual.geometry.copy(),
+                origin=_compose_pose(joint_pose_in_container, visual.origin),
+            )
+            for visual in joint.visuals
+        ]
+    )
+
+    if getattr(container, "inertial", None) is not None and joint.inertial is not None:
+        container.inertial = _merge_inertials(
+            container.inertial,
+            joint.inertial.replace(origin=_compose_pose(joint_pose_in_container, joint.inertial.origin)),
+        )
+
+
+def _merge_inertials(lhs: InertialCfg, rhs: InertialCfg) -> InertialCfg:
+    r"""把两个 link 级惯量近似并成一个新的 `InertialCfg`。
+
+    这里采用保守的刚体合并近似：
+
+    1. 质心按质量加权平均；
+    2. 对角惯量按平行轴定理搬到新质心；
+    3. 非对角项简单相加。
+
+    这不是几何真值重积分，但比“只加质量、不改惯量”更接近物理语义。
+    """
+
+    m1 = lhs.mass
+    m2 = rhs.mass
+    total_mass = m1 + m2
+    com = (
+        (m1 * lhs.origin.pos[0] + m2 * rhs.origin.pos[0]) / total_mass,
+        (m1 * lhs.origin.pos[1] + m2 * rhs.origin.pos[1]) / total_mass,
+        (m1 * lhs.origin.pos[2] + m2 * rhs.origin.pos[2]) / total_mass,
+    )
+
+    dx1 = lhs.origin.pos[0] - com[0]
+    dy1 = lhs.origin.pos[1] - com[1]
+    dz1 = lhs.origin.pos[2] - com[2]
+    dx2 = rhs.origin.pos[0] - com[0]
+    dy2 = rhs.origin.pos[1] - com[1]
+    dz2 = rhs.origin.pos[2] - com[2]
+
+    inertia = {
+        "ixx": lhs.inertia.ixx + m1 * (dy1 * dy1 + dz1 * dz1) + rhs.inertia.ixx + m2 * (dy2 * dy2 + dz2 * dz2),
+        "iyy": lhs.inertia.iyy + m1 * (dx1 * dx1 + dz1 * dz1) + rhs.inertia.iyy + m2 * (dx2 * dx2 + dz2 * dz2),
+        "izz": lhs.inertia.izz + m1 * (dx1 * dx1 + dy1 * dy1) + rhs.inertia.izz + m2 * (dx2 * dx2 + dy2 * dy2),
+        "ixy": lhs.inertia.ixy + rhs.inertia.ixy,
+        "ixz": lhs.inertia.ixz + rhs.inertia.ixz,
+        "iyz": lhs.inertia.iyz + rhs.inertia.iyz,
+    }
+    return InertialCfg(mass=total_mass, origin=PoseCfg(pos=com), inertia=inertia)
 
 
 __all__ = ["JointDeleteCfg", "JointDeleteMutator"]

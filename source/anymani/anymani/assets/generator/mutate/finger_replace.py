@@ -32,9 +32,11 @@ preset 名或直接传入的对象）替换指定的 finger，并确保：
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import random
 from typing import Literal
 
 from ...asset_base import AssetCfgBase, FingerCfg, HandCfg
+from ...builder.finger_buiders import FINGER_PRESET_REGISTRY, get_finger_builder_preset
 from ._base import MutatorBase
 
 
@@ -105,7 +107,28 @@ class FingerReplaceMutator(MutatorBase):
             替换后违反全手唯一性约束，则返回 ``None``。
         """
 
-        pass
+        mutated = target.copy()  # 整根 finger 替换时，整手其余部分应保持完全不动
+        if not mutated.fingers:
+            return None
+
+        if self.cfg.target_finger is None:
+            target_index = random.randrange(len(mutated.fingers))  # 未显式指定时再交给运行时随机选择
+        else:
+            target_index = next((index for index, finger in enumerate(mutated.fingers) if finger.name == self.cfg.target_finger), -1)
+            if target_index < 0:
+                return None
+
+        old_finger = mutated.fingers[target_index]  # 被替换的 finger slot
+        replacement = self._build_replacement_finger(old_finger)
+        if replacement is None:
+            return None
+
+        mutated.fingers[target_index] = replacement
+        try:
+            # 用 `HandCfg.replace(...)` 重新过一遍 schema 层唯一性与链一致性检查。
+            return mutated.replace(fingers=mutated.fingers)
+        except Exception:
+            return None
 
         # TODO:算法之一（finger replacement）
         # ────────────────────────────────────────
@@ -150,6 +173,34 @@ class FingerReplaceMutator(MutatorBase):
         #
         # IDEA：finger replace 是重合区操作，后序语义是"在已有手上做派生"；
         # 它的价值在于能快速枚举"换一根手指的变化量"，而不需要重新跑整套 pre-made 流程。
+
+    def _build_replacement_finger(self, old_finger: FingerCfg) -> FingerCfg | None:
+        r"""根据配置构造将要替换进去的新 finger。"""
+
+        if self.cfg.strategy == "cfg":
+            candidate = self.cfg.replacement_finger_cfg.copy()
+        else:
+            preset_name = self.cfg.replacement_preset_name
+            if preset_name is None:
+                preset_pool = [name for name in FINGER_PRESET_REGISTRY if name != old_finger.metadata.get("builder")]
+                preset_name = random.choice(preset_pool or list(FINGER_PRESET_REGISTRY))
+
+            builder_cfg = get_finger_builder_preset(preset_name)
+            builder_cfg = builder_cfg.replace(name=old_finger.name, parent_link=old_finger.parent_link)
+            candidate = builder_cfg.class_type(builder_cfg).build()
+
+        if self.cfg.inherit_mount:
+            candidate = candidate.replace(
+                name=old_finger.name,  # slot 名不变，替换的是结构而不是 finger 身份
+                parent_link=old_finger.parent_link,
+                mount=old_finger.mount.copy(),
+            )
+        else:
+            candidate = candidate.replace(
+                name=old_finger.name,
+                parent_link=old_finger.parent_link,
+            )
+        return candidate
 
 
 __all__ = ["FingerReplaceCfg", "FingerReplaceMutator"]
