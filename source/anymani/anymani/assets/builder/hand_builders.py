@@ -1,4 +1,24 @@
-r"""Hand-level builders for human-like and gripper-like assemblies."""
+r"""整手级构建器：负责把 palm 与 fingers 装配成 `HandCfg`。
+
+这里的职责边界与你在 `前后序.png`、`资产生产概略.png` 中的设计是一致的：
+
+- 前序 `HandBuilder` 负责“造骨架”
+- 后序 mutate 负责“在已有骨架上做派生”
+
+也就是说，本文件只处理：
+
+1. 选用哪种 palm builder
+2. 选用哪种 finger builder
+3. 非拇指与拇指如何挂载到 palm 上
+4. 如何把这些子结构装配成一个合法的 `HandCfg`
+
+而不会在这里做：
+
+- link 长度扰动
+- joint 删除重连
+- tip 替换
+- limit 微调
+"""
 
 from __future__ import annotations
 
@@ -16,12 +36,22 @@ NON_THUMB_FINGER_NAMES: tuple[str, ...] = ("index", "middle", "ring", "little")
 
 
 def _to_pose_dict(values: dict[str, PoseCfg]) -> dict[str, PoseCfg]:
+    r"""把宽松挂载点输入统一规范为 `PoseCfg` 字典。"""
     return {name: PoseCfg.from_value(value) for name, value in values.items()}
 
 
 @dataclass
 class HumanLikeHandBuilderCfg(HandBuilderCfg):
-    r"""Builder cfg for human-like dexterous hands."""
+    r"""类人手构建器配置。
+
+    当前首轮实现聚焦于 Allegro / LEAP 这类“明显区分拇指与非拇指”的 hand。
+    因此该 cfg 的关键字段不是一般装配参数，而是：
+
+    - `handedness`
+    - `finger_cfg`
+    - `thumb_cfg`
+    - `mounts`
+    """
 
     class_type: type["HumanLikeHandBuilder"] | None = None
     handedness: Literal["left", "right"] = "right"
@@ -45,7 +75,11 @@ class HumanLikeHandBuilderCfg(HandBuilderCfg):
 
 @dataclass
 class GripperLikeHandBuilderCfg(HandBuilderCfg):
-    r"""Placeholder cfg for future gripper-like hand builders."""
+    r"""夹爪手构建器配置占位。
+
+    本轮先不实现，但保留这个 cfg，是为了不破坏你原先“HumanLike /
+    GripperLike 两分”的总体框架。
+    """
 
     class_type: type["GripperLikeHandBuilder"] | None = None
     finger_cfg: FingerBuilderCfg | dict[str, FingerBuilderCfg] | None = None
@@ -59,7 +93,19 @@ class GripperLikeHandBuilderCfg(HandBuilderCfg):
 
 
 class HumanLikeHandBuilder(HandBuilder):
-    r"""Assemble a human-like hand from one palm and multiple finger builders."""
+    r"""类人手装配器。
+
+    当前装配顺序采用非常明确的优先级：
+
+    1. 显式 `cfg.mounts`
+    2. palm preset 自带的 `finger_mounts`
+    3. 参数化 fallback 挂载点
+
+    之所以这样排序，是为了兼顾两条研究路径：
+
+    - 真实 hand 锚点：直接复用 preset mount
+    - 参数化 hand 枚举：在没有 preset 时也能自动产出结构合理的初始手型
+    """
 
     cfg: HumanLikeHandBuilderCfg
 
@@ -68,7 +114,14 @@ class HumanLikeHandBuilder(HandBuilder):
         self.cfg = cfg
 
     def build(self) -> HandCfg:
-        r"""Build a human-like hand into canonical ``HandCfg`` form."""
+        r"""构建类人手的 canonical `HandCfg`。
+
+        Returns:
+            HandCfg: 已装配完成的整手描述。
+
+        Raises:
+            ValueError: 当 palm 或 finger 配置缺失时抛出。
+        """
 
         if self.cfg.palm_cfg is None:
             raise ValueError("HumanLikeHandBuilder requires palm_cfg")
@@ -78,10 +131,13 @@ class HumanLikeHandBuilder(HandBuilder):
         palm_builder = self.cfg.palm_cfg.class_type(self.cfg.palm_cfg)
         palm = palm_builder.build()
 
+        # 先读取 palm preset 中记录的基准挂载点。
+        # 对 Allegro / LEAP 来说，这些值直接来自真实 URDF 的 palm frame。
         preset_mounts = {
             name: PoseCfg.from_value(value)
             for name, value in palm.metadata.get("finger_mounts", {}).items()
         }
+        # mount 优先级：fallback < preset < 显式 cfg.mounts
         mounts = {**self._fallback_mounts(palm), **preset_mounts, **self.cfg.mounts}
 
         fingers = []
@@ -101,9 +157,9 @@ class HumanLikeHandBuilder(HandBuilder):
         metadata = {"builder": "HumanLikeHandBuilder"}
         if self.cfg.palm_cfg.wrist_joints:
             # Question:
-            # ``wrist_joints`` is preserved at the configuration boundary, but the
-            # current ``HandCfg`` canonical structure has no wrist chain slot yet.
-            # We therefore keep the declaration in metadata for later lowering.
+            # 这里保留你在 PalmBuilderCfg 中定义的“前溯腕关节”接口，但当前
+            # `HandCfg` 还没有 wrist chain 的标准槽位，所以首轮只能把它们
+            # 原样挂在 metadata 中，留待后续真正 lower 成链式 joint/link。
             metadata["wrist_joints"] = [joint.to_dict() for joint in self.cfg.palm_cfg.wrist_joints]
 
         return HandCfg(
@@ -116,6 +172,8 @@ class HumanLikeHandBuilder(HandBuilder):
         )
 
     def _build_named_finger(self, finger_cfg: FingerBuilderCfg, finger_name: str, mount: PoseCfg):
+        r"""把一个 finger cfg 变成具名 finger，并赋予 mount。"""
+
         if not hasattr(finger_cfg, "replace"):
             raise TypeError(f"Finger cfg {finger_cfg!r} is not a dataclass-backed config")
 
@@ -128,7 +186,19 @@ class HumanLikeHandBuilder(HandBuilder):
         return finger.replace(name=finger_name, mount=mount, parent_link="palm")
 
     def _fallback_mounts(self, palm) -> dict[str, PoseCfg]:
-        r"""Approximate human-like mounts when neither explicit nor preset mounts exist."""
+        r"""在没有显式 mount 也没有 preset mount 时，生成参数化挂载点。
+
+        这里只追求“结构合理的初始解”，不是追求一步到位地拟合真实手。
+        对 box palm，我们采用一个极简比例模型：
+
+        - 非拇指沿 palm 顶缘展开
+        - 拇指位于 palm 侧前方，并给一个固定 yaw
+
+        这样做的意义在于：
+
+        1. 参数化枚举时不至于完全没有 mount 初值；
+        2. 后续可以把人工调参、mutate 扰动、真实 preset 替换叠加上去。
+        """
 
         if isinstance(self.cfg.palm_cfg, SinglePalmBuilderCfg) and self.cfg.palm_cfg.shape == "box":
             width = float(self.cfg.palm_cfg.width)
@@ -138,6 +208,7 @@ class HumanLikeHandBuilder(HandBuilder):
             if len(names) == 1:
                 xs = [0.0]
             else:
+                # 非拇指在顶缘横向铺开，当前取约 $0.35W$ 的半展宽。
                 half_span = width * 0.35
                 step = 2.0 * half_span / max(len(names) - 1, 1)
                 xs = [half_span - idx * step for idx in range(len(names))]
@@ -145,6 +216,7 @@ class HumanLikeHandBuilder(HandBuilder):
                 name: PoseCfg(pos=(x, length, height / 2.0))
                 for name, x in zip(names, xs)
             }
+            # 拇指用一个简化比例模型近似落在 palm 侧前方。
             thumb_x = width * 0.22 if self.cfg.handedness == "right" else -width * 0.22
             mounts["thumb"] = PoseCfg(
                 pos=(thumb_x, length * 0.33, -height * 0.15),
@@ -155,7 +227,7 @@ class HumanLikeHandBuilder(HandBuilder):
 
 
 class GripperLikeHandBuilder(HandBuilder):
-    r"""Placeholder runtime for future gripper-like embodiments."""
+    r"""夹爪手构建器占位。"""
 
     cfg: GripperLikeHandBuilderCfg
 

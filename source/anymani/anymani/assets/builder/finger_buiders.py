@@ -1,4 +1,20 @@
-r"""Regular finger builders for the first pre-made asset slice."""
+r"""手指构建器：把参数化 finger 描述落为 `FingerCfg`。
+
+本文件对应你在 `Allegro-Non-Thumb.png`、`Leap-Non-Thumb.png`、`Thumb.png`
+中的手指几何草图。当前首轮实现只覆盖 regular family：
+
+- Allegro 非拇指
+- LEAP 非拇指
+- regular thumb（含 `CMC1` 特例）
+
+阅读本文件时，建议始终把两层关系分开看：
+
+1. `joint frame -> mesh frame`
+2. `parent link frame -> child joint frame`
+
+真正的建模难点不是 box/cylinder 本身，而是不同 hand family 下这两层关系
+如何保持坐标语义一致。
+"""
 
 from __future__ import annotations
 
@@ -12,14 +28,25 @@ from .joint_builders_primitive import PrimJointBuilderCfg
 
 
 def _to_si(value: float | int) -> float:
-    r"""Convert likely-centimeter inputs into meters while preserving SI inputs."""
+    r"""把“疑似厘米输入”转换为米制。
+
+    当前很多 preset 仍沿用你注释里的 cm 直觉值，因此这里做一个轻量兼容：
+    若量级明显更像 cm，就除以 100；若本来就是 m，则原样保留。
+    """
 
     value = float(value)
     return value / 100.0 if abs(value) > 0.5 else value
 
 
 def _normalize_pose_value(value: float | Sequence[float] | None, *, field_name: str) -> Vector6:
-    r"""Normalize float / xyz / xyzrpy into one packed 6D pose."""
+    r"""把偏移输入统一解析为 6D pose。
+
+    支持三种写法：
+
+    - `float`：只写沿 finger 生长方向的 $y$ 偏移
+    - `xyz`
+    - `xyzrpy`
+    """
 
     if value is None:
         return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -43,7 +70,7 @@ def _normalize_pose_value(value: float | Sequence[float] | None, *, field_name: 
 
 
 def _normalize_pose_list(values: Sequence[Any], *, count: int, field_name: str) -> list[Vector6]:
-    r"""Normalize a pose list into a fixed-length list of packed 6D poses."""
+    r"""把多段 mesh 偏移规范为定长 `list[Vector6]`。"""
 
     if not values:
         return [(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) for _ in range(count)]
@@ -53,7 +80,7 @@ def _normalize_pose_list(values: Sequence[Any], *, count: int, field_name: str) 
 
 
 def _normalize_joint_limits(values: Sequence[Any] | None, *, count: int) -> list[JointLimitCfg | None]:
-    r"""Normalize optional joint limit overrides."""
+    r"""把逐关节限位输入规范化。"""
 
     if not values:
         return [(-3.141592653589793, 3.141592653589793) for _ in range(count)]
@@ -74,7 +101,16 @@ def _normalize_joint_limits(values: Sequence[Any] | None, *, count: int) -> list
 
 
 def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
-    r"""Normalize tip recipe values and convert likely-cm lengths into meters."""
+    r"""规范化指尖 recipe，并把长度统一成米制。
+
+    当前首轮只支持两类 primitive 复合指尖：
+
+    - `cs`: cylinder + sphere
+    - `bs`: box + sphere
+
+    这和你原始 TODO 里的“第一版先实现 cylinder/box + sphere，自定义指尖留接口”
+    是一致的。
+    """
 
     tip = dict(tip or {"type": "cs", "radius": 0.012, "height": 0.01})
     tip_type = str(tip.get("type", tip.get("kind", "cs"))).lower()
@@ -131,11 +167,14 @@ def _build_cylinder_mesh(*, length: float, radius: float, offset: Vector6, cente
 
 @dataclass
 class RegularFingerBuilderCfg(FingerBuilderCfg):
-    r"""Regular, non-spherical finger builder configuration.
+    r"""常规非球关节手指配置。
 
-    The regular builder targets the first embodiment slice only: Allegro-like
-    non-thumbs, LEAP-like non-thumbs, and the shared thumb path with a special
-    ``CMC1`` frame convention.
+    这个 cfg 对应你原始注释里的“RegularFingerBuilderCfg 大类”。核心思想是：
+
+    - 把 Allegro / LEAP / thumb / non-thumb 先压到同一套 canonical 字段；
+    - 真正让 builder 消费的只保留 `mesh_shape`、`mesh_offsets`、`axes`、
+      `tip` 这几组高信息量输入；
+    - 其余子类字段，本质上都是为了更方便地构造这几组 canonical 输入。
     """
 
     class_type: type["RegularFingerBuilder"] | None = None
@@ -178,6 +217,7 @@ class RegularFingerBuilderCfg(FingerBuilderCfg):
         super().__post_init__()
         if self.num_joints < 1:
             raise ValueError("num_joints must be >= 1")
+        # 先把多精度偏移统一压到 6D 表达，后续算法只读取 canonical 结果。
         self._mesh_offsets_6d = _normalize_pose_list(self.mesh_offsets, count=self.num_joints, field_name="mesh_offsets")
         self._tip_offset_6d = _normalize_pose_value(self.tip_offset, field_name="tip_offset")
         self.tip = _normalize_tip_dict(self.tip)
@@ -194,7 +234,17 @@ class RegularFingerBuilderCfg(FingerBuilderCfg):
 
 @dataclass
 class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
-    r"""Allegro non-thumb builder configuration."""
+    r"""Allegro 非拇指配置。
+
+    这里直接保留了你 TODO 里的第一版 preset 直觉：
+
+    $$
+    l=(1.8, 5.4, 3.8, 2.2)\text{cm},\quad
+    d=(0, 0, -0.6, 0)\text{cm}.
+    $$
+
+    默认仍以 box primitive 为主，因为这更贴近 Allegro“规整块体”的碰撞体直觉。
+    """
 
     width: float | None = None
     height: float | None = None
@@ -228,7 +278,13 @@ class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
 
 @dataclass
 class LeapFingerBuilderCfg(RegularFingerBuilderCfg):
-    r"""LEAP non-thumb builder configuration."""
+    r"""LEAP 非拇指配置。
+
+    与 Allegro 非拇指相比，LEAP 在首轮实现里最重要的差异不是段数，而是：
+
+    1. palm 侧存在固定段 `fixed_part`
+    2. MCP 两关节的轴语义不同
+    """
 
     width: float | None = None
     height: float | None = None
@@ -264,7 +320,15 @@ class LeapFingerBuilderCfg(RegularFingerBuilderCfg):
 
 @dataclass
 class RegularThumbBuilderCfg(RegularFingerBuilderCfg):
-    r"""Shared thumb builder configuration with a special ``CMC1`` rule."""
+    r"""regular thumb 配置。
+
+    这里最关键的不是长度数值，而是 `CMC1` 的坐标约定和普通 finger joint 不同：
+
+    - 普通 joint：偏移为 0 时，mesh 默认从 joint frame 的 $x-z$ 平面向 $+y$ 生长
+    - `CMC1`：偏移为 0 时，mesh frame 与 joint frame 完全重合
+
+    这正是你在 `Thumb.png` 里强调的 thumb 特例。
+    """
 
     cmc1_width: float | None = None
     cmc1_height: float | None = None
@@ -287,8 +351,9 @@ class RegularThumbBuilderCfg(RegularFingerBuilderCfg):
         self.mesh_offsets = [cmc1_pose] + other_offsets
         if not self.axes:
             # Question:
-            # Thumb axis semantics across Allegro / LEAP families are still a research
-            # choice. For the first slice we use one stable canonical convention.
+            # thumb 各关节的轴语义在 Allegro / LEAP 原始 URDF 中并不完全同构。
+            # 当前先选一套稳定 canonical 约定，后续若网络结构希望显式编码
+            # “轴语义差异”，这里再继续细分。
             self.axes = [
                 (1.0, 0.0, 0.0),
                 (0.0, 0.0, 1.0),
@@ -317,7 +382,7 @@ class SphericalFingerBuilderCfg(FingerBuilderCfg):
 
 
 class RegularFingerBuilder(FingerBuilder):
-    r"""Builder for regular fingers with primitive-link geometry."""
+    r"""regular finger 构建器。"""
 
     cfg: RegularFingerBuilderCfg
 
@@ -326,7 +391,11 @@ class RegularFingerBuilder(FingerBuilder):
         self.cfg = cfg
 
     def build(self) -> FingerCfg:
-        r"""Build a regular finger into canonical ``FingerCfg`` form."""
+        r"""构建一根 regular finger。
+
+        Returns:
+            FingerCfg: 由若干 revolute joint 与一个 fixed tip joint 组成的手指描述。
+        """
 
         if isinstance(self.cfg, RegularThumbBuilderCfg):
             joints = self._build_thumb_chain()
@@ -342,6 +411,15 @@ class RegularFingerBuilder(FingerBuilder):
         )
 
     def _build_serial_chain(self, *, first_gap: float) -> list[Any]:
+        r"""构建普通串联链。
+
+        这里对应 Allegro / LEAP 非拇指的共同主干。推进下一关节时，真正使用的
+        不是单纯 `mesh length`，而是你原始 TODO 里强调的“有效长度”：
+
+        $$
+        c_{\text{valid}, i} = l_i + d_i.
+        $$
+        """
         joints = []
         parent_link = self.cfg.parent_link
         previous_valid_length = first_gap
@@ -356,6 +434,15 @@ class RegularFingerBuilder(FingerBuilder):
         return joints
 
     def _build_thumb_chain(self) -> list[Any]:
+        r"""构建拇指链。
+
+        这里把你图里的两套量分开处理：
+
+        - $P_i$：第 $i$ 个 joint 相对于上一 joint 的位置
+        - $mP_i$：第 $i$ 个 mesh 相对于本 joint 的位置
+
+        因此 `CMC1 -> CMC2` 这一步不能直接套普通 serial chain。
+        """
         cfg = self.cfg
         assert isinstance(cfg, RegularThumbBuilderCfg)
 
@@ -389,6 +476,7 @@ class RegularFingerBuilder(FingerBuilder):
         return joints
 
     def _build_joint(self, *, index: int, parent_link: str, origin: PoseCfg):
+        r"""把第 `index` 个运动关节落成 `JointCfg`。"""
         mesh = dict(self.cfg.mesh_shape[index])
         builder_cfg = PrimJointBuilderCfg(
             name=f"{self.cfg.name}_j{index}",
@@ -409,6 +497,12 @@ class RegularFingerBuilder(FingerBuilder):
         return builder.build()
 
     def _build_tip_joint(self, *, parent_link: str, tip_origin_y: float):
+        r"""构建固定指尖关节。
+
+        当前 LEAP 首轮测试路径也统一走 `fixed tip joint + primitive tip`，
+        这是为了先把 pre-made 闭环跑通；若后续要恢复“tip 并入最后一段 link”
+        的 LEAP 语义，可以从这里继续分叉。
+        """
         tip_recipe = dict(self.cfg.tip)
         tip_recipe["offset"] = self.cfg._tip_offset_6d
         builder_cfg = PrimJointBuilderCfg(

@@ -1,4 +1,25 @@
-r"""Palm builders for the pre-made hand asset pipeline."""
+r"""掌部构建器：把掌级几何参数落为 `PalmCfg`。
+
+本文件对应你在 `assets/doc/Single-Palm.jpg`、`allegro-palm.png`、
+`leap-palm.png` 中画出的掌部建模约定。当前首轮实现只做 pre-made，
+因此关注点不是“如何在运行时完美复刻真实 mesh”，而是先给出一套
+跨 hand family 可复用、并且足够清晰的掌级中间表示（IR）。
+
+核心约定有三条：
+
+1. `SinglePalmBuilder` 负责“单一基础几何”的掌部。
+   这条路径服务于跨 family 的参数化枚举，强调描述简单、便于采样。
+2. `ComPalmBuilder` 负责“复合基础几何”的真实 preset。
+   这条路径服务于 Allegro / LEAP 这类已知锚点，强调和真实碰撞体的
+   空间组织保持一致。
+3. palm frame 统一采用你图里的“底边中心原点”语义：
+   - $x$：掌宽方向
+   - $y$：朝指方向的掌长方向
+   - $z$：掌厚方向
+
+这样做的原因是：非拇指手指通常都从 palm 顶缘沿 $+y$ 生长，若 palm
+与 finger 共用这一几何直觉，则后续 hand-level mount 组织会非常直接。
+"""
 
 from __future__ import annotations
 
@@ -12,10 +33,47 @@ from ..asset_schema_core import CollisionGeometryCfg, InertialCfg, PoseCfg, Visu
 
 
 _DEFAULT_PALM_DENSITY = 700.0
-"""A slightly denser default than finger links to keep inertial values positive."""
+"""掌部默认密度 $\\rho$ [kg/m^3]。
+
+这里不是材料学上的精确设定，而是首轮纵向打通时的工程默认值。
+它的目标只是让自动合成的 primitive palm 拥有正定且量级合理的惯量，
+避免出现极小质量导致的数值不稳定。
+"""
+
+
+_SINGLE_PALM_BOX_PRESETS = {
+    "allegro": {"width": 0.112, "length": 0.0944, "height": 0.042},
+    "leap": {"width": 0.12, "length": 0.08, "height": 0.046},
+}
+"""单一 box palm 的参考 preset 尺寸 [m]。
+
+这组数值对应你原始 TODO 里写的“box preset”，它们目前不是
+`SinglePalmBuilderCfg` 的显式字段，而是保留为“参数化手掌的参考锚点”：
+
+- `allegro`: $w=11.2\\text{cm}, l=9.44\\text{cm}, h=4.2\\text{cm}$
+- `leap`: $w=12\\text{cm}, l=8\\text{cm}, h=4.6\\text{cm}$
+
+之所以这次实现里没有把它们做成 `preset=` 字段，是因为 `SinglePalmBuilderCfg`
+当前强调的是“连续参数化空间”，而不是离散 preset 选择。
+但这些参考值本身是重要的建模上下文，所以应该明确保留下来，方便后续：
+
+1. 做 box palm 的参数初始化；
+2. 做 human-like fallback mount 的比例拟合；
+3. 对照真实 hand family 的量级。
+"""
 
 
 def _box_inertia(width: float, length: float, height: float, mass: float) -> dict[str, float]:
+    r"""计算均质长方体在质心处的惯量张量对角项。
+
+    这里采用标准公式：
+
+    $$
+    I_{xx} = \frac{m}{12}(l^2 + h^2),\quad
+    I_{yy} = \frac{m}{12}(w^2 + h^2),\quad
+    I_{zz} = \frac{m}{12}(w^2 + l^2).
+    $$
+    """
     return {
         "ixx": mass * (length * length + height * height) / 12.0,
         "iyy": mass * (width * width + height * height) / 12.0,
@@ -24,6 +82,15 @@ def _box_inertia(width: float, length: float, height: float, mass: float) -> dic
 
 
 def _cylinder_inertia(radius: float, height: float, mass: float) -> dict[str, float]:
+    r"""计算均质圆柱体在质心处的惯量张量对角项。
+
+    当前掌部圆柱采用轴向沿 $z$ 的语义，因此使用：
+
+    $$
+    I_{xx} = I_{yy} = \frac{m}{12}(3r^2 + h^2),\quad
+    I_{zz} = \frac{m}{2}r^2.
+    $$
+    """
     return {
         "ixx": mass * (3.0 * radius * radius + height * height) / 12.0,
         "iyy": mass * (3.0 * radius * radius + height * height) / 12.0,
@@ -32,21 +99,38 @@ def _cylinder_inertia(radius: float, height: float, mass: float) -> dict[str, fl
 
 
 def _sphere_inertia(radius: float, mass: float) -> dict[str, float]:
+    r"""计算均质球体在质心处的惯量张量对角项。
+
+    $$
+    I_{xx} = I_{yy} = I_{zz} = \frac{2mr^2}{5}.
+    $$
+    """
     moment = 2.0 * mass * radius * radius / 5.0
     return {"ixx": moment, "iyy": moment, "izz": moment}
 
 
 def _estimate_mass(volume: float) -> float:
+    r"""由体积 $V$ 和默认密度 $\\rho$ 估算质量。
+
+    这是一个工程近似，而不是来源于真实材料的精确建模：
+
+    $$
+    m = \rho V.
+    $$
+
+    之所以这里要自动估质量，是因为参数化 palm 的主要关注点是几何，
+    用户未必会在每次枚举时都手工指定质量。
+    """
     return max(volume * _DEFAULT_PALM_DENSITY, 1e-5)
 
 
 @dataclass
 class SinglePalmBuilderCfg(PalmBuilderCfg):
-    r"""Single primitive palm configuration.
+    r"""单一基础几何掌部配置。
 
-    The palm frame follows the drawing in ``assets/doc/Single-Palm.jpg``:
-    the origin lies at the bottom center, ``+y`` points toward the fingers,
-    ``+x`` spans palm width, and ``+z`` spans thickness.
+    该 cfg 对应“方案 C”的掌部设计帧：原点在掌底边中心，几何沿 $+y$
+    生长，与 finger builder 中“从 joint frame 的 $x-z$ 平面向 $+y$ 长出”
+    的新约定保持同构。
     """
 
     shape: Literal["box", "cylinder", "sphere", "ellipse"] = "box"
@@ -94,7 +178,14 @@ class SinglePalmBuilderCfg(PalmBuilderCfg):
 
 @dataclass
 class ComPalmBuilderCfg(PalmBuilderCfg):
-    r"""Preset composite palm configuration."""
+    r"""复合基础几何掌部配置。
+
+    这条路径不做连续参数化，而是直接锚定到真实 hand family 的碰撞体布置。
+    当前支持：
+
+    - `allegro`
+    - `leap`
+    """
 
     preset: Literal["leap", "allegro"] = "allegro"
     """Composite palm preset family."""
@@ -110,7 +201,7 @@ class CustomPalmBuilderCfg(PalmBuilderCfg):
 
 
 class SinglePalmBuilder(PalmBuilder):
-    r"""Builder for palms made from one primitive."""
+    r"""单一基础几何掌部构建器。"""
 
     cfg: SinglePalmBuilderCfg
 
@@ -119,56 +210,102 @@ class SinglePalmBuilder(PalmBuilder):
         self.cfg = cfg
 
     def build(self) -> PalmCfg:
-        r"""Build one primitive palm.
+        r"""根据单一 primitive 参数构建 `PalmCfg`。
 
-        # Question:
-        The current canonical schema does not support a scaled primitive directly,
-        so ``ellipse`` is exported as a sphere-envelope approximation while keeping
-        the ellipsoid inertia formula. This is sufficient for the first vertical
-        slice but should be revisited if ellipsoid palms become a training target.
+        这里真正要表达的是“掌部的几何与惯量如何落到当前 schema 上”，
+        而不是简单拼几个字段。
+
+        当前支持四类 shape：
+
+        1. `box`
+        2. `cylinder`
+        3. `sphere`
+        4. `ellipse`
+
+        其中 `ellipse` 需要额外说明：
+
+        理论上，你原始 TODO 的意图是“把椭球体视作球体经各向异性 scale 后的结果”，
+        也就是底层语义上接近：
+
+        $$
+        \text{sphere}(1.0) \xrightarrow{\text{scale}(a,b,c)} \text{ellipsoid}(a,b,c),
+        \quad c = h/2.
+        $$
+
+        这条思路本身没有问题，我之前把它误写成“schema 不能表达，所以只能球近似”，
+        这是我实现时的错误表达。更准确地说是：
+
+        - 你的 TODO 说的是一种**期望的几何表达方式**
+        - 但当前这版 `canonical schema + 标准 URDF writer` 还没有真正打通
+          “scaled primitive” 这条通道
+        - 标准 URDF 1.0 里 primitive (`box/cylinder/sphere`) 本身没有通用
+          `scale` 属性，`scale` 主要属于 `<mesh>` 语义
+
+        所以本轮实现先采取工程折中：
+
+        - 惯量仍按**均质椭球体**公式计算
+        - 几何导出先落为一个外包球 `sphere-envelope`
+
+        这样做的原因不是 TODO 不清楚，而是我这次先优先保证
+        `schema -> exporter -> test` 纵向闭环稳定。若后续你决定椭圆 palm
+        是正式训练对象，推荐的升级方向是二选一：
+
+        1. 在 schema / exporter 里显式支持“scaled primitive”；
+        2. 使用单位球 mesh + scale 来表达椭球。
+
+        Returns:
+            PalmCfg: 掌部的 canonical 描述。
         """
 
         if self.cfg.shape == "box":
+            # box palm 对应你原始 TODO 的“算法之一”。
             width = float(self.cfg.width)
             length = float(self.cfg.length)
             height = float(self.cfg.height)
-            origin = PoseCfg(pos=(0.0, length / 2.0, 0.0))
-            mass = _estimate_mass(width * length * height)
-            inertia = _box_inertia(width, length, height, mass)
+            origin = PoseCfg(pos=(0.0, length / 2.0, 0.0))  # 几何中心 $\mathbf{c}=(0,l/2,0)$
+            mass = _estimate_mass(width * length * height)  # 体积 $V = wlh$
+            inertia = _box_inertia(width, length, height, mass)  # 长方体理论惯量
             geometry = {"type": "box", "size": (width, length, height)}
         elif self.cfg.shape == "cylinder":
+            # cylinder palm 对应你原始 TODO 的“算法之二”。
             radius = float(self.cfg.radius)
             height = float(self.cfg.height)
-            origin = PoseCfg()
-            mass = _estimate_mass(math.pi * radius * radius * height)
-            inertia = _cylinder_inertia(radius, height, mass)
+            origin = PoseCfg()  # 圆柱体质心直接与 palm frame 重合
+            mass = _estimate_mass(math.pi * radius * radius * height)  # 体积 $V=\pi r^2 h$
+            inertia = _cylinder_inertia(radius, height, mass)  # 圆柱理论惯量
             geometry = {"type": "cylinder", "radius": radius, "length": height}
         elif self.cfg.shape == "sphere":
+            # sphere palm 对应你原始 TODO 的“算法之四”。
             radius = float(self.cfg.radius)
-            origin = PoseCfg(pos=(0.0, radius, 0.0))
-            mass = _estimate_mass(4.0 * math.pi * radius**3 / 3.0)
-            inertia = _sphere_inertia(radius, mass)
+            origin = PoseCfg(pos=(0.0, radius, 0.0))  # 球心位于底极点上方 $r$
+            mass = _estimate_mass(4.0 * math.pi * radius**3 / 3.0)  # 体积 $V=4\pi r^3/3$
+            inertia = _sphere_inertia(radius, mass)  # 球理论惯量
             geometry = {"type": "sphere", "radius": radius}
         else:
+            # ellipse palm 对应你原始 TODO 的“算法之三”。
             a = float(self.cfg.a)
             b = float(self.cfg.b)
-            c = float(self.cfg.height) / 2.0
-            radius = max(a, b, c)
-            origin = PoseCfg(pos=(0.0, b, 0.0))
-            mass = _estimate_mass(4.0 * math.pi * a * b * c / 3.0)
+            c = float(self.cfg.height) / 2.0  # 半轴 $c=h/2$
+            radius = max(a, b, c)  # 当前外包球近似半径
+            origin = PoseCfg(pos=(0.0, b, 0.0))  # 质心 $\mathbf{c}=(0,b,0)$
+            mass = _estimate_mass(4.0 * math.pi * a * b * c / 3.0)  # 椭球体积 $V=4\pi abc/3$
             inertia = {
                 "ixx": mass * (b * b + c * c) / 5.0,
                 "iyy": mass * (a * a + c * c) / 5.0,
                 "izz": mass * (a * a + b * b) / 5.0,
             }
-            geometry = {"type": "sphere", "radius": radius}
+            geometry = {"type": "sphere", "radius": radius}  # 工程近似：先写外包球
 
         collision = CollisionGeometryCfg(name="palm_collision", geometry=geometry, origin=origin)
         visual = VisualGeometryCfg(name="palm_visual", geometry=geometry, origin=origin)
         metadata = {"shape": self.cfg.shape}
         if self.cfg.shape == "ellipse":
-            metadata["ellipse_axes"] = {"a": float(self.cfg.a), "b": float(self.cfg.b), "c": float(self.cfg.height) / 2.0}
-            metadata["approximation"] = "sphere_envelope"
+            metadata["ellipse_axes"] = {
+                "a": float(self.cfg.a),
+                "b": float(self.cfg.b),
+                "c": float(self.cfg.height) / 2.0,
+            }  # 记录真实椭球半轴，便于后续 exporter 升级
+            metadata["approximation"] = "sphere_envelope"  # 当前几何仍是外包球近似
         return PalmCfg(
             name="palm",
             inertial=InertialCfg(mass=mass, origin=origin, inertia=inertia),
@@ -233,7 +370,14 @@ _COM_PALM_PRESETS: dict[str, dict[str, object]] = {
 
 
 class ComPalmBuilder(PalmBuilder):
-    r"""Builder for composite preset palms."""
+    r"""复合基础几何掌部构建器。
+
+    与 `SinglePalmBuilder` 不同，这里不是从连续参数空间采样，而是直接把
+    真实手掌碰撞体的 box 组合搬进 `PalmCfg`。这样做的目的，是让：
+
+    - Allegro / LEAP 作为 hand family 锚点时，空间语义尽量贴近真实 hand；
+    - hand-level mount 直接复用真实 URDF 中的基准位姿。
+    """
 
     cfg: ComPalmBuilderCfg
 
@@ -242,7 +386,11 @@ class ComPalmBuilder(PalmBuilder):
         self.cfg = cfg
 
     def build(self) -> PalmCfg:
-        r"""Build a preset palm with multiple primitive collisions."""
+        r"""根据 preset 查表构建复合掌部。
+
+        Returns:
+            PalmCfg: 含多组 collision / visual box 的掌部描述。
+        """
 
         preset = _COM_PALM_PRESETS[self.cfg.preset]
         collisions = [
