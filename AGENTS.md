@@ -93,6 +93,7 @@ __init__.py (Gym 注册)
 ## 常用操作
 
 ### 环境激活
+项目为 uv 环境
 
 ```bash
 source ~/isaac/env_isaaclab/bin/activate

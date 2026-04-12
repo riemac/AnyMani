@@ -12,3 +12,5 @@
 6. 貌似关节级构建器没必要细分声明式配置类和运行时类，会显得很臃肿（后续待定），采用 `@dataclass + classmethod` 会更好？
 7. 关于物理合理性：主要是和inertial字段有关，需要找到真实的质心、计算围绕新质心的惯性矩阵，而不是质心和 joint frame 单纯重合。因为在 URDF 中，<inertia> 矩阵最好是相对于**质心（Center of Mass）**来定义；但这样一来，joint frame之间的边特征 se3 对于网络架构输入，则值得考量。
 8. 关于 leaphand 官方urdf近似为 AnyMani/source/anymani/anymani/assets/hands/leap_hand/leap_hand_right.urdf 的猜想，是否采用了什么简化技术？
+> 似乎是手动近似的
+9. 挂载点check

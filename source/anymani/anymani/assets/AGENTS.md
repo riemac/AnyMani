@@ -65,28 +65,9 @@
 
 只要不破坏结构清晰性，不必过早追求复杂抽象。
 
-### 4. 与 Isaac Lab 风格的关系
-
-本子项目可以借鉴 Isaac Lab 的**配置分层、职责分离、字段级文档化**风格，但不要求机械模仿其 runtime-facing 的 `Manager / Term / TermCfg` 体系。
-
-这里更偏向：
-
-- modeling-facing
-- offline-facing
-- asset-pipeline-facing
-
-而不是 env runtime-facing。
-
-### 5. 注释要求
+### 4. 注释要求
 
 本目录遵循 `annotation` skill 的风格：
-
-- 采用中文
-- 方法 docstring 优先采用 Google Doc String 风格
-- 数学表达统一使用 `$...$` / `$$...$$`
-- 不使用 `:math:` 作为主要数学表达方式
-- 非平凡代码要有足够饱满的行间注释与行右注释
-- 字段说明可采用 Isaac Lab 风格的“字段声明后紧跟短 docstring”
 
 ---
 

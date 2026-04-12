@@ -1,4 +1,4 @@
-r"""整手级构建器：负责把 palm 与 fingers 装配成 `HandCfg`。
+r"""TODO:整手级构建器：负责把 palm 与 fingers 装配成 `HandCfg`。
 
 这里的职责边界与你在 `前后序.png`、`资产生产概略.png` 中的设计是一致的：
 
@@ -18,6 +18,10 @@ r"""整手级构建器：负责把 palm 与 fingers 装配成 `HandCfg`。
 - joint 删除重连
 - tip 替换
 - limit 微调
+
+换句话说，本文件负责的是“前序造骨架”，不是“后序变体扰动”。
+这也是为什么它要高度尊重 palm/finger builder 已经给出的局部语义，而不该
+在 hand 级偷偷篡改下层设计。
 """
 
 from __future__ import annotations
@@ -28,16 +32,16 @@ from typing import Literal
 from ..asset_base import HandCfg
 from ..asset_builders import FingerBuilderCfg, HandBuilder, HandBuilderCfg
 from ..asset_schema_core import PoseCfg
-from .finger_buiders import RegularFingerBuilderCfg
+from .finger_buiders import RegularFingerBuilderCfg, get_finger_builder_preset
 from .palm_builders import SinglePalmBuilderCfg
 
 
-NON_THUMB_FINGER_NAMES: tuple[str, ...] = ("index", "middle", "ring", "little")
+NON_THUMB_FINGER_NAMES: tuple[str, ...] = ("index", "middle", "ring", "little")  # 统一非拇指命名顺序
 
 
 def _to_pose_dict(values: dict[str, PoseCfg]) -> dict[str, PoseCfg]:
     r"""把宽松挂载点输入统一规范为 `PoseCfg` 字典。"""
-    return {name: PoseCfg.from_value(value) for name, value in values.items()}
+    return {name: PoseCfg.from_value(value) for name, value in values.items()}  # 兼容 tuple / dict / PoseCfg
 
 
 @dataclass
@@ -54,23 +58,31 @@ class HumanLikeHandBuilderCfg(HandBuilderCfg):
     """
 
     class_type: type["HumanLikeHandBuilder"] | None = None
-    handedness: Literal["left", "right"] = "right"
-    finger_cfg: FingerBuilderCfg | dict[str, FingerBuilderCfg] | None = None
-    thumb_cfg: FingerBuilderCfg | None = None
-    num_non_thumb: int = 3
-    mounts: dict[str, PoseCfg] = field(default_factory=dict)
+    handedness: Literal["left", "right"] = "right"  # 当前先显式区分左右手
+    finger_cfg: FingerBuilderCfg | str | dict[str, FingerBuilderCfg | str] | None = None  # 非拇指配置，可共享、可分指、可直接写 preset 名
+    thumb_cfg: FingerBuilderCfg | str | None = None  # 拇指配置，也允许直接写 preset 名
+    num_non_thumb: int = 3  # 默认 index/middle/ring 三根非拇指
+    mounts: dict[str, PoseCfg] = field(default_factory=dict)  # 显式挂载点覆盖
 
     def __post_init__(self):
         super().__post_init__()
-        self.mounts = _to_pose_dict(self.mounts)
+        self.mounts = _to_pose_dict(self.mounts)  # 显式 mount 一律先规约到标准 PoseCfg
+        if isinstance(self.finger_cfg, str):
+            self.finger_cfg = get_finger_builder_preset(self.finger_cfg)  # 允许直接写 preset 名
         if isinstance(self.finger_cfg, dict):
+            self.finger_cfg = {
+                name: get_finger_builder_preset(cfg) if isinstance(cfg, str) else cfg
+                for name, cfg in self.finger_cfg.items()
+            }
             invalid = set(self.finger_cfg) - set(NON_THUMB_FINGER_NAMES)
             if invalid:
                 raise ValueError(f"finger_cfg dict keys must be drawn from {NON_THUMB_FINGER_NAMES}, got {invalid}")
-            self.num_non_thumb = len(self.finger_cfg)
+            self.num_non_thumb = len(self.finger_cfg)  # 字典模式下非拇指数由键数决定
         elif self.finger_cfg is not None and not 1 <= self.num_non_thumb <= len(NON_THUMB_FINGER_NAMES):
             raise ValueError(f"num_non_thumb must be in [1, {len(NON_THUMB_FINGER_NAMES)}]")
-        self.class_type = HumanLikeHandBuilder
+        if isinstance(self.thumb_cfg, str):
+            self.thumb_cfg = get_finger_builder_preset(self.thumb_cfg)  # 拇指也允许直接写 preset 名
+        self.class_type = HumanLikeHandBuilder  # human-like hand 统一走这个装配器
 
 
 @dataclass
@@ -82,13 +94,13 @@ class GripperLikeHandBuilderCfg(HandBuilderCfg):
     """
 
     class_type: type["GripperLikeHandBuilder"] | None = None
-    finger_cfg: FingerBuilderCfg | dict[str, FingerBuilderCfg] | None = None
-    num_fingers: int = 3
-    mounts: dict[str, PoseCfg] = field(default_factory=dict)
+    finger_cfg: FingerBuilderCfg | dict[str, FingerBuilderCfg] | None = None  # 夹爪手未来可按指分配 cfg
+    num_fingers: int = 3  # 夹爪数量
+    mounts: dict[str, PoseCfg] = field(default_factory=dict)  # 指根挂载点
 
     def __post_init__(self):
         super().__post_init__()
-        self.mounts = _to_pose_dict(self.mounts)
+        self.mounts = _to_pose_dict(self.mounts)  # 先把 mounts 规约好，虽然本轮尚未实现
         self.class_type = GripperLikeHandBuilder
 
 
@@ -128,8 +140,8 @@ class HumanLikeHandBuilder(HandBuilder):
         if self.cfg.finger_cfg is None:
             raise ValueError("HumanLikeHandBuilder requires finger_cfg")
 
-        palm_builder = self.cfg.palm_cfg.class_type(self.cfg.palm_cfg)
-        palm = palm_builder.build()
+        palm_builder = self.cfg.palm_cfg.class_type(self.cfg.palm_cfg)  # palm 的具体几何由 palm builder 自己负责
+        palm = palm_builder.build()  # hand-level 这里只消费已经构建好的 PalmCfg
 
         # 先读取 palm preset 中记录的基准挂载点。
         # 对 Allegro / LEAP 来说，这些值直接来自真实 URDF 的 palm frame。
@@ -138,23 +150,23 @@ class HumanLikeHandBuilder(HandBuilder):
             for name, value in palm.metadata.get("finger_mounts", {}).items()
         }
         # mount 优先级：fallback < preset < 显式 cfg.mounts
-        mounts = {**self._fallback_mounts(palm), **preset_mounts, **self.cfg.mounts}
+        mounts = {**self._fallback_mounts(palm), **preset_mounts, **self.cfg.mounts}  # 优先级：fallback < preset < 显式 cfg.mounts
 
         fingers = []
         if isinstance(self.cfg.finger_cfg, dict):
-            items = list(self.cfg.finger_cfg.items())
+            items = list(self.cfg.finger_cfg.items())  # 字典模式：允许每根非拇指独立配置
         else:
-            items = [(name, self.cfg.finger_cfg) for name in NON_THUMB_FINGER_NAMES[: self.cfg.num_non_thumb]]
+            items = [(name, self.cfg.finger_cfg) for name in NON_THUMB_FINGER_NAMES[: self.cfg.num_non_thumb]]  # 共享非拇指模板
 
         for finger_name, finger_cfg in items:
-            built = self._build_named_finger(finger_cfg, finger_name, mounts.get(finger_name, PoseCfg()))
+            built = self._build_named_finger(finger_cfg, finger_name, mounts.get(finger_name, PoseCfg()))  # 给每根 finger 注入名字与挂载点
             fingers.append(built)
 
         if self.cfg.thumb_cfg is not None:
-            thumb_mount = mounts.get("thumb", PoseCfg())
+            thumb_mount = mounts.get("thumb", PoseCfg())  # 拇指挂点允许由 preset 或显式覆盖
             fingers.append(self._build_named_finger(self.cfg.thumb_cfg, "thumb", thumb_mount))
 
-        metadata = {"builder": "HumanLikeHandBuilder"}
+        metadata = {"builder": "HumanLikeHandBuilder"}  # sidecar / 调试时可回溯 hand builder 来源
         if self.cfg.palm_cfg.wrist_joints:
             # Question:
             # 这里保留你在 PalmBuilderCfg 中定义的“前溯腕关节”接口，但当前
@@ -163,12 +175,12 @@ class HumanLikeHandBuilder(HandBuilder):
             metadata["wrist_joints"] = [joint.to_dict() for joint in self.cfg.palm_cfg.wrist_joints]
 
         return HandCfg(
-            name=self.cfg.name,
-            family=self.cfg.family,
-            handedness=self.cfg.handedness,
-            palm=palm,
-            fingers=fingers,
-            metadata=metadata,
+            name=self.cfg.name,  # hand 名
+            family=self.cfg.family,  # hand family 标签
+            handedness=self.cfg.handedness,  # 左右手属性
+            palm=palm,  # 已构建好的 palm
+            fingers=fingers,  # 已装配好的 fingers
+            metadata=metadata,  # 附加 provenance / wrist 占位信息
         )
 
     def _build_named_finger(self, finger_cfg: FingerBuilderCfg, finger_name: str, mount: PoseCfg):
@@ -177,13 +189,13 @@ class HumanLikeHandBuilder(HandBuilder):
         if not hasattr(finger_cfg, "replace"):
             raise TypeError(f"Finger cfg {finger_cfg!r} is not a dataclass-backed config")
 
-        updates = {"name": finger_name}
+        updates = {"name": finger_name}  # 先注入 finger 逻辑名，保证 joint/link 命名稳定
         if isinstance(finger_cfg, RegularFingerBuilderCfg):
-            updates["parent_link"] = "palm"
-        built_cfg = finger_cfg.replace(**updates)
+            updates["parent_link"] = "palm"  # human-like hand 中 finger 根默认挂到 palm
+        built_cfg = finger_cfg.replace(**updates)  # 不原地改 preset，对调用方保持纯净
         finger_builder = built_cfg.class_type(built_cfg)
         finger = finger_builder.build()
-        return finger.replace(name=finger_name, mount=mount, parent_link="palm")
+        return finger.replace(name=finger_name, mount=mount, parent_link="palm")  # 最终再把 mount 写进 FingerCfg
 
     def _fallback_mounts(self, palm) -> dict[str, PoseCfg]:
         r"""在没有显式 mount 也没有 preset mount 时，生成参数化挂载点。
@@ -201,19 +213,19 @@ class HumanLikeHandBuilder(HandBuilder):
         """
 
         if isinstance(self.cfg.palm_cfg, SinglePalmBuilderCfg) and self.cfg.palm_cfg.shape == "box":
-            width = float(self.cfg.palm_cfg.width)
-            length = float(self.cfg.palm_cfg.length)
-            height = float(self.cfg.palm_cfg.height)
+            width = float(self.cfg.palm_cfg.width)  # palm 宽度 $W$
+            length = float(self.cfg.palm_cfg.length)  # palm 长度 $L$
+            height = float(self.cfg.palm_cfg.height)  # palm 厚度 $H$
             names = NON_THUMB_FINGER_NAMES[: self.cfg.num_non_thumb]
             if len(names) == 1:
-                xs = [0.0]
+                xs = [0.0]  # 只有一根非拇指时直接放在中线
             else:
                 # 非拇指在顶缘横向铺开，当前取约 $0.35W$ 的半展宽。
-                half_span = width * 0.35
-                step = 2.0 * half_span / max(len(names) - 1, 1)
-                xs = [half_span - idx * step for idx in range(len(names))]
+                half_span = width * 0.35  # 非拇指横向半展宽
+                step = 2.0 * half_span / max(len(names) - 1, 1)  # 相邻 finger 的横向步长
+                xs = [half_span - idx * step for idx in range(len(names))]  # 从 radial 侧到 ulnar 侧铺开
             mounts = {
-                name: PoseCfg(pos=(x, length, height / 2.0))
+                name: PoseCfg(pos=(x, length, height / 2.0))  # 非拇指统一挂在 palm 顶缘
                 for name, x in zip(names, xs)
             }
             # 拇指用一个简化比例模型近似落在 palm 侧前方。
@@ -223,7 +235,7 @@ class HumanLikeHandBuilder(HandBuilder):
                 rpy=(0.0, 0.0, -1.5707963267948966 if self.cfg.handedness == "right" else 1.5707963267948966),
             )
             return mounts
-        return {name: PoseCfg() for name in (*NON_THUMB_FINGER_NAMES[: self.cfg.num_non_thumb], "thumb")}
+        return {name: PoseCfg() for name in (*NON_THUMB_FINGER_NAMES[: self.cfg.num_non_thumb], "thumb")}  # 若无更好先验，就全部回退到零挂载点
 
 
 class GripperLikeHandBuilder(HandBuilder):

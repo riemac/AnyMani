@@ -2,12 +2,19 @@ import pytest
 
 from source.anymani.anymani.assets.builder.finger_buiders import (
     AllegroFingerBuilderCfg,
+    FINGER_PRESET_REGISTRY,
     LeapFingerBuilderCfg,
     RegularFingerBuilder,
     RegularThumbBuilderCfg,
+    get_finger_builder_preset,
 )
 from source.anymani.anymani.assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
-from source.anymani.anymani.assets.builder.palm_builders import ComPalmBuilderCfg, SinglePalmBuilder, SinglePalmBuilderCfg
+from source.anymani.anymani.assets.builder.palm_builders import (
+    ComPalmBuilderCfg,
+    PALM_PRESET_REGISTRY,
+    SinglePalmBuilder,
+    SinglePalmBuilderCfg,
+)
 from source.anymani.anymani.assets.asset_schema_core import PoseCfg
 
 
@@ -26,6 +33,19 @@ def test_allegro_cfg_normalizes_offsets_and_tip_units():
     assert cfg._mesh_offsets_6d[2][1] == -0.006
     assert cfg.tip["radius"] == 0.012
     assert cfg.tip["height"] == 0.01
+
+
+def test_finger_preset_registry_exposes_named_builder_cfgs():
+    assert "allegro_non_thumb_v1" in FINGER_PRESET_REGISTRY
+    preset = get_finger_builder_preset("allegro_non_thumb_v1")
+    assert isinstance(preset, AllegroFingerBuilderCfg)
+    assert preset.name == "index"
+
+
+def test_palm_preset_registry_exposes_named_factories():
+    palm_cfg = PALM_PRESET_REGISTRY["com_allegro"]()
+    assert isinstance(palm_cfg, ComPalmBuilderCfg)
+    assert palm_cfg.preset == "allegro"
 
 
 def test_regular_thumb_cfg_keeps_cmc1_joint_center_semantics():
@@ -70,3 +90,16 @@ def test_human_like_builder_prefers_explicit_mounts_over_preset_mounts():
     assert index_finger.mount.pos == explicit_mount.pos
     assert index_finger.mount.rpy == explicit_mount.rpy
     assert thumb_finger.mount.pos == (-0.0182, 0.019333, -0.045987)
+
+
+def test_human_like_builder_accepts_string_finger_presets():
+    hand = HumanLikeHandBuilder(
+        HumanLikeHandBuilderCfg(
+            name="demo",
+            family="allegro",
+            palm_cfg=ComPalmBuilderCfg(preset="allegro"),
+            finger_cfg="allegro_non_thumb_v1",
+            thumb_cfg="allegro_thumb_v1",
+        )
+    ).build()
+    assert [finger.name for finger in hand.fingers] == ["index", "middle", "ring", "thumb"]

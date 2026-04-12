@@ -1,4 +1,4 @@
-r"""掌部构建器：把掌级几何参数落为 `PalmCfg`。
+r"""TODO:掌部构建器：把掌级几何参数落为 `PalmCfg`。
 
 本文件对应你在 `assets/doc/Single-Palm.jpg`、`allegro-palm.png`、
 `leap-palm.png` 中画出的掌部建模约定。当前首轮实现只做 pre-made，
@@ -19,6 +19,12 @@ r"""掌部构建器：把掌级几何参数落为 `PalmCfg`。
 
 这样做的原因是：非拇指手指通常都从 palm 顶缘沿 $+y$ 生长，若 palm
 与 finger 共用这一几何直觉，则后续 hand-level mount 组织会非常直接。
+
+这里同样保留高密度注释，因为 palm 不只是一个大块碰撞体，它还是：
+
+1. hand 的几何主躯干；
+2. finger mounts 的参考系；
+3. human-like / gripper-like 进一步分化时的结构分水岭。
 """
 
 from __future__ import annotations
@@ -134,31 +140,31 @@ class SinglePalmBuilderCfg(PalmBuilderCfg):
     """
 
     shape: Literal["box", "cylinder", "sphere", "ellipse"] = "box"
-    """Primitive palm family."""
+    """单一 palm 的基础几何类型。"""
 
     length: float | None = None
-    """Palm length along ``+y`` for box / ellipse palms."""
+    """掌长，沿 ``+y`` 方向，仅 box / ellipse 使用。"""
 
     width: float | None = None
-    """Palm width along ``+x`` for box palms."""
+    """掌宽，沿 ``+x`` 方向，主要用于 box palm。"""
 
     height: float | None = None
-    """Palm thickness along ``+z`` for every supported shape."""
+    """掌厚，沿 ``+z`` 方向。所有形状都需要。"""
 
     radius: float | None = None
-    """Palm radius for cylinder / sphere palms."""
+    """圆柱/球 palm 的半径。"""
 
     a: float | None = None
-    """Ellipse semi-axis along ``+x``."""
+    """椭球在 ``+x`` 方向的半轴。"""
 
     b: float | None = None
-    """Ellipse semi-axis along ``+y``."""
+    """椭球在 ``+y`` 方向的半轴。"""
 
     def __post_init__(self):
         super().__post_init__()
         if self.shape == "box":
             for field_name in ("width", "length", "height"):
-                value = getattr(self, field_name)
+                value = getattr(self, field_name)  # box 需要三条边都合法
                 if value is None or float(value) <= 0.0:
                     raise ValueError(f"{field_name} must be positive for box palms")
         elif self.shape in {"cylinder", "sphere"}:
@@ -173,7 +179,7 @@ class SinglePalmBuilderCfg(PalmBuilderCfg):
                 raise ValueError("ellipse palms require positive height")
         else:
             raise ValueError(f"unsupported palm shape: {self.shape}")
-        self.class_type = SinglePalmBuilder
+        self.class_type = SinglePalmBuilder  # 单一 primitive palm 统一走 SinglePalmBuilder
 
 
 @dataclass
@@ -188,16 +194,20 @@ class ComPalmBuilderCfg(PalmBuilderCfg):
     """
 
     preset: Literal["leap", "allegro"] = "allegro"
-    """Composite palm preset family."""
+    """复合 palm 的 hand family preset 名。"""
 
     def __post_init__(self):
         super().__post_init__()
-        self.class_type = ComPalmBuilder
+        self.class_type = ComPalmBuilder  # 复合 palm preset 统一走 ComPalmBuilder
 
 
 @dataclass
 class CustomPalmBuilderCfg(PalmBuilderCfg):
-    r"""Placeholder config for future mesh-authored palm presets."""
+    r"""自定义掌部 mesh 配置占位。
+
+    这条路径留给未来从 CAD / Blender / mesh 工具链导出的掌部。
+    本轮 pre-made 纵向切片暂不展开。
+    """
 
 
 class SinglePalmBuilder(PalmBuilder):
@@ -257,6 +267,30 @@ class SinglePalmBuilder(PalmBuilder):
             PalmCfg: 掌部的 canonical 描述。
         """
 
+        # ================================================================
+        # Palm 设计帧约定（方案 C，与 PrimJointBuilder 同构）
+        # ================================================================
+        # 原点：形体底边中心
+        #   x -> 掌宽方向
+        #   y -> 朝指方向，即 palm 的“生长方向”
+        #   z -> 掌厚方向
+        #
+        # --- TODO:算法之一：box（像 LEAP、Allegro 这类手较常用）
+        # 输入：宽 $w$ (x), 长 $l$ (y), 高 $h$ (z), 质量 $m$
+        # 几何中心：$\mathbf{c} = (0,\; l/2,\; 0)$
+        #
+        # --- TODO:算法之二：cylinder（比较适合夹爪手）
+        # 输入：半径 $r$, 高 $h$ (z), 质量 $m$
+        # 几何中心：$\mathbf{c} = (0,\; 0,\; 0)$
+        #
+        # --- TODO:算法之三：ellipse（夹爪手和类人手都可以用）
+        # 输入：x 半轴 $a$, y 半轴 $b$, 高 $h$ (z), 质量 $m$
+        # 期望表达：`sphere + scale(a, b, c)`，其中 $c = h/2$
+        #
+        # --- TODO:算法之四：sphere（很少用，先保留接口）
+        # 输入：半径 $r$, 质量 $m$
+        # 几何中心：$\mathbf{c} = (0,\; r,\; 0)$
+        # ================================================================
         if self.cfg.shape == "box":
             # box palm 对应你原始 TODO 的“算法之一”。
             width = float(self.cfg.width)
@@ -296,9 +330,9 @@ class SinglePalmBuilder(PalmBuilder):
             }
             geometry = {"type": "sphere", "radius": radius}  # 工程近似：先写外包球
 
-        collision = CollisionGeometryCfg(name="palm_collision", geometry=geometry, origin=origin)
+        collision = CollisionGeometryCfg(name="palm_collision", geometry=geometry, origin=origin)  # collision 与 visual 首轮保持一致
         visual = VisualGeometryCfg(name="palm_visual", geometry=geometry, origin=origin)
-        metadata = {"shape": self.cfg.shape}
+        metadata = {"shape": self.cfg.shape}  # 保留 palm shape 供 hand-level / exporter 做 provenance
         if self.cfg.shape == "ellipse":
             metadata["ellipse_axes"] = {
                 "a": float(self.cfg.a),
@@ -318,9 +352,9 @@ class SinglePalmBuilder(PalmBuilder):
 _COM_PALM_PRESETS: dict[str, dict[str, object]] = {
     "allegro": {
         "collisions": [
-            {"size": (0.0414, 0.1120, 0.0448), "origin": (-0.0090, 0.0000, -0.0230)},
-            {"size": (0.0414, 0.0538, 0.0428), "origin": (-0.0090, -0.0253, -0.0667)},
-            {"size": (0.0414, 0.0720, 0.0130), "origin": (-0.0093, -0.00557, -0.08874)},
+            {"size": (0.0414, 0.1120, 0.0448), "origin": (-0.0090, 0.0000, -0.0230)},  # palm 主体
+            {"size": (0.0414, 0.0538, 0.0428), "origin": (-0.0090, -0.0253, -0.0667)},  # 掌根后侧加厚块
+            {"size": (0.0414, 0.0720, 0.0130), "origin": (-0.0093, -0.00557, -0.08874)},  # 更薄的下层条带
         ],
         "inertial": {
             "mass": 0.4154,
@@ -336,8 +370,8 @@ _COM_PALM_PRESETS: dict[str, dict[str, object]] = {
     },
     "leap": {
         "collisions": [
-            {"size": (0.022, 0.026, 0.034), "origin": (-0.009, 0.008, -0.011)},
-            {"size": (0.022, 0.026, 0.034), "origin": (-0.009, -0.037, -0.011)},
+            {"size": (0.022, 0.026, 0.034), "origin": (-0.009, 0.008, -0.011)},  # 上部块
+            {"size": (0.022, 0.026, 0.034), "origin": (-0.009, -0.037, -0.011)},  # 下部块
             {"size": (0.022, 0.026, 0.034), "origin": (-0.009, -0.082, -0.011)},
             {"size": (0.058, 0.020, 0.046), "origin": (-0.066, -0.078, -0.0115), "rpy": (0.0, 0.0, -0.2967)},
             {"size": (0.020, 0.120, 0.030), "origin": (-0.030, -0.035, -0.003)},
@@ -369,6 +403,41 @@ _COM_PALM_PRESETS: dict[str, dict[str, object]] = {
 }
 
 
+def get_single_palm_box_preset(name: str) -> SinglePalmBuilderCfg:
+    r"""按名字返回一份单一 box palm preset。
+
+    这组 preset 主要服务于“参数化 palm 的参考锚点”，不是为了取代
+    `ComPalmBuilder` 的真实碰撞体 preset。
+    """
+
+    try:
+        dims = _SINGLE_PALM_BOX_PRESETS[name]  # 先取参考锚点尺寸
+    except KeyError as exc:
+        raise KeyError(f"Unknown single palm box preset: {name!r}") from exc
+    return SinglePalmBuilderCfg(shape="box", **dims)  # 返回一份新的 cfg，避免外部污染模块常量
+
+
+def get_com_palm_preset(name: str) -> ComPalmBuilderCfg:
+    r"""按名字返回一份复合 palm preset cfg。"""
+
+    if name not in _COM_PALM_PRESETS:
+        raise KeyError(f"Unknown composite palm preset: {name!r}")
+    return ComPalmBuilderCfg(preset=name)  # 复合 palm preset 直接按名字回填
+
+
+PALM_PRESET_REGISTRY = {
+    "single_box_allegro": lambda: get_single_palm_box_preset("allegro"),
+    "single_box_leap": lambda: get_single_palm_box_preset("leap"),
+    "com_allegro": lambda: get_com_palm_preset("allegro"),
+    "com_leap": lambda: get_com_palm_preset("leap"),
+}
+"""掌部 preset 的轻量注册表。
+
+finger / palm 两侧都保留这种显式字典，是为了让 asset generator 后续在
+“离散 preset 空间”和“连续参数空间”之间切换时有统一入口。
+"""
+
+
 class ComPalmBuilder(PalmBuilder):
     r"""复合基础几何掌部构建器。
 
@@ -392,25 +461,25 @@ class ComPalmBuilder(PalmBuilder):
             PalmCfg: 含多组 collision / visual box 的掌部描述。
         """
 
-        preset = _COM_PALM_PRESETS[self.cfg.preset]
+        preset = _COM_PALM_PRESETS[self.cfg.preset]  # 真实 hand family 的复合碰撞体查表
         collisions = [
             CollisionGeometryCfg(
-                name=f"{self.cfg.preset}_col_{index}",
-                geometry={"type": "box", "size": entry["size"]},
-                origin=PoseCfg(pos=entry["origin"], rpy=entry.get("rpy", (0.0, 0.0, 0.0))),
+                name=f"{self.cfg.preset}_col_{index}",  # collision box 命名稳定带上 preset 前缀
+                geometry={"type": "box", "size": entry["size"]},  # 复合 palm 当前统一用 box 近似
+                origin=PoseCfg(pos=entry["origin"], rpy=entry.get("rpy", (0.0, 0.0, 0.0))),  # 每块 box 都保留独立位姿
             )
             for index, entry in enumerate(preset["collisions"])
         ]
         visuals = [
             VisualGeometryCfg(
-                name=f"{self.cfg.preset}_vis_{index}",
+                name=f"{self.cfg.preset}_vis_{index}",  # visual 先与 collision 保持一致
                 geometry={"type": "box", "size": entry["size"]},
                 origin=PoseCfg(pos=entry["origin"], rpy=entry.get("rpy", (0.0, 0.0, 0.0))),
             )
             for index, entry in enumerate(preset["collisions"])
         ]
-        mounts = {name: PoseCfg.from_value(value) for name, value in preset["finger_mounts"].items()}
-        metadata = {"preset": self.cfg.preset, "finger_mounts": mounts}
+        mounts = {name: PoseCfg.from_value(value) for name, value in preset["finger_mounts"].items()}  # palm 自带 finger mounts
+        metadata = {"preset": self.cfg.preset, "finger_mounts": mounts}  # hand builder 会继续读取这些 mount
         return PalmCfg(
             name="palm",
             inertial=InertialCfg(**preset["inertial"]),
@@ -426,4 +495,7 @@ __all__ = [
     "CustomPalmBuilderCfg",
     "SinglePalmBuilder",
     "ComPalmBuilder",
+    "PALM_PRESET_REGISTRY",
+    "get_single_palm_box_preset",
+    "get_com_palm_preset",
 ]

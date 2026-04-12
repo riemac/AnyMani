@@ -1,23 +1,29 @@
-"""手部资产生成的 Builder 层空骨架。
+r"""TODO:手部资产生成的 Builder 层骨架。
 
-本文件只保留你主导的运行时框架定义，不再内置任何默认构建算法。
-也就是说，这里当前只回答“将来准备在哪些层级放置构建算法”，而不回答
-“算法现在具体怎么实现”。
+这里不是具体的几何构建算法文件，而是“算法应该被放在哪一层”的总框架文件。
+对这个项目而言，Builder 分层本身就是研究设计的一部分，因此这里不应该只剩
+一个空壳接口，而应该把各层的职责边界写清楚，避免后续 coding 时再被实现
+细节反过来绑架设计。
 
 当前预设四个层级：
 
-- `JointBuilder`: 关节级构建器
-- `FingerBuilder`: 手指级构建器
-- `PalmBuilder`: 掌级构建器
-- `HandBuilder`: 整手级构建器
+- `JointBuilder`：关节级构建器
+- `FingerBuilder`：手指级构建器
+- `PalmBuilder`：掌级构建器
+- `HandBuilder`：整手级构建器
 
-每个层级都保留两部分：
+每个层级都拆成两部分：
 
 - 声明式配置对象 `*BuilderCfg`
 - 运行时对象 `*Builder`
 
-后续 joint-level / finger-level / palm-level / hand-level 的真实生成算法，
-将由研究推进时逐步填入这些类中。
+这样做的根本原因是把“我要什么”与“怎么构造”分开：
+
+1. `*BuilderCfg` 用来表达研究者可直接理解、可直接控制的参数；
+2. `*Builder` 用来把这些参数解释成 canonical asset schema。
+
+因此，本文件默认不替你私自预设某一版 hand/finger/palm 的算法，只保留
+框架与职责说明，真正的算法放在各自的 builder 子文件里实现。
 """
 
 from __future__ import annotations
@@ -40,39 +46,67 @@ class BuilderCfg(AssetCfgBase):
     """
 
     class_type: type["Builder"] | None = None
-    """关联的构建器运行时类。"""
+    """关联的构建器运行时类。
+
+    这里采用“配置类反指运行时类”的显式方式，而不是更重的全局 registry。
+    原因很简单：当前仍处在科研探索期，分层和字段都可能继续演化；显式关系
+    最利于逐段阅读与审查，不会把控制流藏进框架魔法里。
+    """
 
 
 @dataclass
 class JointBuilderCfg(BuilderCfg):
-    r"""关节级构建器配置。"""
+    r"""关节级构建器配置。
+
+    关节级 builder 的主要任务，是描述“本 joint 之后这段 child link 的局部
+    几何与惯量”。它一般不决定整根 finger 的串联关系；那部分属于 finger
+    级 builder 的职责。
+    """
 
     class_type: type["Builder"] | None = None
     """关联的关节级构建器类。"""
 
     is_customized: bool = None
-    """mesh是否自定义，即非URDF默认的box/cylinder/sphere。"""
+    """mesh 是否自定义。
+
+    - `False`：通常表示可以用 URDF 默认 primitive，如 box/cylinder/sphere
+    - `True`：通常表示需要 custom mesh、复合 mesh 或额外导出逻辑
+    """
 
     def __post_init__(self):
         if self.class_type is None:
-            self.class_type = JointBuilder
+            self.class_type = JointBuilder  # 默认回落到最薄的 joint 壳子
 
 
 @dataclass
 class FingerBuilderCfg(BuilderCfg):
-    r"""手指级构建器配置。"""
+    r"""手指级构建器配置。
+
+    手指级 builder 是整个资产生成链里最关键的一层之一，因为它同时处理两套
+    关系：
+
+    1. `joint frame -> mesh frame`
+    2. `parent link frame -> child joint frame`
+
+    因此，thumb / non-thumb、全驱 / 欠驱、球关节 / 非球关节这类差异，
+    往往都会首先在这一层被结构化表达。
+    """
 
     class_type: type["Builder"] | None = None
     """关联的手指级构建器类。"""
 
     def __post_init__(self):
         if self.class_type is None:
-            self.class_type = FingerBuilder
+            self.class_type = FingerBuilder  # 默认只保留 finger 层接口，不注入算法
 
 
 @dataclass
 class PalmBuilderCfg(BuilderCfg):
-    r"""掌级构建器配置。"""
+    r"""掌级构建器配置。
+
+    Palm 不只是一个“大块碰撞体”，也是所有 finger mount 的基座参考系。
+    因此 palm frame 的原点、朝向、尺寸语义，都会直接影响 hand 级装配。
+    """
 
     class_type: type["Builder"] | None = None
     """关联的掌级构建器类。"""
@@ -88,16 +122,38 @@ class PalmBuilderCfg(BuilderCfg):
 
     def __post_init__(self):
         if self.class_type is None:
-            self.class_type = PalmBuilder
+            self.class_type = PalmBuilder  # palm 层默认入口
 
 
 @dataclass
 class HandBuilderCfg(BuilderCfg):
     r"""手级构建器配置。
 
-    这里当前只保留最薄的手级入口。后续若你需要把“自定义人为形状”
-    “allegro-like / leap-like / mixed-like”这类参数显式写进来，就在
-    这个配置对象上继续扩展，而不是让我先替你预设一套默认语义。
+    HandBuilder 的核心职责是**装配**：接收一个 palm builder cfg 和若干
+    finger builder cfgs，分别调用对应的 builder 生成 PalmCfg / FingerCfg，
+    再组装成 HandCfg。
+
+    本类只承载"装配所需的声明式参数"，不承载具体的几何算法——
+    那些由 PalmBuilderCfg / FingerBuilderCfg 的子类各自负责。
+    """
+
+    name: str = "hand"
+    """手资产名称。"""
+
+    family: str = "generic"
+    """手族标签，例如 ``"leap"``、``"allegro"`` 或 ``"generic"``。
+
+    这里的 `family` 更偏向 provenance / 研究分组标签，而不是严格的运行时
+    分发键。真正的构建逻辑仍由 palm/finger 子 cfg 自己决定。
+    """
+
+    palm_cfg: "PalmBuilderCfg | None" = None
+    """掌部构建器配置。
+
+    子类可使用：
+
+    - `SinglePalmBuilderCfg`：连续参数化 palm
+    - `ComPalmBuilderCfg`：复合 preset palm
     """
 
     class_type: type["Builder"] | None = None
@@ -105,7 +161,7 @@ class HandBuilderCfg(BuilderCfg):
 
     def __post_init__(self):
         if self.class_type is None:
-            self.class_type = HandBuilder
+            self.class_type = HandBuilder  # 默认只保留整手装配入口
 
 
 class Builder:
@@ -118,7 +174,7 @@ class Builder:
     cfg: BuilderCfg
 
     def __init__(self, cfg: BuilderCfg):
-        self.cfg = cfg
+        self.cfg = cfg  # 运行时 builder 显式持有声明式 cfg，便于调试与追溯
 
     def build(self) -> AssetCfgBase:
         r"""构建一个资产配置对象。
@@ -142,7 +198,7 @@ class JointBuilder(Builder):  # TODO:预计打算Primitive / Custom子类，然�
     """
 
     def __init__(self, cfg: JointBuilderCfg):
-        super().__init__(cfg)
+        super().__init__(cfg)  # 当前这里只保留 joint 级统一入口
 
     def build(self) -> JointCfg:
         r"""构建一个 `JointCfg`。
@@ -165,7 +221,7 @@ class FingerBuilder(Builder):
     """
 
     def __init__(self, cfg: FingerBuilderCfg):
-        super().__init__(cfg)
+        super().__init__(cfg)  # finger 级真实算法由更细的子类承担
 
     def build(self) -> FingerCfg:
         r"""构建一个 `FingerCfg`。
@@ -188,7 +244,7 @@ class PalmBuilder(Builder):
     """
 
     def __init__(self, cfg: PalmBuilderCfg):
-        super().__init__(cfg)
+        super().__init__(cfg)  # palm 级真实算法由子类承担
 
     def build(self) -> PalmCfg:
         r"""构建一个 `PalmCfg`。
@@ -206,13 +262,12 @@ class PalmBuilder(Builder):
 class HandBuilder(Builder):
     r"""手级构建器。
 
-    预期职责是：在更高层组合 palm 与 fingers，形成整手 `HandCfg`。
-    当前不再默认补 inertial、不再默认拼装一只可运行的 hand，也不再
-    预设任何 allegro / leap / mixed 的具体生成逻辑。
+    职责是**装配**：分别调用 PalmBuilder 和 FingerBuilder 产出配件，
+    再组合成 HandCfg。不负责自己生成几何——那是子 builder 的事。
     """
 
     def __init__(self, cfg: HandBuilderCfg):
-        super().__init__(cfg)
+        super().__init__(cfg)  # hand 级只做装配，不抢下层几何职责
 
     def build(self) -> HandCfg:
         r"""构建一个 `HandCfg`。
