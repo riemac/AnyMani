@@ -1,20 +1,57 @@
-"""手部资产生成的 Validator 层空骨架。
+r"""手部资产验证层的顶层抽象合同。
 
-本文件只保留你主导的验证器框架，不再默认内置验证规则。尤其是：
+本文件与 `asset_generator.py` / `asset_builders.py` 类似，主要承担两类职责：
 
-- 不再默认拒绝 mimic joint
-- 不再默认把 `HandCfg.validate()` 包装成运行时流程
-- 不再替你预设“物理合理性”具体由哪些规则组成
+- 定义共享的验证报告对象与基类合同；
+- 作为兼容入口 re-export joint / finger / palm / hand 四层验证器。
 
-这里现在只负责声明：未来验证算法将被分布在 joint / finger / palm / hand
-四个层级里。
+真正的层级正文下沉到 `validator/` 子目录，避免本文件再次膨胀。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
-from .asset_base import AssetCfgBase, FingerCfg, HandCfg, JointCfg, PalmCfg
+from .asset_base import AssetCfgBase
+
+
+@dataclass
+class ValidationIssue(AssetCfgBase):
+    r"""单条验证问题。
+
+    这里统一承载 fatal error / warning / info 三类问题，供 generator 后续做
+    reject、统计或研究分析。
+    """
+
+    scope: str = "hand"
+    """问题作用域，例如 `joint` / `finger` / `palm` / `hand`。"""
+
+    severity: Literal["fatal", "warning", "info"] = "fatal"
+    """问题严重级别。`fatal` 用于直接 reject，`warning/info` 用于软报告。"""
+
+    code: str = "validation.issue"
+    """问题编码。便于后续统计 reject reason 分布。"""
+
+    message: str = ""
+    """面向人阅读的诊断信息。"""
+
+    details: dict[str, Any] = field(default_factory=dict)
+    """可选的结构化补充信息，例如阈值、观测值与 lineage。"""
+
+
+@dataclass
+class ValidationReport(AssetCfgBase):
+    r"""验证报告基类。"""
+
+    target_name: str | None = None
+    """被验证对象的逻辑名称。"""
+
+    issues: list[ValidationIssue] = field(default_factory=list)
+    """按生成顺序收集的验证问题列表。"""
+
+    summary: dict[str, Any] = field(default_factory=dict)
+    """可选的汇总信息，例如通过率、统计量或表示适配分数。"""
 
 
 @dataclass
@@ -24,60 +61,15 @@ class ValidatorCfg(AssetCfgBase):
     class_type: type["Validator"] | None = None
     """关联的验证器运行时类。"""
 
-
-@dataclass
-class JointValidatorCfg(ValidatorCfg):
-    r"""关节级验证器配置。"""
-
-    class_type: type["Validator"] | None = None
-    """关联的关节级验证器类。"""
-
-    def __post_init__(self):
-        if self.class_type is None:
-            self.class_type = JointValidator
-
-
-@dataclass
-class FingerValidatorCfg(ValidatorCfg):
-    r"""手指级验证器配置。"""
-
-    class_type: type["Validator"] | None = None
-    """关联的手指级验证器类。"""
-
-    def __post_init__(self):
-        if self.class_type is None:
-            self.class_type = FingerValidator
-
-
-@dataclass
-class PalmValidatorCfg(ValidatorCfg):
-    r"""掌级验证器配置。"""
-
-    class_type: type["Validator"] | None = None
-    """关联的掌级验证器类。"""
-
-    def __post_init__(self):
-        if self.class_type is None:
-            self.class_type = PalmValidator
-
-
-@dataclass
-class HandValidatorCfg(ValidatorCfg):
-    r"""手级验证器配置。"""
-
-    class_type: type["Validator"] | None = None
-    """关联的手级验证器类。"""
-
-    def __post_init__(self):
-        if self.class_type is None:
-            self.class_type = HandValidator
+    strict: bool = True
+    """是否把 fatal invariant 视为立即中断条件。"""
 
 
 class Validator:
     r"""验证器基类。
 
-    这里的 `validate()` 只保留接口，表示“这里将来会放置物理合理性规则”，
-    但当前不替你决定任何默认规则。
+    默认合同采用“硬错误 + 软报告”双轨：fatal invariant 负责保护结构边界，
+    warning/info 则服务于研究分析与生成分布筛选。
     """
 
     cfg: ValidatorCfg
@@ -85,104 +77,50 @@ class Validator:
     def __init__(self, cfg: ValidatorCfg):
         self.cfg = cfg
 
-    def validate(self, target: AssetCfgBase) -> None:
+    def validate(self, target: AssetCfgBase) -> ValidationReport | None:
         r"""验证一个资产对象。
 
         Args:
             target (AssetCfgBase): 待验证资产。
 
-        Raises:
-            NotImplementedError: 当前只是规则入口骨架，尚未填入真实实现。
+        Returns:
+            ValidationReport | None: 当前阶段只保留报告合同，不写正式规则实现。
         """
+        pass
 
-        raise NotImplementedError("Validator 骨架已保留，但具体验证规则需后续实现。")
-
-
-class JointValidator(Validator):
-    r"""关节级验证器。"""
-
-    def __init__(self, cfg: JointValidatorCfg):
-        super().__init__(cfg)
-
-    def validate(self, target: AssetCfgBase) -> None:
-        r"""验证一个 `JointCfg`。
-
-        Args:
-            target (AssetCfgBase): 待验证资产，预期应为 `JointCfg`。
-
-        Raises:
-            NotImplementedError: joint-level 验证规则尚未实现。
-        """
-
-        raise NotImplementedError("JointValidator 目前只保留骨架，等待 joint-level 规则实现。")
+        # TODO:算法之一（通用验证合同）
+        # ────────────────────────────────────────
+        # 输入：任意实现了 `AssetCfgBase` 的资产对象。
+        # 输出：`ValidationReport`，其中 `fatal` 用于 reject，`warning/info` 用于软诊断。
+        #
+        # ── 类型守卫 ──
+        #   1. 检查 `target` 是否属于当前验证器所覆盖的层级。
+        #   2. 若不匹配，则在正式实现阶段生成一条 `fatal` 级别的问题。
+        #
+        # ── 规则执行 ──
+        #   1. 先跑 schema / topological invariant 这类硬边界。
+        #   2. 再补充几何、物理、表征适配等软评估项。
+        #
+        # IDEA：顶层 `Validator` 只定义“问题对象长什么样”，不定义任何手型专属规则。
 
 
-class FingerValidator(Validator):
-    r"""手指级验证器。"""
-
-    def __init__(self, cfg: FingerValidatorCfg):
-        super().__init__(cfg)
-
-    def validate(self, target: AssetCfgBase) -> None:
-        r"""验证一个 `FingerCfg`。
-
-        Args:
-            target (AssetCfgBase): 待验证资产，预期应为 `FingerCfg`。
-
-        Raises:
-            NotImplementedError: finger-level 验证规则尚未实现。
-        """
-
-        raise NotImplementedError("FingerValidator 目前只保留骨架，等待 finger-level 规则实现。")
-
-
-class PalmValidator(Validator):
-    r"""掌级验证器。"""
-
-    def __init__(self, cfg: PalmValidatorCfg):
-        super().__init__(cfg)
-
-    def validate(self, target: AssetCfgBase) -> None:
-        r"""验证一个 `PalmCfg`。
-
-        Args:
-            target (AssetCfgBase): 待验证资产，预期应为 `PalmCfg`。
-
-        Raises:
-            NotImplementedError: palm-level 验证规则尚未实现。
-        """
-
-        raise NotImplementedError("PalmValidator 目前只保留骨架，等待 palm-level 规则实现。")
-
-
-class HandValidator(Validator):
-    r"""手级验证器。"""
-
-    def __init__(self, cfg: HandValidatorCfg):
-        super().__init__(cfg)
-
-    def validate(self, target: AssetCfgBase) -> None:
-        r"""验证一个 `HandCfg`。
-
-        Args:
-            target (AssetCfgBase): 待验证资产，预期应为 `HandCfg`。
-
-        Raises:
-            NotImplementedError: hand-level 验证规则尚未实现。
-        """
-
-        raise NotImplementedError("HandValidator 目前只保留骨架，等待 hand-level 规则实现。")
+from .validator.finger_validators import FingerValidator, FingerValidatorCfg
+from .validator.hand_validators import HandValidator, HandValidatorCfg
+from .validator.joint_validators import JointValidator, JointValidatorCfg
+from .validator.palm_validators import PalmValidator, PalmValidatorCfg
 
 
 __all__ = [
+    "ValidationIssue",
+    "ValidationReport",
     "ValidatorCfg",
-    "JointValidatorCfg",
-    "FingerValidatorCfg",
-    "PalmValidatorCfg",
-    "HandValidatorCfg",
     "Validator",
+    "JointValidatorCfg",
     "JointValidator",
+    "FingerValidatorCfg",
     "FingerValidator",
+    "PalmValidatorCfg",
     "PalmValidator",
+    "HandValidatorCfg",
     "HandValidator",
 ]
