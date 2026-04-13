@@ -96,6 +96,7 @@ def resolve_finger_slot_builder_cfg(raw: Any) -> Any:
 def resolve_human_like_mounts(
     *,
     family: str | None,
+    handedness: str | None,
     palm_cfg: Any,
     mount_preset: str | None = None,
     mounts: dict[str, Any] | None = None,
@@ -119,7 +120,7 @@ def resolve_human_like_mounts(
     resolved_from_preset: dict[str, PoseCfg] = {}
     for preset_name in candidate_names:
         try:
-            resolved_from_preset = get_mount_preset(preset_name)
+            resolved_from_preset = get_mount_preset(preset_name, handedness=handedness or "right")
             break
         except KeyError:
             continue
@@ -141,6 +142,7 @@ def resolve_human_like_builder_kwargs(raw: dict[str, Any]) -> dict[str, Any]:
     mount_preset = data.pop("mount_preset", None)
     data["mounts"] = resolve_human_like_mounts(
         family=data.get("family"),
+        handedness=data.get("handedness"),
         palm_cfg=data.get("palm_cfg"),
         mount_preset=mount_preset,
         mounts=data.get("mounts"),

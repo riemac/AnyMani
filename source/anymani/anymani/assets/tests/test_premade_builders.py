@@ -159,3 +159,65 @@ def test_human_like_hand_builder_assembles_allegro_hand():
     assert hand.dof_count == 16
     # index 的挂载点来自 Allegro mount preset，而不是零位 fallback。
     assert math.isclose(hand.fingers[0].mount.pos[1], 0.0435, rel_tol=0.0, abs_tol=1e-6)
+
+
+def test_single_box_allegro_uses_explicit_single_palm_mount_preset():
+    """single_box_allegro 不应再误复用 real Allegro mount preset。"""
+
+    hand = HumanLikeHandBuilder(
+        make_human_like_builder_cfg(
+            name="single_box_allegro_demo",
+            family="allegro",
+            handedness="right",
+            palm_cfg="single_box_allegro",
+            finger_cfg="allegro_non_thumb_v1",
+            thumb_cfg="allegro_thumb_v1",
+        )
+    ).build()
+
+    index = next(finger for finger in hand.fingers if finger.name == "index")
+    thumb = next(finger for finger in hand.fingers if finger.name == "thumb")
+
+    assert math.isclose(index.mount.pos[0], 0.044, rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(index.mount.pos[1], 0.0944, rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(index.mount.pos[2], 0.009, rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(index.mount.rpy[2], math.radians(-5.0), rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(thumb.mount.pos[0], 0.0245, rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(thumb.mount.rpy[2], -math.pi / 2.0, rel_tol=0.0, abs_tol=1e-6)
+
+
+def test_single_box_mount_preset_mirrors_left_thumb_only():
+    """single-box 左手当前只对 thumb 做显式镜像，non-thumb 保持不动。"""
+
+    right = HumanLikeHandBuilder(
+        make_human_like_builder_cfg(
+            name="single_box_leap_right",
+            family="leap",
+            handedness="right",
+            palm_cfg="single_box_leap",
+            finger_cfg="leap_non_thumb_v1",
+            thumb_cfg="leap_thumb_v1",
+        )
+    ).build()
+    left = HumanLikeHandBuilder(
+        make_human_like_builder_cfg(
+            name="single_box_leap_left",
+            family="leap",
+            handedness="left",
+            palm_cfg="single_box_leap",
+            finger_cfg="leap_non_thumb_v1",
+            thumb_cfg="leap_thumb_v1",
+        )
+    ).build()
+
+    right_index = next(finger for finger in right.fingers if finger.name == "index")
+    left_index = next(finger for finger in left.fingers if finger.name == "index")
+    right_thumb = next(finger for finger in right.fingers if finger.name == "thumb")
+    left_thumb = next(finger for finger in left.fingers if finger.name == "thumb")
+
+    assert left_index.mount.pos == right_index.mount.pos
+    assert left_index.mount.rpy == right_index.mount.rpy
+    assert math.isclose(left_thumb.mount.pos[0], -right_thumb.mount.pos[0], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_thumb.mount.pos[1], right_thumb.mount.pos[1], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_thumb.mount.pos[2], right_thumb.mount.pos[2], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_thumb.mount.rpy[2], -right_thumb.mount.rpy[2], rel_tol=0.0, abs_tol=1e-6)

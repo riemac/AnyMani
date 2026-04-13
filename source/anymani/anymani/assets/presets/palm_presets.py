@@ -15,24 +15,32 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
+from .units import cm
+
 if TYPE_CHECKING:
     from ..builder.palm_builders import ComPalmBuilderCfg, SinglePalmBuilderCfg
 
 
 ALLEGRO_SINGLE_PALM_BOX_PRESET: dict[str, Any] = {
+    "mount_preset": "single_box_allegro",
     "shape": "box",
-    "width": 0.112,
-    "length": 0.0944,
-    "height": 0.042,
+    "width": cm(11.2),
+    "length": cm(9.44),
+    "height": cm(4.2),
 }
-"""Allegro 单体 box palm 的参数锚点。"""
+"""Allegro 单体 box palm 的参数锚点。
+
+这里显式把 `mount_preset` 一起记录下来，避免 single-box palm 的挂载语义
+再散落到 hand-level resolver 里隐式猜测。
+"""
 
 
 LEAP_SINGLE_PALM_BOX_PRESET: dict[str, Any] = {
+    "mount_preset": "single_box_leap",
     "shape": "box",
-    "width": 0.12,
-    "length": 0.08,
-    "height": 0.046,
+    "width": cm(12.0),
+    "length": cm(8.0),
+    "height": cm(4.6),
 }
 """LEAP 单体 box palm 的参数锚点。"""
 
@@ -95,7 +103,21 @@ def get_single_palm_box_preset(name: str) -> "SinglePalmBuilderCfg":
         payload = deepcopy(single_preset_registry[name])
     except KeyError as exc:
         raise KeyError(f"Unknown single palm box preset: {name!r}") from exc
+    payload.pop("mount_preset", None)
     return SinglePalmBuilderCfg(**payload)
+
+
+def get_single_palm_box_preset_data(name: str) -> dict[str, Any]:
+    r"""按名字返回一份单一 box palm 的原始 preset 数据副本。"""
+
+    single_preset_registry = {
+        "allegro": ALLEGRO_SINGLE_PALM_BOX_PRESET,
+        "leap": LEAP_SINGLE_PALM_BOX_PRESET,
+    }
+    try:
+        return deepcopy(single_preset_registry[name])
+    except KeyError as exc:
+        raise KeyError(f"Unknown single palm box preset data: {name!r}") from exc
 
 
 def get_com_palm_preset(name: str) -> "ComPalmBuilderCfg":
@@ -132,6 +154,7 @@ __all__ = [
     "COM_PALM_PRESET_DATA",
     "PALM_PRESET_REGISTRY",
     "get_single_palm_box_preset",
+    "get_single_palm_box_preset_data",
     "get_com_palm_preset",
     "get_com_palm_preset_data",
 ]

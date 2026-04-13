@@ -13,20 +13,23 @@ r"""向后兼容的 re-export 桩（已拆分到 generator/exporter/ 子包）�
 """
 
 from .exporter._base import ExportResult, ExporterBase
+from .exporter.finger_exporter import FingerExporter, FingerExporterCfg
 from .exporter.hand_exporter import HandExporter, HandExporterCfg
+from .exporter.joint_exporter import JointExporter, JointExporterCfg
+from .exporter.palm_exporter import PalmExporter, PalmExporterCfg
 from .exporter.sidecar import SidecarCfg, SidecarExporter
 from .exporter.urdf_writer import UrdfWriter, UrdfWriterCfg
 
 # 旧接口别名（向后兼容）
 Exporter = ExporterBase
-JointExporter = ExporterBase   # 未单独实现，保留占位
-FingerExporter = ExporterBase  # 未单独实现，保留占位
-PalmExporter = ExporterBase    # 未单独实现，保留占位
 
 __all__ = [
     "ExportResult",
     "ExporterBase",
     "Exporter",
+    "JointExporterCfg",
+    "FingerExporterCfg",
+    "PalmExporterCfg",
     "UrdfWriterCfg",
     "UrdfWriter",
     "SidecarCfg",
