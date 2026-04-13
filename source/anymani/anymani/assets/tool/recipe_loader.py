@@ -61,19 +61,7 @@ from typing import Any
 
 import yaml
 
-from ..builder.finger_buiders import (
-    AllegroFingerBuilderCfg,
-    LeapFingerBuilderCfg,
-    RegularThumbBuilderCfg,
-    get_finger_builder_preset,
-)
-from ..builder.hand_builders import GripperLikeHandBuilderCfg, HumanLikeHandBuilderCfg
-from ..builder.palm_builders import (
-    ComPalmBuilderCfg,
-    SinglePalmBuilderCfg,
-    get_com_palm_preset,
-    get_single_palm_box_preset,
-)
+from ..builder.hand_builders import GripperLikeHandBuilderCfg
 from ..exporter.hand_exporter import HandExporterCfg
 from ..exporter.sidecar import SidecarCfg
 from ..exporter.urdf_writer import UrdfWriterCfg
@@ -87,6 +75,7 @@ from ..generator.mutate import (
     MountPerturbCfg,
     TipReplaceCfg,
 )
+from ..presets import make_human_like_builder_cfg
 from ..validator.finger_rules import FingerValidatorCfg
 from ..validator.hand_rules import HandValidatorCfg
 from ..validator.joint_rules import JointValidatorCfg
@@ -275,93 +264,12 @@ def _build_made_cfg(raw: dict[str, Any]) -> Any:
     """
 
     data = deepcopy(raw)
-    if "palm_cfg" in data:
-        data["palm_cfg"] = _build_palm_cfg(data["palm_cfg"])
-    if "finger_cfg" in data:
-        data["finger_cfg"] = _build_finger_slot_cfg(data["finger_cfg"])
-    if "thumb_cfg" in data:
-        data["thumb_cfg"] = _build_finger_cfg(data["thumb_cfg"])
-
     builder_type = data.pop("builder_type", "human_like")
     if builder_type == "gripper_like":
         return GripperLikeHandBuilderCfg(**data)
     if builder_type != "human_like":
         raise ValueError(f"Unsupported builder_type: {builder_type!r}")
-    return HumanLikeHandBuilderCfg(**data)
-
-
-def _build_palm_cfg(raw: Any) -> Any:
-    r"""构造 palm builder cfg。
-
-    palm 当前支持两类声明风格：
-
-    1. preset 字符串：如 `com_allegro`、`single_box_leap`
-    2. 直接 dict：由字段形状推断是 `ComPalmBuilderCfg` 还是 `SinglePalmBuilderCfg`
-    """
-
-    if isinstance(raw, (ComPalmBuilderCfg, SinglePalmBuilderCfg)):
-        return raw
-    if isinstance(raw, str):
-        if raw.startswith("com_"):
-            return get_com_palm_preset(raw.removeprefix("com_"))
-        if raw.startswith("single_box_"):
-            return get_single_palm_box_preset(raw.removeprefix("single_box_"))
-        raise ValueError(f"Unsupported palm preset string: {raw!r}")
-    if not isinstance(raw, dict):
-        raise TypeError(f"Unsupported palm cfg payload: {raw!r}")
-    if "preset" in raw:
-        return ComPalmBuilderCfg(**raw)
-    return SinglePalmBuilderCfg(**raw)
-
-
-def _build_finger_slot_cfg(raw: Any) -> Any:
-    r"""构造非拇指 finger 槽位配置。
-
-    `HumanLikeHandBuilderCfg.finger_cfg` 有两层语义：
-
-    1. 一份共享 finger cfg：所有非拇指共用
-    2. 一个按 slot 分配的 dict：如 `index/middle/ring/little` 各自独立
-
-    因此这里必须先判断传入 dict 是“单个 cfg 描述”还是“按 finger 名分配的映射”。
-    """
-
-    if isinstance(raw, dict):
-        slot_names = {"index", "middle", "ring", "little"}
-        # 这里不再用“是否长得像 cfg 字段集合”来猜，因为 dump 后的 cfg 会携带
-        # `_mesh_offsets_6d` 这类内部规范化字段；若继续做负向猜测，round-trip
-        # 时就会把单个 finger cfg 误判成“按手指槽位分配的映射”。
-        if raw and set(raw).issubset(slot_names):
-            return {name: _build_finger_cfg(cfg) for name, cfg in raw.items()}
-    return _build_finger_cfg(raw)
-
-
-def _build_finger_cfg(raw: Any) -> Any:
-    r"""构造 regular finger cfg。
-
-    当前首轮优先支持两种输入：
-
-    1. preset 字符串：最稳，也是最符合现在 pre-made slice 的入口
-    2. 直接 cfg dict：通过字段特征推断 thumb / leap / allegro
-    """
-
-    if isinstance(raw, (AllegroFingerBuilderCfg, LeapFingerBuilderCfg, RegularThumbBuilderCfg)):
-        return raw
-    if isinstance(raw, str):
-        return get_finger_builder_preset(raw)
-    if not isinstance(raw, dict):
-        raise TypeError(f"Unsupported finger cfg payload: {raw!r}")
-
-    data = deepcopy(raw)
-    preset_name = data.pop("preset_name", data.pop("preset", None))
-    if isinstance(preset_name, str):
-        return get_finger_builder_preset(preset_name).replace(**data)
-
-    thumb_keys = {"lengths", "cmc1_width", "cmc1_height", "cmc1_offset", "non_cmc1_offset"}
-    if thumb_keys & set(data):
-        return RegularThumbBuilderCfg(**data)
-    if "fixed_part" in data:
-        return LeapFingerBuilderCfg(**data)
-    return AllegroFingerBuilderCfg(**data)
+    return make_human_like_builder_cfg(**data)
 
 
 def _dump_value(value: Any) -> Any:

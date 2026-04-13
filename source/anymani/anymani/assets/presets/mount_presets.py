@@ -1,17 +1,10 @@
-r"""hand-level 挂载点 preset 的共享定义。
+"""hand-level mount preset。
 
-本模块把原先散落在 `hand_builders.py` 里的 mount preset 提取出来，变成
-builder 子目录内可复用的共享常量与查询函数。这样做的直接原因不是“为了抽象”，
-而是当前已经有两处 builder 需要消费同一份 hand-level mount 语义：
+这一层表达的是“finger 根部相对于 palm frame 的挂载位姿”。
+它与 finger/palm 自身几何是不同层级的信息，因此应独立存放。
 
-1. `hand_builders.py`
-   - 在装配阶段决定每根 finger 的最终 `mount`
-2. `palm_builders.py`
-   - 在复合 palm preset 的 metadata 中记录 `finger_mounts`
-
-若继续把 preset 只写在 `hand_builders.py`，`palm_builders.py` 就只能通过
-不存在的私有模块导入，最终在测试收集阶段直接炸掉。把它提出来之后，
-pre-made 主链的 mount 语义就重新收敛到了单一来源。
+把 mount preset 从 builder 子目录挪出来之后，hand 装配层和 palm preset 层
+都可以引用同一份 mount 语义，而不会再制造“某个 builder 私藏一份挂载字典”的耦合。
 """
 
 from __future__ import annotations
@@ -25,12 +18,7 @@ ALLEGRO_MOUNT_PRESET: dict[str, PoseCfg] = {
     "ring": PoseCfg(pos=(0.0, -0.0435, -0.001542), rpy=(0.0873, 0.0, 0.0)),
     "thumb": PoseCfg(pos=(-0.0182, 0.019333, -0.045987), rpy=(0.0, -1.6581, -1.5708)),
 }
-"""Allegro 挂载点 preset。
-
-这些值表达的是 Allegro 风格 hand 中：
-- index / middle / ring 在 palm 顶缘的挂载位姿
-- thumb 在 palm 侧前方的挂载位姿
-"""
+"""Allegro 挂载点 preset。"""
 
 
 LEAP_MOUNT_PRESET: dict[str, PoseCfg] = {
@@ -52,16 +40,17 @@ MOUNT_PRESET_REGISTRY: dict[str, dict[str, PoseCfg]] = {
 }
 """挂载点 preset 注册表。
 
-这里显式同时支持：
+这里显式同时保留：
+
 - family 名
 - palm recipe 名
 
-这样 single palm 和 com palm 都可以走同一个 hand-level mount preset 入口。
+这样 hand-level 的 mount 解析就不需要再知道“某个别名最终对应哪个 family”。
 """
 
 
 def get_mount_preset(name: str) -> dict[str, PoseCfg]:
-    r"""按名字返回一份挂载点 preset 副本。"""
+    r"""按名字返回一份 mount preset 副本。"""
 
     try:
         preset = MOUNT_PRESET_REGISTRY[name]

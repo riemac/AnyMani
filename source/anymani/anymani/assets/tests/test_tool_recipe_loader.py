@@ -30,6 +30,7 @@ from assets.builder.hand_builders import HumanLikeHandBuilderCfg
 from assets.builder.palm_builders import ComPalmBuilderCfg
 from assets.exporter.hand_exporter import HandExporterCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
+from assets.presets import make_human_like_builder_cfg
 from assets.tool.recipe_loader import RecipeLoader
 from assets.validator.hand_rules import HandValidatorCfg
 
@@ -102,11 +103,11 @@ def test_recipe_loader_save_and_load_round_trip_keeps_current_contract(tmp_path)
         mode="full",
         artifact_level="bundle",
         output_dir=tmp_path / "generated",
-        Made=HumanLikeHandBuilderCfg(
+        Made=make_human_like_builder_cfg(
             name="allegro_round_trip",
             family="allegro",
             handedness="right",
-            palm_cfg=ComPalmBuilderCfg(preset="allegro"),
+            palm_cfg="com_allegro",
             finger_cfg="allegro_non_thumb_v1",
             thumb_cfg="allegro_thumb_v1",
         ),

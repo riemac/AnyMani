@@ -32,13 +32,7 @@ from typing import Literal
 from ..asset_base import HandCfg
 from ..asset_builders import FingerBuilderCfg, HandBuilder, HandBuilderCfg
 from ..asset_schema_core import PoseCfg
-from ._mount_presets import (
-    ALLEGRO_MOUNT_PRESET,
-    LEAP_MOUNT_PRESET,
-    MOUNT_PRESET_REGISTRY,
-    get_mount_preset,
-)
-from .finger_buiders import RegularFingerBuilderCfg, get_finger_builder_preset
+from .finger_buiders import RegularFingerBuilderCfg
 from .palm_builders import ComPalmBuilderCfg, SinglePalmBuilderCfg
 
 
@@ -48,6 +42,19 @@ NON_THUMB_FINGER_NAMES: tuple[str, ...] = ("index", "middle", "ring", "little") 
 def _to_pose_dict(values: dict[str, PoseCfg]) -> dict[str, PoseCfg]:
     r"""把宽松挂载点输入统一规范为 `PoseCfg` 字典。"""
     return {name: PoseCfg.from_value(value) for name, value in values.items()}  # 兼容 tuple / dict / PoseCfg
+
+
+def _ensure_resolved_finger_cfg(slot_name: str, cfg: FingerBuilderCfg | str | None) -> FingerBuilderCfg | None:
+    r"""确保 hand builder 只接收到已解析好的 finger cfg，而不是 preset 字符串。"""
+
+    if cfg is None:
+        return None
+    if isinstance(cfg, str):
+        raise TypeError(
+            f"{slot_name} must be a resolved FingerBuilderCfg, got preset string {cfg!r}. "
+            "Resolve preset names in `assets.presets` or `RecipeLoader` before constructing HumanLikeHandBuilderCfg."
+        )
+    return cfg
 
 
 @dataclass
@@ -65,20 +72,17 @@ class HumanLikeHandBuilderCfg(HandBuilderCfg):
 
     class_type: type["HumanLikeHandBuilder"] | None = None
     handedness: Literal["left", "right"] = "right"  # 当前先显式区分左右手
-    finger_cfg: FingerBuilderCfg | str | dict[str, FingerBuilderCfg | str] | None = None  # 非拇指配置，可共享、可分指、可直接写 preset 名
-    thumb_cfg: FingerBuilderCfg | str | None = None  # 拇指配置，也允许直接写 preset 名
+    finger_cfg: FingerBuilderCfg | dict[str, FingerBuilderCfg] | None = None  # 非拇指配置：builder 层只接受已解析 cfg
+    thumb_cfg: FingerBuilderCfg | None = None  # 拇指配置：preset 解析必须在更上层完成
     num_non_thumb: int = 3  # 默认 index/middle/ring 三根非拇指
-    mount_preset: str | None = None  # 显式挂载点 preset 名；优先于自动推断
-    mounts: dict[str, PoseCfg] = field(default_factory=dict)  # 显式挂载点覆盖
+    mounts: dict[str, PoseCfg] = field(default_factory=dict)  # 显式挂载点覆盖；preset 解析应已在 preset/recipe 层完成
 
     def __post_init__(self):
         super().__post_init__()
         self.mounts = _to_pose_dict(self.mounts)  # 显式 mount 一律先规约到标准 PoseCfg
-        if isinstance(self.finger_cfg, str):
-            self.finger_cfg = get_finger_builder_preset(self.finger_cfg)  # 允许直接写 preset 名
         if isinstance(self.finger_cfg, dict):
             self.finger_cfg = {
-                name: get_finger_builder_preset(cfg) if isinstance(cfg, str) else cfg
+                name: _ensure_resolved_finger_cfg(f"finger_cfg[{name!r}]", cfg)
                 for name, cfg in self.finger_cfg.items()
             }
             invalid = set(self.finger_cfg) - set(NON_THUMB_FINGER_NAMES)
@@ -87,8 +91,9 @@ class HumanLikeHandBuilderCfg(HandBuilderCfg):
             self.num_non_thumb = len(self.finger_cfg)  # 字典模式下非拇指数由键数决定
         elif self.finger_cfg is not None and not 1 <= self.num_non_thumb <= len(NON_THUMB_FINGER_NAMES):
             raise ValueError(f"num_non_thumb must be in [1, {len(NON_THUMB_FINGER_NAMES)}]")
-        if isinstance(self.thumb_cfg, str):
-            self.thumb_cfg = get_finger_builder_preset(self.thumb_cfg)  # 拇指也允许直接写 preset 名
+        else:
+            self.finger_cfg = _ensure_resolved_finger_cfg("finger_cfg", self.finger_cfg)
+        self.thumb_cfg = _ensure_resolved_finger_cfg("thumb_cfg", self.thumb_cfg)
         self.class_type = HumanLikeHandBuilder  # human-like hand 统一走这个装配器
 
 
@@ -116,11 +121,11 @@ class HumanLikeHandBuilder(HandBuilder):
 
     当前装配顺序采用非常明确的优先级：
 
-    1. 显式 `cfg.mounts`
-    2. palm preset 自带的 `finger_mounts`
-    3. 参数化 fallback 挂载点
+        1. 显式 `cfg.mounts`
+        2. palm metadata 自带的 `finger_mounts`
+        3. 参数化 fallback 挂载点
 
-    之所以这样排序，是为了兼顾两条研究路径：
+        之所以这样排序，是为了兼顾两条研究路径：
 
     - 真实 hand 锚点：直接复用 preset mount
     - 参数化 hand 枚举：在没有 preset 时也能自动产出结构合理的初始手型
@@ -150,9 +155,9 @@ class HumanLikeHandBuilder(HandBuilder):
         palm_builder = self.cfg.palm_cfg.class_type(self.cfg.palm_cfg)  # palm 的具体几何由 palm builder 自己负责
         palm = palm_builder.build()  # hand-level 这里只消费已经构建好的 PalmCfg
 
-        preset_mounts = self._preset_mounts()
-        # mount 优先级：fallback < preset < 显式 cfg.mounts
-        mounts = {**self._fallback_mounts(palm), **preset_mounts, **self.cfg.mounts}  # 优先级：fallback < preset < 显式 cfg.mounts
+        metadata_mounts = self._metadata_mounts(palm)
+        # mount 优先级：fallback < palm metadata < 显式 cfg.mounts
+        mounts = {**self._fallback_mounts(palm), **metadata_mounts, **self.cfg.mounts}
 
         fingers = []
         if isinstance(self.cfg.finger_cfg, dict):
@@ -199,30 +204,19 @@ class HumanLikeHandBuilder(HandBuilder):
         finger = finger_builder.build()
         return finger.replace(name=finger_name, mount=mount, parent_link="palm")  # 最终再把 mount 写进 FingerCfg
 
-    def _preset_mounts(self) -> dict[str, PoseCfg]:
-        r"""解析 hand-level 挂载点 preset。
+    def _metadata_mounts(self, palm) -> dict[str, PoseCfg]:
+        r"""从 palm metadata 中读取显式挂载点。
 
-        优先级：
-        1. `cfg.mount_preset`
-        2. 从 palm cfg 推断
-        3. 从 hand family 推断
+        hand builder 不再负责解析任何 preset 名称；若 palm builder 或 preset 层
+        已经提供了 `finger_mounts`，这里就直接消费。
         """
 
-        if self.cfg.mount_preset is not None:
-            return get_mount_preset(self.cfg.mount_preset)  # 用户显式指定优先
-
-        palm_cfg = self.cfg.palm_cfg
-        if isinstance(palm_cfg, ComPalmBuilderCfg):
-            return get_mount_preset(f"com_{palm_cfg.preset}")  # 复合 palm 直接按 recipe 名推断
-
-        if isinstance(palm_cfg, SinglePalmBuilderCfg) and palm_cfg.shape == "box":
-            if self.cfg.family in {"allegro", "leap"}:
-                return get_mount_preset(f"single_box_{self.cfg.family}")  # 单体 box palm 按 hand family 推断
-
-        if self.cfg.family in {"allegro", "leap"}:
-            return get_mount_preset(self.cfg.family)  # 最后再退到 family 级默认挂载点
-
-        return {}
+        if not isinstance(palm.metadata, dict):
+            return {}
+        finger_mounts = palm.metadata.get("finger_mounts")
+        if not isinstance(finger_mounts, dict):
+            return {}
+        return _to_pose_dict(finger_mounts)
 
     def _fallback_mounts(self, palm) -> dict[str, PoseCfg]:
         r"""在没有显式 mount 也没有 preset mount 时，生成参数化挂载点。
@@ -280,10 +274,6 @@ class GripperLikeHandBuilder(HandBuilder):
 
 __all__ = [
     "NON_THUMB_FINGER_NAMES",
-    "ALLEGRO_MOUNT_PRESET",
-    "LEAP_MOUNT_PRESET",
-    "MOUNT_PRESET_REGISTRY",
-    "get_mount_preset",
     "HumanLikeHandBuilderCfg",
     "GripperLikeHandBuilderCfg",
     "HumanLikeHandBuilder",

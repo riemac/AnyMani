@@ -14,20 +14,19 @@ from __future__ import annotations
 import math
 import random
 
-from assets.builder.finger_buiders import get_finger_builder_preset
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
-from assets.builder.palm_builders import ComPalmBuilderCfg
 from assets.generator.mutate import LinkScaleCfg, LinkScaleMutator, TipReplaceCfg, TipReplaceMutator
+from assets.presets import get_finger_builder_preset, make_human_like_builder_cfg
 
 
 def _make_allegro_builder_cfg() -> HumanLikeHandBuilderCfg:
     """构造一份稳定的 Allegro pre-made hand recipe。"""
 
-    return HumanLikeHandBuilderCfg(
+    return make_human_like_builder_cfg(
         name="allegro_mutate_geometry_demo",
         family="allegro",
         handedness="right",
-        palm_cfg=ComPalmBuilderCfg(preset="allegro"),
+        palm_cfg="com_allegro",
         finger_cfg="allegro_non_thumb_v1",
         thumb_cfg="allegro_thumb_v1",
     )
@@ -46,11 +45,11 @@ def _build_custom_tip_hand():
         tip={"type": "mesh", "tip_type": "round"},
     )
     return HumanLikeHandBuilder(
-        HumanLikeHandBuilderCfg(
+        make_human_like_builder_cfg(
             name="leap_custom_tip_mutate_demo",
             family="leap",
             handedness="right",
-            palm_cfg=ComPalmBuilderCfg(preset="leap"),
+            palm_cfg="com_leap",
             finger_cfg=finger_cfg,
             thumb_cfg="leap_thumb_v1",
         )

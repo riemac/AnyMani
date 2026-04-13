@@ -36,7 +36,8 @@ from typing import Literal
 from ..asset_base import PalmCfg
 from ..asset_builders import PalmBuilder, PalmBuilderCfg
 from ..asset_schema_core import CollisionGeometryCfg, InertialCfg, PoseCfg, VisualGeometryCfg
-from ._mount_presets import get_mount_preset
+from ..presets.mount_presets import get_mount_preset
+from ..presets.palm_presets import get_com_palm_preset_data
 
 
 _DEFAULT_PALM_DENSITY = 700.0
@@ -332,112 +333,6 @@ class SinglePalmBuilder(PalmBuilder):
         )
 
 
-# ============================================================================
-#  Single palm preset
-# ============================================================================
-#
-# 这里不再把 single palm preset 藏在一个裸字典里，而是和 finger preset 一样，
-# 显式写成具名常量。这样读代码时可以直接看到具体数值，不会只看到一个抽象名字。
-
-# Allegro 单体 box palm preset
-ALLEGRO_SINGLE_PALM_BOX_PRESET = SinglePalmBuilderCfg(
-    shape="box",
-    width=0.112,
-    length=0.0944,
-    height=0.042,
-)
-
-# LEAP 单体 box palm preset
-LEAP_SINGLE_PALM_BOX_PRESET = SinglePalmBuilderCfg(
-    shape="box",
-    width=0.12,
-    length=0.08,
-    height=0.046,
-)
-
-
-_COM_PALM_PRESETS: dict[str, dict[str, object]] = {
-    "allegro": {
-        "collisions": [
-            {"size": (0.0414, 0.1120, 0.0448), "origin": (-0.0090, 0.0000, -0.0230)},  # palm 主体
-            {"size": (0.0414, 0.0538, 0.0428), "origin": (-0.0090, -0.0253, -0.0667)},  # 掌根后侧加厚块
-            {"size": (0.0414, 0.0720, 0.0130), "origin": (-0.0093, -0.00557, -0.08874)},  # 更薄的下层条带
-        ],
-        "inertial": {
-            "mass": 0.4154,
-            "origin": (0.0, 0.0, 0.0),
-            "inertia": {"ixx": 1.0e-4, "iyy": 1.0e-4, "izz": 1.0e-4},
-        },
-        "mount_preset": "allegro",
-    },
-    "leap": {
-        "collisions": [
-            {"size": (0.022, 0.026, 0.034), "origin": (-0.009, 0.008, -0.011)},  # 上部块
-            {"size": (0.022, 0.026, 0.034), "origin": (-0.009, -0.037, -0.011)},  # 下部块
-            {"size": (0.022, 0.026, 0.034), "origin": (-0.009, -0.082, -0.011)},
-            {"size": (0.058, 0.020, 0.046), "origin": (-0.066, -0.078, -0.0115), "rpy": (0.0, 0.0, -0.2967)},
-            {"size": (0.020, 0.120, 0.030), "origin": (-0.030, -0.035, -0.003)},
-            {"size": (0.010, 0.120, 0.020), "origin": (-0.032, -0.035, -0.024), "rpy": (0.0, 0.785, 0.0)},
-            {"size": (0.024, 0.116, 0.046), "origin": (-0.048, -0.033, -0.0115)},
-            {"size": (0.044, 0.052, 0.046), "origin": (-0.078, -0.053, -0.0115)},
-            {"size": (0.004, 0.036, 0.034), "origin": (-0.098, -0.009, -0.006)},
-            {"size": (0.044, 0.056, 0.004), "origin": (-0.078, -0.003, 0.010)},
-        ],
-        "inertial": {
-            "mass": 0.237,
-            "origin": (0.0, 0.0, 0.0),
-            "inertia": {
-                "ixx": 3.54094e-4,
-                "ixy": -1.193e-6,
-                "ixz": -2.445e-6,
-                "iyy": 2.60915e-4,
-                "iyz": -2.905e-6,
-                "izz": 5.29257e-4,
-            },
-        },
-        "mount_preset": "leap",
-    },
-}
-
-
-def get_single_palm_box_preset(name: str) -> SinglePalmBuilderCfg:
-    r"""按名字返回一份单一 box palm preset。
-
-    这组 preset 主要服务于“参数化 palm 的参考锚点”，不是为了取代
-    `ComPalmBuilder` 的真实碰撞体 preset。
-    """
-
-    single_preset_registry = {
-        "allegro": ALLEGRO_SINGLE_PALM_BOX_PRESET,
-        "leap": LEAP_SINGLE_PALM_BOX_PRESET,
-    }
-    try:
-        return single_preset_registry[name].copy()  # 返回副本，避免调用方污染模块级 preset 常量
-    except KeyError as exc:
-        raise KeyError(f"Unknown single palm box preset: {name!r}") from exc
-
-
-def get_com_palm_preset(name: str) -> ComPalmBuilderCfg:
-    r"""按名字返回一份复合 palm preset cfg。"""
-
-    if name not in _COM_PALM_PRESETS:
-        raise KeyError(f"Unknown composite palm preset: {name!r}")
-    return ComPalmBuilderCfg(preset=name)  # 复合 palm preset 直接按名字回填
-
-
-PALM_PRESET_REGISTRY = {
-    "single_box_allegro": lambda: ALLEGRO_SINGLE_PALM_BOX_PRESET.copy(),
-    "single_box_leap": lambda: LEAP_SINGLE_PALM_BOX_PRESET.copy(),
-    "com_allegro": lambda: get_com_palm_preset("allegro"),
-    "com_leap": lambda: get_com_palm_preset("leap"),
-}
-"""掌部 preset 的轻量注册表。
-
-finger / palm 两侧都保留这种显式字典，是为了让 asset generator 后续在
-“离散 preset 空间”和“连续参数空间”之间切换时有统一入口。
-"""
-
-
 class ComPalmBuilder(PalmBuilder):
     r"""复合基础几何掌部构建器。
 
@@ -461,7 +356,9 @@ class ComPalmBuilder(PalmBuilder):
             PalmCfg: 含多组 collision / visual box 的掌部描述。
         """
 
-        preset = _COM_PALM_PRESETS[self.cfg.preset]  # 真实 hand family 的复合碰撞体查表
+        # 复合 palm 的 raw recipe 已移动到 `assets.presets.palm_presets`；
+        # builder 在这里的职责，只是把那份显式数据 lower 成当前 `PalmCfg`。
+        preset = get_com_palm_preset_data(self.cfg.preset)
         collisions = [
             CollisionGeometryCfg(
                 name=f"{self.cfg.preset}_col_{index}",  # collision box 命名稳定带上 preset 前缀
@@ -500,9 +397,4 @@ __all__ = [
     "CustomPalmBuilderCfg",
     "SinglePalmBuilder",
     "ComPalmBuilder",
-    "ALLEGRO_SINGLE_PALM_BOX_PRESET",
-    "LEAP_SINGLE_PALM_BOX_PRESET",
-    "PALM_PRESET_REGISTRY",
-    "get_single_palm_box_preset",
-    "get_com_palm_preset",
 ]

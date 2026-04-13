@@ -9,10 +9,9 @@
 
 from __future__ import annotations
 
-from assets.builder.finger_buiders import get_finger_builder_preset
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.builder.joint_builders_primitive import PrimJointBuilderCfg
-from assets.builder.palm_builders import ComPalmBuilderCfg
+from assets.presets import get_finger_builder_preset, make_human_like_builder_cfg
 from assets.validator.finger_rules import FingerValidator, FingerValidatorCfg
 from assets.validator.hand_rules import HandValidator, HandValidatorCfg
 from assets.validator.joint_rules import JointValidator, JointValidatorCfg
@@ -21,11 +20,11 @@ from assets.validator.joint_rules import JointValidator, JointValidatorCfg
 def _build_allegro_hand():
     """构造一份稳定的 Allegro 整手，用于 hand-level validator 测试。"""
 
-    cfg = HumanLikeHandBuilderCfg(
+    cfg = make_human_like_builder_cfg(
         name="allegro_demo",
         family="allegro",
         handedness="right",
-        palm_cfg=ComPalmBuilderCfg(preset="allegro"),
+        palm_cfg="com_allegro",
         finger_cfg="allegro_non_thumb_v1",
         thumb_cfg="allegro_thumb_v1",
     )
@@ -107,4 +106,3 @@ def test_hand_validator_upgrades_dof_warning_to_error_in_strict_mode():
     assert any("dof" in warning for warning in relaxed.warnings)
     assert strict.passed is False
     assert any("dof" in error for error in strict.errors)
-

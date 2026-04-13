@@ -14,20 +14,20 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
-from assets.builder.palm_builders import ComPalmBuilderCfg
 from assets.exporter.urdf_writer import UrdfWriter, UrdfWriterCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
+from assets.presets import make_human_like_builder_cfg
 from assets.validator.hand_rules import HandValidator, HandValidatorCfg
 
 
 def _make_allegro_builder_cfg() -> HumanLikeHandBuilderCfg:
     """与 builder 测试共用的一份 Allegro hand recipe。"""
 
-    return HumanLikeHandBuilderCfg(
+    return make_human_like_builder_cfg(
         name="allegro_demo",
         family="allegro",
         handedness="right",
-        palm_cfg=ComPalmBuilderCfg(preset="allegro"),
+        palm_cfg="com_allegro",
         finger_cfg="allegro_non_thumb_v1",
         thumb_cfg="allegro_thumb_v1",
     )
@@ -102,4 +102,3 @@ def test_hand_generator_returns_bundle_and_exports_to_configured_directory(tmp_p
     assert result.tree_txt is not None
     assert result.tree_mermaid is not None
     assert result.urdf_path.parent.parent == tmp_path
-

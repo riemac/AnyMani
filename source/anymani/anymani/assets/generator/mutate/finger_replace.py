@@ -36,7 +36,7 @@ import random
 from typing import Literal
 
 from ...asset_base import AssetCfgBase, FingerCfg, HandCfg
-from ...builder.finger_buiders import FINGER_PRESET_REGISTRY, get_finger_builder_preset
+from ...presets import FINGER_PRESET_REGISTRY, get_finger_builder_preset
 from ._base import MutatorBase
 
 

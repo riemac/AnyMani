@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import math
 
-from assets.builder.finger_buiders import get_finger_builder_preset
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.builder.joint_builders_primitive import PrimJointBuilderCfg
 from assets.builder.palm_builders import ComPalmBuilder, ComPalmBuilderCfg, SinglePalmBuilder, SinglePalmBuilderCfg
+from assets.presets import get_finger_builder_preset, make_human_like_builder_cfg
 
 
 def _make_allegro_hand_cfg() -> HumanLikeHandBuilderCfg:
@@ -33,11 +33,11 @@ def _make_allegro_hand_cfg() -> HumanLikeHandBuilderCfg:
     一次性串起来，作为首轮纵向闭环的最小锚点。
     """
 
-    return HumanLikeHandBuilderCfg(
+    return make_human_like_builder_cfg(
         name="allegro_demo",
         family="allegro",
         handedness="right",
-        palm_cfg=ComPalmBuilderCfg(preset="allegro"),
+        palm_cfg="com_allegro",
         finger_cfg="allegro_non_thumb_v1",
         thumb_cfg="allegro_thumb_v1",
     )
@@ -159,4 +159,3 @@ def test_human_like_hand_builder_assembles_allegro_hand():
     assert hand.dof_count == 16
     # index 的挂载点来自 Allegro mount preset，而不是零位 fallback。
     assert math.isclose(hand.fingers[0].mount.pos[1], 0.0435, rel_tol=0.0, abs_tol=1e-6)
-

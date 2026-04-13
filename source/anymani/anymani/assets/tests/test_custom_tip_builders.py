@@ -15,11 +15,10 @@ from __future__ import annotations
 
 import math
 
-from assets.builder.finger_buiders import get_finger_builder_preset
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.builder.joint_builders_custom import CustomTipBuilderCfg
-from assets.builder.palm_builders import ComPalmBuilderCfg
 from assets.exporter.urdf_writer import UrdfWriter, UrdfWriterCfg
+from assets.presets import get_finger_builder_preset, make_human_like_builder_cfg
 
 
 def test_custom_tip_builder_builds_round_mesh_tip_with_anchor_alignment():
@@ -74,11 +73,11 @@ def test_urdf_writer_serializes_custom_tip_mesh_for_human_like_hand():
         tip={"type": "mesh", "tip_type": "leap_cube"},
     )
     hand = HumanLikeHandBuilder(
-        HumanLikeHandBuilderCfg(
+        make_human_like_builder_cfg(
             name="leap_custom_tip_demo",
             family="leap",
             handedness="right",
-            palm_cfg=ComPalmBuilderCfg(preset="leap"),
+            palm_cfg="com_leap",
             finger_cfg=finger_cfg,
             thumb_cfg="leap_thumb_v1",
         )

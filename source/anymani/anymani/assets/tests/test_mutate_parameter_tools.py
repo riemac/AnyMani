@@ -18,19 +18,19 @@ import math
 import random
 
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
-from assets.builder.palm_builders import ComPalmBuilderCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from assets.generator.mutate import HandMutator, HandMutatorCfg, LimitTweakCfg, LimitTweakMutator, MountPerturbCfg, MountPerturbMutator
+from assets.presets import make_human_like_builder_cfg
 
 
 def _make_allegro_builder_cfg() -> HumanLikeHandBuilderCfg:
     """构造一份稳定的 Allegro pre-made hand recipe。"""
 
-    return HumanLikeHandBuilderCfg(
+    return make_human_like_builder_cfg(
         name="allegro_mutate_demo",
         family="allegro",
         handedness="right",
-        palm_cfg=ComPalmBuilderCfg(preset="allegro"),
+        palm_cfg="com_allegro",
         finger_cfg="allegro_non_thumb_v1",
         thumb_cfg="allegro_thumb_v1",
     )
