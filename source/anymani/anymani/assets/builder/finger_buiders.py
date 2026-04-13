@@ -83,7 +83,7 @@ def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
     tip_type = str(tip.get("type", tip.get("kind", "cs"))).lower()  # 兼容历史 `kind=` 写法
     normalized: dict[str, Any] = {"type": tip_type}
     if tip_type == "cs":
-        normalized["radius"] = _to_si(tip.get("radius", 0.012))
+        normalized["radius"] = _to_si(tip.get("radius", 0.012))  # builder 侧裸值统一按 m；`cm(...)` 已在上游转成 m
         normalized["height"] = _to_si(tip.get("height", 0.01))
     elif tip_type == "bs":
         normalized["radius"] = _to_si(tip.get("radius", 0.012))
@@ -263,10 +263,24 @@ class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
     这样做是为了保留“规整块体”和“圆柱近似”两条 regular finger 路线。
     """
 
-    length: list[float] = field(default_factory=lambda: [1.8, 5.4, 3.8, 2.2])
+    length: list[float] = field(default_factory=lambda: [0.018, 0.054, 0.038, 0.022])
     """各段 joint mesh 沿 finger 生长方向的长度列表。
 
-    默认值对应你原始 TODO 里的 Allegro 非拇指四段经验长度：
+    builder 侧标准输入是 SI(m)，因此默认值直接写成：
+
+    $$
+    l=(0.018, 0.054, 0.038, 0.022)\text{m}.
+    $$
+
+    它与原始科研锚点
+
+    $$
+    l=(1.8, 5.4, 3.8, 2.2)\text{cm}
+    $$
+
+    完全等价，只是把单位表达显式切换到了 SI。
+
+    原始 TODO 里的 Allegro 非拇指四段经验长度为：
 
     $$
     l=(1.8, 5.4, 3.8, 2.2)\text{cm}.
@@ -279,16 +293,16 @@ class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
 
     def __post_init__(self):
         lengths = [_to_si(value) for value in self.length[: self.num_joints]]  # 长度列表 $l_i$
-        width = _to_si(self.width or 2.7)  # Allegro 非拇指默认宽度 $w=2.7$cm
-        height = _to_si(self.height or 2.0)  # Allegro 非拇指默认高度 $h=2.0$cm
+        width = _to_si(self.width or 0.027)  # Allegro 非拇指默认宽度 $w=0.027\text{m}=2.7\text{cm}$
+        height = _to_si(self.height or 0.020)  # Allegro 非拇指默认高度 $h=0.020\text{m}=2.0\text{cm}$
         radius = _to_si(self.radius) if self.radius is not None else None  # 若显式给半径，则允许切到 cylinder 路线
-        defaults = _normalize_pose_list([0.0, 0.0, -0.6, 0.0][: self.num_joints], count=self.num_joints, field_name="allegro_default_offsets")
+        defaults = _normalize_pose_list([0.0, 0.0, -0.006, 0.0][: self.num_joints], count=self.num_joints, field_name="allegro_default_offsets")
         merged_offsets = self.mesh_offsets or defaults  # 默认只保留第三段负向 $y$ 偏移，对应原始 TODO 中的末段重叠近似
         self.mesh_offsets = merged_offsets
         if not self.axes:
             self.axes = [(0.0, 1.0, 0.0)] + [(1.0, 0.0, 0.0)] * max(self.num_joints - 1, 0)  # 0 号绕 $y$，其余近似绕 $x$
         if not self.tip:
-            self.tip = {"type": "cs", "radius": 1.2, "height": 1.0}  # 默认圆柱+半球指尖
+            self.tip = {"type": "cs", "radius": 0.012, "height": 0.010}  # 默认圆柱+半球指尖，标准输入单位为 m
         if not self.mesh_shape:
             builder = _build_cylinder_mesh if radius is not None and self.width is None and self.height is None else _build_box_mesh
             self.mesh_shape = [
@@ -334,7 +348,7 @@ class LeapFingerBuilderCfg(RegularFingerBuilderCfg):
     family 的参数空间过早锁死。
     """
 
-    length: list[float] = field(default_factory=lambda: [3.9, 1.5, 3.6, 2.0])
+    length: list[float] = field(default_factory=lambda: [0.039, 0.015, 0.036, 0.020])
     """各段 joint mesh 沿 finger 生长方向的长度列表。
 
     默认值对应你原始 TODO 里 LEAP 非拇指的第一版简化近似：
@@ -355,16 +369,16 @@ class LeapFingerBuilderCfg(RegularFingerBuilderCfg):
 
     def __post_init__(self):
         lengths = [_to_si(value) for value in self.length[: self.num_joints]]  # 长度列表 $l_i$
-        width = _to_si(self.width or 3.4)  # LEAP 简化 box 宽度
-        height = _to_si(self.height or 2.05)  # LEAP 简化 box 高度
+        width = _to_si(self.width or 0.034)  # LEAP 简化 box 宽度 $0.034\text{m}=3.4\text{cm}$
+        height = _to_si(self.height or 0.0205)  # LEAP 简化 box 高度 $0.0205\text{m}=2.05\text{cm}$
         radius = _to_si(self.radius) if self.radius is not None else None
-        self.fixed_part = _to_si(self.fixed_part or 1.3)  # palm 侧固定段长度 $l_f$
+        self.fixed_part = _to_si(self.fixed_part or 0.013)  # palm 侧固定段长度 $l_f=0.013\text{m}=1.3\text{cm}$
         if not self.axes:
             defaults = [(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
             self.axes = defaults[: self.num_joints]  # 保留你 TODO 里的 LEAP 非拇指轴语义
         if not self.tip:
             # User confirmed that the first testing path may use cylinder+sphere.
-            self.tip = {"type": "cs", "radius": 1.2, "height": 1.0}
+            self.tip = {"type": "cs", "radius": 0.012, "height": 0.010}
         if not self.mesh_shape:
             builder = _build_cylinder_mesh if radius is not None and self.width is None and self.height is None else _build_box_mesh
             self.mesh_shape = [
@@ -412,20 +426,18 @@ class RegularThumbBuilderCfg(RegularFingerBuilderCfg):
     height: float | None = None
     """除 CMC1 外，其余 thumb joint mesh 的统一高度。"""
 
-    lengths: list[float] = field(default_factory=lambda: [4.5, 1.7, 4.3, 4.0])
+    lengths: list[float] = field(default_factory=lambda: [0.045, 0.017, 0.043, 0.040])
     """thumb 各段长度列表。
 
     默认值当前更偏向 Allegro 风格的 thumb 近似：
-
     $$
     l=(4.5, 1.7, 4.3, 4.0)\text{cm}.
     $$
-
     这里用复数 `lengths` 而不是单数 `length`，是为了和 non-thumb 的 cfg 在阅读上
     做出一点区分，提醒读者：thumb 的第一段 `CMC1` 在几何语义上并不是普通串联段。
     """
 
-    cmc1_offset: float | Vector2 | Vector3 = (0.9, 1.45)
+    cmc1_offset: float | Vector2 | Vector3 = (0.009, 0.0145)
     r"""CMC1 mesh 相对于本 joint frame 的位置偏移。
 
     这是 thumb 最关键的特例字段之一。它支持三种精度：
@@ -440,7 +452,7 @@ class RegularThumbBuilderCfg(RegularFingerBuilderCfg):
     2. 研究者在调 thumb 时，通常会首先思考 CMC1 在 palm 内部的嵌入位置。
     """
 
-    non_cmc1_offset: list[Any] = field(default_factory=lambda: [-0.2, 0.0, -0.9])
+    non_cmc1_offset: list[Any] = field(default_factory=lambda: [-0.002, 0.0, -0.009])
     """除 CMC1 外，其余 thumb joint mesh 的偏移列表。
 
     该字段只负责 CMC2 及之后的各段，因此长度应为 `num_joints - 1`。
@@ -451,10 +463,10 @@ class RegularThumbBuilderCfg(RegularFingerBuilderCfg):
     def __post_init__(self):
         self.num_joints = len(self.lengths)  # thumb 段数直接由 lengths 决定
         lengths = [_to_si(value) for value in self.lengths]  # 长度列表 $l_i$
-        cmc1_width = _to_si(self.cmc1_width or 3.5)  # CMC1 特例块体宽度
-        cmc1_height = _to_si(self.cmc1_height or 3.4)  # CMC1 特例块体高度
-        width = _to_si(self.width or 1.9)  # 其余关节统一宽度
-        height = _to_si(self.height or 2.7)  # 其余关节统一高度
+        cmc1_width = _to_si(self.cmc1_width or 0.035)  # CMC1 特例块体宽度 $0.035\text{m}=3.5\text{cm}$
+        cmc1_height = _to_si(self.cmc1_height or 0.034)  # CMC1 特例块体高度 $0.034\text{m}=3.4\text{cm}$
+        width = _to_si(self.width or 0.019)  # 其余关节统一宽度 $0.019\text{m}=1.9\text{cm}$
+        height = _to_si(self.height or 0.027)  # 其余关节统一高度 $0.027\text{m}=2.7\text{cm}$
 
         cmc1_pose = _normalize_pose_value(self.cmc1_offset, field_name="cmc1_offset")  # CMC1 偏移单独解析
         other_offsets = _normalize_pose_list(self.non_cmc1_offset, count=self.num_joints - 1, field_name="non_cmc1_offset")
@@ -471,7 +483,7 @@ class RegularThumbBuilderCfg(RegularFingerBuilderCfg):
                 (0.0, 1.0, 0.0),
             ]
         if not self.tip:
-            self.tip = {"type": "cs", "radius": 1.2, "height": 1.0}  # thumb 首轮也统一走 primitive tip
+            self.tip = {"type": "cs", "radius": 0.012, "height": 0.010}  # thumb 首轮也统一走 primitive tip，单位为 m
         if not self.mesh_shape:
             self.mesh_shape = [
                 _build_box_mesh(length=lengths[0], width=cmc1_width, height=cmc1_height, offset=cmc1_pose, center_on_joint=True),  # CMC1 零偏移时 mesh frame 与 joint frame 重合

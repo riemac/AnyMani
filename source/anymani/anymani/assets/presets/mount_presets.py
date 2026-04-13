@@ -22,25 +22,30 @@ from __future__ import annotations
 import math
 
 from ..asset_schema_core import PoseCfg
-from .units import cm, deg, rad
+from .units import cm, deg, m, rad
 
 
 ALLEGRO_MOUNT_PRESET: dict[str, PoseCfg] = {
-    "index": PoseCfg(pos=(0.0, 0.0435, -0.001542), rpy=(-0.0873, 0.0, 0.0)),
-    "middle": PoseCfg(pos=(0.0, 0.0, 0.0007), rpy=(0.0, 0.0, 0.0)),
-    "ring": PoseCfg(pos=(0.0, -0.0435, -0.001542), rpy=(0.0873, 0.0, 0.0)),
-    "thumb": PoseCfg(pos=(-0.0182, 0.019333, -0.045987), rpy=(0.0, -1.6581, -1.5708)),
+    "index": PoseCfg(pos=(m(0.0), m(0.0435), m(-0.001542)), rpy=(rad(-0.0873), 0.0, 0.0)),
+    "middle": PoseCfg(pos=(m(0.0), m(0.0), m(0.0007)), rpy=(0.0, 0.0, 0.0)),
+    "ring": PoseCfg(pos=(m(0.0), m(-0.0435), m(-0.001542)), rpy=(rad(0.0873), 0.0, 0.0)),
+    "thumb": PoseCfg(pos=(m(-0.0182), m(0.019333), m(-0.045987)), rpy=(0.0, rad(-1.6581), rad(-1.5708))),
 }
 """Allegro 挂载点 preset。"""
 
 
 LEAP_MOUNT_PRESET: dict[str, PoseCfg] = {
-    "index": PoseCfg(pos=(-0.0070, 0.0230, -0.0187), rpy=(1.5708, 1.5708, 0.0)),
-    "middle": PoseCfg(pos=(-0.0071, -0.0224, -0.0187), rpy=(1.5708, 1.5708, 0.0)),
-    "ring": PoseCfg(pos=(-0.00709, -0.0678, -0.0187), rpy=(1.5708, 1.5708, 0.0)),
-    "thumb": PoseCfg(pos=(-0.0693, -0.0012, -0.0216), rpy=(0.0, 1.5708, 0.0)),
+    "index": PoseCfg(pos=(m(-0.0070), m(0.0230), m(-0.0187)), rpy=(rad(1.5708), rad(1.5708), 0.0)),
+    "middle": PoseCfg(pos=(m(-0.0071), m(-0.0224), m(-0.0187)), rpy=(rad(1.5708), rad(1.5708), 0.0)),
+    "ring": PoseCfg(pos=(m(-0.00709), m(-0.0678), m(-0.0187)), rpy=(rad(1.5708), rad(1.5708), 0.0)),
+    "thumb": PoseCfg(pos=(m(-0.0693), m(-0.0012), m(-0.0216)), rpy=(0.0, rad(1.5708), 0.0)),
 }
-"""LEAP 挂载点 preset。"""
+"""LEAP 挂载点 preset。
+
+# NOTE:
+这里保留“真实 family 锚点默认用 m 直写”的风格；
+若后续某组 mount 仍来自手工 cm 记录，则允许像 single-box 系列那样显式写 `cm(...)`。
+"""
 
 
 LEAP_SINGLE_BOX_MOUNT_PRESET: dict[str, PoseCfg] = {

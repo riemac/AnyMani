@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from .units import cm
 from ..builder.finger_buiders import (
     AllegroFingerBuilderCfg,
     LeapFingerBuilderCfg,
@@ -24,12 +25,12 @@ from ..builder.finger_buiders import (
 ALLEGRO_FINGER_PRESET = AllegroFingerBuilderCfg(
     name="index",
     num_joints=4,
-    width=2.7,
-    height=2.0,
-    length=[1.8, 5.4, 3.8, 2.2],
-    mesh_offsets=[0.0, 0.0, -0.6, 0.0],
+    width=cm(2.7),  # 默认人工测量锚点仍按 cm 录入，更符合手部资产调参直觉
+    height=cm(2.0),  # builder 侧最终只看到 SI(m)，这里的 `cm(...)` 只承担显式换算
+    length=[cm(1.8), cm(5.4), cm(3.8), cm(2.2)],
+    mesh_offsets=[0.0, 0.0, cm(-0.6), 0.0],
     axes=[(0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
-    tip={"type": "cs", "radius": 1.2, "height": 1.0},
+    tip={"type": "cs", "radius": cm(1.2), "height": cm(1.0)},
 )
 """Allegro 非拇指执行型 preset。
 
@@ -47,13 +48,13 @@ ALLEGRO_FINGER_PRESET = AllegroFingerBuilderCfg(
 LEAP_FINGER_PRESET = LeapFingerBuilderCfg(
     name="index",
     num_joints=4,
-    width=3.4,
-    height=2.05,
-    length=[3.9, 1.5, 3.6, 2.0],
+    width=cm(3.4),
+    height=cm(2.05),
+    length=[cm(3.9), cm(1.5), cm(3.6), cm(2.0)],
     mesh_offsets=[0.0, 0.0, 0.0, 0.0],
-    fixed_part=1.3,
+    fixed_part=cm(1.3),
     axes=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
-    tip={"type": "cs", "radius": 1.2, "height": 1.0},
+    tip={"type": "cs", "radius": cm(1.2), "height": cm(1.0)},
 )
 """LEAP 非拇指执行型 preset。
 
@@ -65,30 +66,30 @@ LEAP_FINGER_PRESET = LeapFingerBuilderCfg(
 
 ALLEGRO_THUMB_PRESET = RegularThumbBuilderCfg(
     name="thumb",
-    lengths=[4.5, 1.7, 4.3, 4.0],
-    cmc1_width=3.5,
-    cmc1_height=3.4,
-    width=1.9,
-    height=2.7,
-    cmc1_offset=(0.9, 1.45),
-    non_cmc1_offset=[-0.2, 0.0, -0.9],
+    lengths=[cm(4.5), cm(1.7), cm(4.3), cm(4.0)],
+    cmc1_width=cm(3.5),
+    cmc1_height=cm(3.4),
+    width=cm(1.9),
+    height=cm(2.7),
+    cmc1_offset=(cm(0.9), cm(1.45)),
+    non_cmc1_offset=[cm(-0.2), 0.0, cm(-0.9)],
     axes=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0)],
-    tip={"type": "cs", "radius": 1.2, "height": 1.0},
+    tip={"type": "cs", "radius": cm(1.2), "height": cm(1.0)},
 )
 """Allegro 拇指执行型 preset。"""
 
 
 LEAP_THUMB_PRESET = RegularThumbBuilderCfg(
     name="thumb",
-    lengths=[2.8, 1.7, 4.7, 2.3],
-    cmc1_width=2.30,
-    cmc1_height=2.67,
-    width=2.3,
-    height=3.47,
-    cmc1_offset=(0.0, -0.33),
+    lengths=[cm(2.8), cm(1.7), cm(4.7), cm(2.3)],
+    cmc1_width=cm(2.30),
+    cmc1_height=cm(2.67),
+    width=cm(2.3),
+    height=cm(3.47),
+    cmc1_offset=(0.0, cm(-0.33)),
     non_cmc1_offset=[0.0, 0.0, 0.0],
     axes=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0)],
-    tip={"type": "cs", "radius": 1.2, "height": 1.0},
+    tip={"type": "cs", "radius": cm(1.2), "height": cm(1.0)},
 )
 """LEAP 拇指执行型 preset。"""
 

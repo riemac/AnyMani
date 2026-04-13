@@ -20,19 +20,23 @@ from ..asset_schema_core import JointLimitCfg, Vector3, Vector6, _ensure_tuple
 
 
 def _to_si(value: float | int) -> float:
-    r"""把“疑似厘米输入”转换为米制。
+    r"""把 builder 输入规约为 SI 长度标量。
 
-    当前很多 preset 仍沿用注释里的 cm 直觉值，因此这里做一个轻量兼容：
+    # NOTE:
+    当前单位契约已经收敛为：
 
-    - 若量级明显更像 cm，则除以 100；
-    - 若本来就是 m，则原样保留。
+    - builder 的标准输入一律是 **米**；
+    - 若调用方更习惯以厘米记录，请先在 preset/调用侧显式写成 `cm(...)`；
+    - builder 内部不再根据数值量级去猜“这是不是 cm”。
 
-    这是一个工程约定，不是严格的单位推断器。其目的只是让 preset 与参数化输入
-    在首轮实现里更顺滑地共存。
+    这样做的原因不是“软件洁癖”，而是科研语义需要可审计：
+
+    1. 裸浮点数看到多少就是多少，统一按 SI(m) 解释；
+    2. `cm(...)` / `mm(...)` 这种单位转换只在上游显式发生；
+    3. builder 不再偷偷把 `2.7` 解释成 `2.7cm`，避免调参时出现隐式量纲歧义。
     """
 
-    value = float(value)  # 统一先压成 float，避免 dataclass 里混入 int 语义
-    return value / 100.0 if abs(value) > 0.5 else value  # 经验规则：大于 0.5 更像 cm 量纲
+    return float(value)  # 标准输入已定义为 SI(m)，这里只做类型规约，不做单位猜测
 
 
 def _normalize_pose_value(value: float | Sequence[float] | None, *, field_name: str) -> Vector6:
