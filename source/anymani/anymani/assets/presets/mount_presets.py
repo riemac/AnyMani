@@ -5,6 +5,16 @@
 
 把 mount preset 从 builder 子目录挪出来之后，hand 装配层和 palm preset 层
 都可以引用同一份 mount 语义，而不会再制造“某个 builder 私藏一份挂载字典”的耦合。
+
+# NOTE:
+当前这里保存的统一是“canonical right-hand anchor”：
+
+- preset 文件负责保存一套离散数值锚点；
+- 真正的左/右手 thumb 镜像，不再在这里做；
+- handedness 相关的唯一映射，统一交给 `HumanLikeHandBuilder`。
+
+这样做是为了让 mount preset 本体保持“纯数据表”角色，而把几何语义变换
+收口到 hand 装配层，符合用户对 builder 职责边界的最新要求。
 """
 
 from __future__ import annotations
@@ -74,40 +84,29 @@ MOUNT_PRESET_REGISTRY: dict[str, dict[str, PoseCfg]] = {
 """
 
 
-_LEFT_THUMB_MIRROR_PRESETS = {"single_box_allegro", "single_box_leap"}
-"""当前只有 single-box palm 的左右手镜像规则有明确科研语义说明。
+def get_mount_preset(name: str, *, handedness: str | None = None) -> dict[str, PoseCfg]:
+    r"""按名字返回一份 canonical mount preset 副本。
 
-# Question:
-真实 family 的 `allegro` / `leap` / `com_*` 左右手挂载规则目前并没有同样明确的
-注释来源；因此这轮只对 single-box 系列应用显式左手 thumb 镜像。
-"""
+    Args:
+        name (str): 已注册的 mount preset 名。
+        handedness (str | None): 兼容旧调用点而保留的形参；当前不再在此处执行
+            handedness 修正。真正的左/右手 thumb 唯一映射由 `HumanLikeHandBuilder`
+            在 hand 装配阶段完成。
 
+    Returns:
+        dict[str, PoseCfg]: canonical right-hand 语义下的 mount 字典副本。
 
-def _mirror_thumb_pose_for_left(pose: PoseCfg) -> PoseCfg:
-    r"""把 single-box 右手 thumb 挂载点镜像成左手版本。
-
-    规则直接来自用户原始 TODO：
-
-    1. 关于 palm frame，左/右手都保持同一套 `x/y/z` 约定；
-    2. thumb 的位置相对 `y-z` 平面对称，因此只翻转 `x`；
-    3. yaw 的符号反转，其余约定保持不变。
+    Raises:
+        KeyError: 当名字未注册时抛出。
     """
-
-    return PoseCfg(pos=(-pose.pos[0], pose.pos[1], pose.pos[2]), rpy=(pose.rpy[0], pose.rpy[1], -pose.rpy[2]))
-
-
-def get_mount_preset(name: str, *, handedness: str = "right") -> dict[str, PoseCfg]:
-    r"""按名字返回一份 mount preset 副本，并在需要时做 handedness 修正。"""
 
     try:
         preset = MOUNT_PRESET_REGISTRY[name]
     except KeyError as exc:
         raise KeyError(f"Unknown mount preset: {name!r}") from exc
 
-    mounts = {finger: pose.copy() for finger, pose in preset.items()}
-    if handedness == "left" and name in _LEFT_THUMB_MIRROR_PRESETS and "thumb" in mounts:
-        mounts["thumb"] = _mirror_thumb_pose_for_left(mounts["thumb"])
-    return mounts
+    _ = handedness  # 仅为兼容旧调用签名保留；当前实际 handedness 映射已移交给 hand builder
+    return {finger: pose.copy() for finger, pose in preset.items()}  # 返回副本，避免调用方污染注册表
 
 
 __all__ = [
