@@ -71,12 +71,19 @@ ALLEGRO_THUMB_PRESET = RegularThumbBuilderCfg(
     cmc1_height=cm(3.4),
     width=cm(1.9),
     height=cm(2.7),
-    cmc1_offset=(cm(0.9), cm(1.45)),
+    cmc1_offset=(cm(0.9), cm(1.45)),  # (y, z) 偏移
     non_cmc1_offset=[cm(-0.2), 0.0, cm(-0.9)],
-    axes=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0)],
+    axes=[(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (0.0, 0.0, 1.0)],
     tip={"type": "cs", "radius": cm(1.2), "height": cm(1.0)},
 )
-"""Allegro 拇指执行型 preset。"""
+"""Allegro 拇指执行型 preset。
+
+轴语义严格对齐 `Thumb.png` 中的科研约定：
+
+- CMC1: 绕 $x$
+- CMC2: 绕 $y$
+- MCP / IP: 绕 $z$
+"""
 
 
 LEAP_THUMB_PRESET = RegularThumbBuilderCfg(
@@ -88,10 +95,14 @@ LEAP_THUMB_PRESET = RegularThumbBuilderCfg(
     height=cm(3.47),
     cmc1_offset=(0.0, cm(-0.33)),
     non_cmc1_offset=[0.0, 0.0, 0.0],
-    axes=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0)],
+    axes=[(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (0.0, 0.0, 1.0)],
     tip={"type": "cs", "radius": cm(1.2), "height": cm(1.0)},
 )
-"""LEAP 拇指执行型 preset。"""
+"""LEAP 拇指执行型 preset。
+
+本轮虽然不恢复 LEAP 的 custom `leap_cube` tip，但共享的 thumb 链路轴语义仍与
+`Thumb.png` 保持一致：CMC1 为 $x$，CMC2 为 $y$，后续为 $z$。
+"""
 
 
 FINGER_PRESET_REGISTRY: dict[str, RegularFingerBuilderCfg] = {

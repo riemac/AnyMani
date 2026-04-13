@@ -472,15 +472,20 @@ class RegularThumbBuilderCfg(RegularFingerBuilderCfg):
         other_offsets = _normalize_pose_list(self.non_cmc1_offset, count=self.num_joints - 1, field_name="non_cmc1_offset")
         self.mesh_offsets = [cmc1_pose] + other_offsets  # thumb 先拼成一份完整 offsets，再交给 super 统一规范化
         if not self.axes:
-            # Question:
-            # thumb 各关节的轴语义在 Allegro / LEAP 原始 URDF 中并不完全同构。
-            # 当前先选一套稳定 canonical 约定，后续若网络结构希望显式编码
-            # “轴语义差异”，这里再继续细分。
+            # 当前 thumb 轴语义直接对齐 `Thumb.png` 与用户给出的手写公式：
+            #
+            # - CMC1: 绕 $x$
+            # - CMC2: 绕 $y$
+            # - 其余 MCP / IP: 绕 $z$
+            #
+            # 这样做的目的不是“先随便给一套轴”，而是把 thumb 的几何链条与
+            # 你图里的科研解释绑定起来；否则即便静态 mesh 看起来连上了，
+            # 关节坐标语义也会悄悄漂掉。
             self.axes = [
                 (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
                 (0.0, 0.0, 1.0),
-                (0.0, 1.0, 0.0),
-                (0.0, 1.0, 0.0),
+                (0.0, 0.0, 1.0),
             ]
         if not self.tip:
             self.tip = {"type": "cs", "radius": 0.012, "height": 0.010}  # thumb 首轮也统一走 primitive tip，单位为 m
@@ -595,36 +600,50 @@ class RegularFingerBuilder(FingerBuilder):
         # - $P_i$：joint frame 串联位置
         # - $mP_i$：mesh 相对于本 joint frame 的位置
         # 分开表达。尤其 `CMC1 -> CMC2` 这一步是 thumb 的真正特例。
+        #
+        # 当前实现严格按用户给出的公式收口：
+        #
+        # 1. `CMC1` 自身的 mesh 位姿来自 $(d_{0y}, d_{0z})$，并保持
+        #    `center_on_joint=True`，即零偏移时 mesh frame 与 joint frame 重合；
+        # 2. `CMC2` joint origin 取
+        #    $(x_1, y_1, z_1)=((w_{cmc1}-w)/2,\ d_{0y}+l_0/2,\ d_{0z}-(h_{cmc1}-h)/2)$；
+        # 3. 对 $i>=2$ 的后续关节，只沿 thumb 生长方向推进
+        #    $y_i = l_{i-1} + d_{i-1,y}$；
+        # 4. tip joint 同理落在
+        #    $y_{tip} = l_{N-1} + d_{N-1,y}$。
+        #
+        # 换句话说，后续 joint 的推进量只吃上一段 mesh 的有效 $y$ 向长度，
+        # 不再把其它局部 mesh 偏移误当成“链条自身的位姿漂移”。
         cfg = self.cfg
         assert isinstance(cfg, RegularThumbBuilderCfg)
 
         joints = [self._build_joint(index=0, parent_link=cfg.parent_link, origin=PoseCfg())]  # CMC1 从 finger 根直接长出
         parent_link = joints[0].child  # 后续 joint 都挂在 CMC1 的 child link 之后
 
-        cmc1_offset = cfg._mesh_offsets_6d[0]  # CMC1 的 mesh 偏移 $mP_0$
+        cmc1_mesh_pose = cfg._mesh_offsets_6d[0]  # CMC1 的 mesh 偏移 $mP_0=(0,d_{0y},d_{0z})$
         cmc1_length = _mesh_length(cfg.mesh_shape[0])  # CMC1 长度 $l_0$
-        cmc1_width, cmc1_height = _mesh_cross_section(cfg.mesh_shape[0])  # CMC1 横截面尺寸
-        next_width, next_height = _mesh_cross_section(cfg.mesh_shape[1])  # CMC2 横截面尺寸
-        origin_1 = PoseCfg(
+        cmc1_width, cmc1_height = _mesh_cross_section(cfg.mesh_shape[0])  # CMC1 横截面尺寸 $(w_{cmc1}, h_{cmc1})$
+        next_width, next_height = _mesh_cross_section(cfg.mesh_shape[1])  # CMC2 段横截面尺寸 $(w, h)$
+        cmc2_origin = PoseCfg(
             pos=(
                 (cmc1_width - next_width) / 2.0,  # 通过宽度差把 CMC2 对齐到 thumb 侧边
-                cmc1_offset[1] + cmc1_length / 2.0,  # 沿生长方向推进到 CMC1 中上部
-                cmc1_offset[2] - (cmc1_height - next_height) / 2.0,  # 在 $z$ 上补偿 CMC1 与后续段高度差
+                cmc1_mesh_pose[1] + cmc1_length / 2.0,  # $y_1=d_{0y}+l_0/2$
+                cmc1_mesh_pose[2] - (cmc1_height - next_height) / 2.0,  # $z_1=d_{0z}-(h_{cmc1}-h)/2$
             )
         )
-        joint_1 = self._build_joint(index=1, parent_link=parent_link, origin=origin_1)  # 单独处理 CMC1 -> CMC2 这一步
+        joint_1 = self._build_joint(index=1, parent_link=parent_link, origin=cmc2_origin)  # 单独处理 CMC1 -> CMC2 这一步
         joints.append(joint_1)
         parent_link = joint_1.child
 
-        previous_valid_length = _mesh_length(cfg.mesh_shape[1]) + cfg._mesh_offsets_6d[1][1]  # CMC2 之后重新回到普通串联推进
+        next_joint_y = _mesh_length(cfg.mesh_shape[1]) + cfg._mesh_offsets_6d[1][1]  # $y_2=l_1+d_{1y}$，只吃上一段的有效 $y$ 向推进
         for index in range(2, cfg.num_joints):
-            origin = PoseCfg(pos=(0.0, previous_valid_length, 0.0))  # 其余 MCP / IP 段近似同构
+            origin = PoseCfg(pos=(0.0, next_joint_y, 0.0))  # 其余 MCP / IP 段按 $y_i=l_{i-1}+d_{i-1,y}$ 推进
             joint = self._build_joint(index=index, parent_link=parent_link, origin=origin)
             joints.append(joint)
             parent_link = joint.child
-            previous_valid_length = _mesh_length(cfg.mesh_shape[index]) + cfg._mesh_offsets_6d[index][1]  # 继续按有效长度推进
+            next_joint_y = _mesh_length(cfg.mesh_shape[index]) + cfg._mesh_offsets_6d[index][1]  # 下一段继续用上一段有效长度推进
 
-        joints.append(self._build_tip_joint(parent_link=parent_link, tip_origin_y=previous_valid_length))  # 末端补一个 fixed tip
+        joints.append(self._build_tip_joint(parent_link=parent_link, tip_origin_y=next_joint_y))  # $y_{tip}=l_{N-1}+d_{N-1,y}$
         return joints
 
     def _build_joint(self, *, index: int, parent_link: str, origin: PoseCfg):
