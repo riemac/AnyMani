@@ -219,8 +219,9 @@ class HandExporter(ExporterBase):
         # return combined
         #
         # IDEA：HandExporter 的价值是"让调用方不需要知道哪些模式下产生哪些文件"；
-        # 所有 artifact_level 的决策都在这里集中处理，GeneratorRunner 的 _save_result()
-        # 只需调用 HandExporter.export(result, output_dir) 即可。
+        # 所有 artifact_level 的决策都在这里集中处理。上层无论是
+        # `HandGenerator` 正式主线，还是后续的 hand quick-check 脚本，
+        # 都只需要调用 `HandExporter.export(result, output_dir)`。
 
 
 __all__ = ["HandExporterCfg", "HandExporter"]

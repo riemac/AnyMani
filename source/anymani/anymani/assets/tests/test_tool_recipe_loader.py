@@ -1,11 +1,25 @@
-"""tooling 层回归测试：RecipeLoader + GeneratorRunner。
+r"""tooling 层回归测试：`RecipeLoader -> HandGenerator` 直连契约。
 
-这组测试锁住当前首轮真正需要的运行时入口契约：
+这组测试锁住新的工具层边界：
 
-1. recipe 可从 dict / YAML 收敛到 typed `HandGeneratorCfg`
-2. 历史 `export_dir` 写法仍能兼容到当前 `output_dir`
-3. runner 能接受 cfg / dict / path 三种入口
-4. `bundle` 和 `hand_cfg` 两种产物粒度都能得到稳定文件组织
+1. `RecipeLoader` 仍负责 YAML / dict → typed `HandGeneratorCfg`
+2. 历史 `export_dir` 仍兼容到当前 `output_dir`
+3. tooling 层不再通过 `GeneratorRunner` 额外包一层运行逻辑
+4. 声明式 recipe 加载后，应直接驱动 `HandGenerator`
+
+也就是说，这里验证的是：
+
+$$
+\text{recipe} \xrightarrow{\text{RecipeLoader}} \text{HandGeneratorCfg}
+\xrightarrow{\text{HandGenerator}} \text{artifact}
+$$
+
+而不是旧的：
+
+$$
+\text{recipe} \xrightarrow{\text{RecipeLoader}} \text{GeneratorRunner}
+\xrightarrow{\text{内部再转}} \text{HandGenerator}
+$$
 """
 
 from __future__ import annotations
@@ -15,9 +29,8 @@ import yaml
 from assets.builder.hand_builders import HumanLikeHandBuilderCfg
 from assets.builder.palm_builders import ComPalmBuilderCfg
 from assets.exporter.hand_exporter import HandExporterCfg
-from assets.generator.hand_generator import HandGeneratorCfg
+from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from assets.tool.recipe_loader import RecipeLoader
-from assets.tool.runner import GeneratorRunner
 from assets.validator.hand_rules import HandValidatorCfg
 
 
@@ -35,7 +48,7 @@ def _made_recipe_dict() -> dict:
 
 
 def _tool_recipe_dict(output_dir: str, *, artifact_level: str) -> dict:
-    """返回一份可直接喂给 RecipeLoader / Runner 的完整 recipe。"""
+    """返回一份可直接喂给 `RecipeLoader` 的完整 recipe。"""
 
     return {
         "mode": "full",
@@ -114,26 +127,22 @@ def test_recipe_loader_save_and_load_round_trip_keeps_current_contract(tmp_path)
     assert loaded.Made.thumb_cfg.__class__.__name__ == "RegularThumbBuilderCfg"
 
 
-def test_generator_runner_runs_from_dict_and_persists_hand_cfg_sidecar_and_trees(tmp_path):
-    """runner 在 `hand_cfg` 模式下也应补齐 sidecar / tree 文件。"""
+def test_loaded_recipe_drives_hand_generator_directly_for_hand_cfg_mode(tmp_path):
+    """`hand_cfg` 模式下，tooling 层应只返回内存中的 `HandCfg`。"""
 
-    out_dir = tmp_path / "hand_cfg_outputs"
-    runner = GeneratorRunner(_tool_recipe_dict(str(tmp_path / "ignored"), artifact_level="hand_cfg"), output_dir=out_dir)
+    cfg = RecipeLoader.load_dict(_tool_recipe_dict(str(tmp_path / "ignored"), artifact_level="hand_cfg"))
+    cfg = cfg.replace(output_dir=tmp_path / "hand_cfg_outputs")
 
-    results = runner.run()
+    result = HandGenerator(cfg).generate()
 
-    assert len(results) == 1
-    result = results[0]
+    assert result is not None
     assert result.hand_cfg is not None
     assert result.urdf_path is None
-    assert result.sidecar_path is not None and result.sidecar_path.is_file()
-    assert (result.sidecar_path.parent / "tree.txt").is_file()
-    assert (result.sidecar_path.parent / "tree.mmd").is_file()
-    assert result.sidecar_path.parent.parent == out_dir
+    assert result.sidecar_path is None
 
 
-def test_generator_runner_loads_yaml_recipe_and_respects_output_override_for_bundle(tmp_path):
-    """runner 从 YAML 路径启动时，应把 bundle 产物写到覆写目录。"""
+def test_loaded_recipe_drives_hand_generator_directly_for_bundle_mode(tmp_path):
+    """`bundle` 模式下，recipe 加载后应直接得到完整落盘产物。"""
 
     recipe_path = tmp_path / "bundle_recipe.yaml"
     RecipeLoader.save(
@@ -142,10 +151,10 @@ def test_generator_runner_loads_yaml_recipe_and_respects_output_override_for_bun
     )
     out_dir = tmp_path / "bundle_outputs"
 
-    results = list(GeneratorRunner(recipe_path, output_dir=out_dir).stream())
+    cfg = RecipeLoader.load(recipe_path).replace(output_dir=out_dir)
+    result = HandGenerator(cfg).generate()
 
-    assert len(results) == 1
-    result = results[0]
+    assert result is not None
     assert result.hand_cfg is not None
     assert result.urdf_path is not None and result.urdf_path.is_file()
     assert result.sidecar_path is not None and result.sidecar_path.is_file()
