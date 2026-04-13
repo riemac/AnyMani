@@ -215,44 +215,30 @@ class HandGenerator:
     def generate(self) -> HandGenerationResult | None:
         r"""执行一次整手资产生成。
 
+        当前这条主路径已经实现的是：
+
+        1. `mode="made"`：执行 `builder -> validator -> export`
+        2. `mode="full"`：执行 `builder -> mutate -> validator -> export`
+        3. `artifact_level="hand_cfg"`：只保留内存中的 `HandCfg`
+        4. `artifact_level="urdf" / "bundle"`：落盘导出由 `HandExporter` 负责
+
+        你原先写在函数尾部的 `# TODO:算法之一（mode-aware generation pipeline）`
+        并不是“完全没做”，而是**规格已部分落地**。真正还没有落地的是：
+
+        - `mode="mutate"` 的“只做后序、外部输入 HandCfg”入口
+        - 更细的 mode 分支统计 / provenance 记录
+
+        因此这里应把算法规格放在活代码前面，而不是留在 `return` 后面变成
+        死注释；死注释既破坏可读性，也会让读者误判“这段到底做没做”。
+
         Returns:
             HandGenerationResult: 一次生成调用的轻量结果包。
+
+        Raises:
+            NotImplementedError: 当请求 `mode="mutate"` 时抛出；该分支仍待接入
+                “外部给定 HandCfg -> 后序变异 -> 校验/导出”的独立入口。
+            ValueError: 当 `Made` 仍是抽象 `HandBuilderCfg` 而非具体 builder cfg 时抛出。
         """
-
-        if self.cfg.mode == "mutate":
-            raise NotImplementedError("mode='mutate' is intentionally deferred in the first pre-made slice.")
-
-        if self.cfg.Made.class_type is HandBuilder:
-            raise ValueError("HandGeneratorCfg.Made must be a concrete HandBuilderCfg subclass, not bare HandBuilderCfg")
-
-        builder = self.cfg.Made.class_type(self.cfg.Made)
-        hand_cfg = builder.build()
-
-        if self.cfg.mode == "full" and _has_enabled_mutation(self.cfg.Mutate):
-            hand_cfg = HandMutator(self.cfg.Mutate).mutate(hand_cfg)
-            if hand_cfg is None:
-                return None
-
-        validator = HandValidator(self.cfg.Validate)
-        validation = validator.validate(hand_cfg)
-        if not validation:
-            return None
-
-        result = HandGenerationResult(
-            hand_cfg=hand_cfg,
-            metadata={
-                "id": uuid4().hex[:8],
-                "builder_cfg": self.cfg.Made.__class__.__name__,
-                "warnings": validation.warnings,
-            },
-        )
-
-        if self.cfg.artifact_level != "hand_cfg":
-            export_cfg = self.cfg.Export.replace(artifact_level=self.cfg.artifact_level)
-            exporter = HandExporter(export_cfg)
-            exporter.export(result, output_dir=self.cfg.output_dir)
-
-        return result
 
         # TODO:算法之一（mode-aware generation pipeline）
         # ────────────────────────────────────────
@@ -266,21 +252,67 @@ class HandGenerator:
         #
         # 输出：`HandGenerationResult`
         #
-        # ── 计算步骤 ──
-        #   1. 根据 mode 决定是否执行前序生成（made）
-        #   2. 若启用 mutate，则在 HandCfg 上执行后序变异
-        #   3. 按 Validate 约束校验当前 HandCfg
-        #   4. 按 artifact_level 决定是否导出 URDF / sidecar
-        #   5. 将请求的轻量/完整产物写入结果包并返回
+        # ── 当前已落地部分 ──
+        #   1. `mode=made`：执行 made -> validate -> export。
+        #   2. `mode=full`：执行 made -> mutate -> validate -> export。
+        #   3. `artifact_level=hand_cfg`：不强迫用户落盘 URDF。
+        #   4. `artifact_level=bundle`：`HandCfg` 与导出物可同时保留。
         #
-        # ── 与 preset 的交叉验证 ──
-        #   1. `mode=made` 时，结果应能与 builder preset 一一对应。
-        #   2. `mode=mutate` 时，输入必须是可被后序工具消费的 HandCfg。
-        #   3. `artifact_level=hand_cfg` 时，不应强迫用户落盘 URDF。
-        #   4. `artifact_level=bundle` 时，HandCfg 与导出物应可同时保留。
+        # ── 当前未落地部分 ──
+        #   1. `mode=mutate`：尚未提供“外部输入 HandCfg 后仅做后序工具”的入口。
+        #   2. 更细粒度的 provenance / rejection 统计仍可继续扩充。
         #
         # IDEA：主入口的价值不是把每一步都做满，而是把默认路径做顺，
         # 同时给用户足够多的“中间停靠点”。
+
+        # `mode="mutate"` 的语义要求调用方先提供一份现成 `HandCfg`。
+        # 当前 `HandGeneratorCfg` 还没有这个输入槽位，因此这里显式拒绝，
+        # 避免伪装成“支持 mutate-only”。
+        if self.cfg.mode == "mutate":
+            raise NotImplementedError("mode='mutate' is intentionally deferred in the first pre-made slice.")
+
+        # `Made` 必须是具体 builder cfg，而不是抽象基类；否则无法真正 lower
+        # 成 hand skeleton。
+        if self.cfg.Made.class_type is HandBuilder:
+            raise ValueError("HandGeneratorCfg.Made must be a concrete HandBuilderCfg subclass, not bare HandBuilderCfg")
+
+        # 前序造骨架：`HandBuilderCfg -> HandBuilder -> HandCfg`。
+        builder = self.cfg.Made.class_type(self.cfg.Made)  # 具体 hand builder 运行时对象
+        hand_cfg = builder.build()  # made 阶段产出的 canonical `HandCfg`
+
+        # 后序派生：只有在 `mode="full"` 且至少启用一个 mutate 工具时才进入。
+        # 这样 `mode="made"` 不会因为空 mutate cfg 产生额外语义分支。
+        if self.cfg.mode == "full" and _has_enabled_mutation(self.cfg.Mutate):
+            hand_cfg = HandMutator(self.cfg.Mutate).mutate(hand_cfg)  # `HandCfg -> HandCfg | None`
+            if hand_cfg is None:
+                return None  # 变异被拒绝；拒绝语义统一表现为“本次样本无结果”
+
+        # 统一在 made / mutate 之后做手级 validator，保证输出侧永远消费的是
+        # 同一种“已通过当前约束”的 `HandCfg`。
+        validator = HandValidator(self.cfg.Validate)
+        validation = validator.validate(hand_cfg)  # 结构、命名、链式一致性等检查结果
+        if not validation:
+            return None  # validator 拒绝时不抛异常，而是返回空样本给上层批处理逻辑
+
+        # 结果包先保留内存对象，再按 artifact level 决定是否继续落盘。
+        result = HandGenerationResult(
+            hand_cfg=hand_cfg,
+            metadata={
+                "id": uuid4().hex[:8],  # 8 位短 ID，作为本次生成产物目录名
+                "builder_cfg": self.cfg.Made.__class__.__name__,  # 记录前序 builder cfg 类型
+                "warnings": validation.warnings,  # validator 的非致命 warning，保留给 sidecar / 调试消费
+            },
+        )
+
+        # `artifact_level="hand_cfg"` 表示用户只想拿内存中的 hand schema；
+        # 其余两档则交给 exporter 负责落盘。
+        if self.cfg.artifact_level != "hand_cfg":
+            export_cfg = self.cfg.Export.replace(artifact_level=self.cfg.artifact_level)  # 把主入口的粒度选择下传给 exporter
+            exporter = HandExporter(export_cfg)  # 导出器负责 URDF / sidecar / tree 文件
+            exporter.export(result, output_dir=self.cfg.output_dir)  # 产物写入 `assets/generated/` 或调用方覆写目录
+
+        return result
+
     def generate_batch(self) -> Iterator[HandGenerationResult]:
         r"""批量生成整手资产，按 ``cfg.sampling_strategy`` 路由到不同策略。
 
@@ -288,26 +320,23 @@ class HandGenerator:
         返回一个迭代器，支持 lazy 消费（边生成边落盘），不需要把所有结果
         同时塞进内存。
 
+        你原先写在函数尾部的两段 TODO，其实对应两种非常不同的批处理语义：
+
+        1. `sample`：从联合分布 $(\text{pre-made} \times \text{post-mutate})$ 反复采样，
+           总产物数由 `n_samples` 严格控制
+        2. `enumerate`：显式遍历离散空间，理论总产物数近似为
+           $|\mathcal{P}| \times |\mathcal{M}|$
+
+        当前已经落地的是 `sample` 路线的最小可用实现：不断调用 `generate()`
+        直到得到 `n_samples` 个通过 validator 的样本；`enumerate` 仍明确后延。
+
         Yields:
             HandGenerationResult: 每次成功生成的轻量结果包。
+
+        Raises:
+            NotImplementedError: 当请求 `sampling_strategy="enumerate"` 时抛出。
+            RuntimeError: 当拒绝样本过多，超过最大尝试次数时抛出。
         """
-
-        if self.cfg.sampling_strategy == "enumerate":
-            raise NotImplementedError("enumerate batch generation is deferred beyond the first pre-made slice.")
-
-        target_count = max(int(self.cfg.n_samples), 0)
-        success_count = 0
-        attempt_count = 0
-        max_attempts = max(target_count * 10, 10)
-        while success_count < target_count:
-            attempt_count += 1
-            if attempt_count > max_attempts:
-                raise RuntimeError("too many rejected samples during generate_batch()")
-            result = self.generate()
-            if result is None:
-                continue
-            yield result
-            success_count += 1
 
         # TODO:算法之一（batch orchestration — sample 策略）
         # ────────────────────────────────────────
@@ -319,24 +348,14 @@ class HandGenerator:
         #
         # 输出：yield HandGenerationResult，共 N 个（不含被 validator 拒绝者）
         #
-        # ── 循环体 ──
-        #   success_count = 0
-        #   attempt_count = 0
-        #   while success_count < N:
-        #     attempt_count += 1
-        #     result = self.generate()              # 单次联合采样
-        #     if result is not None:
-        #       yield result
-        #       success_count += 1
-        #     if attempt_count > N × max_attempt_ratio:  # 防止无限循环
-        #       raise RuntimeError("too many rejections")
+        # ── 当前已落地部分 ──
+        #   1. 反复调用 `self.generate()` 进行单次联合采样。
+        #   2. `result is not None` 才计入成功样本数。
+        #   3. 用 `max_attempts` 抑制 rejection 过多导致的无限循环。
         #
         # ── 关键性质 ──
-        #   每次 generate() 独立从联合分布采样 (pre-made × post-mutate)，
-        #   不存在笛卡尔展开，产物数量严格由 N 控制。
-        #   连续工具（link_scale、mount_perturb、limit_tweak）的随机性来自
-        #   其 sigma 参数，不会重复；离散工具（joint_delete、finger_replace）
-        #   每次随机选一种操作，而不是枚举所有可能。
+        #   每次 `generate()` 独立从联合分布采样 $(\text{pre-made} \times \text{post-mutate})$，
+        #   不做笛卡尔展开，产物数量严格由 $N$ 控制。
         #
         # TODO:算法之二（batch orchestration — enumerate 策略）
         # ────────────────────────────────────────
@@ -349,28 +368,36 @@ class HandGenerator:
         #
         # 输出：yield HandGenerationResult，最多 max_enumerate 个
         #
-        # ── 枚举体 ──
-        #   pre_made_space = cfg.Made.enumerate()      # 返回所有离散 HandBuilderCfg 列表
-        #   count = 0
-        #   for builder_cfg in pre_made_space:
-        #     hand = HandBuilder(builder_cfg).build()
-        #     if hand is None: continue
-        #     mutate_options = cfg.Mutate.enumerate(hand)  # 返回所有离散 mutate 方案
-        #     for mutated_hand in mutate_options:
-        #       if max_enumerate and count >= max_enumerate: return
-        #       result = HandGenerationResult(hand_cfg=mutated_hand)
-        #       if cfg.Validate: ...validate...
-        #       yield result
-        #       count += 1
-        #
-        # ── 爆炸风险说明 ──
-        #   若 pre-made 有 P 个离散组合，post-mutate 有 M 个离散方案，
-        #   总产物数 = P × M，在大空间下极易爆炸。
-        #   建议：enumerate 策略仅用于 P × M ≤ 几百 的小规模对照实验；
-        #   大规模数据集请使用 sample 策略。
+        # ── 当前未落地部分 ──
+        #   1. `cfg.Made.enumerate()` 的离散 builder 空间接口
+        #   2. `cfg.Mutate.enumerate(hand)` 的离散后序方案接口
+        #   3. `P × M` 爆炸下的更细粒度预算控制
         #
         # IDEA：两种策略的 API 对调用者完全透明（都是 yield 迭代器），
-        # 切换只需修改 cfg.sampling_strategy，不需要改调用代码。
+        # 切换只需修改 `cfg.sampling_strategy`，不需要改调用代码。
+
+        # `enumerate` 不是“循环多跑几次 sample”，而是显式遍历离散组合空间。
+        # 这要求 made/mutate 两侧都提供 enumerate 协议；当前还未接通。
+        if self.cfg.sampling_strategy == "enumerate":
+            raise NotImplementedError("enumerate batch generation is deferred beyond the first pre-made slice.")
+
+        # `target_count` 是用户要求的成功样本数 $N$，而不是尝试次数。
+        # 失败样本（被 mutate / validator 拒绝）不会计入这个预算。
+        target_count = max(int(self.cfg.n_samples), 0)  # 目标成功样本数 $N$
+        success_count = 0  # 已经产出的有效样本数
+        attempt_count = 0  # 总尝试次数（含失败）
+        max_attempts = max(target_count * 10, 10)  # 保守上限：默认允许最多约 $10N$ 次尝试
+
+        # sample 批处理的核心循环：直到成功样本数达到 $N$ 才停止。
+        while success_count < target_count:
+            attempt_count += 1  # 每次循环都代表一次独立联合采样尝试
+            if attempt_count > max_attempts:
+                raise RuntimeError("too many rejected samples during generate_batch()")
+            result = self.generate()  # 复用单样本主路径，避免 batch 和 single 两套语义分叉
+            if result is None:
+                continue  # 被拒绝样本只消耗尝试次数，不消耗成功预算
+            yield result  # lazy 产出，支持边生成边落盘/边消费
+            success_count += 1  # 只有成功样本才推进批次完成度
 
 # ============================================================================
 #  树状渲染工具
