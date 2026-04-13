@@ -10,7 +10,10 @@ from __future__ import annotations
 import argparse
 import sys
 
-from _common import bootstrap_python_path, print_export_result, resolve_output_dir
+if __package__ in {None, ""}:
+    from _common import bootstrap_python_path, print_export_result, resolve_output_dir
+else:
+    from ._common import bootstrap_python_path, print_export_result, resolve_output_dir
 
 bootstrap_python_path()
 
@@ -44,7 +47,11 @@ def main() -> int:
     if not export_result.ok:
         raise RuntimeError(f"JointExporter failed: {export_result.errors}")
 
-    print_export_result(label=f"joint preview [{args.finger_preset}#{args.joint_index}]", output_dir=output_dir, written=export_result.written)
+    print_export_result(
+        label=f"joint preview [{args.finger_preset}#{args.joint_index}]",
+        output_dir=output_dir,
+        written=export_result.written,
+    )
     return 0
 
 

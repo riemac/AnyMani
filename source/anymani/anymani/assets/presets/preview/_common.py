@@ -1,4 +1,4 @@
-"""asset quick-check 脚本共享辅助。
+"""preset quick-check 脚本共享辅助。
 
 这些脚本的定位很明确：给 preset 调参提供最短反馈回路。
 因此这里的公共逻辑也刻意只保留最薄的一层：
@@ -6,6 +6,9 @@
 1. 把 `source/anymani` 加进 `sys.path`
 2. 统一输出目录策略（默认临时目录，可显式覆写）
 3. 统一打印导出结果
+
+之所以把这批脚本放在 `assets/presets/preview/`，是因为它们服务的对象本来就是
+preset，而不是更广义的仓库级脚本系统。
 """
 
 from __future__ import annotations
@@ -15,12 +18,17 @@ import sys
 import tempfile
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SOURCE_ROOT = REPO_ROOT / "source" / "anymani"
+# 当前文件位于：
+#   source/anymani/anymani/assets/presets/preview/_common.py
+# 因此：
+# - parents[6] -> 仓库根目录 AnyMani/
+# - parents[4] -> 可直接放进 `sys.path` 的 source/anymani/
+REPO_ROOT = Path(__file__).resolve().parents[6]
+SOURCE_ROOT = Path(__file__).resolve().parents[4]
 
 
 def bootstrap_python_path() -> None:
-    """确保脚本从仓库根目录直接运行时也能导入 `anymani` 包。"""
+    """确保脚本以文件路径直跑时，也能稳定导入 `anymani` 包。"""
 
     if str(SOURCE_ROOT) not in sys.path:
         sys.path.insert(0, str(SOURCE_ROOT))

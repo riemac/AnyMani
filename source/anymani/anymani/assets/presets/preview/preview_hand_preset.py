@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 import sys
 
-from _common import bootstrap_python_path, print_export_result, resolve_output_dir
+if __package__ in {None, ""}:
+    from _common import bootstrap_python_path, print_export_result, resolve_output_dir
+else:
+    from ._common import bootstrap_python_path, print_export_result, resolve_output_dir
 
 bootstrap_python_path()
 
