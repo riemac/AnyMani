@@ -32,7 +32,7 @@ parser.add_argument(
     "--connectivity-preset",
     type=str,
     default=None,
-    help="可选的 hand-level connectivity preset 名；只描述合法 joint / child-link 组合，不绑定 fingertip。",
+    help="可选的 hand-level connectivity preset 名；只描述合法 joint / child-link 组合，不绑定 fingertip。当前要求同时提供 `--hand-preset`。",
 )
 parser.add_argument(
     "--artifact-level",
@@ -118,6 +118,9 @@ def _build_made_cfg_and_label(args) -> tuple[object, str]:
 
 def main() -> int:
     args = parser.parse_args()
+    if args.connectivity_preset is not None and args.hand_preset is None:
+        parser.error("`--connectivity-preset` currently requires `--hand-preset`, because pre-made connectivity is keyed by base hand preset.")
+
     output_dir = resolve_output_dir(args.output_dir, prefix="anymani_hand_preview")
     made_cfg, label = _build_made_cfg_and_label(args)
     if args.connectivity_preset is not None:
@@ -127,8 +130,12 @@ def main() -> int:
         artifact_level=args.artifact_level,
         output_dir=output_dir,
         Made=made_cfg,
-        hand_preset=args.hand_preset,
-        connectivity_preset=args.connectivity_preset,
+        hand_presets=[args.hand_preset] if args.connectivity_preset is not None and args.hand_preset is not None else [],
+        connectivity_presets=(
+            {args.hand_preset: [args.connectivity_preset]}
+            if args.connectivity_preset is not None and args.hand_preset is not None
+            else None
+        ),
         output_layout=args.output_layout,
     )
     result = HandGenerator(generator_cfg).generate()

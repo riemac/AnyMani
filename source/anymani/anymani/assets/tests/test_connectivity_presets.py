@@ -1,14 +1,16 @@
 """pre-made connectivity preset 与枚举主链回归测试。
 
-这组测试锁住的是本轮新增的 pre-made 关键契约：
+这组测试锁住的是这轮重写后的 pre-made 关键契约：
 
-1. 合法注册的主体只覆盖 joint / child-link connectivity，不绑定 fingertip；
-2. `HandGeneratorCfg` 继续作为唯一 façade，能够直接消费
-   `hand_preset` / `connectivity_preset` / `hand_preset_names` / `connectivity_preset_names`；
-3. `generate_batch(sampling_strategy="enumerate")` 已能枚举
+1. connectivity registry 的主体是**显式 joint / child-link delete recipe**，
+   不再把科研语义压扁成 `retained_revolute=k`；
+2. `HandGeneratorCfg` 的 pre-made façade 只保留
+   `hand_presets` 与 `connectivity_presets` 两个顶层字段；
+3. pre-made 主线在 joint-centric 语义下应使用 `drop`：
+   删除 joint 时同步删除其 child-link 几何，而不是 merge 回父段；
+4. `generate_batch(sampling_strategy="enumerate")` 已能显式遍历
    `base hand preset × connectivity preset` 的离散空间；
-4. `preview_hand_preset.py` 现在可以带上 `--connectivity-preset` 直接导出
-   pre-made 产物，形成最短人工巡检回路。
+5. `preview_hand_preset.py` 现在仍可通过 `--connectivity-preset` 形成最短人工巡检回路。
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import yaml
 
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from assets.presets import (
+    get_finger_connectivity_preset_data,
     get_hand_connectivity_preset_data,
     list_hand_connectivity_preset_names,
 )
@@ -36,41 +39,49 @@ def test_connectivity_registry_exposes_family_specific_full_alias():
     这里锁住的不是“名字好不好看”这种表层细节，而是更重要的 provenance 语义：
 
     - `allegro_full` / `leap_full` 要稳定可喊；
-    - 它们内部仍应明确指向 thumb / non-thumb 的 full chain recipe；
-    - 合法注册的数据主体不应夹带 tip 几何字段。
+    - 它们内部仍应明确指向 thumb / non-thumb 的 full chain delete recipe；
+    - finger-level registry 应显式写出 deleted joint 后缀，而不是只剩计数。
     """
 
     allegro_names = list_hand_connectivity_preset_names("allegro")
     preset = get_hand_connectivity_preset_data("allegro_full")
+    drop_recipe = get_finger_connectivity_preset_data("allegro_non_thumb_drop_j2_j3")
 
     assert "allegro_full" in allegro_names
     assert preset.family == "allegro"
-    assert preset.finger_slots["thumb"] == "allegro_thumb_r4"
-    assert preset.finger_slots["index"] == "allegro_non_thumb_r4"
-    assert "tip" not in preset.metadata
+    assert preset.finger_slots["thumb"] == "allegro_thumb_full"
+    assert preset.finger_slots["index"] == "allegro_non_thumb_full"
+    assert preset.metadata["index_deleted_joint_suffixes"] == []
+    assert drop_recipe.deleted_joint_suffixes == ("j2", "j3")
+    assert drop_recipe.regroup_strategy == "drop"
 
 
-def test_hand_generator_applies_connectivity_preset_and_exports_recursive_bundle(tmp_path):
-    r"""带 connectivity preset 的单样本生成应走 recursive pre-made 输出。
+def test_hand_generator_applies_connectivity_preset_and_drops_deleted_child_link_geometry(tmp_path):
+    r"""带 connectivity preset 的单样本生成应删除被裁剪段的 child-link 几何。
 
     这里验证的核心是：
 
     $$
-    \text{single\_palm\_allegro}
-    \xrightarrow{\text{connectivity }\,t3/i2/m2/r2}
+    \text{single\_palm\_leap}
+    \xrightarrow{\text{connectivity }\,t3/i2/m2/r2,\ \text{drop geometry}}
     \text{dof}=3+2+2+2=9
     $$
 
-    同时，sidecar 里应显式保留 `base_hand_preset` 与 `connectivity_preset`。
+    用户这轮指出的问题正是：旧实现把被删 joint 的 mesh merge 回父段，
+    导致 URDF 里还能看到残留几何。这里直接锁住 joint-centric 语义：
+
+    - `index_j2` / `index_j3` 必须从链里消失；
+    - `index_j2_col` / `index_j3_col` 这类 child-link 几何也必须消失；
+    - sidecar 必须明确记录这是一次 `drop` 语义的 connectivity 裁剪。
     """
 
     result = HandGenerator(
         HandGeneratorCfg(
-            mode="full",
+            mode="made",
             artifact_level="bundle",
             output_dir=tmp_path,
-            hand_preset="single_palm_allegro",
-            connectivity_preset="allegro_t3_i2_m2_r2",
+            hand_presets=["single_palm_leap"],
+            connectivity_presets={"single_palm_leap": ["leap_t3_i2_m2_r2"]},
             output_layout="recursive",
         )
     ).generate()
@@ -80,15 +91,26 @@ def test_hand_generator_applies_connectivity_preset_and_exports_recursive_bundle
     assert result.hand_cfg.dof_count == 9
     assert result.urdf_path is not None and result.urdf_path.is_file()
     assert result.sidecar_path is not None and result.sidecar_path.is_file()
-    assert result.urdf_path.parent.parent.name == "allegro_t3_i2_m2_r2"
-    assert result.urdf_path.parent.parent.parent.name == "single_palm_allegro"
+    assert result.urdf_path.parent.parent.name == "leap_t3_i2_m2_r2"
+    assert result.urdf_path.parent.parent.parent.name == "single_palm_leap"
     assert result.urdf_path.parent.parent.parent.parent.name == "pre_made"
 
+    index = next(finger for finger in result.hand_cfg.fingers if finger.name == "index")
+    surviving_joint_names = [joint.name for joint in index.joints]
+    surviving_collision_names = [collision.name for joint in index.joints for collision in joint.collisions]
+
+    assert surviving_joint_names == ["index_root_fixed", "index_j0", "index_j1", "index_tip"]
+    assert "index_j2_col" not in surviving_collision_names
+    assert "index_j3_col" not in surviving_collision_names
+
     sidecar = yaml.safe_load(result.sidecar_path.read_text(encoding="utf-8"))
-    assert sidecar["base_hand_preset"] == "single_palm_allegro"
-    assert sidecar["connectivity_preset"] == "allegro_t3_i2_m2_r2"
-    assert sidecar["per_finger_connectivity"]["thumb"]["retained_revolute"] == 3
-    assert sidecar["per_finger_connectivity"]["index"]["retained_revolute"] == 2
+    assert sidecar["base_hand_preset"] == "single_palm_leap"
+    assert sidecar["connectivity_preset"] == "leap_t3_i2_m2_r2"
+    assert sidecar["per_finger_connectivity"]["thumb"]["deleted_joints"] == ["thumb_j3"]
+    assert sidecar["per_finger_connectivity"]["index"]["deleted_joint_suffixes"] == ["j2", "j3"]
+    assert sidecar["per_finger_connectivity"]["index"]["deleted_joints"] == ["index_j2", "index_j3"]
+    assert sidecar["per_finger_connectivity"]["index"]["regroup_strategy"] == "drop"
+    assert sidecar["per_finger_connectivity"]["index"]["remaining_revolute"] == 2
 
 
 def test_hand_generator_enumerate_walks_registered_connectivity_space(tmp_path):
@@ -96,8 +118,8 @@ def test_hand_generator_enumerate_walks_registered_connectivity_space(tmp_path):
 
     本测试不再接受旧的 “enumerate 尚未实现” 状态，而是锁住：
 
-    - `hand_preset_names`
-    - `connectivity_preset_names`
+    - `hand_presets`
+    - `connectivity_presets`
     - `max_enumerate`
 
     这三个 façade 字段已经能稳定驱动 pre-made 枚举。
@@ -109,8 +131,8 @@ def test_hand_generator_enumerate_walks_registered_connectivity_space(tmp_path):
             artifact_level="hand_cfg",
             output_dir=tmp_path,
             sampling_strategy="enumerate",
-            hand_preset_names=("single_palm_allegro",),
-            connectivity_preset_names=("allegro_full", "allegro_t3_i2_m2_r2"),
+            hand_presets=["single_palm_allegro"],
+            connectivity_presets={"single_palm_allegro": ["allegro_full", "allegro_t3_i2_m2_r2"]},
             max_enumerate=2,
         )
     )

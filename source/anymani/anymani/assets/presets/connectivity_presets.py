@@ -1,28 +1,41 @@
 """pre-made connectivity preset 注册表。
 
 这个文件保存的不是 fingertip 几何，也不是 finger 的底层长度/宽度测量值，
-而是 **pre-made 阶段合法的 joint / child-link 组合语义**。
+而是 **pre-made 阶段合法的 joint / child-link 删减 recipe**。
 
-之所以单独立这个文件，是因为你已经明确拍板了两个边界：
+这次重写的核心动机，直接来自你在 `FIXME` 里的两条批评：
 
-1. **合法注册的主体是 connectivity**，即哪些 joint / child-link 组合是科研上允许进入
-   pre-made 离散空间的；
-2. **fingertip 与 connectivity 解耦**，不再像 `get_zero` 那样一起绑死进同一张合法表。
+1. 不能再把 connectivity recipe 抽象成 `retained_revolute=k` 这种“只剩计数”的语义；
+2. 应当回到更直率的第一性原理表达：
+   **从 canonical finger / hand preset 中，显式删掉哪些 joint / child-link。**
 
-换句话说，本文件回答的是：
+也就是说，这里记录的是：
 
-- “一根 Allegro / LEAP finger 在 pre-made 阶段，允许保留多少个 revolute joint？”
-- “thumb / non-thumb 的合法删减范围分别是什么？”
-- “整只手把这些 finger-level 合法组合做笛卡尔积之后，生成哪些 hand-level
-   connectivity preset 名？”
+- 哪些合法 connectivity 变体允许进入 pre-made 离散空间；
+- 每条变体要删除哪些 joint；
+- 删除后采用哪种 regroup 语义。
 
 而它**刻意不回答**：
 
-- “tip 到底是 `cs` 还是 custom mesh？”
-- “tip 现在要不要做 geometry swap / mesh perturb？”
+- fingertip 要不要换形状；
+- tip 几何要不要变长、替换、扰动。
 
-这些 tip 变化属于后续 `post-mutate` 的空间；pre-made v1 只要求：
-合法 connectivity recipe 可以与任意当前可用的 tip 选择组合。
+这些 tip 变化仍属于后续 `post-mutate` 的空间，不再混进 connectivity legality 本体。
+
+# NOTE:
+当前项目的 `JointCfg` 是 joint-centric 的：一个 joint 同时携带其 child link 的
+collision / visual / inertial。因此这里所谓“删除某个 joint”，在科研语义上也就等价于：
+**删除这个 joint 所代表的 child link 节点及其几何。**
+
+# NOTE:
+为保证科研人员能够直接从名字回忆对应骨架，这里采用两层表达：
+
+1. **finger-level 显式 delete recipe**：明确写出要删的 joint 后缀，例如 `("j2", "j3")`；
+2. **hand-level 组合 preset**：把 thumb / index / middle / ring 的 finger-level recipe
+   组合成整手 connectivity preset。
+
+hand-level 名字仍保留 `allegro_t3_i2_m2_r2` 这种简洁形式，
+但这只是**命名与 provenance 的缩写**；真正的执行语义来自显式 delete 列表。
 """
 
 from __future__ import annotations
@@ -39,33 +52,54 @@ from typing import Any, Literal
 NON_THUMB_SLOTS: tuple[str, ...] = ("index", "middle", "ring")
 
 
+# 这里显式写出 canonical hand 中各类 finger 的 revolute 数量。
+# 这些常量只承担“命名 / provenance 缩写”的职责，不再承担 connectivity 语义本体。
+_CANONICAL_REVOLUTE_COUNT: dict[tuple[str, Literal["non_thumb", "thumb"]], int] = {
+    ("allegro", "non_thumb"): 4,  # Allegro 非拇指 canonical 链：`j0, j1, j2, j3`
+    ("allegro", "thumb"): 4,      # Allegro 拇指 canonical 链：`j0, j1, j2, j3`
+    ("leap", "non_thumb"): 4,     # LEAP 非拇指 canonical 链：`root_fixed + j0, j1, j2, j3`
+    ("leap", "thumb"): 4,         # LEAP 拇指 canonical 链：`j0, j1, j2, j3`
+}
+
+
 @dataclass
 class FingerConnectivityPreset:
-    r"""单根 finger 的合法 connectivity recipe。
+    r"""单根 finger 的显式 connectivity delete recipe。
 
-    这里故意只记录“保留多少个 revolute joint”而不是直接记录 tip 名称，原因是：
+    这里不再说“保留前 $k$ 个 revolute joint”，而是直接写：
+    **要从 canonical finger preset 里删掉哪些 joint / child-link。**
 
-    1. 当前 `JointDeleteMutator` 的执行语义本来就是：
-       保留若干运动关节，删掉剩余运动关节，并自动把剩余链路重连；
-    2. 对当前 v1 的 prefix-style 合法链而言，
-       “保留前 $k$ 个 revolute joint”已经足够精确表达科研意图；
-    3. tip 始终作为末端 fixed joint 保留，因此不应写进 connectivity legality 本体。
+    `deleted_joint_suffixes` 采用 slot-agnostic 的后缀写法，例如：
+
+    - `("j3",)`：表示删除最远端一个 revolute 段；
+    - `("j2", "j3")`：表示删除更远端两段；
+    - `()`：表示 full chain，不删任何运动段。
+
+    运行时在具体 finger slot 上 lower 时，会把这些后缀扩展成：
+
+    - `index_j3`
+    - `middle_j3`
+    - `ring_j3`
+    - `thumb_j3`
+
+    这类真正存在于 `HandCfg` 里的 joint 名。
 
     Attributes:
-        name (str): 稳定 preset 名；供 provenance / CLI / sidecar 直接回溯。
+        name (str): 稳定 preset 名；供 provenance / sidecar / debug 直接回溯。
         family (str): 适用 hand family，例如 `allegro` / `leap`。
         finger_kind (Literal["non_thumb", "thumb"]): 该 recipe 面向的 finger 类别。
-        retained_revolute (int): 保留的 revolute joint 数量 $k$。
-        regroup_strategy (Literal["merge", "drop"]): 删除剩余 joint 后如何处理被删段几何。
-        note (str): 面向科研阅读的短说明，解释这个 recipe 的物理含义。
+        deleted_joint_suffixes (tuple[str, ...]): 要从 canonical chain 中删除的 joint 后缀。
+        regroup_strategy (Literal["drop", "merge"]): 删除后如何处理被删段几何。
+            pre-made joint-centric 主线默认采用 `drop`，即删除 joint 时同步删除 child-link 几何。
+        note (str): 面向科研阅读的短说明，解释这条 recipe 的物理含义。
         metadata (dict[str, Any]): 预留扩展字段；例如未来的 canonical pose 标签。
     """
 
     name: str
     family: str
     finger_kind: Literal["non_thumb", "thumb"]
-    retained_revolute: int
-    regroup_strategy: Literal["merge", "drop"] = "merge"
+    deleted_joint_suffixes: tuple[str, ...] = ()
+    regroup_strategy: Literal["drop", "merge"] = "drop"
     note: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -74,18 +108,17 @@ class FingerConnectivityPreset:
 class HandConnectivityPreset:
     r"""整手级 connectivity recipe。
 
-    hand-level preset 只是把已经合法的 finger-level recipe 组合起来：
+    hand-level preset 只是把已经合法的 finger-level delete recipe 组合起来：
 
-    - `index / middle / ring` 分别选哪条 non-thumb recipe；
-    - `thumb` 选哪条 thumb recipe。
+    - `thumb` 用哪条 thumb recipe；
+    - `index / middle / ring` 各用哪条 non-thumb recipe。
 
-    这让 `HandGenerator` 可以直接按：
-
+    这使 `HandGenerator` 可以继续按：
     $$
     \text{base hand preset} \times \text{hand connectivity preset}
     $$
-
-    的离散空间进行 pre-made 枚举，而不需要再在主循环里硬编码四重 for-loop。
+    的离散空间做 pre-made 枚举，
+    但 connectivity 的语义主体已经从“保留 DOF 计数”切回“显式删除哪些 joint / child-link”。
     """
 
     name: str
@@ -97,128 +130,173 @@ class HandConnectivityPreset:
 def _build_finger_connectivity_registry() -> dict[str, FingerConnectivityPreset]:
     r"""构建 finger-level 合法 connectivity 注册表。
 
-    这里收敛的是你当前已经拍板的 family-specific 合法范围：
+    这里不再动态推导 legal recipe，而是把当前 v1 允许进入 pre-made 主线的删法
+    显式写出来。这样做的好处是：
 
-    - Allegro non-thumb：保留 $k \in \{2, 3, 4\}$ 个 revolute joint；
-    - LEAP non-thumb：保留 $k \in \{1, 2, 3, 4\}$ 个 revolute joint；
-    - Allegro / LEAP thumb：保留 $k \in \{3, 4\}$ 个 revolute joint。
-
-    这组范围直接来自你给出的 TODO 算法与当前科研语义，而不是 generic delete
-    能力的上界。也就是说：
-
-    - generic delete 允许“任意删”
-    - 但这里的合法注册只允许“进入 pre-made 主线的删法”
+    1. 科研人员可以直接在代码里读到“删的是哪几个 joint”；
+    2. `JointDeleteMutator` 退回到纯执行器，不再承担 legality 本体；
+    3. future work 若要扩展到更复杂的非 prefix 删除，也只需要在这里继续加 recipe。
     """
 
-    registry: dict[str, FingerConnectivityPreset] = {}
-
-    # Allegro 非拇指的合法离散链：
-    # - 4 DOF：完整链
-    # - 3 DOF：去掉最远端一个运动关节
-    # - 2 DOF：保留更近端的双关节骨干
-    for retained in (4, 3, 2):
-        name = f"allegro_non_thumb_r{retained}"
-        registry[name] = FingerConnectivityPreset(
-            name=name,
+    return {
+        # ------------------------------------------------------------------
+        # Allegro 非拇指：full / drop j3 / drop j2+j3
+        # ------------------------------------------------------------------
+        "allegro_non_thumb_full": FingerConnectivityPreset(
+            name="allegro_non_thumb_full",
             family="allegro",
             finger_kind="non_thumb",
-            retained_revolute=retained,
-            regroup_strategy="merge",
-            note=f"Allegro 非拇指保留前 {retained} 个 revolute joint；tip 始终保留。",
-        )
-
-    # LEAP 非拇指当前允许更激进的离散骨架压缩：
-    # - 4 / 3 / 2 / 1 DOF 都进入合法 pre-made 空间
-    # - 但 tip 依然不进入 legality 本体，而是继续挂在链尾
-    for retained in (4, 3, 2, 1):
-        name = f"leap_non_thumb_r{retained}"
-        registry[name] = FingerConnectivityPreset(
-            name=name,
+            deleted_joint_suffixes=(),
+            regroup_strategy="drop",
+            note="Allegro 非拇指 full chain；保留 `j0, j1, j2, j3, tip`。",
+        ),
+        "allegro_non_thumb_drop_j3": FingerConnectivityPreset(
+            name="allegro_non_thumb_drop_j3",
+            family="allegro",
+            finger_kind="non_thumb",
+            deleted_joint_suffixes=("j3",),
+            regroup_strategy="drop",
+            note="Allegro 非拇指删除最远端 `j3`；child-link 几何同步删除，不 merge 回父段。",
+        ),
+        "allegro_non_thumb_drop_j2_j3": FingerConnectivityPreset(
+            name="allegro_non_thumb_drop_j2_j3",
+            family="allegro",
+            finger_kind="non_thumb",
+            deleted_joint_suffixes=("j2", "j3"),
+            regroup_strategy="drop",
+            note="Allegro 非拇指删除 `j2, j3`；仅保留更近端双关节骨干与 tip。",
+        ),
+        # ------------------------------------------------------------------
+        # LEAP 非拇指：full / drop j3 / drop j2+j3 / drop j1+j2+j3
+        # `root_fixed` 是显式固定根部段，不属于 connectivity 裁剪对象。
+        # ------------------------------------------------------------------
+        "leap_non_thumb_full": FingerConnectivityPreset(
+            name="leap_non_thumb_full",
             family="leap",
             finger_kind="non_thumb",
-            retained_revolute=retained,
-            regroup_strategy="merge",
-            note=f"LEAP 非拇指保留前 {retained} 个 revolute joint；tip 独立于 connectivity legality。",
-        )
+            deleted_joint_suffixes=(),
+            regroup_strategy="drop",
+            note="LEAP 非拇指 full chain；保留 `root_fixed + j0, j1, j2, j3, tip`。",
+        ),
+        "leap_non_thumb_drop_j3": FingerConnectivityPreset(
+            name="leap_non_thumb_drop_j3",
+            family="leap",
+            finger_kind="non_thumb",
+            deleted_joint_suffixes=("j3",),
+            regroup_strategy="drop",
+            note="LEAP 非拇指删除最远端 `j3`；fixed root 与 tip 继续保留。",
+        ),
+        "leap_non_thumb_drop_j2_j3": FingerConnectivityPreset(
+            name="leap_non_thumb_drop_j2_j3",
+            family="leap",
+            finger_kind="non_thumb",
+            deleted_joint_suffixes=("j2", "j3"),
+            regroup_strategy="drop",
+            note="LEAP 非拇指删除 `j2, j3`；保留 `root_fixed + j0 + j1 + tip`。",
+        ),
+        "leap_non_thumb_drop_j1_j2_j3": FingerConnectivityPreset(
+            name="leap_non_thumb_drop_j1_j2_j3",
+            family="leap",
+            finger_kind="non_thumb",
+            deleted_joint_suffixes=("j1", "j2", "j3"),
+            regroup_strategy="drop",
+            note="LEAP 非拇指删除 `j1, j2, j3`；仅保留 `root_fixed + j0 + tip`。",
+        ),
+        # ------------------------------------------------------------------
+        # 拇指：当前先收敛到 full / drop j3 两档。
+        # ------------------------------------------------------------------
+        "allegro_thumb_full": FingerConnectivityPreset(
+            name="allegro_thumb_full",
+            family="allegro",
+            finger_kind="thumb",
+            deleted_joint_suffixes=(),
+            regroup_strategy="drop",
+            note="Allegro 拇指 full chain；保留 `j0, j1, j2, j3, tip`。",
+        ),
+        "allegro_thumb_drop_j3": FingerConnectivityPreset(
+            name="allegro_thumb_drop_j3",
+            family="allegro",
+            finger_kind="thumb",
+            deleted_joint_suffixes=("j3",),
+            regroup_strategy="drop",
+            note="Allegro 拇指删除最远端 `j3`；tip 仍保留并重新接回近端剩余链。",
+        ),
+        "leap_thumb_full": FingerConnectivityPreset(
+            name="leap_thumb_full",
+            family="leap",
+            finger_kind="thumb",
+            deleted_joint_suffixes=(),
+            regroup_strategy="drop",
+            note="LEAP 拇指 full chain；保留 `j0, j1, j2, j3, tip`。",
+        ),
+        "leap_thumb_drop_j3": FingerConnectivityPreset(
+            name="leap_thumb_drop_j3",
+            family="leap",
+            finger_kind="thumb",
+            deleted_joint_suffixes=("j3",),
+            regroup_strategy="drop",
+            note="LEAP 拇指删除最远端 `j3`；tip 仍保留并重新接回近端剩余链。",
+        ),
+    }
 
-    # thumb 当前先收敛到 full / minus-distal 两档：
-    # - 4 DOF：完整链
-    # - 3 DOF：删去最远端一个运动关节
-    for family in ("allegro", "leap"):
-        for retained in (4, 3):
-            name = f"{family}_thumb_r{retained}"
-            registry[name] = FingerConnectivityPreset(
-                name=name,
-                family=family,
-                finger_kind="thumb",
-                retained_revolute=retained,
-                regroup_strategy="merge",
-                note=f"{family} thumb 保留前 {retained} 个 revolute joint；tip 不与合法 recipe 绑定。",
-            )
 
-    return registry
+# 这里显式给出“finger-level recipe 的枚举顺序”。
+# 顺序本身就是科研语义的一部分：先 full，再从近似保守的轻删减走向更激进的压缩。
+_FINGER_CONNECTIVITY_ENUMERATION_ORDER: dict[tuple[str, Literal["non_thumb", "thumb"]], tuple[str, ...]] = {
+    ("allegro", "non_thumb"): (
+        "allegro_non_thumb_full",
+        "allegro_non_thumb_drop_j3",
+        "allegro_non_thumb_drop_j2_j3",
+    ),
+    ("allegro", "thumb"): (
+        "allegro_thumb_full",
+        "allegro_thumb_drop_j3",
+    ),
+    ("leap", "non_thumb"): (
+        "leap_non_thumb_full",
+        "leap_non_thumb_drop_j3",
+        "leap_non_thumb_drop_j2_j3",
+        "leap_non_thumb_drop_j1_j2_j3",
+    ),
+    ("leap", "thumb"): (
+        "leap_thumb_full",
+        "leap_thumb_drop_j3",
+    ),
+}
 
 
-def _sorted_finger_recipe_names(*, family: str, finger_kind: Literal["non_thumb", "thumb"]) -> tuple[str, ...]:
-    r"""按保留 DOF 从大到小返回指定 family / kind 的 recipe 名。
+def _remaining_revolute_count(preset: FingerConnectivityPreset) -> int:
+    r"""返回某条 finger-level delete recipe 剩余的 revolute joint 数。
 
-    之所以做显式排序，是为了让：
-
-    - `family_full`
-    - `family_t3_i2_m2_r2`
-    - ...
-
-    这样的 hand-level preset 生成顺序保持稳定，可用于测试与 provenance。
+    # NOTE:
+    这里的计数只服务于 hand-level 名字缩写与 metadata 标注，
+    并不再承担 recipe 本体语义。recipe 的主体仍是 `deleted_joint_suffixes`。
     """
 
-    names = [
-        name
-        for name, preset in FINGER_CONNECTIVITY_PRESET_REGISTRY.items()
-        if preset.family == family and preset.finger_kind == finger_kind
-    ]
-    return tuple(
-        name
-        for _, name in sorted(
-            (
-                FINGER_CONNECTIVITY_PRESET_REGISTRY[name].retained_revolute,
-                name,
-            )
-            for name in names
-        )[::-1]
-    )
+    canonical = _CANONICAL_REVOLUTE_COUNT[(preset.family, preset.finger_kind)]  # canonical revolute 总数
+    return canonical - len(preset.deleted_joint_suffixes)  # 删除几段，就少几个 revolute
 
 
 def _build_hand_connectivity_registry() -> dict[str, HandConnectivityPreset]:
-    r"""由 finger-level 合法 recipe 自动展开 hand-level 注册表。
+    r"""由显式 finger-level delete recipe 展开 hand-level 注册表。
 
-    这里做的不是“软工层面的炫技自动生成”，而是把一条非常朴素的科研事实代码化：
+    这里保留 product 展开，不是为了“炫技自动生成”，而是为了把一个非常朴素的科研事实
+    写成代码：
 
-    - 合法性首先定义在单根 finger 的 joint / child-link 组合上；
-    - 整手的 connectivity variation 就是这些合法单指组合的笛卡尔积。
+    - legality 先定义在单根 finger 的 joint / child-link 删减上；
+    - 整手 connectivity variation 就是这些合法单指 recipe 的组合。
 
-    因而 hand-level registry 的名字虽然自动生成，但它们的来源完全透明：
+    与旧实现的区别在于：
 
-    $$
-    \mathcal{H}_{family}
-    =
-    \mathcal{T}_{thumb}
-    \times
-    \mathcal{T}_{index}
-    \times
-    \mathcal{T}_{middle}
-    \times
-    \mathcal{T}_{ring}.
-    $$
+    - **旧实现**：先定义 `retained_revolute` 计数，再由计数反推删法；
+    - **当前实现**：先显式写出删法，再只把剩余 DOF 数当作 hand-level 命名缩写。
     """
 
     registry: dict[str, HandConnectivityPreset] = {}
 
     for family in ("allegro", "leap"):
-        non_thumb_names = _sorted_finger_recipe_names(family=family, finger_kind="non_thumb")
-        thumb_names = _sorted_finger_recipe_names(family=family, finger_kind="thumb")
-
-        full_non_thumb = max(FINGER_CONNECTIVITY_PRESET_REGISTRY[name].retained_revolute for name in non_thumb_names)
-        full_thumb = max(FINGER_CONNECTIVITY_PRESET_REGISTRY[name].retained_revolute for name in thumb_names)
+        non_thumb_names = _FINGER_CONNECTIVITY_ENUMERATION_ORDER[(family, "non_thumb")]
+        thumb_names = _FINGER_CONNECTIVITY_ENUMERATION_ORDER[(family, "thumb")]
 
         for thumb_name, index_name, middle_name, ring_name in product(
             thumb_names,
@@ -226,16 +304,23 @@ def _build_hand_connectivity_registry() -> dict[str, HandConnectivityPreset]:
             non_thumb_names,
             non_thumb_names,
         ):
-            thumb_dof = FINGER_CONNECTIVITY_PRESET_REGISTRY[thumb_name].retained_revolute
-            index_dof = FINGER_CONNECTIVITY_PRESET_REGISTRY[index_name].retained_revolute
-            middle_dof = FINGER_CONNECTIVITY_PRESET_REGISTRY[middle_name].retained_revolute
-            ring_dof = FINGER_CONNECTIVITY_PRESET_REGISTRY[ring_name].retained_revolute
+            thumb_recipe = FINGER_CONNECTIVITY_PRESET_REGISTRY[thumb_name]
+            index_recipe = FINGER_CONNECTIVITY_PRESET_REGISTRY[index_name]
+            middle_recipe = FINGER_CONNECTIVITY_PRESET_REGISTRY[middle_name]
+            ring_recipe = FINGER_CONNECTIVITY_PRESET_REGISTRY[ring_name]
 
-            # 完整链使用更短、更直观的别名，便于 quick usage 直接喊：
-            # - `allegro_full`
-            # - `leap_full`
-            if (thumb_dof, index_dof, middle_dof, ring_dof) == (full_thumb, full_non_thumb, full_non_thumb, full_non_thumb):
-                name = f"{family}_full"
+            thumb_dof = _remaining_revolute_count(thumb_recipe)   # hand-level 名字里的 `t`
+            index_dof = _remaining_revolute_count(index_recipe)   # hand-level 名字里的 `i`
+            middle_dof = _remaining_revolute_count(middle_recipe) # hand-level 名字里的 `m`
+            ring_dof = _remaining_revolute_count(ring_recipe)     # hand-level 名字里的 `r`
+
+            if (
+                thumb_recipe.deleted_joint_suffixes == ()
+                and index_recipe.deleted_joint_suffixes == ()
+                and middle_recipe.deleted_joint_suffixes == ()
+                and ring_recipe.deleted_joint_suffixes == ()
+            ):
+                name = f"{family}_full"  # full chain 给稳定短别名，方便 CLI / quick usage 直接喊
             else:
                 name = f"{family}_t{thumb_dof}_i{index_dof}_m{middle_dof}_r{ring_dof}"
 
@@ -253,6 +338,10 @@ def _build_hand_connectivity_registry() -> dict[str, HandConnectivityPreset]:
                     "index_revolute": index_dof,
                     "middle_revolute": middle_dof,
                     "ring_revolute": ring_dof,
+                    "thumb_deleted_joint_suffixes": list(thumb_recipe.deleted_joint_suffixes),
+                    "index_deleted_joint_suffixes": list(index_recipe.deleted_joint_suffixes),
+                    "middle_deleted_joint_suffixes": list(middle_recipe.deleted_joint_suffixes),
+                    "ring_deleted_joint_suffixes": list(ring_recipe.deleted_joint_suffixes),
                 },
             )
 
@@ -260,10 +349,10 @@ def _build_hand_connectivity_registry() -> dict[str, HandConnectivityPreset]:
 
 
 FINGER_CONNECTIVITY_PRESET_REGISTRY: dict[str, FingerConnectivityPreset] = _build_finger_connectivity_registry()
-"""finger-level 合法 connectivity 注册表。"""
+"""finger-level 合法 connectivity delete recipe 注册表。"""
 
 HAND_CONNECTIVITY_PRESET_REGISTRY: dict[str, HandConnectivityPreset] = _build_hand_connectivity_registry()
-"""hand-level 合法 connectivity 注册表。"""
+"""hand-level 合法 connectivity 组合注册表。"""
 
 
 def get_finger_connectivity_preset_data(name: str) -> FingerConnectivityPreset:

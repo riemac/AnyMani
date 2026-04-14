@@ -23,8 +23,8 @@ result = HandGenerator(
         mode="full",
         artifact_level="bundle",
         output_dir=repo_root / "source" / "anymani" / "anymani" / "assets" / "generated",
-        hand_preset="single_palm_allegro",
-        connectivity_preset="allegro_full",
+        hand_presets=["single_palm_allegro"],
+        connectivity_presets={"single_palm_allegro": ["allegro_full"]},
         output_layout="recursive",
     )
 ).generate()
@@ -48,8 +48,8 @@ result = HandGenerator(
         mode="full",
         artifact_level="bundle",
         output_dir=repo_root / "source" / "anymani" / "anymani" / "assets" / "generated",
-        hand_preset="single_palm_allegro",
-        connectivity_preset="allegro_t3_i2_m2_r2",
+        hand_presets=["single_palm_allegro"],
+        connectivity_presets={"single_palm_allegro": ["allegro_t3_i2_m2_r2"]},
         output_layout="recursive",
     )
 ).generate()
@@ -74,13 +74,11 @@ generator = HandGenerator(
         artifact_level="bundle",
         output_dir=repo_root / "source" / "anymani" / "anymani" / "assets" / "generated",
         sampling_strategy="enumerate",
-        hand_preset_names=("single_palm_allegro", "single_palm_leap"),
-        connectivity_preset_names=(
-            "allegro_full",
-            "allegro_t3_i2_m2_r2",
-            "leap_full",
-            "leap_t3_i2_m2_r2",
-        ),
+        hand_presets=["single_palm_allegro", "single_palm_leap"],
+        connectivity_presets={
+            "single_palm_allegro": ["allegro_full", "allegro_t3_i2_m2_r2"],
+            "single_palm_leap": ["leap_full", "leap_t3_i2_m2_r2"],
+        },
         max_enumerate=4,
         output_layout="recursive",
     )

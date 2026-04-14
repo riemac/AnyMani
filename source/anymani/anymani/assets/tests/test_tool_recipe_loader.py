@@ -168,8 +168,8 @@ def test_recipe_loader_keeps_premade_facade_fields_as_generator_contract(tmp_pat
 
     这里锁住的是这轮新增的顶层声明式契约：
 
-    - `hand_preset_names`
-    - `connectivity_preset_names`
+    - `hand_presets`
+    - `connectivity_presets`
     - `output_layout`
 
     它们都属于 `HandGeneratorCfg` 本体，而不是新的 wrapper / runner。
@@ -181,12 +181,12 @@ def test_recipe_loader_keeps_premade_facade_fields_as_generator_contract(tmp_pat
             "artifact_level": "hand_cfg",
             "output_dir": str(tmp_path / "generated"),
             "sampling_strategy": "enumerate",
-            "hand_preset_names": ["single_palm_allegro"],
-            "connectivity_preset_names": ["allegro_full", "allegro_t3_i2_m2_r2"],
+            "hand_presets": ["single_palm_allegro"],
+            "connectivity_presets": {"single_palm_allegro": ["allegro_full", "allegro_t3_i2_m2_r2"]},
             "output_layout": "recursive",
         }
     )
 
-    assert cfg.hand_preset_names == ("single_palm_allegro",)
-    assert cfg.connectivity_preset_names == ("allegro_full", "allegro_t3_i2_m2_r2")
+    assert cfg.hand_presets == ["single_palm_allegro"]
+    assert cfg.connectivity_presets == {"single_palm_allegro": ["allegro_full", "allegro_t3_i2_m2_r2"]}
     assert cfg.output_layout == "recursive"
