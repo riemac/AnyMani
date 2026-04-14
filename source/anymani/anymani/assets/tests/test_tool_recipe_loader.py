@@ -161,3 +161,32 @@ def test_loaded_recipe_drives_hand_generator_directly_for_bundle_mode(tmp_path):
     assert result.sidecar_path is not None and result.sidecar_path.is_file()
     assert result.urdf_path.parent.parent == out_dir
     assert result.sidecar_path.parent.parent == out_dir
+
+
+def test_recipe_loader_keeps_premade_facade_fields_as_generator_contract(tmp_path):
+    r"""`RecipeLoader` 应保留 pre-made façade 字段，而不是在 tooling 层吞掉它们。
+
+    这里锁住的是这轮新增的顶层声明式契约：
+
+    - `hand_preset_names`
+    - `connectivity_preset_names`
+    - `output_layout`
+
+    它们都属于 `HandGeneratorCfg` 本体，而不是新的 wrapper / runner。
+    """
+
+    cfg = RecipeLoader.load_dict(
+        {
+            "mode": "made",
+            "artifact_level": "hand_cfg",
+            "output_dir": str(tmp_path / "generated"),
+            "sampling_strategy": "enumerate",
+            "hand_preset_names": ["single_palm_allegro"],
+            "connectivity_preset_names": ["allegro_full", "allegro_t3_i2_m2_r2"],
+            "output_layout": "recursive",
+        }
+    )
+
+    assert cfg.hand_preset_names == ("single_palm_allegro",)
+    assert cfg.connectivity_preset_names == ("allegro_full", "allegro_t3_i2_m2_r2")
+    assert cfg.output_layout == "recursive"

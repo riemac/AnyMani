@@ -22,6 +22,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from .connectivity_presets import (
+    FINGER_CONNECTIVITY_PRESET_REGISTRY,
+    HAND_CONNECTIVITY_PRESET_REGISTRY,
+    NON_THUMB_SLOTS,
+    FingerConnectivityPreset,
+    HandConnectivityPreset,
+    get_default_hand_connectivity_preset_name,
+    get_finger_connectivity_preset_data,
+    get_hand_connectivity_preset_data,
+    list_hand_connectivity_preset_names,
+)
 from .finger_presets import (
     ALLEGRO_FINGER_PRESET,
     ALLEGRO_THUMB_PRESET,
@@ -119,6 +130,15 @@ def make_human_like_builder_cfg(**kwargs: Any):
     return _impl(**kwargs)
 
 __all__ = [
+    "NON_THUMB_SLOTS",
+    "FingerConnectivityPreset",
+    "HandConnectivityPreset",
+    "FINGER_CONNECTIVITY_PRESET_REGISTRY",
+    "HAND_CONNECTIVITY_PRESET_REGISTRY",
+    "get_finger_connectivity_preset_data",
+    "get_hand_connectivity_preset_data",
+    "list_hand_connectivity_preset_names",
+    "get_default_hand_connectivity_preset_name",
     "ALLEGRO_FINGER_PRESET",
     "LEAP_FINGER_PRESET",
     "ALLEGRO_THUMB_PRESET",

@@ -29,11 +29,24 @@ parser.add_argument("--palm-preset", type=str, default=None, help="palm preset �
 parser.add_argument("--finger-preset", type=str, default=None, help="非拇指 finger preset 名；缺省时按 family 推成 `{family}_non_thumb_v1`。")
 parser.add_argument("--thumb-preset", type=str, default=None, help="thumb preset 名；缺省时按 family 推成 `{family}_thumb_v1`。")
 parser.add_argument(
+    "--connectivity-preset",
+    type=str,
+    default=None,
+    help="可选的 hand-level connectivity preset 名；只描述合法 joint / child-link 组合，不绑定 fingertip。",
+)
+parser.add_argument(
     "--artifact-level",
     type=str,
     default="urdf",
     choices=("hand_cfg", "urdf", "bundle"),
     help="正式 HandGenerator 导出粒度；quick-check 默认只写 URDF。",
+)
+parser.add_argument(
+    "--output-layout",
+    type=str,
+    default="recursive",
+    choices=("flat", "recursive"),
+    help="当启用 connectivity preset 时，控制 pre-made 产物采用递归式还是扁平式目录。",
 )
 parser.add_argument("--output-dir", type=str, default=None, help="导出目录；不写则自动创建临时目录。")
 
@@ -107,11 +120,16 @@ def main() -> int:
     args = parser.parse_args()
     output_dir = resolve_output_dir(args.output_dir, prefix="anymani_hand_preview")
     made_cfg, label = _build_made_cfg_and_label(args)
+    if args.connectivity_preset is not None:
+        label = f"{label} + connectivity={args.connectivity_preset}"
     generator_cfg = HandGeneratorCfg(
         mode="full",
         artifact_level=args.artifact_level,
         output_dir=output_dir,
         Made=made_cfg,
+        hand_preset=args.hand_preset,
+        connectivity_preset=args.connectivity_preset,
+        output_layout=args.output_layout,
     )
     result = HandGenerator(generator_cfg).generate()
     if result is None:

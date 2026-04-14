@@ -33,7 +33,9 @@ r"""手部资产生成器主入口草案。
 
 from __future__ import annotations
 
+import hashlib
 import math
+import random
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +45,13 @@ from uuid import uuid4
 from ..asset_base import AssetCfgBase, HandCfg
 from ..asset_builders import HandBuilder, HandBuilderCfg
 from ..exporter import HandExporter, HandExporterCfg
+from ..presets.connectivity_presets import (
+    get_default_hand_connectivity_preset_name,
+    get_finger_connectivity_preset_data,
+    get_hand_connectivity_preset_data,
+    list_hand_connectivity_preset_names,
+)
+from ..presets.hand_presets import get_hand_builder_preset_data, make_human_like_builder_cfg_from_preset
 from ..validator import HandValidator, HandValidatorCfg
 
 try:
@@ -80,6 +89,65 @@ def _has_enabled_mutation(cfg: HandMutatorCfg) -> bool:
         getattr(cfg, key) is not None
         for key in ("joint_delete", "link_scale", "tip_replace", "limit_tweak", "mount_perturb", "finger_replace")
     )
+
+
+def _normalize_name_tuple(values: tuple[str, ...] | list[str] | None, *, field_name: str) -> tuple[str, ...]:
+    r"""把 recipe / YAML 侧的名称列表统一规约为稳定元组。
+
+    `RecipeLoader` 在顶层标量字段上会把 YAML list 原样传给 `HandGeneratorCfg`，
+    因此这里在 cfg 层再做一次显式规约，避免后续：
+
+    - `list[str]`
+    - `tuple[str, ...]`
+    - 单个字符串误传
+
+    这三种形态混在一起，导致 pre-made 枚举逻辑分支越来越乱。
+    """
+
+    if values is None:
+        return ()
+    if isinstance(values, str):
+        return (values,)
+    if isinstance(values, tuple):
+        return tuple(str(item) for item in values)
+    if isinstance(values, list):
+        return tuple(str(item) for item in values)
+    raise TypeError(f"{field_name} must be a tuple/list of str or None, got {values!r}")
+
+
+def _stable_premade_id(*parts: str) -> str:
+    r"""为 pre-made 的离散 recipe 组合生成稳定短 ID。
+
+    在 `enumerate` 路径里，我们希望：
+
+    - 同一个 `(base_hand_preset, connectivity_preset)` 组合，多次生成时 ID 稳定；
+    - sidecar / output path 能直接靠这组 provenance 回溯；
+    - 但目录名又不要长到影响人工浏览。
+
+    因而这里对 provenance 字符串做 md5，再取前 8 位十六进制作为稳定短签名。
+    """
+
+    payload = "::".join(parts).encode("utf-8")
+    return hashlib.md5(payload).hexdigest()[:8]
+
+
+def _deleted_revolute_joint_names(finger, *, retained_revolute: int) -> tuple[str, ...]:
+    r"""把“保留前 $k$ 个 revolute joint”的 legality 规约成显式删除集合。
+
+    这里故意不把 tip 写进 connectivity recipe，本函数也因此只看 `revolute` joint：
+
+    - fixed root segment（如 LEAP 的 `root_fixed`）天然保留；
+    - tip fixed joint 天然保留；
+    - 真正进入 pre-made legality 空间的，只有中间那段运动学骨干。
+    """
+
+    revolute_joint_names = [joint.name for joint in finger.joints if joint.joint_type == "revolute"]
+    if not 1 <= retained_revolute <= len(revolute_joint_names):
+        raise ValueError(
+            f"retained_revolute={retained_revolute} is incompatible with finger "
+            f"{finger.name!r} which has {len(revolute_joint_names)} revolute joints"
+        )
+    return tuple(revolute_joint_names[retained_revolute:])
 
 
 # ============================================================================
@@ -189,10 +257,53 @@ class HandGeneratorCfg(AssetCfgBase):
     测试或批量脚本也可以显式覆盖成临时目录。
     """
 
+    hand_preset: str | None = None
+    """可选的 base hand preset 名。
+
+    # NOTE:
+    这是用户层的 façade 字段，不是为了替代 `Made`，而是为了让科研侧可以直接喊：
+
+    - `single_palm_leap`
+    - `single_palm_allegro`
+
+    这类稳定的 pre-made 锚点名。若同时提供了具体 `Made` cfg，则运行时优先使用
+    `Made` 作为实际 builder 输入，而把 `hand_preset` 当作 provenance 锚点保留下来。
+    """
+
+    connectivity_preset: str | None = None
+    """可选的 hand-level connectivity preset 名。
+
+    这里的 preset 只描述合法的 joint / child-link 组合，不绑定 fingertip。
+    若为 `None` 且同时提供了 `hand_preset`，则默认回退到该 family 的 `*_full`
+    connectivity preset。
+    """
+
+    hand_preset_names: tuple[str, ...] = ()
+    """批量生成时可枚举 / 可采样的 base hand preset 名集合。"""
+
+    connectivity_preset_names: tuple[str, ...] = ()
+    """批量生成时可枚举 / 可采样的 connectivity preset 名集合。"""
+
+    output_layout: Literal["flat", "recursive"] = "recursive"
+    """pre-made 产物的目录组织模式。
+
+    - ``recursive``：`generated/pre_made/{hand_preset}/{connectivity_preset}/{sample_id}/`
+    - ``flat``：`generated/pre_made_flat/{sample_id}/`
+
+    # NOTE:
+    这个字段仍然收口在 `HandGeneratorCfg`，因为用户已经明确要求：
+    `HandGeneratorCfg` 才是生成资产时的唯一 façade，不再额外包装新的 runner。
+    """
+
     def __post_init__(self):
         if self.class_type is None:
             self.class_type = HandGenerator
         self.output_dir = Path(self.output_dir)
+        self.hand_preset_names = _normalize_name_tuple(self.hand_preset_names, field_name="hand_preset_names")
+        self.connectivity_preset_names = _normalize_name_tuple(
+            self.connectivity_preset_names,
+            field_name="connectivity_preset_names",
+        )
 
 
 # ============================================================================
@@ -211,6 +322,319 @@ class HandGenerator:
 
     def __init__(self, cfg: HandGeneratorCfg):
         self.cfg = cfg
+
+    def _candidate_hand_preset_names(self) -> tuple[str, ...]:
+        r"""返回当前 generator 可见的 base hand preset 名集合。
+
+        这里统一把：
+
+        - `hand_preset`
+        - `hand_preset_names`
+
+        两种 façade 入口规约成同一套候选集合，避免 sample / enumerate 路线各自
+        写一套名字选择逻辑。
+        """
+
+        if self.cfg.hand_preset is not None:
+            return (self.cfg.hand_preset,)
+        return self.cfg.hand_preset_names
+
+    def _compatible_connectivity_names(self, *, family: str) -> tuple[str, ...]:
+        r"""返回与给定 family 兼容的 connectivity preset 名集合。
+
+        过滤规则非常直接：
+
+        1. 若用户显式给了单个 `connectivity_preset`，必须检查 family 一致；
+        2. 若用户给了一组 `connectivity_preset_names`，则只保留当前 family 兼容项；
+        3. 若用户没给，则默认展开该 family 的全部合法 connectivity preset。
+        """
+
+        if self.cfg.connectivity_preset is not None:
+            preset = get_hand_connectivity_preset_data(self.cfg.connectivity_preset)
+            if preset.family != family:
+                raise ValueError(
+                    f"Connectivity preset {preset.name!r} belongs to family {preset.family!r}, "
+                    f"but current hand family is {family!r}"
+                )
+            return (preset.name,)
+
+        if self.cfg.connectivity_preset_names:
+            compatible = []
+            for name in self.cfg.connectivity_preset_names:
+                preset = get_hand_connectivity_preset_data(name)
+                if preset.family == family:
+                    compatible.append(name)
+            if not compatible:
+                raise ValueError(
+                    f"No connectivity preset in {self.cfg.connectivity_preset_names!r} is compatible with family {family!r}"
+                )
+            return tuple(compatible)
+
+        return list_hand_connectivity_preset_names(family)
+
+    def _resolve_single_premade_selection(self) -> tuple[str | None, str | None] | None:
+        r"""为 `generate()` 的单样本路径解析本次要使用的 pre-made 选择。
+
+        这里故意把“是否走 pre-made façade”定义得很宽松：
+
+        - 只要给了 `hand_preset` / `hand_preset_names`
+        - 或者给了 `connectivity_preset` / `connectivity_preset_names`
+
+        就认为用户正在通过 `HandGeneratorCfg` 使用 pre-made 语义。
+
+        返回值的两个分量分别是：
+
+        - `hand_preset_name`：可为 `None`，表示本次 base hand 仍来自显式 `Made`
+        - `connectivity_preset_name`：可为 `None`，表示本次只造 canonical base hand
+        """
+
+        hand_candidates = self._candidate_hand_preset_names()
+        has_connectivity_request = bool(self.cfg.connectivity_preset or self.cfg.connectivity_preset_names)
+        if not hand_candidates and not has_connectivity_request:
+            return None
+
+        hand_preset_name: str | None
+        if self.cfg.hand_preset is not None:
+            hand_preset_name = self.cfg.hand_preset  # 单样本显式 hand preset：不做随机选择
+        elif hand_candidates:
+            hand_preset_name = random.choice(hand_candidates)  # sample 路径可从 preset 池中随机抽取
+        else:
+            hand_preset_name = None  # 允许“只给 connectivity preset + 具体 Made cfg”的局部实验路径
+
+        if hand_preset_name is not None:
+            family = str(get_hand_builder_preset_data(hand_preset_name)["family"])
+            if self.cfg.connectivity_preset is None and not self.cfg.connectivity_preset_names:
+                if self.cfg.hand_preset is not None:
+                    # 单个 hand preset 且没显式给 connectivity 时，默认落到该 family 的 full chain。
+                    return hand_preset_name, get_default_hand_connectivity_preset_name(family)
+                compatible_names = self._compatible_connectivity_names(family=family)
+                return hand_preset_name, random.choice(compatible_names)
+
+            compatible_names = self._compatible_connectivity_names(family=family)
+            if self.cfg.connectivity_preset is not None:
+                return hand_preset_name, compatible_names[0]
+            return hand_preset_name, random.choice(compatible_names)
+
+        if self.cfg.connectivity_preset is not None:
+            return None, self.cfg.connectivity_preset
+        if self.cfg.connectivity_preset_names:
+            return None, random.choice(self.cfg.connectivity_preset_names)
+        return None
+
+    def _build_base_hand(self, *, hand_preset_name: str | None) -> tuple[HandCfg, str]:
+        r"""构建本次样本的 canonical base hand。
+
+        base hand 的来源按以下优先级收敛：
+
+        1. 若 `Made` 已经是具体 builder cfg，则优先使用它；
+        2. 否则若给了 `hand_preset_name`，就从 hand preset 解析出 builder cfg；
+        3. 两者都没有时，说明当前 cfg 既没有具体 `Made`，也没有 pre-made hand preset，
+           这在运行时应视为无效输入。
+
+        这样做的动机，是同时支持两条工作流：
+
+        - 正式 pre-made：`hand_preset -> canonical hand`
+        - 科研局部实验：`hand_preset` 只作为 provenance 锚点，但真正的 base hand
+          仍由你显式覆写后的 `Made` cfg 构建
+        """
+
+        if self.cfg.Made.class_type is not HandBuilder:
+            builder_cfg = self.cfg.Made  # 显式 `Made` 一旦具体化，就说明用户要以它作为真实基座
+        elif hand_preset_name is not None:
+            builder_cfg = make_human_like_builder_cfg_from_preset(hand_preset_name)
+        else:
+            raise ValueError("HandGenerator requires a concrete Made cfg or a hand_preset when using the pre-made facade")
+
+        builder = builder_cfg.class_type(builder_cfg)
+        return builder.build(), builder_cfg.__class__.__name__
+
+    def _apply_connectivity_preset(
+        self,
+        hand_cfg: HandCfg,
+        *,
+        connectivity_preset_name: str,
+        hand_preset_name: str | None,
+    ) -> tuple[HandCfg, dict[str, Any]]:
+        r"""把 hand-level connectivity preset lower 成显式的 joint delete + regroup 结果。
+
+        这里刻意采用“两层语义分离”：
+
+        - 合法 recipe 在 `assets/presets/connectivity_presets.py`
+        - 真正执行删除/重连的 runtime 在 `mutate/joint_delete.py`
+
+        也就是说，本函数本质上做的是：
+
+        $$
+        \text{legal connectivity preset}
+        \xrightarrow{\text{lower}}
+        \text{per-finger deleted joint set}
+        \xrightarrow{\text{JointDeleteMutator}}
+        \text{new HandCfg}.
+        $$
+        """
+
+        connectivity_preset = get_hand_connectivity_preset_data(connectivity_preset_name)
+        if connectivity_preset.family != hand_cfg.family:
+            raise ValueError(
+                f"Connectivity preset {connectivity_preset.name!r} belongs to family {connectivity_preset.family!r}, "
+                f"but the built hand belongs to {hand_cfg.family!r}"
+            )
+
+        # 这里局部导入 `JointDeleteMutator`，是为了保留当前模块原先的 fallback 结构：
+        # 没有 mutate 子包的环境下，`HandGenerator` 其它轻量路径仍可 import。
+        from .mutate import JointDeleteCfg, JointDeleteMutator
+
+        mutated = hand_cfg.copy()
+        per_finger_connectivity: dict[str, Any] = {}
+
+        # 按 slot recipe 顺序逐根手指 lower。
+        # 每一步都只改当前 finger，其余 finger 保持不动，便于 sidecar 回溯。
+        for finger_name, finger_recipe_name in connectivity_preset.finger_slots.items():
+            current_finger = next((finger for finger in mutated.fingers if finger.name == finger_name), None)
+            if current_finger is None:
+                continue  # 当前 hand 若没有这个 slot，就跳过，不对未来 little-finger 扩展设死约束
+
+            finger_recipe = get_finger_connectivity_preset_data(finger_recipe_name)
+            deleted_joint_names = _deleted_revolute_joint_names(
+                current_finger,
+                retained_revolute=finger_recipe.retained_revolute,
+            )
+            per_finger_connectivity[finger_name] = {
+                "finger_connectivity_preset": finger_recipe.name,
+                "retained_revolute": finger_recipe.retained_revolute,
+                "deleted_joints": list(deleted_joint_names),
+                "regroup_strategy": finger_recipe.regroup_strategy,
+            }
+
+            if not deleted_joint_names:
+                continue  # full chain 这类 recipe 不需要真正执行 delete
+
+            lowered = JointDeleteMutator(
+                JointDeleteCfg(
+                    target_finger=finger_name,
+                    deleted_joints=deleted_joint_names,
+                    regroup_strategy=finger_recipe.regroup_strategy,
+                    respect_preset=False,  # legality 已由 connectivity registry 定义，这里不再让 generic mutator 额外裁决
+                    keep_terminal_joint=True,
+                )
+            ).mutate(mutated)
+            if lowered is None:
+                raise ValueError(
+                    f"Failed to lower connectivity preset {connectivity_preset_name!r} on finger {finger_name!r}"
+                )
+            mutated = lowered
+
+        hand_metadata = dict(mutated.metadata)
+        hand_metadata["premade_connectivity"] = {
+            "base_hand_preset": hand_preset_name,
+            "connectivity_preset": connectivity_preset_name,
+            "per_finger": per_finger_connectivity,
+        }
+        mutated = mutated.replace(metadata=hand_metadata)
+        return mutated, {
+            "base_hand_preset": hand_preset_name,
+            "connectivity_preset": connectivity_preset_name,
+            "per_finger_connectivity": per_finger_connectivity,
+        }
+
+    def _resolve_export_root(self, *, result: HandGenerationResult) -> Path:
+        r"""根据 pre-made provenance 与 `output_layout` 计算本次导出的根目录。
+
+        当前导出器仍保持它一贯的职责边界：
+
+        - `HandExporter` 负责在传入目录下再补一层 `{sample_id}/`
+        - `HandGenerator` 负责决定这个“传入目录”到底应该是平铺还是递归层级
+
+        这样可以在不破坏现有 exporter 结构的前提下，把目录语义仍然收口到
+        `HandGeneratorCfg` 这个唯一 façade。
+        """
+
+        if result.hand_cfg is None or "connectivity_preset" not in result.metadata:
+            return self.cfg.output_dir
+
+        connectivity_preset_name = str(result.metadata["connectivity_preset"])
+        if self.cfg.output_layout == "flat":
+            return self.cfg.output_dir / "pre_made_flat"
+
+        hand_anchor = str(result.metadata.get("base_hand_preset") or result.hand_cfg.family)
+        return self.cfg.output_dir / "pre_made" / hand_anchor / connectivity_preset_name
+
+    def _generate_once(
+        self,
+        *,
+        hand_preset_name: str | None,
+        connectivity_preset_name: str | None,
+    ) -> HandGenerationResult | None:
+        r"""执行一次单样本生成；供 `generate()` 与 `generate_batch()` 共同复用。
+
+        这个内部 helper 的价值，是把：
+
+        - 单样本 `generate()`
+        - 枚举式 `generate_batch()`
+
+        这两条路径共享到同一套 build / connectivity / mutate / validate / export
+        语义上，而不是各写一份相似但悄悄分叉的实现。
+        """
+
+        # `mode="mutate"` 的语义要求调用方先提供一份现成 `HandCfg`。
+        # 当前 `HandGeneratorCfg` 还没有这个输入槽位，因此这里显式拒绝，
+        # 避免伪装成“支持 mutate-only”。
+        if self.cfg.mode == "mutate":
+            raise NotImplementedError("mode='mutate' is intentionally deferred in the first pre-made slice.")
+
+        hand_cfg, builder_cfg_name = self._build_base_hand(hand_preset_name=hand_preset_name)
+
+        premade_metadata: dict[str, Any] = {}
+        if connectivity_preset_name is not None:
+            hand_cfg, premade_metadata = self._apply_connectivity_preset(
+                hand_cfg,
+                connectivity_preset_name=connectivity_preset_name,
+                hand_preset_name=hand_preset_name,
+            )
+
+        # 后序派生：只有在 `mode="full"` 且至少启用一个 mutate 工具时才进入。
+        # 这样 `mode="made"` 不会因为空 mutate cfg 产生额外语义分支。
+        if self.cfg.mode == "full" and _has_enabled_mutation(self.cfg.Mutate):
+            hand_cfg = HandMutator(self.cfg.Mutate).mutate(hand_cfg)  # `HandCfg -> HandCfg | None`
+            if hand_cfg is None:
+                return None  # 变异被拒绝；拒绝语义统一表现为“本次样本无结果”
+
+        # 统一在 made / mutate 之后做手级 validator，保证输出侧永远消费的是
+        # 同一种“已通过当前约束”的 `HandCfg`。
+        validator = HandValidator(self.cfg.Validate)
+        validation = validator.validate(hand_cfg)  # 结构、命名、链式一致性等检查结果
+        if not validation:
+            return None  # validator 拒绝时不抛异常，而是返回空样本给上层批处理逻辑
+
+        sample_id = uuid4().hex[:8]
+        if connectivity_preset_name is not None and self.cfg.sampling_strategy == "enumerate":
+            sample_id = _stable_premade_id(
+                hand_preset_name or hand_cfg.family,
+                connectivity_preset_name,
+            )
+
+        metadata = {
+            "id": sample_id,  # 8 位短 ID，sample 路径默认随机，enumerate 路径按 recipe 稳定化
+            "builder_cfg": builder_cfg_name,  # 记录 base hand 最终使用的 builder cfg 类型
+            "warnings": validation.warnings,  # validator 的非致命 warning，保留给 sidecar / 调试消费
+            "family": hand_cfg.family,
+        }
+        metadata.update({key: value for key, value in premade_metadata.items() if value is not None})
+        metadata["output_layout"] = self.cfg.output_layout
+
+        result = HandGenerationResult(
+            hand_cfg=hand_cfg,
+            metadata=metadata,
+        )
+
+        # `artifact_level="hand_cfg"` 表示用户只想拿内存中的 hand schema；
+        # 其余两档则交给 exporter 负责落盘。
+        if self.cfg.artifact_level != "hand_cfg":
+            export_cfg = self.cfg.Export.replace(artifact_level=self.cfg.artifact_level)  # 把主入口的粒度选择下传给 exporter
+            exporter = HandExporter(export_cfg)  # 导出器负责 URDF / sidecar / tree 文件
+            exporter.export(result, output_dir=self._resolve_export_root(result=result))  # 目录布局仍由 HandGenerator façade 决定
+
+        return result
 
     def generate(self) -> HandGenerationResult | None:
         r"""执行一次整手资产生成。
@@ -265,53 +689,10 @@ class HandGenerator:
         # IDEA：主入口的价值不是把每一步都做满，而是把默认路径做顺，
         # 同时给用户足够多的“中间停靠点”。
 
-        # `mode="mutate"` 的语义要求调用方先提供一份现成 `HandCfg`。
-        # 当前 `HandGeneratorCfg` 还没有这个输入槽位，因此这里显式拒绝，
-        # 避免伪装成“支持 mutate-only”。
-        if self.cfg.mode == "mutate":
-            raise NotImplementedError("mode='mutate' is intentionally deferred in the first pre-made slice.")
-
-        # `Made` 必须是具体 builder cfg，而不是抽象基类；否则无法真正 lower
-        # 成 hand skeleton。
-        if self.cfg.Made.class_type is HandBuilder:
-            raise ValueError("HandGeneratorCfg.Made must be a concrete HandBuilderCfg subclass, not bare HandBuilderCfg")
-
-        # 前序造骨架：`HandBuilderCfg -> HandBuilder -> HandCfg`。
-        builder = self.cfg.Made.class_type(self.cfg.Made)  # 具体 hand builder 运行时对象
-        hand_cfg = builder.build()  # made 阶段产出的 canonical `HandCfg`
-
-        # 后序派生：只有在 `mode="full"` 且至少启用一个 mutate 工具时才进入。
-        # 这样 `mode="made"` 不会因为空 mutate cfg 产生额外语义分支。
-        if self.cfg.mode == "full" and _has_enabled_mutation(self.cfg.Mutate):
-            hand_cfg = HandMutator(self.cfg.Mutate).mutate(hand_cfg)  # `HandCfg -> HandCfg | None`
-            if hand_cfg is None:
-                return None  # 变异被拒绝；拒绝语义统一表现为“本次样本无结果”
-
-        # 统一在 made / mutate 之后做手级 validator，保证输出侧永远消费的是
-        # 同一种“已通过当前约束”的 `HandCfg`。
-        validator = HandValidator(self.cfg.Validate)
-        validation = validator.validate(hand_cfg)  # 结构、命名、链式一致性等检查结果
-        if not validation:
-            return None  # validator 拒绝时不抛异常，而是返回空样本给上层批处理逻辑
-
-        # 结果包先保留内存对象，再按 artifact level 决定是否继续落盘。
-        result = HandGenerationResult(
-            hand_cfg=hand_cfg,
-            metadata={
-                "id": uuid4().hex[:8],  # 8 位短 ID，作为本次生成产物目录名
-                "builder_cfg": self.cfg.Made.__class__.__name__,  # 记录前序 builder cfg 类型
-                "warnings": validation.warnings,  # validator 的非致命 warning，保留给 sidecar / 调试消费
-            },
-        )
-
-        # `artifact_level="hand_cfg"` 表示用户只想拿内存中的 hand schema；
-        # 其余两档则交给 exporter 负责落盘。
-        if self.cfg.artifact_level != "hand_cfg":
-            export_cfg = self.cfg.Export.replace(artifact_level=self.cfg.artifact_level)  # 把主入口的粒度选择下传给 exporter
-            exporter = HandExporter(export_cfg)  # 导出器负责 URDF / sidecar / tree 文件
-            exporter.export(result, output_dir=self.cfg.output_dir)  # 产物写入 `assets/generated/` 或调用方覆写目录
-
-        return result
+        selection = self._resolve_single_premade_selection()
+        if selection is None:
+            return self._generate_once(hand_preset_name=None, connectivity_preset_name=None)
+        return self._generate_once(hand_preset_name=selection[0], connectivity_preset_name=selection[1])
 
     def generate_batch(self) -> Iterator[HandGenerationResult]:
         r"""批量生成整手资产，按 ``cfg.sampling_strategy`` 路由到不同策略。
@@ -377,9 +758,32 @@ class HandGenerator:
         # 切换只需修改 `cfg.sampling_strategy`，不需要改调用代码。
 
         # `enumerate` 不是“循环多跑几次 sample”，而是显式遍历离散组合空间。
-        # 这要求 made/mutate 两侧都提供 enumerate 协议；当前还未接通。
+        # 当前这条路优先为 pre-made façade 落地：也就是显式遍历
+        # `base hand preset × connectivity preset`。
         if self.cfg.sampling_strategy == "enumerate":
-            raise NotImplementedError("enumerate batch generation is deferred beyond the first pre-made slice.")
+            hand_preset_names = self._candidate_hand_preset_names()
+            if not hand_preset_names:
+                raise NotImplementedError(
+                    "enumerate batch generation currently requires hand_preset / hand_preset_names in the HandGenerator facade."
+                )
+
+            emitted = 0
+            max_enumerate = self.cfg.max_enumerate
+            for hand_preset_name in hand_preset_names:
+                family = str(get_hand_builder_preset_data(hand_preset_name)["family"])
+                connectivity_names = self._compatible_connectivity_names(family=family)
+                for connectivity_preset_name in connectivity_names:
+                    if max_enumerate is not None and emitted >= max_enumerate:
+                        return
+                    result = self._generate_once(
+                        hand_preset_name=hand_preset_name,
+                        connectivity_preset_name=connectivity_preset_name,
+                    )
+                    if result is None:
+                        continue
+                    yield result
+                    emitted += 1
+            return
 
         # `target_count` 是用户要求的成功样本数 $N$，而不是尝试次数。
         # 失败样本（被 mutate / validator 拒绝）不会计入这个预算。
