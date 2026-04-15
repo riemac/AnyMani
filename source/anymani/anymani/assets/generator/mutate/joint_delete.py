@@ -92,6 +92,22 @@ class JointDeleteMutator(MutatorBase):
 
     负责对已构建好的 `HandCfg` 执行 joint 删除 + 重连，并按 `regroup_strategy`
     处理被删关节的 child link 几何。
+
+    # NOTE:
+    这里需要明确区分两类完全不同的科学语义：
+
+    1. `merge`
+       被删 joint 的 child-link 几何并回上游保留容器，同时剩余链条做
+       **拓扑收缩**；也就是说，后续 surviving joint 会“穿透”所有被删段，
+       继续落到原本的 distal rest pose 附近。
+    2. `drop`
+       被删 joint 与其 child-link 几何一起消失；剩余链条做
+       **物理缩短后的自动重解算**。这时 surviving joint / tip 不应再保留
+       被删段累计长度，而应继承“第一段被删 joint 的挂接位姿”。
+
+    第二条正是当前 pre-made joint-centric 主线真正需要的语义：
+    删掉一个 joint 节点，就等于删掉该 joint 所代表的 child-link 节点及其几何，
+    剩下的链条要继续“过生活”，而不是把 distal node 悬空保留在旧位置。
     """
 
     cfg: JointDeleteCfg
@@ -206,27 +222,83 @@ class JointDeleteMutator(MutatorBase):
         # 能通过 HandValidator 的全局链式一致性检查，建议在此处嵌入轻量预检。
 
     def _delete_from_finger(self, hand: HandCfg, finger, delete_set: set[str]):
-        r"""在单根 finger 上执行 joint 删除 + 重连。"""
+        r"""在单根 finger 上执行 joint 删除 + 重连。
 
-        new_joints = []
-        last_kept_parent = finger.parent_link  # 当前保留下来的链尾 link 名
-        last_kept_container = hand.palm  # 用于 `merge` 时接收被删 joint 的几何
-        pending_origin = PoseCfg()  # 从 `last_kept_parent` 到“下一个原始 joint parent”的累计位姿
+        这里的实现核心，是把“删中段后怎么串接 surviving 链”写清楚：
+
+        - `merge`：继续累计被删段位姿，等价于**收缩图结构但保留 distal 位置**；
+        - `drop`：只记住**第一段被删 joint 的 origin**，等价于
+          “删掉这些配置项后，从第一个被删挂接点重新长出剩余链”。
+
+        对 regular finger builder 而言，这个“第一段被删 joint 的 origin”
+        恰好就是上一保留段的有效推进长度 $c_{\text{valid}}$ 在当前 schema 中的
+        直接体现，因此不需要回到 `BuilderCfg` 重新 build，也能忠实表达
+        “配置项消失后的自动重解算”。
+        """
+
+        new_joints = []  # 新 finger 链中的 surviving joints
+        last_kept_parent = finger.parent_link  # 当前 surviving 链尾所依附的 parent link
+        last_kept_container = hand.palm  # 仅 `merge` 时需要一个接收被删几何的保留容器
+
+        # `pending_cumulative_origin` 表示：从最近保留节点到当前遍历位置之前，
+        # 被跳过的所有 deleted joints 的累计位姿。
+        # 它只服务 `merge` 语义，因为 merge 关心“几何 / distal 节点保持在原 rest pose 附近”。
+        pending_cumulative_origin = PoseCfg()
+
+        # `pending_drop_relink_origin` 表示：删除序列中**第一段**被删 joint 的 origin。
+        # 它是 `drop` 语义下 surviving 链的新挂接点。
+        #
+        # 注意这里必须允许“零位姿也是有效值”（例如删除 Allegro 的根 joint `j0`），
+        # 因此不能用 `PoseCfg()` 自身作为“有没有 pending”的判据，必须显式用 `None`。
+        pending_drop_relink_origin: PoseCfg | None = None
 
         for joint in finger.joints:
-            composed_origin = _compose_pose(pending_origin, joint.origin)  # 当前 joint 相对最近保留 link 的位姿
+            # 当前 joint 若要被 merge 到上游容器里，其 child-link 几何应落到
+            # “最近保留节点坐标系 + 已跳过 deleted 段累计位姿 + 当前 joint.origin” 这个位置。
+            geometry_origin_in_container = _compose_pose(pending_cumulative_origin, joint.origin)
 
             if joint.name in delete_set:
+                # `merge`：被删 joint 的 child-link 几何并回当前保留容器，
+                # 因此需要使用累计后的 container-frame 位姿。
                 if self.cfg.regroup_strategy == "merge":
-                    _merge_deleted_joint_into_container(last_kept_container, joint, composed_origin)
-                pending_origin = composed_origin  # 下一关节需要继续把这一步的位姿吃进去
+                    _merge_deleted_joint_into_container(last_kept_container, joint, geometry_origin_in_container)
+
+                # `drop`：第一段被删 joint 的 origin 就是 surviving 链新的挂接点。
+                # 如果后面继续删更多段，我们仍保持这个起点不变；因为那些中间配置项
+                # 已经整体消失，不应再把它们的长度累计进剩余链的重连位姿里。
+                if pending_drop_relink_origin is None:
+                    pending_drop_relink_origin = joint.origin.copy()
+
+                # 无论是 `merge` 还是 `drop`，都要继续累计完整旧链位姿，
+                # 因为：
+                # - `merge` 下后续 surviving joint 仍需保持旧的 distal pose；
+                # - `merge` 下后续 deleted geometry 也需要落到正确的 container frame。
+                pending_cumulative_origin = geometry_origin_in_container
                 continue
 
-            kept_joint = joint.replace(parent=last_kept_parent, origin=composed_origin)
+            # 没有任何 deleted gap 时，surviving joint 仍沿用原始 local origin。
+            if pending_drop_relink_origin is None:
+                relink_origin = joint.origin.copy()  # 无删减 gap：保持原 builder 输出的 parent->joint 位姿
+            elif self.cfg.regroup_strategy == "drop":
+                # `drop`：配置项消失后的物理缩短语义。
+                # surviving joint / tip 应直接接到“第一段被删 joint 的挂接点”，
+                # 而不是继续穿透累计后的旧 distal pose。
+                relink_origin = pending_drop_relink_origin.copy()
+            else:
+                # `merge`：延续旧实现的拓扑收缩语义，surviving joint 继续落在
+                # 所有被删段穿透后的 distal pose 上。
+                relink_origin = _compose_pose(pending_cumulative_origin, joint.origin)
+
+            kept_joint = joint.replace(parent=last_kept_parent, origin=relink_origin)
             new_joints.append(kept_joint)
+
+            # 一旦当前 joint 被保留，新的 surviving 链尾就推进到它的 child link。
             last_kept_parent = kept_joint.child
             last_kept_container = kept_joint
-            pending_origin = PoseCfg()  # 一旦保留了当前 joint，累计位姿就重新归零
+
+            # 新的保留节点已经建立，因此 gap 相关缓存全部归零，等待下一段 delete 序列。
+            pending_cumulative_origin = PoseCfg()
+            pending_drop_relink_origin = None
 
         if not new_joints:
             return None
