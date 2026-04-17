@@ -42,12 +42,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-import random
-from typing import Literal
+from typing import Any, Literal
 
 from ...asset_base import AssetCfgBase, HandCfg
 from ...asset_schema_core import CollisionGeometryCfg, MeshGeometryCfg, PoseCfg, VisualGeometryCfg
 from ._base import MutatorBase
+from ._distribution import ScalarDistributionCfg
 
 
 # ============================================================================
@@ -76,30 +76,19 @@ class TipReplaceCfg(AssetCfgBase):
     """目标几何类型（仅 ``geometry_swap`` 模式有效）。为 ``None`` 时自动选择
     与当前类型相反的几何（box → cylinder，cylinder → box）。"""
 
-    size_sigma: float = 0.0
-    """几何尺寸扰动强度（meter）；在形状替换基础上叠加小范围随机扰动。
-    设为 0.0 表示纯粹做形状替换，不额外引入尺寸随机。"""
+    size_distribution: ScalarDistributionCfg = field(
+        default_factory=lambda: ScalarDistributionCfg(kind="fixed", value=0.0)
+    )
+    """几何尺寸扰动分布；采样值直接叠加到 shape swap 后的线性尺寸上。"""
 
-    mesh_perturb_ratio: float = 0.05
-    """mesh origin 偏移比例扰动强度（仅 ``mesh_perturb`` 模式有效）；
-    0.05 表示在原偏移值基础上叠加 ± 5% 的随机扰动。"""
+    mesh_offset_distribution: ScalarDistributionCfg = field(
+        default_factory=lambda: ScalarDistributionCfg(kind="uniform", low=-0.05, high=0.05)
+    )
+    """mesh origin 偏移比例扰动分布；采样值 $\varepsilon$ 用在 $p'=p(1+\varepsilon)$。"""
 
     def __post_init__(self):
         if self.class_type is None:
             self.class_type = TipReplaceMutator
-        if self.size_sigma < 0:
-            raise ValueError(f"size_sigma must be >= 0, got {self.size_sigma}")
-        if not 0.0 <= self.mesh_perturb_ratio <= 1.0:
-            raise ValueError(
-                f"mesh_perturb_ratio must be in [0, 1], got {self.mesh_perturb_ratio}"
-            )
-
-
-# ============================================================================
-#  运行时壳
-# ============================================================================
-
-
 class TipReplaceMutator(MutatorBase):
     r"""指尖替换运行时壳。
 
@@ -112,7 +101,44 @@ class TipReplaceMutator(MutatorBase):
     def __init__(self, cfg: TipReplaceCfg):
         self.cfg = cfg
 
-    def mutate(self, target: HandCfg) -> HandCfg | None:
+    def describe_sampling(self, target: HandCfg) -> dict[str, ScalarDistributionCfg]:
+        r"""描述 tip replace 当前需要的独立采样维度。"""
+
+        target_names = set(self.cfg.target_fingers)
+        distribution_plan: dict[str, ScalarDistributionCfg] = {}
+        for finger in target.fingers:
+            if target_names and finger.name not in target_names:
+                continue
+
+            tip_joint = finger.tip_joint
+            if self.cfg.mode == "geometry_swap":
+                source_kind = _resolve_tip_body_kind(tip_joint)
+                target_kind = self.cfg.target_geometry or ("box" if source_kind == "cylinder" else "cylinder")
+                if source_kind == target_kind or source_kind not in {"box", "cylinder"}:
+                    continue
+                if source_kind == "cylinder":
+                    for axis_name in ("width", "depth", "length"):
+                        distribution_plan[f"{finger.name}::{axis_name}"] = self.cfg.size_distribution.copy()
+                else:
+                    for axis_name in ("radius", "length"):
+                        distribution_plan[f"{finger.name}::{axis_name}"] = self.cfg.size_distribution.copy()
+                continue
+
+            for collection_name in ("collisions", "visuals"):
+                collection = getattr(tip_joint, collection_name)
+                for element_index, element in enumerate(collection):
+                    if not isinstance(element.geometry, MeshGeometryCfg):
+                        continue
+                    for coord_index, value in enumerate(element.origin.pos):
+                        if abs(value) <= 1e-12:
+                            continue
+                        distribution_plan[f"{finger.name}::{collection_name}::{element_index}::{coord_index}"] = (
+                            self.cfg.mesh_offset_distribution.copy()
+                        )
+
+        return distribution_plan
+
+    def mutate(self, target: HandCfg, *, sampled_params: dict[str, Any] | None = None) -> HandCfg | None:
         r"""对已构建的 `HandCfg` 执行指尖几何替换。
 
         Args:
@@ -122,8 +148,9 @@ class TipReplaceMutator(MutatorBase):
             HandCfg | None: 替换指尖几何后的整手配置。
         """
 
-        mutated = target.copy()  # 指尖替换只改末端几何，因此深拷贝即可
-        target_names = set(self.cfg.target_fingers)  # 空集语义：作用于全部 finger
+        mutated = target.copy()
+        target_names = set(self.cfg.target_fingers)
+        sampled = sampled_params or {}
 
         for finger in mutated.fingers:
             if target_names and finger.name not in target_names:
@@ -131,9 +158,9 @@ class TipReplaceMutator(MutatorBase):
 
             tip_joint = finger.tip_joint  # 当前约定下末端 joint 就是 tip joint
             if self.cfg.mode == "geometry_swap":
-                self._swap_tip_geometry(tip_joint)
+                self._swap_tip_geometry(finger.name, tip_joint, sampled)
             else:
-                self._perturb_mesh_tip_origin(tip_joint)
+                self._perturb_mesh_tip_origin(finger.name, tip_joint, sampled)
 
         return mutated
 
@@ -177,7 +204,7 @@ class TipReplaceMutator(MutatorBase):
         # IDEA：几何替换是纯参数级操作，风险低；但 mesh_perturb 的偏移量若过大
         # 可能导致视觉 / 碰撞不一致，建议在 validator 里对偏移上限做检查。
 
-    def _swap_tip_geometry(self, tip_joint) -> None:
+    def _swap_tip_geometry(self, finger_name: str, tip_joint, sampled_params: dict[str, Any]) -> None:
         r"""在 `box` 与 `cylinder` 之间替换 tip 主体几何。
 
         当前把“主体几何”定义为：tip joint 的 collision / visual 列表里，
@@ -203,7 +230,13 @@ class TipReplaceMutator(MutatorBase):
         if source_kind not in {"box", "cylinder"} or target_kind not in {"box", "cylinder"}:
             return  # mesh / sphere tip 当前不走 geometry swap
 
-        geometry, origin = _swap_geometry_and_origin(source_geometry, body_collision.origin, target_kind, self.cfg.size_sigma)
+        geometry, origin = _swap_geometry_and_origin(
+            finger_name,
+            source_geometry,
+            body_collision.origin,
+            target_kind,
+            sampled_params,
+        )
         tip_joint.collisions[body_collision_index] = CollisionGeometryCfg(
             name=body_collision.name,
             geometry=geometry,
@@ -215,7 +248,7 @@ class TipReplaceMutator(MutatorBase):
             origin=origin,
         )
 
-    def _perturb_mesh_tip_origin(self, tip_joint) -> None:
+    def _perturb_mesh_tip_origin(self, finger_name: str, tip_joint, sampled_params: dict[str, Any]) -> None:
         r"""对 mesh tip 的局部原点做比例扰动。
 
         这里不改 mesh 文件路径，也不改 scale，只对 origin.pos 做：
@@ -230,17 +263,22 @@ class TipReplaceMutator(MutatorBase):
         for collection_name in ("collisions", "visuals"):
             collection = getattr(tip_joint, collection_name)
             updated = []
-            for element in collection:
+            for element_index, element in enumerate(collection):
                 if not isinstance(element.geometry, MeshGeometryCfg):
                     updated.append(element)
                     continue
 
                 pos_new = []
-                for value in element.origin.pos:
+                for coord_index, value in enumerate(element.origin.pos):
                     if abs(value) <= 1e-12:
                         pos_new.append(value)
                         continue
-                    epsilon = random.uniform(-self.cfg.mesh_perturb_ratio, self.cfg.mesh_perturb_ratio)
+                    epsilon = float(
+                        sampled_params.get(
+                            f"{finger_name}::{collection_name}::{element_index}::{coord_index}",
+                            0.0,
+                        )
+                    )
                     pos_new.append(value * (1.0 + epsilon))
 
                 updated.append(
@@ -260,7 +298,22 @@ def _find_tip_body_index(elements) -> int | None:
     return None
 
 
-def _swap_geometry_and_origin(source_geometry, source_origin: PoseCfg, target_kind: str, size_sigma: float):
+def _resolve_tip_body_kind(tip_joint) -> str | None:
+    r"""解析当前 tip 主体 primitive 的几何类型。"""
+
+    body_index = _find_tip_body_index(tip_joint.collisions)
+    if body_index is None:
+        return None
+    return tip_joint.collisions[body_index].geometry.kind
+
+
+def _swap_geometry_and_origin(
+    finger_name: str,
+    source_geometry,
+    source_origin: PoseCfg,
+    target_kind: str,
+    sampled_params: dict[str, Any],
+):
     r"""根据目标几何类型构造替换后的 `(geometry, origin)`。
 
     这里采用一个保守规则：
@@ -275,14 +328,14 @@ def _swap_geometry_and_origin(source_geometry, source_origin: PoseCfg, target_ki
     if source_geometry.kind == "cylinder":
         radius = float(source_geometry.radius)
         length = float(source_geometry.length)
-        width = max(2.0 * radius + random.gauss(0.0, size_sigma), 1e-9)
-        depth = max(2.0 * radius + random.gauss(0.0, size_sigma), 1e-9)
-        body_length = max(length + random.gauss(0.0, size_sigma), 1e-9)
+        width = max(2.0 * radius + float(sampled_params.get(f"{finger_name}::width", 0.0)), 1e-9)
+        depth = max(2.0 * radius + float(sampled_params.get(f"{finger_name}::depth", 0.0)), 1e-9)
+        body_length = max(length + float(sampled_params.get(f"{finger_name}::length", 0.0)), 1e-9)
         return {"type": "box", "size": (width, depth, body_length)}, source_origin
 
     size = tuple(float(value) for value in source_geometry.size)
-    radius = max(min(size[0], size[2]) / 2.0 + random.gauss(0.0, size_sigma), 1e-9)
-    length = max(size[1] + random.gauss(0.0, size_sigma), 1e-9)
+    radius = max(min(size[0], size[2]) / 2.0 + float(sampled_params.get(f"{finger_name}::radius", 0.0)), 1e-9)
+    length = max(size[1] + float(sampled_params.get(f"{finger_name}::length", 0.0)), 1e-9)
     return (
         {"type": "cylinder", "radius": radius, "length": length},
         PoseCfg(

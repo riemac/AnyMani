@@ -11,7 +11,22 @@ from __future__ import annotations
 
 import assets.generator.quick as quick_module
 from assets.generator.hand_generator import HandGeneratorCfg
-from assets.generator.quick import enumerate_premade_bundles, main, make_full_only_connectivity_presets
+from assets.generator.quick import enumerate_premade_bundles, main
+
+
+def _single_family_full_pool(hand_preset: str, family: str) -> dict[str, dict[str, list[str]]]:
+    r"""构造 quick façade 现在直接接受的 slot-level full-chain pool。"""
+
+    thumb_recipe = f"{family}_thumb_full"
+    non_thumb_recipe = f"{family}_non_thumb_full"
+    return {
+        hand_preset: {
+            "thumb": [thumb_recipe],
+            "index": [non_thumb_recipe],
+            "middle": [non_thumb_recipe],
+            "ring": [non_thumb_recipe],
+        }
+    }
 
 
 def test_quick_facade_enumerates_small_recolored_space_and_writes_bundle(tmp_path):
@@ -19,12 +34,8 @@ def test_quick_facade_enumerates_small_recolored_space_and_writes_bundle(tmp_pat
 
     cfg = HandGeneratorCfg(
         mode="made",
-        sampling_strategy="enumerate",
         hand_presets=["single_palm_allegro"],
-        connectivity_presets=make_full_only_connectivity_presets(
-            ["single_palm_allegro"],
-            allow_cross_family=False,
-        ),
+        connectivity_presets=_single_family_full_pool("single_palm_allegro", "allegro"),
         mixed=False,
         missing=False,
         recolored="anatomy_v1",
@@ -39,7 +50,7 @@ def test_quick_facade_enumerates_small_recolored_space_and_writes_bundle(tmp_pat
     result = results[0]
     assert result.hand_cfg is not None
     assert result.metadata["topology_kind"] == "single_family"
-    assert result.metadata["connectivity_preset"] == "allegro_full"
+    assert result.metadata["connectivity_preset"] == "thumb-full__index-full__middle-full__ring-full"
     assert result.urdf_path is not None and result.urdf_path.is_file()
     assert result.sidecar_path is not None and result.sidecar_path.is_file()
 
@@ -58,12 +69,8 @@ def test_quick_facade_main_accepts_small_custom_cfg(monkeypatch, tmp_path):
 
     cfg = HandGeneratorCfg(
         mode="made",
-        sampling_strategy="enumerate",
         hand_presets=["single_palm_leap"],
-        connectivity_presets=make_full_only_connectivity_presets(
-            ["single_palm_leap"],
-            allow_cross_family=False,
-        ),
+        connectivity_presets=_single_family_full_pool("single_palm_leap", "leap"),
         mixed=False,
         missing=True,
         recolored=False,

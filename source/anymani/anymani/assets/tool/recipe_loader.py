@@ -2,7 +2,7 @@ r"""YAML recipe 解析器：YAML ↔ HandGeneratorCfg 双向转换。
 
 本模块解决的核心问题是：`HandGeneratorCfg` 是一个多层嵌套 dataclass，直接用
 Python 构造时配置量大；有了 YAML loader，用户只需编写声明式 recipe 文件，就能
-描述完整的生成空间和采样策略。
+描述完整的生成空间与导出约定。
 
 YAML Recipe 格式约定
 --------------------
@@ -16,7 +16,6 @@ YAML Recipe 格式约定
     name: allegro_variant
     family: allegro
     handedness: right
-    sampling_strategy: sample
     n_samples: 8
     mode: full
     artifact_level: bundle
@@ -61,18 +60,19 @@ from typing import Any
 
 import yaml
 
+from ..asset_base import AssetCfgBase
 from ..builder.hand_builders import GripperLikeHandBuilderCfg
 from ..exporter.hand_exporter import HandExporterCfg
 from ..exporter.sidecar import SidecarCfg
 from ..exporter.urdf_writer import UrdfWriterCfg
 from ..generator.hand_generator import HandGeneratorCfg
 from ..generator.mutate import (
-    FingerReplaceCfg,
     HandMutatorCfg,
-    JointDeleteCfg,
     LimitTweakCfg,
     LinkScaleCfg,
     MountPerturbCfg,
+    MutatorTerm,
+    ScalarDistributionCfg,
     TipReplaceCfg,
 )
 from ..presets import make_human_like_builder_cfg
@@ -137,6 +137,15 @@ class RecipeLoader:
         if "export_dir" in data and "output_dir" not in data:
             data["output_dir"] = data.pop("export_dir")
 
+        # 历史 recipe 里 `sampling_strategy` 曾显式区分 sample / enumerate。
+        # 当前语义已经固定：
+        #
+        # - pre-made topology = 离散枚举
+        # - post-mutate = 对每个 pre-made topology 做 Monte Carlo 采样
+        #
+        # 因而旧字段在 loader 层直接吞掉，避免老 recipe 因多余键崩溃。
+        data.pop("sampling_strategy", None)
+
         if "Made" in data and isinstance(data["Made"], dict):
             data["Made"] = _build_made_cfg(data["Made"])
         if "Mutate" in data and isinstance(data["Mutate"], dict):
@@ -200,34 +209,137 @@ def _build_mutate_cfg(raw: dict[str, Any]) -> HandMutatorCfg:
     if "order" in data and isinstance(data["order"], list):
         data["order"] = tuple(data["order"])
 
-    tool_cfg_map = {
-        "joint_delete": JointDeleteCfg,
+    legacy_tool_cfg_map = {
         "link_scale": LinkScaleCfg,
         "tip_replace": TipReplaceCfg,
         "limit_tweak": LimitTweakCfg,
         "mount_perturb": MountPerturbCfg,
-        "finger_replace": FingerReplaceCfg,
     }
+    removed_tool_names = {"joint_delete", "finger_replace"}
     tuple_fields = {
-        "joint_delete": ("deleted_joints",),
         "link_scale": ("target_joints",),
         "tip_replace": ("target_fingers",),
         "limit_tweak": ("target_joints",),
         "mount_perturb": ("target_fingers",),
-        "finger_replace": (),
     }
 
-    for key, cfg_cls in tool_cfg_map.items():
-        payload = data.get(key)
+    terms: dict[str, MutatorTerm] = {}
+    for key in list(data.keys()):
+        if key in {"class_type", "order", "on_reject", "step_validate", "terms"}:
+            continue
+        if key in removed_tool_names:
+            raise ValueError(f"Mutate.{key} has been removed from post-mutate; move it out of Mutate.")
+
+        payload = data.pop(key)
         if not isinstance(payload, dict):
             continue
-        payload = deepcopy(payload)
-        for field_name in tuple_fields[key]:
-            if field_name in payload and isinstance(payload[field_name], list):
-                payload[field_name] = tuple(payload[field_name])
-        data[key] = cfg_cls(**payload)
 
-    return HandMutatorCfg(**data)
+        if "cfg" in payload:
+            terms[key] = MutatorTerm(cfg=_build_named_mutator_term_cfg(key, payload))
+            continue
+
+        if key in legacy_tool_cfg_map:
+            terms[key] = MutatorTerm(
+                cfg=_build_legacy_mutator_cfg(
+                    key,
+                    payload,
+                    cfg_cls=legacy_tool_cfg_map[key],
+                    tuple_field_names=tuple_fields[key],
+                )
+            )
+            continue
+
+        raise ValueError(f"Unknown mutate term: {key!r}")
+
+    if "terms" in data:
+        explicit_terms = data.pop("terms")
+        if isinstance(explicit_terms, dict):
+            for name, payload in explicit_terms.items():
+                if not isinstance(payload, dict):
+                    continue
+                terms[name] = MutatorTerm(cfg=_build_named_mutator_term_cfg(name, payload))
+
+    return HandMutatorCfg(terms=terms, **data)
+
+
+def _build_named_mutator_term_cfg(term_name: str, raw: dict[str, Any]) -> AssetCfgBase:
+    r"""解析新式 `term_name: {cfg_type, cfg}` 结构。"""
+
+    cfg_type_name = raw.get("cfg_type")
+    cfg_payload = raw.get("cfg")
+    if not isinstance(cfg_type_name, str) or not isinstance(cfg_payload, dict):
+        raise ValueError(f"Mutate term {term_name!r} must provide cfg_type and cfg")
+
+    cfg_type_map = {
+        "LinkScaleCfg": LinkScaleCfg,
+        "TipReplaceCfg": TipReplaceCfg,
+        "LimitTweakCfg": LimitTweakCfg,
+        "MountPerturbCfg": MountPerturbCfg,
+    }
+    if cfg_type_name not in cfg_type_map:
+        raise ValueError(f"Unsupported mutate cfg_type: {cfg_type_name!r}")
+
+    tuple_fields = {
+        "LinkScaleCfg": ("target_joints",),
+        "TipReplaceCfg": ("target_fingers",),
+        "LimitTweakCfg": ("target_joints",),
+        "MountPerturbCfg": ("target_fingers",),
+    }
+    return _build_legacy_mutator_cfg(
+        term_name,
+        cfg_payload,
+        cfg_cls=cfg_type_map[cfg_type_name],
+        tuple_field_names=tuple_fields[cfg_type_name],
+    )
+
+
+def _build_legacy_mutator_cfg(
+    term_name: str,
+    raw: dict[str, Any],
+    *,
+    cfg_cls: type[Any],
+    tuple_field_names: tuple[str, ...],
+) -> AssetCfgBase:
+    r"""兼容旧式 `link_scale: {...}` 结构，并补齐新分布字段。"""
+
+    payload = deepcopy(raw)
+    for field_name in tuple_field_names:
+        if field_name in payload and isinstance(payload[field_name], list):
+            payload[field_name] = tuple(payload[field_name])
+
+    _normalize_distribution_fields(payload)
+    try:
+        return cfg_cls(**payload)
+    except TypeError as exc:
+        raise TypeError(f"Failed to build mutate term {term_name!r}: {exc}") from exc
+
+
+def _normalize_distribution_fields(payload: dict[str, Any]) -> None:
+    r"""把 YAML 里的嵌套 distribution 块递归实例化成 `ScalarDistributionCfg`。"""
+
+    distribution_field_names = (
+        "delta_distribution",
+        "translation_distribution",
+        "rotation_distribution",
+        "size_distribution",
+        "mesh_offset_distribution",
+    )
+    distribution_dict_field_names = (
+        "per_joint_delta_distribution",
+        "per_finger_translation_distribution",
+    )
+
+    for field_name in distribution_field_names:
+        if field_name in payload and isinstance(payload[field_name], dict):
+            payload[field_name] = ScalarDistributionCfg(**payload[field_name])
+
+    for field_name in distribution_dict_field_names:
+        if field_name not in payload or not isinstance(payload[field_name], dict):
+            continue
+        payload[field_name] = {
+            key: ScalarDistributionCfg(**value) if isinstance(value, dict) else value
+            for key, value in payload[field_name].items()
+        }
 
 
 def _build_validate_stage_cfg(raw: dict[str, Any], *, stage_cfg_cls: type[Any]) -> Any:

@@ -30,6 +30,7 @@ from assets.builder.hand_builders import HumanLikeHandBuilderCfg
 from assets.builder.palm_builders import ComPalmBuilderCfg
 from assets.exporter.hand_exporter import HandExporterCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
+from assets.generator.mutate import HandMutatorCfg, MountPerturbCfg
 from assets.presets import make_human_like_builder_cfg
 from assets.tool.recipe_loader import RecipeLoader
 from assets.validator.hand_rules import HandValidatorCfg
@@ -185,11 +186,53 @@ def test_recipe_loader_keeps_premade_facade_fields_as_generator_contract(tmp_pat
             "output_dir": str(tmp_path / "generated"),
             "sampling_strategy": "enumerate",
             "hand_presets": ["single_palm_allegro"],
-            "connectivity_presets": {"single_palm_allegro": ["allegro_full", "allegro_t3_i2_m2_r2"]},
+            "connectivity_presets": {
+                "single_palm_allegro": {
+                    "thumb": ["allegro_thumb_full"],
+                    "index": ["allegro_non_thumb_full"],
+                    "middle": ["allegro_non_thumb_drop_j2"],
+                    "ring": ["allegro_non_thumb_drop_j2_j3"],
+                }
+            },
             "output_layout": "recursive",
         }
     )
 
     assert cfg.hand_presets == ["single_palm_allegro"]
-    assert cfg.connectivity_presets == {"single_palm_allegro": ["allegro_full", "allegro_t3_i2_m2_r2"]}
+    assert cfg.connectivity_presets == {
+        "single_palm_allegro": {
+            "thumb": ["allegro_thumb_full"],
+            "index": ["allegro_non_thumb_full"],
+            "middle": ["allegro_non_thumb_drop_j2"],
+            "ring": ["allegro_non_thumb_drop_j2_j3"],
+        }
+    }
     assert cfg.output_layout == "recursive"
+
+
+def test_recipe_loader_builds_legacy_mutate_block_into_term_container(tmp_path):
+    r"""旧式 `Mutate.mount_perturb: {...}` 仍应被桥接到新的 term container。"""
+
+    cfg = RecipeLoader.load_dict(
+        {
+            "mode": "full",
+            "artifact_level": "hand_cfg",
+            "output_dir": str(tmp_path / "generated"),
+            "Made": _made_recipe_dict(),
+            "Mutate": {
+                "mount_perturb": {
+                    "target_fingers": ["index"],
+                    "translation_distribution": {
+                        "kind": "fixed",
+                        "value": 0.001,
+                    },
+                }
+            },
+        }
+    )
+
+    assert isinstance(cfg.Mutate, HandMutatorCfg)
+    assert cfg.Mutate.has_terms() is True
+    assert [name for name, _ in cfg.Mutate.ordered_terms()] == ["mount_perturb"]
+    assert isinstance(cfg.Mutate.terms["mount_perturb"].cfg, MountPerturbCfg)
+    assert cfg.Mutate.terms["mount_perturb"].cfg.translation_distribution.value == 0.001

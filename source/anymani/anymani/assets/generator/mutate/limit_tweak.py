@@ -28,11 +28,11 @@ r"""关节限位微调工具：在已有 HandCfg 上对 joint limit 做小范围
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import random
-from typing import Literal
+from typing import Any, Literal
 
 from ...asset_base import AssetCfgBase, HandCfg
 from ._base import MutatorBase
+from ._distribution import ScalarDistributionCfg
 
 
 # ============================================================================
@@ -54,8 +54,10 @@ class LimitTweakCfg(AssetCfgBase):
     """调整模式。``absolute`` 在 lower/upper 上叠加绝对偏移（rad）；
     ``relative`` 以限位范围的比例施加扰动。"""
 
-    sigma: float = 0.05
-    """扰动强度。``absolute`` 模式下单位为 rad；``relative`` 模式下为无量纲比例。"""
+    delta_distribution: ScalarDistributionCfg = field(
+        default_factory=lambda: ScalarDistributionCfg(kind="normal", mean=0.0, sigma=0.05)
+    )
+    """单个限位扰动的基础分布。"""
 
     symmetric: bool = False
     """是否强制对称扰动（lower 和 upper 采样大小相等、方向相反）。
@@ -64,21 +66,12 @@ class LimitTweakCfg(AssetCfgBase):
     clip: float | None = 0.5
     """扰动幅度裁剪上限（rad）；为 ``None`` 时不额外裁剪。防止单步扰动过大。"""
 
-    per_joint_sigma: dict[str, float] = field(default_factory=dict)
-    """可选的每 joint 单独 sigma 覆盖；键为 joint 名，值为对应 sigma。"""
+    per_joint_delta_distribution: dict[str, ScalarDistributionCfg] = field(default_factory=dict)
+    """可选的每 joint 单独分布覆盖；键为 joint 名。"""
 
     def __post_init__(self):
         if self.class_type is None:
             self.class_type = LimitTweakMutator
-        if self.sigma < 0:
-            raise ValueError(f"sigma must be >= 0, got {self.sigma}")
-
-
-# ============================================================================
-#  运行时壳
-# ============================================================================
-
-
 class LimitTweakMutator(MutatorBase):
     r"""关节限位微调运行时壳。
 
@@ -91,7 +84,41 @@ class LimitTweakMutator(MutatorBase):
     def __init__(self, cfg: LimitTweakCfg):
         self.cfg = cfg
 
-    def mutate(self, target: HandCfg) -> HandCfg | None:
+    def describe_sampling(self, target: HandCfg) -> dict[str, ScalarDistributionCfg]:
+        r"""给出当前 hand 上每个目标 joint 的限位扰动分布。"""
+
+        target_names = set(self.cfg.target_joints)
+        distribution_plan: dict[str, ScalarDistributionCfg] = {}
+        for joint in target.iter_joints():
+            if joint.joint_type == "fixed" or joint.limit is None:
+                continue
+            if target_names and joint.name not in target_names:
+                continue
+
+            joint_range = float(joint.limit.upper) - float(joint.limit.lower)
+            distribution_cfg = self.cfg.per_joint_delta_distribution.get(joint.name, self.cfg.delta_distribution).copy()
+            if self.cfg.mode == "relative":
+                if distribution_cfg.kind == "normal":
+                    distribution_cfg.mean *= joint_range
+                    distribution_cfg.sigma *= joint_range
+                elif distribution_cfg.kind == "uniform":
+                    distribution_cfg.low *= joint_range
+                    distribution_cfg.high *= joint_range
+                else:
+                    distribution_cfg.value *= joint_range
+            if self.cfg.clip is not None:
+                clip = float(self.cfg.clip)
+                distribution_cfg.clip_min = -clip if distribution_cfg.clip_min is None else distribution_cfg.clip_min
+                distribution_cfg.clip_max = clip if distribution_cfg.clip_max is None else distribution_cfg.clip_max
+
+            if self.cfg.symmetric:
+                distribution_plan[f"{joint.name}::delta"] = distribution_cfg
+            else:
+                distribution_plan[f"{joint.name}::lower"] = distribution_cfg.copy()
+                distribution_plan[f"{joint.name}::upper"] = distribution_cfg.copy()
+        return distribution_plan
+
+    def mutate(self, target: HandCfg, *, sampled_params: dict[str, Any] | None = None) -> HandCfg | None:
         r"""对已构建的 `HandCfg` 执行关节限位微调。
 
         Args:
@@ -101,8 +128,9 @@ class LimitTweakMutator(MutatorBase):
             HandCfg | None: 限位微调后的整手配置。
         """
 
-        mutated = target.copy()  # 后序工具始终在深拷贝上操作，避免污染前序锚点 hand
-        target_names = set(self.cfg.target_joints)  # 空集语义：作用于全部非 fixed joint
+        mutated = target.copy()
+        target_names = set(self.cfg.target_joints)
+        sampled = sampled_params or {}
 
         for joint in mutated.iter_joints():
             # fixed joint 没有限位语义；limit 缺失时也不做“自动补限位”的越权操作。
@@ -111,29 +139,14 @@ class LimitTweakMutator(MutatorBase):
             if target_names and joint.name not in target_names:
                 continue
 
-            sigma = float(self.cfg.per_joint_sigma.get(joint.name, self.cfg.sigma))  # 每关节允许单独覆盖扰动强度
-            if sigma == 0.0:
-                continue  # 零扰动强度显式表示“不改这个 joint”
-
-            lower = float(joint.limit.lower)  # 原始下限 $l$
-            upper = float(joint.limit.upper)  # 原始上限 $u$
-            joint_range = upper - lower  # 当前限位范围 $r=u-l$
-
-            # 根据模式确定当前 joint 的扰动量纲：
-            # - absolute：直接以 rad 采样
-            # - relative：以现有范围 $r$ 为基准采样比例扰动
-            if self.cfg.mode == "absolute":
-                delta_scale = sigma  # $\delta \sim \mathcal{N}(0,\sigma)$
+            lower = float(joint.limit.lower)
+            upper = float(joint.limit.upper)
+            if self.cfg.symmetric:
+                delta_lower = float(sampled.get(f"{joint.name}::delta", 0.0))
+                delta_upper = -delta_lower
             else:
-                delta_scale = sigma * joint_range  # $\delta \sim \mathcal{N}(0,\sigma r)$
-
-            delta_lower = random.gauss(0.0, delta_scale)  # 下限扰动 $\delta_l$
-            delta_upper = -delta_lower if self.cfg.symmetric else random.gauss(0.0, delta_scale)  # 对称模式下保持中心不动
-
-            if self.cfg.clip is not None:
-                clip = float(self.cfg.clip)  # 单步扰动裁剪半径
-                delta_lower = max(min(delta_lower, clip), -clip)
-                delta_upper = max(min(delta_upper, clip), -clip)
+                delta_lower = float(sampled.get(f"{joint.name}::lower", 0.0))
+                delta_upper = float(sampled.get(f"{joint.name}::upper", 0.0))
 
             lower_new = lower + delta_lower  # $l' = l + \delta_l$
             upper_new = upper + delta_upper  # $u' = u + \delta_u$

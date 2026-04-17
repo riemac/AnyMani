@@ -58,10 +58,9 @@ from ._premade import (
     stable_premade_id,
 )
 from ._recolor import RecolorSpec, describe_recolor_spec, normalize_recolor_spec, resolve_visual_recolor_materials
-from ._tree_render import render_hand_tree_mermaid, render_hand_tree_txt
 
 try:
-    from .mutate import HandMutator, HandMutatorCfg
+    from .mutate import HandMutator, HandMutatorCfg, sample_scalar_distribution
 except Exception:
     @dataclass
     class HandMutatorCfg(AssetCfgBase):
@@ -71,12 +70,13 @@ except Exception:
         generator cfg still keeps the field so the public interface remains stable.
         """
 
-        joint_delete: object | None = None
-        link_scale: object | None = None
-        tip_replace: object | None = None
-        limit_tweak: object | None = None
-        mount_perturb: object | None = None
-        finger_replace: object | None = None
+        order: tuple[str, ...] = ()
+        on_reject: Literal["abort", "skip"] = "abort"
+        step_validate: bool = False
+        terms: dict[str, object] = field(default_factory=dict)
+
+        def has_terms(self) -> bool:
+            return bool(self.terms)
 
     class HandMutator:
         r"""Fallback mutator used when the mutate package is unavailable."""
@@ -84,17 +84,32 @@ except Exception:
         def __init__(self, cfg: HandMutatorCfg):
             self.cfg = cfg
 
-        def mutate(self, target: HandCfg) -> HandCfg | None:
+        def describe_sampling(self, target: HandCfg) -> dict[str, dict[str, Any]]:
+            return {}
+
+        def mutate(self, target: HandCfg, *, sampled_params: dict[str, dict[str, Any]] | None = None) -> HandCfg | None:
             raise NotImplementedError("mutate runtime is unavailable in the current environment")
+
+    def sample_scalar_distribution(cfg, *, rng=None):
+        raise NotImplementedError("mutate sampling runtime is unavailable in the current environment")
 
 
 def _has_enabled_mutation(cfg: HandMutatorCfg) -> bool:
     r"""Check whether any post-mutate tool is enabled in the cfg."""
 
-    return any(
-        getattr(cfg, key) is not None
-        for key in ("joint_delete", "link_scale", "tip_replace", "limit_tweak", "mount_perturb", "finger_replace")
-    )
+    return cfg.has_terms()
+
+
+def _sample_mutation_terms(mutator: HandMutator, target: HandCfg) -> dict[str, dict[str, float]]:
+    r"""按 mutator 描述的独立联合分布为当前 hand 采样一组 term 参数。"""
+
+    sampled_terms: dict[str, dict[str, float]] = {}
+    for term_name, distribution_map in mutator.describe_sampling(target).items():
+        sampled_terms[term_name] = {
+            local_name: sample_scalar_distribution(distribution_cfg)
+            for local_name, distribution_cfg in distribution_map.items()
+        }
+    return sampled_terms
 
 
 # ============================================================================
@@ -141,26 +156,18 @@ class HandGeneratorCfg(AssetCfgBase):
     artifact_level: Literal["hand_cfg", "urdf", "bundle"] = "bundle"
     """产物粒度。`hand_cfg` 只返回轻量结构，`urdf` 侧重落盘，`bundle` 同时保留多种产物。"""
 
-    sampling_strategy: Literal["sample", "enumerate"] = "sample"
-    """批量生成时的采样策略。
+    n_samples: int = 1
+    """post-mutate 阶段的 Monte Carlo 采样预算。
 
-    - ``sample``：先确定总预算 ``n_samples``，每次从生成空间联合采样
-      (pre-made 参数 × post-mutate 参数)，产物数量严格等于 ``n_samples``。
-      适合大规模多样化训练数据集，不会产生笛卡尔爆炸。
+    # NOTE:
+    当前批处理语义已经固定，不再暴露单独的 `sampling_strategy`：
 
-    - ``enumerate``：遍历 pre-made 配置的离散组合，对每个再遍历 post-mutate
-      的离散选项（如关节删除方案）。产物数量 = |pre-made 离散空间| ×
-      |post-mutate 离散空间|，可用 ``max_enumerate`` 做硬上限截断。
-      适合对照实验和可复现小规模数据集，使用不当会产生爆炸数量。
+    - pre-made：离散笛卡尔展开
+    - post-mutate：对每个 pre-made topology 采样 `n_samples` 个后序变体
     """
 
-    n_samples: int = 1
-    """``sampling_strategy="sample"`` 时的总产物预算；``generate_batch()`` 将
-    循环采样直到累计 ``n_samples`` 个成功通过 validator 的产物。"""
-
     max_enumerate: int | None = None
-    """``sampling_strategy="enumerate"`` 时的最大产物数上限；为 ``None`` 时不截断。
-    强烈建议在实验前先预估枚举空间大小，避免无意触发笛卡尔爆炸。"""
+    """pre-made 笛卡尔展开的最大产物数上限；为 ``None`` 时不截断。"""
 
     Made: HandBuilderCfg = field(default_factory=HandBuilderCfg)
     """前序生成配置入口；主要负责关节拓扑维度的变体，把生成空间中的选择落到一个初始 `HandCfg`。"""
@@ -192,15 +199,32 @@ class HandGeneratorCfg(AssetCfgBase):
     因为它本身就是“用户手写离散列表”的语义对象。
     """
 
-    connectivity_presets: dict[str, list[str] | dict[str, list[str]]] | None = None
+    connectivity_presets: dict[str, dict[str, list[str]]] | None = None
     """pre-made connectivity façade。
 
-    # FIXME：只支持1套形状：
+    当前只支持唯一一种直观形状：
 
-    **slot-level 主语义**
-       `hand_preset -> {slot -> [finger_connectivity_preset_name, ...]}`
+    `hand_preset -> {slot -> [finger_connectivity_preset_name, ...]}`
 
-    第二种才是 mixed / missing topology 真正依赖的 candidate-pool 语义。
+    这里的科研语义就是：
+
+    - 给定一只 base hand；
+    - 直接声明它每个 slot 允许使用哪些**已注册手指 connectivity 资产**。
+
+    例如：
+
+    ```python
+    connectivity_presets = {
+        "single_palm_allegro": {
+            "thumb": ["allegro_thumb_full"],
+            "index": ["allegro_non_thumb_full", "allegro_non_thumb_drop_j3"],
+            "middle": ["allegro_non_thumb_full"],
+            "ring": ["allegro_non_thumb_full"],
+        }
+    }
+    ```
+
+    若为 ``None``，则每个 surviving slot 自动展开该 slot family 下全部已注册合法 recipe。
     """
 
     mixed: bool = True
@@ -315,7 +339,6 @@ class HandGenerator:
                 "root_dir": str(run_root),
                 "mode": self.cfg.mode,
                 "artifact_level": self.cfg.artifact_level,
-                "sampling_strategy": self.cfg.sampling_strategy,
                 "phases": {
                     "pre_made": pre_made_enabled,
                     "post_mutate": post_mutate_enabled,
@@ -508,6 +531,8 @@ class HandGenerator:
         *,
         hand_preset_name: str | None,
         connectivity_preset_name: str | None,
+        enumerated: bool = False,
+        sampled_mutation_terms: dict[str, dict[str, float]] | None = None,
     ) -> HandGenerationResult | None:
         r"""执行一次单样本生成；供 `generate()` 与 `generate_batch()` 共同复用。
 
@@ -545,11 +570,14 @@ class HandGenerator:
             return None  # pre-made 结构闸门拒绝后，不再允许继续进入 mutate / export
 
         validation_warnings = list(pre_made_validation.warnings)
+        sampled_terms: dict[str, dict[str, float]] | None = None
 
         # 后序派生：只有在 `mode="full"` 且至少启用一个 mutate 工具时才进入。
         # 这样 `mode="made"` 不会因为空 mutate cfg 产生额外语义分支。
         if self.cfg.mode == "full" and _has_enabled_mutation(self.cfg.Mutate):
-            hand_cfg = HandMutator(self.cfg.Mutate).mutate(hand_cfg)  # `HandCfg -> HandCfg | None`
+            mutator = HandMutator(self.cfg.Mutate)
+            sampled_terms = sampled_mutation_terms or _sample_mutation_terms(mutator, hand_cfg)
+            hand_cfg = mutator.mutate(hand_cfg, sampled_params=sampled_terms)
             if hand_cfg is None:
                 self._record_generation_rejection(stage="mutate")
                 return None  # 变异被拒绝；拒绝语义统一表现为“本次样本无结果”
@@ -560,7 +588,7 @@ class HandGenerator:
             validation_warnings.extend(post_mutate_validation.warnings)
 
         sample_id = uuid4().hex[:8]
-        if connectivity_preset_name is not None and self.cfg.sampling_strategy == "enumerate":
+        if connectivity_preset_name is not None and enumerated:
             sample_id = stable_premade_id(
                 hand_preset_name or hand_cfg.family,
                 connectivity_preset_name,
@@ -574,6 +602,8 @@ class HandGenerator:
             "handedness": hand_cfg.handedness,
         }
         metadata.update({key: value for key, value in premade_metadata.items() if value is not None})
+        if sampled_terms:
+            metadata["post_mutate_samples"] = sampled_terms
         metadata["output_layout"] = self.cfg.output_layout
         recolor_metadata = describe_recolor_spec(self.cfg.recolored)
         if recolor_metadata is not None:
@@ -659,24 +689,16 @@ class HandGenerator:
         return self._generate_once(hand_preset_name=selection[0], connectivity_preset_name=selection[1])
 
     def generate_batch(self) -> Iterator[HandGenerationResult]:
-        r"""批量生成整手资产，按 ``cfg.sampling_strategy`` 路由到不同策略。
+        r"""批量生成整手资产。
 
         这是面向批量数据集生成的主接口。与 ``generate()`` 的区别在于它
         返回一个迭代器，支持 lazy 消费（边生成边落盘），不需要把所有结果
         同时塞进内存。
 
-        你原先写在函数尾部的两段 TODO，其实对应两种非常不同的批处理语义：
+        当前 contract 已明确固定为两层：
 
-        1. `sample`：从联合分布 $(\text{pre-made} \times \text{post-mutate})$ 反复采样，
-           总产物数由 `n_samples` 严格控制
-        2. `enumerate`：显式遍历离散空间，理论总产物数近似为
-           $|\mathcal{P}| \times |\mathcal{M}|$
-
-        当前这两条路线都已经落地：
-
-        1. `sample`：不断调用 `generate()`，直到得到 `n_samples` 个通过 validator 的样本
-        2. `enumerate`：显式遍历 `hand_presets × connectivity presets` 的 pre-made 离散空间，
-           并在每个 canonical 组合上再按需叠加 post-mutate
+        1. pre-made：显式遍历离散 topology × connectivity 空间
+        2. post-mutate：对每个 pre-made 基座采样 `n_samples` 个后序样本
 
         Yields:
             HandGenerationResult: 每次成功生成的轻量结果包。
@@ -685,93 +707,50 @@ class HandGenerator:
             RuntimeError: 当拒绝样本过多，超过最大尝试次数时抛出。
         """
 
-        # TODO:算法之一（batch orchestration — sample 策略）
-        # ────────────────────────────────────────
-        # 触发条件：cfg.sampling_strategy == "sample"
-        #
-        # 输入
-        #   cfg.n_samples: 目标产物总数 N
-        #   cfg.Made / cfg.Mutate / cfg.Validate / cfg.Export: 各阶段配置
-        #
-        # 输出：yield HandGenerationResult，共 N 个（不含被 validator 拒绝者）
-        #
-        # ── 当前已落地部分 ──
-        #   1. 反复调用 `self.generate()` 进行单次联合采样。
-        #   2. `result is not None` 才计入成功样本数。
-        #   3. 用 `max_attempts` 抑制 rejection 过多导致的无限循环。
-        #
-        # ── 关键性质 ──
-        #   每次 `generate()` 独立从联合分布采样 $(\text{pre-made} \times \text{post-mutate})$，
-        #   不做笛卡尔展开，产物数量严格由 $N$ 控制。
-        #
-        # TODO:算法之二（batch orchestration — enumerate 策略）
-        # ────────────────────────────────────────
-        # 触发条件：cfg.sampling_strategy == "enumerate"
-        #
-        # 输入
-        #   cfg.Made: 前序离散生成空间（palm_type × finger_preset 组合列表）
-        #   cfg.Mutate: 后序离散选项（joint_delete 方案列表、finger_replace preset 列表）
-        #   cfg.max_enumerate: 硬上限（None = 不截断，危险！）
-        #
-        # 输出：yield HandGenerationResult，最多 max_enumerate 个
-        #
-        # ── 当前未落地部分 ──
-        #   1. `cfg.Made.enumerate()` 的离散 builder 空间接口
-        #   2. `cfg.Mutate.enumerate(hand)` 的离散后序方案接口
-        #   3. `P × M` 爆炸下的更细粒度预算控制
-        #
-        # IDEA：两种策略的 API 对调用者完全透明（都是 yield 迭代器），
-        # 切换只需修改 `cfg.sampling_strategy`，不需要改调用代码。
-
-        # `enumerate` 不是“循环多跑几次 sample”，而是显式遍历离散组合空间。
-        # 当前这条路优先为 pre-made façade 落地：也就是显式遍历
-        # `base hand preset × connectivity preset`。
-        if self.cfg.sampling_strategy == "enumerate":
-            hand_preset_names = self._candidate_hand_preset_names()
-            if not hand_preset_names:
-                raise NotImplementedError(
-                    "enumerate batch generation currently requires hand_presets in the HandGenerator pre-made facade."
-                )
-
+        hand_preset_names = self._candidate_hand_preset_names()
+        if hand_preset_names:
             emitted = 0
             max_enumerate = self.cfg.max_enumerate
+            mutate_samples_per_topology = (
+                max(int(self.cfg.n_samples), 0)
+                if self.cfg.mode == "full" and _has_enabled_mutation(self.cfg.Mutate)
+                else 1
+            )
+
             for hand_preset_name in hand_preset_names:
                 connectivity_names = self._connectivity_names_for_hand_preset(hand_preset_name=hand_preset_name)
                 for connectivity_preset_name in connectivity_names:
-                    if max_enumerate is not None and emitted >= max_enumerate:
-                        return
-                    result = self._generate_once(
-                        hand_preset_name=hand_preset_name,
-                        connectivity_preset_name=connectivity_preset_name,
-                    )
-                    if result is None:
-                        continue
-                    yield result
-                    emitted += 1
+                    for _ in range(mutate_samples_per_topology):
+                        if max_enumerate is not None and emitted >= max_enumerate:
+                            return
+                        result = self._generate_once(
+                            hand_preset_name=hand_preset_name,
+                            connectivity_preset_name=connectivity_preset_name,
+                            enumerated=mutate_samples_per_topology == 1,
+                        )
+                        if result is None:
+                            continue
+                        yield result
+                        emitted += 1
             return
 
-        # `target_count` 是用户要求的成功样本数 $N$，而不是尝试次数。
-        # 失败样本（被 mutate / validator 拒绝）不会计入这个预算。
-        target_count = max(int(self.cfg.n_samples), 0)  # 目标成功样本数 $N$
-        success_count = 0  # 已经产出的有效样本数
-        attempt_count = 0  # 总尝试次数（含失败）
-        max_attempts = max(target_count * 10, 10)  # 保守上限：默认允许最多约 $10N$ 次尝试
+        target_count = max(int(self.cfg.n_samples), 0)
+        success_count = 0
+        attempt_count = 0
+        max_attempts = max(target_count * 10, 10)
 
-        # sample 批处理的核心循环：直到成功样本数达到 $N$ 才停止。
         while success_count < target_count:
-            attempt_count += 1  # 每次循环都代表一次独立联合采样尝试
+            attempt_count += 1
             if attempt_count > max_attempts:
                 raise RuntimeError("too many rejected samples during generate_batch()")
-            result = self.generate()  # 复用单样本主路径，避免 batch 和 single 两套语义分叉
+            result = self.generate()
             if result is None:
-                continue  # 被拒绝样本只消耗尝试次数，不消耗成功预算
-            yield result  # lazy 产出，支持边生成边落盘/边消费
-            success_count += 1  # 只有成功样本才推进批次完成度
+                continue
+            yield result
+            success_count += 1
 
 __all__ = [
     "HandGenerationResult",
     "HandGeneratorCfg",
     "HandGenerator",
-    "render_hand_tree_txt",
-    "render_hand_tree_mermaid",
 ]

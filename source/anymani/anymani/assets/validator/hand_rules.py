@@ -12,9 +12,9 @@ r"""整手级验证规则集和验证流水线。
 2. **DOF 总量范围**：整手 DOF 是否在 ``[dof_min, dof_max]`` 内
 3. **手指数量范围**：finger 数量是否在 ``[finger_count_min, finger_count_max]`` 内
 4. **所有旁链挂载一致性**：所有 finger 的 ``parent_link`` 均等于 ``palm.name``
-   （schema 已做，post-mutate 的 finger_replace 后可能破坏，需重跑）
+   （schema 已做，但任何 post-mutate 挂载/结构改动后仍需重跑）
 5. **相邻手指挂载最小间距**：任意两根手指的 mount 位置之间的欧氏距离
-   不得低于 ``min_finger_spacing``（meter），防止手指在几何上重叠
+    不得低于 ``min_finger_spacing``（meter），防止手指在几何上重叠
 
 设计说明
 --------

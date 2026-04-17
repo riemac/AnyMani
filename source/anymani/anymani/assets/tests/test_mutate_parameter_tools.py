@@ -1,25 +1,21 @@
-"""后序 mutate 的参数级工具回归测试。
-
-当前这组测试刻意只覆盖“最不改拓扑”的 slice：
-
-1. `limit_tweak`
-2. `mount_perturb`
-3. `HandMutator` 的流水线编排
-4. `HandGenerator` 对已支持 mutate 工具的调度
-
-这样做的目的，是先把 post-mutate 从“完全不可执行”推进到
-“参数级工具已经可用”，而不在同一轮里混入 `joint_delete` / `finger_replace`
- 这类结构级重写。
-"""
+"""后序 mutate 参数工具与联合采样编排回归测试。"""
 
 from __future__ import annotations
 
 import math
-import random
 
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
-from assets.generator.mutate import HandMutator, HandMutatorCfg, LimitTweakCfg, LimitTweakMutator, MountPerturbCfg, MountPerturbMutator
+from assets.generator.mutate import (
+    HandMutator,
+    HandMutatorCfg,
+    LimitTweakCfg,
+    LimitTweakMutator,
+    MountPerturbCfg,
+    MountPerturbMutator,
+    MutatorTerm,
+    ScalarDistributionCfg,
+)
 from assets.presets import make_human_like_builder_cfg
 
 
@@ -43,7 +39,7 @@ def _build_allegro_hand():
 
 
 def _joint_by_name(hand, joint_name: str):
-    """按名字取 joint，避免测试里反复手写展平查找。"""
+    """按名字取 joint。"""
 
     for joint in hand.iter_joints():
         if joint.name == joint_name:
@@ -60,10 +56,44 @@ def _finger_by_name(hand, finger_name: str):
     raise KeyError(finger_name)
 
 
-def test_limit_tweak_mutator_changes_target_joint_and_preserves_valid_interval():
+def _single_full_pool() -> dict[str, dict[str, list[str]]]:
+    """提供一个只有 canonical full topology 的 pre-made pool。"""
+
+    return {
+        "single_palm_allegro": {
+            "thumb": ["allegro_thumb_full"],
+            "index": ["allegro_non_thumb_full"],
+            "middle": ["allegro_non_thumb_full"],
+            "ring": ["allegro_non_thumb_full"],
+        }
+    }
+
+
+class DemoParameterMutatorCfg(HandMutatorCfg):
+    """用类属性声明 term，锁住新的 IsaacLab 风格 container 用法。"""
+
+    limit = MutatorTerm(
+        cfg=LimitTweakCfg(
+            target_joints=("index_j0",),
+            mode="absolute",
+            symmetric=True,
+            clip=0.1,
+            delta_distribution=ScalarDistributionCfg(kind="fixed", value=0.05),
+        )
+    )
+    mount = MutatorTerm(
+        cfg=MountPerturbCfg(
+            target_fingers=("index",),
+            perturb_rotation=True,
+            translation_distribution=ScalarDistributionCfg(kind="fixed", value=0.001),
+            rotation_distribution=ScalarDistributionCfg(kind="fixed", value=0.02),
+        )
+    )
+
+
+def test_limit_tweak_mutator_consumes_sampled_values_and_preserves_valid_interval():
     """`limit_tweak` 应只改目标关节，并保持 `lower < upper`。"""
 
-    random.seed(0)
     hand = _build_allegro_hand()
     before_index = _joint_by_name(hand, "index_j0").limit
     before_middle = _joint_by_name(hand, "middle_j0").limit
@@ -72,11 +102,11 @@ def test_limit_tweak_mutator_changes_target_joint_and_preserves_valid_interval()
         LimitTweakCfg(
             target_joints=("index_j0",),
             mode="absolute",
-            sigma=0.1,
             symmetric=True,
             clip=0.1,
+            delta_distribution=ScalarDistributionCfg(kind="fixed", value=0.05),
         )
-    ).mutate(hand)
+    ).mutate(hand, sampled_params={"index_j0::delta": 0.05})
 
     assert mutated is not None
     after_index = _joint_by_name(mutated, "index_j0").limit
@@ -91,7 +121,6 @@ def test_limit_tweak_mutator_changes_target_joint_and_preserves_valid_interval()
 def test_mount_perturb_mutator_changes_only_target_finger_mount():
     """`mount_perturb` 应只改目标 finger 的挂载位姿，不影响其他 finger。"""
 
-    random.seed(0)
     hand = _build_allegro_hand()
     before_index = _finger_by_name(hand, "index").mount
     before_middle = _finger_by_name(hand, "middle").mount
@@ -99,11 +128,21 @@ def test_mount_perturb_mutator_changes_only_target_finger_mount():
     mutated = MountPerturbMutator(
         MountPerturbCfg(
             target_fingers=("index",),
-            translation_sigma=0.003,
             perturb_rotation=True,
-            rotation_sigma=0.05,
+            translation_distribution=ScalarDistributionCfg(kind="fixed", value=0.001),
+            rotation_distribution=ScalarDistributionCfg(kind="fixed", value=0.02),
         )
-    ).mutate(hand)
+    ).mutate(
+        hand,
+        sampled_params={
+            "index::tx": 0.001,
+            "index::ty": 0.001,
+            "index::tz": 0.001,
+            "index::rr": 0.02,
+            "index::rp": 0.02,
+            "index::ry": 0.02,
+        },
+    )
 
     assert mutated is not None
     after_index = _finger_by_name(mutated, "index").mount
@@ -114,55 +153,64 @@ def test_mount_perturb_mutator_changes_only_target_finger_mount():
     assert after_middle.rpy == before_middle.rpy
 
 
-def test_hand_mutator_pipeline_applies_parameter_tools_and_step_validation():
-    """`HandMutator` 应能串联参数级工具，并在 step_validate 打开时仍顺利通过。"""
+def test_hand_mutator_pipeline_accepts_declared_terms_and_step_validation():
+    """`HandMutatorCfg` 应按声明顺序解析 term，并接受上游采样值。"""
 
-    random.seed(0)
     hand = _build_allegro_hand()
+    cfg = DemoParameterMutatorCfg(order=("limit", "mount"), step_validate=True)
 
-    mutated = HandMutator(
-        HandMutatorCfg(
-            limit_tweak=LimitTweakCfg(
-                target_joints=("index_j0",),
-                mode="absolute",
-                sigma=0.1,
-                symmetric=True,
-                clip=0.1,
-            ),
-            mount_perturb=MountPerturbCfg(
-                target_fingers=("index",),
-                translation_sigma=0.003,
-            ),
-            order=("limit_tweak", "mount_perturb"),
-            step_validate=True,
-        )
-    ).mutate(hand)
+    mutated = HandMutator(cfg).mutate(
+        hand,
+        sampled_params={
+            "limit": {"index_j0::delta": 0.05},
+            "mount": {
+                "index::tx": 0.001,
+                "index::ty": 0.001,
+                "index::tz": 0.001,
+                "index::rr": 0.02,
+                "index::rp": 0.02,
+                "index::ry": 0.02,
+            },
+        },
+    )
 
     assert mutated is not None
+    assert [name for name, _ in cfg.ordered_terms()] == ["limit", "mount"]
     assert _joint_by_name(mutated, "index_j0").limit.lower != _joint_by_name(hand, "index_j0").limit.lower
     assert _finger_by_name(mutated, "index").mount.pos != _finger_by_name(hand, "index").mount.pos
 
 
-def test_hand_generator_executes_supported_mutate_pipeline():
-    """`HandGenerator` 在 full 模式下应能执行已支持的参数级 mutate。"""
+def test_hand_generator_executes_term_container_and_emits_samples_per_topology():
+    """`HandGenerator` full 模式应对每个 pre-made topology 发出 `n_samples` 个 post-mutate 样本。"""
 
-    random.seed(0)
-    baseline = HumanLikeHandBuilder(_make_allegro_builder_cfg()).build()
-    result = HandGenerator(
-        HandGeneratorCfg(
-            mode="full",
-            artifact_level="hand_cfg",
-            Made=_make_allegro_builder_cfg(),
-            Mutate=HandMutatorCfg(
-                mount_perturb=MountPerturbCfg(
-                    target_fingers=("index",),
-                    translation_sigma=0.003,
+    result_list = list(
+        HandGenerator(
+            HandGeneratorCfg(
+                mode="full",
+                artifact_level="hand_cfg",
+                handedness="right",
+                hand_presets=["single_palm_allegro"],
+                connectivity_presets=_single_full_pool(),
+                mixed=False,
+                missing=False,
+                max_enumerate=3,
+                n_samples=3,
+                Mutate=HandMutatorCfg(
+                    terms={
+                        "mount": MutatorTerm(
+                            cfg=MountPerturbCfg(
+                                target_fingers=("index",),
+                                translation_distribution=ScalarDistributionCfg(kind="fixed", value=0.001),
+                            )
+                        )
+                    },
+                    order=("mount",),
                 ),
-                order=("mount_perturb",),
-            ),
-        )
-    ).generate()
+            )
+        ).generate_batch()
+    )
 
-    assert result is not None
-    assert result.hand_cfg is not None
-    assert _finger_by_name(result.hand_cfg, "index").mount.pos != _finger_by_name(baseline, "index").mount.pos
+    assert len(result_list) == 3
+    assert all(result.hand_cfg is not None for result in result_list)
+    assert all(result.metadata["topology_name"] == "right_t4_i4_m4_r4" for result in result_list)
+    assert all("post_mutate_samples" in result.metadata for result in result_list)

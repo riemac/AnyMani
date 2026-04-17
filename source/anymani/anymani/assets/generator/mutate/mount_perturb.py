@@ -37,11 +37,12 @@ $$
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import random
+from typing import Any
 
 from ...asset_base import AssetCfgBase, HandCfg
 from ...asset_schema_core import PoseCfg
 from ._base import MutatorBase
+from ._distribution import ScalarDistributionCfg
 
 
 # ============================================================================
@@ -62,16 +63,18 @@ class MountPerturbCfg(AssetCfgBase):
     target_fingers: tuple[str, ...] = ()
     """需要扰动的手指名称集合；空元组表示作用于全部手指。"""
 
-    translation_sigma: float = 0.003
-    """平移扰动强度（meter）；对应每个分量的正态标准差。
-    0.003 m 约为 3 mm，适合在已有设计基础上做小范围局部搜索。"""
+    translation_distribution: ScalarDistributionCfg = field(
+        default_factory=lambda: ScalarDistributionCfg(kind="normal", mean=0.0, sigma=0.003)
+    )
+    """挂载平移扰动分布；默认是 $\sigma=3\text{ mm}$ 的零均值高斯。"""
 
     perturb_rotation: bool = False
     """是否同时对旋转（rpy）施加扰动。默认关闭；打开后需配合 rotation_sigma。"""
 
-    rotation_sigma: float = 0.05
-    """旋转扰动强度（rad）；仅 ``perturb_rotation=True`` 时有效。
-    0.05 rad ≈ 2.9°，对应小范围姿态搜索。"""
+    rotation_distribution: ScalarDistributionCfg = field(
+        default_factory=lambda: ScalarDistributionCfg(kind="normal", mean=0.0, sigma=0.05)
+    )
+    """挂载姿态扰动分布；仅 `perturb_rotation=True` 时参与联合采样。"""
 
     clip_translation: float | None = 0.02
     """平移扰动的最大绝对幅度（meter）；为 ``None`` 时不额外裁剪。"""
@@ -79,23 +82,12 @@ class MountPerturbCfg(AssetCfgBase):
     clip_rotation: float | None = 0.2
     """旋转扰动的最大绝对幅度（rad）；为 ``None`` 时不额外裁剪。"""
 
-    per_finger_translation_sigma: dict[str, float] = field(default_factory=dict)
-    """可选的每 finger 单独 translation_sigma 覆盖；键为 finger 名。"""
+    per_finger_translation_distribution: dict[str, ScalarDistributionCfg] = field(default_factory=dict)
+    """可选的每 finger 单独平移分布覆盖；键为 finger 名。"""
 
     def __post_init__(self):
         if self.class_type is None:
             self.class_type = MountPerturbMutator
-        if self.translation_sigma < 0:
-            raise ValueError(f"translation_sigma must be >= 0, got {self.translation_sigma}")
-        if self.rotation_sigma < 0:
-            raise ValueError(f"rotation_sigma must be >= 0, got {self.rotation_sigma}")
-
-
-# ============================================================================
-#  运行时壳
-# ============================================================================
-
-
 class MountPerturbMutator(MutatorBase):
     r"""挂载点扰动运行时壳。
 
@@ -108,7 +100,38 @@ class MountPerturbMutator(MutatorBase):
     def __init__(self, cfg: MountPerturbCfg):
         self.cfg = cfg
 
-    def mutate(self, target: HandCfg) -> HandCfg | None:
+    def describe_sampling(self, target: HandCfg) -> dict[str, ScalarDistributionCfg]:
+        r"""描述当前 hand 上每根目标 finger 的挂载位姿扰动分布。"""
+
+        target_names = set(self.cfg.target_fingers)
+        distribution_plan: dict[str, ScalarDistributionCfg] = {}
+        for finger in target.fingers:
+            if target_names and finger.name not in target_names:
+                continue
+
+            translation_cfg = self.cfg.per_finger_translation_distribution.get(
+                finger.name,
+                self.cfg.translation_distribution,
+            ).copy()
+            if self.cfg.clip_translation is not None:
+                clip_t = float(self.cfg.clip_translation)
+                translation_cfg.clip_min = -clip_t if translation_cfg.clip_min is None else translation_cfg.clip_min
+                translation_cfg.clip_max = clip_t if translation_cfg.clip_max is None else translation_cfg.clip_max
+            for axis_name in ("tx", "ty", "tz"):
+                distribution_plan[f"{finger.name}::{axis_name}"] = translation_cfg.copy()
+
+            if self.cfg.perturb_rotation:
+                rotation_cfg = self.cfg.rotation_distribution.copy()
+                if self.cfg.clip_rotation is not None:
+                    clip_r = float(self.cfg.clip_rotation)
+                    rotation_cfg.clip_min = -clip_r if rotation_cfg.clip_min is None else rotation_cfg.clip_min
+                    rotation_cfg.clip_max = clip_r if rotation_cfg.clip_max is None else rotation_cfg.clip_max
+                for axis_name in ("rr", "rp", "ry"):
+                    distribution_plan[f"{finger.name}::{axis_name}"] = rotation_cfg.copy()
+
+        return distribution_plan
+
+    def mutate(self, target: HandCfg, *, sampled_params: dict[str, Any] | None = None) -> HandCfg | None:
         r"""对已构建的 `HandCfg` 执行挂载点位姿扰动。
 
         Args:
@@ -118,31 +141,28 @@ class MountPerturbMutator(MutatorBase):
             HandCfg | None: 挂载点微调后的整手配置。
         """
 
-        mutated = target.copy()  # 挂载点微扰不改拓扑，因此深拷贝后原地改 mount 即可
-        target_names = set(self.cfg.target_fingers)  # 空集语义：作用于全部 finger
+        mutated = target.copy()
+        target_names = set(self.cfg.target_fingers)
+        sampled = sampled_params or {}
 
         for finger in mutated.fingers:
             if target_names and finger.name not in target_names:
                 continue
 
-            sigma_t = float(self.cfg.per_finger_translation_sigma.get(finger.name, self.cfg.translation_sigma))
-            delta_pos = []
-            for _ in range(3):
-                value = random.gauss(0.0, sigma_t)  # palm frame 下的平移扰动分量
-                if self.cfg.clip_translation is not None:
-                    clip_t = float(self.cfg.clip_translation)
-                    value = max(min(value, clip_t), -clip_t)
-                delta_pos.append(value)
+            delta_pos = [
+                float(sampled.get(f"{finger.name}::tx", 0.0)),
+                float(sampled.get(f"{finger.name}::ty", 0.0)),
+                float(sampled.get(f"{finger.name}::tz", 0.0)),
+            ]
 
             # 旋转默认关闭；这符合“先稳住位置扰动，再按需放开姿态搜索”的保守策略。
             delta_rpy = [0.0, 0.0, 0.0]
             if self.cfg.perturb_rotation:
-                for axis_index in range(3):
-                    value = random.gauss(0.0, self.cfg.rotation_sigma)  # `roll/pitch/yaw` 独立扰动
-                    if self.cfg.clip_rotation is not None:
-                        clip_r = float(self.cfg.clip_rotation)
-                        value = max(min(value, clip_r), -clip_r)
-                    delta_rpy[axis_index] = value
+                delta_rpy = [
+                    float(sampled.get(f"{finger.name}::rr", 0.0)),
+                    float(sampled.get(f"{finger.name}::rp", 0.0)),
+                    float(sampled.get(f"{finger.name}::ry", 0.0)),
+                ]
 
             finger.mount = PoseCfg(
                 pos=(

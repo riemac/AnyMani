@@ -90,16 +90,12 @@ if __package__ in {None, ""}:
     from anymani.assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
     from anymani.assets.presets.connectivity_presets import (
         list_finger_connectivity_preset_names,
-        list_hand_connectivity_preset_names,
     )
-    from anymani.assets.presets.hand_presets import get_hand_builder_preset_data
 else:
     from .hand_generator import HandGenerator, HandGeneratorCfg
     from ..presets.connectivity_presets import (
         list_finger_connectivity_preset_names,
-        list_hand_connectivity_preset_names,
     )
-    from ..presets.hand_presets import get_hand_builder_preset_data
 
 
 # ============================================================================
@@ -107,7 +103,7 @@ else:
 # ============================================================================
 
 
-ConnectivityFacade = dict[str, list[str] | dict[str, list[str]]] | None
+ConnectivityFacade = dict[str, dict[str, list[str]]] | None
 RecolorFacade = str | dict[str, tuple[float, float, float, float]] | bool | None
 
 
@@ -121,12 +117,24 @@ RecolorFacade = str | dict[str, tuple[float, float, float, float]] | bool | None
 # 真正的运行配置仍然只有一个：下面的 `RUN_CFG: HandGeneratorCfg`。
 
 HAND_PRESETS: list[str] = ["single_palm_allegro", "single_palm_leap"]  # 当前纳入 pre-made 枚举的 canonical palm anchor
-CONNECTIVITY_PRESETS: ConnectivityFacade = None  # `None` = 自动展开全部合法 slot-level connectivity pool
+CONNECTIVITY_PRESETS: ConnectivityFacade = {
+    "single_palm_allegro": {
+        "thumb": ["allegro_thumb_full"],  # thumb 必须与 palm family 绑定，因此这里只给 allegro thumb
+        "index": ["allegro_non_thumb_full", "leap_non_thumb_full"],  # non-thumb 允许跨 family，直接把 mixed candidate pool 写死在顶部
+        "middle": ["allegro_non_thumb_full", "leap_non_thumb_full"],
+        "ring": ["allegro_non_thumb_full", "leap_non_thumb_full"],
+    },
+    "single_palm_leap": {
+        "thumb": ["leap_thumb_full"],  # leap palm 同理只配 leap thumb
+        "index": ["allegro_non_thumb_full", "leap_non_thumb_full"],
+        "middle": ["allegro_non_thumb_full", "leap_non_thumb_full"],
+        "ring": ["allegro_non_thumb_full", "leap_non_thumb_full"],
+    },
+}  # 若真想炸完整 registry，再手动改回 `None`
 HANDEDNESS: Literal["left", "right", "all"] = "all"  # `all` = 同时生成左右手；后续目录命名会显式带 `left_` / `right_`
 MIXED = True  # 是否把 mixed-family topology 纳入 pre-made 主线
 MISSING = True  # 是否把“缺失一根 non-thumb”的 topology 也纳入 pre-made 主线
 RECOLORED: RecolorFacade = "anatomy_v1"  # URDF visual recolor façade；默认直接打开 anatomy palette
-SAMPLING_STRATEGY: Literal["sample", "enumerate"] = "enumerate"  # quick.py 当前主用法仍是 pre-made 枚举，但保留显式字段方便人工核对
 MAX_ENUMERATE: int | None = None  # `None` = 真正跑完整合法空间；小整数 = 先做 smoke-test / 局部巡检
 ARTIFACT_LEVEL: Literal["hand_cfg", "urdf", "bundle"] = "bundle"  # quick façade 默认直接导出完整 bundle 便于人工巡检
 OUTPUT_LAYOUT: Literal["flat", "recursive"] = "recursive"  # mixed / missing / connectivity 回溯时，递归布局更适合人工浏览
@@ -135,83 +143,12 @@ _SHOW_REGISTRY = True  # 是否在真正生成前先打印 connectivity registry
 _PRINT_RESULT_LIMIT: int | None = 40  # 终端最多 preview 多少条结果；`0` = 只看 summary，`None` = 打印全部
 
 
-def make_full_only_connectivity_presets(
-    hand_presets: list[str],
-    *,
-    allow_cross_family: bool = True,
-) -> dict[str, dict[str, list[str]]]:
-    r"""构造“只保留 full-chain connectivity”的 slot-level candidate pool。
-
-    这是当前 quick façade 里最常用的“缩小空间” helper：
-
-    - topology 仍可以是 single / missing / mixed
-    - 但每个 surviving slot 的 connectivity 不再枚举 distal trim 之类裁剪
-    - 因而你可以先只核 topology 本身，而不让 joint delete 维度同时爆炸
-
-    Args:
-        hand_presets (list[str]): 当前想纳入 quick 枚举的 base hand preset 名列表。
-        allow_cross_family (bool): 若为 `True`，则 slot-level full pool 同时允许
-            Allegro 与 Leap 的 full-chain recipe；这样 mixed topology 仍能继续存在。
-            若为 `False`，则每个 slot 只保留与 base hand family 一致的 full recipe。
-
-    Returns:
-        dict[str, dict[str, list[str]]]: 可直接塞给 `HandGeneratorCfg.connectivity_presets`
-        的 slot-level façade。
-    """
-
-    full_only_by_family = {
-        "allegro": {
-            "thumb": ["allegro_thumb_full"],
-            "non_thumb": ["allegro_non_thumb_full"],
-        },
-        "leap": {
-            "thumb": ["leap_thumb_full"],
-            "non_thumb": ["leap_non_thumb_full"],
-        },
-    }
-
-    full_only_cross_family = {
-        "thumb": ["allegro_thumb_full", "leap_thumb_full"],
-        "non_thumb": ["allegro_non_thumb_full", "leap_non_thumb_full"],
-    }
-
-    resolved: dict[str, dict[str, list[str]]] = {}
-    for hand_preset_name in hand_presets:
-        family = str(get_hand_builder_preset_data(hand_preset_name)["family"])  # base hand preset 决定 palm anchor family
-        if allow_cross_family:
-            resolved[hand_preset_name] = {
-                "thumb": list(full_only_cross_family["thumb"]),  # mixed topology 仍允许 thumb 跨 family
-                "index": list(full_only_cross_family["non_thumb"]),
-                "middle": list(full_only_cross_family["non_thumb"]),
-                "ring": list(full_only_cross_family["non_thumb"]),
-            }
-        else:
-            resolved[hand_preset_name] = {
-                "thumb": list(full_only_by_family[family]["thumb"]),  # 只保留与 base hand 同 family 的 full-chain recipe
-                "index": list(full_only_by_family[family]["non_thumb"]),
-                "middle": list(full_only_by_family[family]["non_thumb"]),
-                "ring": list(full_only_by_family[family]["non_thumb"]),
-            }
-    return resolved
-
-
 # 这是 quick.py 真正唯一的运行配置入口。
-# 若想直接跑“当前全部合法空间”，保持默认即可：
-#   python quick.py
-#
-# 若只想先看 topology，不想让 connectivity 同时爆炸，可把 `CONNECTIVITY_PRESETS` 改成：
-#   make_full_only_connectivity_presets(
-#       ["single_palm_allegro", "single_palm_leap"],
-#       allow_cross_family=True,
-#   )
-#
-# NOTE:
 # `mode="made"` 是 quick.py 这条脚本入口的边界：它服务 pre-made，不在这里接 post-mutate。
 RUN_CFG = HandGeneratorCfg(
     mode="made",  # quick.py 当前定位就是 pre-made 直接入口，不承担 post-mutate 编排
     artifact_level=ARTIFACT_LEVEL,  # hand_cfg / urdf / bundle 的导出粒度
     output_dir=OUTPUT_DIR,  # 产物根目录；后续 run-level 时间戳目录会在 generator 层继续展开
-    sampling_strategy=SAMPLING_STRATEGY,  # 默认显式写成 enumerate，便于用户一眼确认当前批处理语义
     handedness=HANDEDNESS,  # 当前要生成哪种 handedness；目录命名逻辑会在 generator 主线里真正消费它
     hand_presets=list(HAND_PRESETS),  # palm anchor 离散空间
     connectivity_presets=CONNECTIVITY_PRESETS,  # `None` 表示自动展开全部合法 slot-level connectivity
@@ -231,21 +168,11 @@ RUN_CFG = HandGeneratorCfg(
 def print_registry_summary(run_cfg: HandGeneratorCfg) -> None:
     r"""打印当前 quick façade 对应的 registry 摘要。
 
-    这里刻意把**legacy hand-level alias** 与 **真实 slot-level recipe** 分开打印，
-    因为你当前真正枚举 mixed / missing 时，语义主体已经是 finger-level candidate pool，
-    而不是早期那套 hand-level alias。
-    """
+    quick.py 现在只面向 slot-level connectivity façade，因此这里直接打印：
 
-    print("=== legacy hand-level connectivity aliases ===")
-    for family in ("allegro", "leap"):
-        alias_names = list_hand_connectivity_preset_names(family)
-        print(f"{family}: {len(alias_names)} aliases")
-        preview = alias_names[:8]  # 只 preview 前 8 个，避免 registry 摘要本身过长
-        for name in preview:
-            print(f"  - {name}")
-        if len(alias_names) > len(preview):
-            print(f"  ... ({len(alias_names) - len(preview)} more aliases omitted)")
-    print()
+    - 各 family / finger_kind 已注册的 finger-level recipe
+    - 当前 quick.py 顶部大写变量 lower 后的有效值
+    """
 
     print("=== actual finger-level connectivity recipes ===")
     for family in ("allegro", "leap"):
@@ -260,7 +187,6 @@ def print_registry_summary(run_cfg: HandGeneratorCfg) -> None:
     print(f"mixed            = {run_cfg.mixed}")  # 是否允许 mixed-family topology
     print(f"missing          = {run_cfg.missing}")  # 是否允许 missing-finger topology
     print(f"recolored        = {run_cfg.recolored}")  # 当前 visual recolor façade
-    print(f"sampling_strategy = {run_cfg.sampling_strategy}")  # 当前批处理语义：sample / enumerate
     print(f"artifact_level   = {run_cfg.artifact_level}")  # hand_cfg / urdf / bundle
     print(f"output_layout    = {run_cfg.output_layout}")  # recursive / flat
     print(f"output_dir       = {run_cfg.output_dir}")  # 导出根目录

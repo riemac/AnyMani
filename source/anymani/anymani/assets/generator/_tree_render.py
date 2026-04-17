@@ -14,16 +14,14 @@
 # NOTE:
 这里的渲染结果并不是“花哨调试输出”，而是科研排障的重要界面：
 
-- `render_hand_tree_txt()` 适合终端快速查看；
-- `render_hand_tree_mermaid()` 适合文档/Notebook 嵌入。
+- `render_hand_tree_txt()` 适合终端快速查看。
 
-它们都基于同一个 `HandCfg` 真源，不引入任何新语义。
+它始终基于同一个 `HandCfg` 真源，不引入任何新语义。
 """
 
 from __future__ import annotations
 
 import math
-import re
 from typing import Any
 
 from ..asset_base import HandCfg
@@ -136,85 +134,6 @@ def render_hand_tree_txt(hand_cfg: HandCfg) -> str:
             )
 
     return "\n".join(lines)
-
-
-def render_hand_tree_mermaid(hand_cfg: HandCfg) -> str:
-    r"""把 `HandCfg` 渲染为 Mermaid `graph TD` 代码块字符串。
-
-    节点标签包含：
-
-    - joint 名
-    - child link 名
-    - 关节类型
-    - 旋转轴
-    - 推进距离
-    - 关节限位
-    - 指尖标记
-
-    返回值可直接嵌入 Markdown 三反引号代码块中渲染。
-    """
-
-    def node_id(name: str) -> str:
-        r"""把任意名称规约成 Mermaid 合法节点 ID。"""
-
-        return re.sub(r"[^a-zA-Z0-9_]", "_", name)
-
-    lines: list[str] = ["```mermaid", "graph TD"]
-
-    # ── palm 节点 ─────────────────────────────────────────────────────────
-    dof = hand_cfg.dof_count  # Mermaid 顶层也保留整手 DOF 摘要
-    palm_id = node_id(hand_cfg.palm.name)
-    lines.append(
-        f'    {palm_id}["{hand_cfg.palm.name}'
-        f"<br/>family={hand_cfg.family} · {hand_cfg.handedness} · dof={dof}\"]"
-    )
-
-    for finger in hand_cfg.fingers:
-        prev_id = palm_id  # finger 第一条边总是从 palm 发出
-
-        for j_idx, joint in enumerate(finger.joints):
-            child_id = node_id(joint.child)
-
-            # ── 节点标签 ──────────────────────────────────────────────────
-            axis_str = _axis_label(joint.axis) if joint.joint_type != "fixed" else "fixed"
-            length = _link_length(joint.origin)
-
-            limit_part = ""
-            if joint.limit is not None and joint.joint_type == "revolute":
-                lo = joint.limit.lower
-                hi = joint.limit.upper
-                limit_part = f"<br/>[{lo:+.2f}, {hi:+.2f}] rad"
-
-            tip_part = "<br/>★ TIP" if joint.is_tip else ""
-
-            label = (
-                f"{joint.name} → {joint.child}"
-                f"<br/>{joint.joint_type} · axis={axis_str} · len={length:.3f} m"
-                f"{limit_part}{tip_part}"
-            )
-
-            # 指尖用双圆括号，普通节点用方括号。
-            if joint.is_tip:
-                lines.append(f'    {child_id}(("{label}"))')
-            else:
-                lines.append(f'    {child_id}["{label}"]')
-
-            # ── 边标签 ────────────────────────────────────────────────────
-            if j_idx == 0:
-                # 第一段边同时标出 finger 名与 mount 位姿，便于从 palm 侧核对挂载关系。
-                mount_pos = _fmt_vec(finger.mount.pos) if finger.mount else "+0.000,+0.000,+0.000"
-                edge_lbl = f'|"[{finger.name}] mount={mount_pos}"|'
-            else:
-                edge_lbl = ""
-
-            lines.append(f"    {prev_id} -->{edge_lbl} {child_id}")
-            prev_id = child_id  # 下一段继续从当前 child link 节点发出
-
-    lines.append("```")
-    return "\n".join(lines)
-
-
 __all__ = [
     "render_hand_tree_txt",
-    "render_hand_tree_mermaid",
 ]

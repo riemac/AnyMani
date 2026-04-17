@@ -12,10 +12,9 @@
 from __future__ import annotations
 
 import math
-import random
 
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
-from assets.generator.mutate import LinkScaleCfg, LinkScaleMutator, TipReplaceCfg, TipReplaceMutator
+from assets.generator.mutate import LinkScaleCfg, LinkScaleMutator, ScalarDistributionCfg, TipReplaceCfg, TipReplaceMutator
 from assets.presets import get_finger_builder_preset, make_human_like_builder_cfg
 
 
@@ -77,7 +76,6 @@ def _finger_by_name(hand, finger_name: str):
 def test_link_scale_mutator_rescales_target_joint_origin_only():
     """`link_scale` 应只缩放目标 joint 的 `origin.pos`，并保持方向不变。"""
 
-    random.seed(0)
     hand = _build_allegro_hand()
     before_index = _joint_by_name(hand, "index_j1").origin.pos
     before_middle = _joint_by_name(hand, "middle_j1").origin.pos
@@ -87,10 +85,10 @@ def test_link_scale_mutator_rescales_target_joint_origin_only():
         LinkScaleCfg(
             target_joints=("index_j1",),
             scale_mode="relative",
-            sigma=0.1,
+            delta_distribution=ScalarDistributionCfg(kind="fixed", value=0.1),
             clip_ratio=0.1,
         )
-    ).mutate(hand)
+    ).mutate(hand, sampled_params={"index_j1": 0.1})
 
     assert mutated is not None
     after_index = _joint_by_name(mutated, "index_j1").origin.pos
@@ -123,7 +121,6 @@ def test_tip_replace_mutator_swaps_primitive_tip_body_geometry():
 def test_tip_replace_mutator_perturbs_custom_mesh_tip_origin():
     """`mesh_perturb` 模式应对 custom mesh tip 的局部原点做比例扰动。"""
 
-    random.seed(0)
     hand = _build_custom_tip_hand()
     before_origin = _finger_by_name(hand, "index").tip_joint.collisions[0].origin.pos
 
@@ -131,9 +128,17 @@ def test_tip_replace_mutator_perturbs_custom_mesh_tip_origin():
         TipReplaceCfg(
             target_fingers=("index",),
             mode="mesh_perturb",
-            mesh_perturb_ratio=0.1,
+            mesh_offset_distribution=ScalarDistributionCfg(kind="fixed", value=0.1),
         )
-    ).mutate(hand)
+    ).mutate(
+        hand,
+        sampled_params={
+            "index::collisions::0::0": 0.1,
+            "index::collisions::0::2": 0.1,
+            "index::visuals::0::0": 0.1,
+            "index::visuals::0::2": 0.1,
+        },
+    )
 
     assert mutated is not None
     after_origin = _finger_by_name(mutated, "index").tip_joint.collisions[0].origin.pos

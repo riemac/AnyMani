@@ -44,7 +44,6 @@ class HandGenerationResult:
     此外，为了科研排障方便，结果包也允许按需缓存：
 
     - ASCII 树
-    - Mermaid 树
     """
 
     hand_cfg: HandCfg | None = None
@@ -62,11 +61,8 @@ class HandGenerationResult:
     tree_txt: str | None = None
     """ASCII 树状可视化；通过 `render_trees()` 填充，也可落盘为 `.txt` 文件。"""
 
-    tree_mermaid: str | None = None
-    """Mermaid 树状可视化；通过 `render_trees()` 填充，可直接嵌入 Markdown。"""
-
     def render_trees(self) -> "HandGenerationResult":
-        r"""从 `self.hand_cfg` 就地生成 txt 和 Mermaid 两种树状可视化，并返回自身。
+        r"""从 `self.hand_cfg` 就地生成 ASCII 树状可视化，并返回自身。
 
         Returns:
             HandGenerationResult: 返回自身，便于链式写法：
@@ -76,10 +72,9 @@ class HandGenerationResult:
         if self.hand_cfg is not None:
             # 延迟导入展示层工具，避免把结果包定义再次和 `hand_generator.py`
             # 的主调度逻辑缠回一个文件。
-            from ._tree_render import render_hand_tree_mermaid, render_hand_tree_txt
+            from ._tree_render import render_hand_tree_txt
 
             self.tree_txt = render_hand_tree_txt(self.hand_cfg)  # 终端友好的 ASCII 树
-            self.tree_mermaid = render_hand_tree_mermaid(self.hand_cfg)  # 文档/Notebook 友好的 Mermaid 树
         return self
 
 

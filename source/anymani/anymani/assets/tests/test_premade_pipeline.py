@@ -104,7 +104,6 @@ def test_hand_generator_returns_bundle_and_exports_to_configured_directory(tmp_p
     assert result.urdf_path is not None and result.urdf_path.is_file()
     assert result.sidecar_path is not None and result.sidecar_path.is_file()
     assert result.tree_txt is not None
-    assert result.tree_mermaid is not None
     run_root = result.urdf_path.parent.parent
     assert run_root.parent == tmp_path
     assert (run_root / "summary.yaml").is_file()

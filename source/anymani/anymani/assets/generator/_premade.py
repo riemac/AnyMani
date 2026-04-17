@@ -39,7 +39,6 @@ from ..presets.connectivity_presets import (
     get_finger_connectivity_preset_data,
     get_hand_connectivity_preset_data,
     list_finger_connectivity_preset_names,
-    list_hand_connectivity_preset_names,
 )
 from ..presets.hand_presets import get_hand_builder_preset_data, make_human_like_builder_cfg_from_preset
 from ..presets.resolver import resolve_finger_builder_cfg
@@ -139,15 +138,20 @@ def normalize_name_list(values: list[str] | tuple[str, ...] | None, *, field_nam
 
 def normalize_connectivity_mapping(
     values: dict[str, Any] | None,
-) -> dict[str, list[str] | dict[str, list[str]]] | None:
-    r"""把 `connectivity_presets` 统一规约为新旧兼容的稳定形状。
+) -> dict[str, dict[str, list[str]]] | None:
+    r"""把 `connectivity_presets` 统一规约为唯一合法的 slot-level 形状。
 
-    当前支持两套 façade：
+    当前 `HandGeneratorCfg.connectivity_presets` 的 contract 已明确收敛为：
 
-    1. 旧版兼容层：`hand_preset -> [hand_connectivity_preset_name, ...]`
-    2. 新版主语义：`hand_preset -> {slot -> [finger_connectivity_preset_name, ...]}`
+    `hand_preset -> {slot -> [finger_connectivity_preset_name, ...]}`
 
-    第二种才是 mixed / missing 真正依赖的 slot-level candidate pool。
+    也就是说，研究者直接声明：
+
+    - 哪个 base hand 参与 pre-made；
+    - 这个 hand 的每个 slot 允许枚举哪些**已注册 finger connectivity 资产**。
+
+    不再接受旧的 hand-level alias 列表形状，避免配置层再次出现
+    “看起来像整手 preset，实际上 lower 成 slot recipe” 的语义歧义。
     """
 
     if values is None:
@@ -155,29 +159,27 @@ def normalize_connectivity_mapping(
     if not isinstance(values, dict):
         raise TypeError(f"connectivity_presets must be a mapping or None, got {values!r}")
 
-    normalized: dict[str, list[str] | dict[str, list[str]]] = {}
+    normalized: dict[str, dict[str, list[str]]] = {}
     for hand_preset_name, preset_names in values.items():
         normalized_key = str(hand_preset_name)
-        if isinstance(preset_names, dict):
-            invalid_slots = set(preset_names) - set(_PREMADE_SLOT_ORDER)
-            if invalid_slots:
-                raise ValueError(
-                    f"connectivity_presets[{hand_preset_name!r}] has invalid slot keys {sorted(invalid_slots)!r}; "
-                    f"allowed slots are {_PREMADE_SLOT_ORDER!r}"
-                )
-            normalized[normalized_key] = {
-                str(slot_name): normalize_name_list(
-                    slot_values,
-                    field_name=f"connectivity_presets[{hand_preset_name!r}][{slot_name!r}]",
-                )
-                for slot_name, slot_values in preset_names.items()
-            }
-            continue
-
-        normalized[normalized_key] = normalize_name_list(
-            preset_names,
-            field_name=f"connectivity_presets[{hand_preset_name!r}]",
-        )
+        if not isinstance(preset_names, dict):
+            raise TypeError(
+                f"connectivity_presets[{hand_preset_name!r}] must be a slot-level mapping "
+                f"{{slot -> [finger_connectivity_preset_name, ...]}}, got {preset_names!r}"
+            )
+        invalid_slots = set(preset_names) - set(_PREMADE_SLOT_ORDER)
+        if invalid_slots:
+            raise ValueError(
+                f"connectivity_presets[{hand_preset_name!r}] has invalid slot keys {sorted(invalid_slots)!r}; "
+                f"allowed slots are {_PREMADE_SLOT_ORDER!r}"
+            )
+        normalized[normalized_key] = {
+            str(slot_name): normalize_name_list(
+                slot_values,
+                field_name=f"connectivity_presets[{hand_preset_name!r}][{slot_name!r}]",
+            )
+            for slot_name, slot_values in preset_names.items()
+        }
     return normalized
 
 
@@ -230,22 +232,15 @@ def _build_topology_registry_key(
 def _supports_topology_expansion(cfg: Any, *, base_hand_preset_name: str) -> bool:
     r"""判断当前 base hand 是否应展开 missing / mixed topology。
 
-    这里刻意把“legacy hand-level connectivity list”视为一个兼容层：
+    现在的 pre-made façade 已经只保留 slot-level candidate pool。
+    因而 mixed / missing 的展开边界也跟着变得直接：
 
-    - 若用户显式传的是旧式 `[allegro_full, ...]`
-    - 说明他想锁定旧的 single-family 空间，而不是立即跃迁到 mixed / missing
-
-    因而 mixed / missing 的真正展开条件是：
-
-    1. `Made` 仍是抽象 hand builder（不是局部 preview override）
-    2. `connectivity_presets` 对当前 hand 没有给 legacy hand-level 列表
+    - 只要 `Made` 没有被 concrete builder cfg 局部覆写；
+    - 那么 base hand 就按照 slot-level candidate pool 正常展开 mixed / missing。
     """
 
-    if cfg.Made.class_type is not HandBuilder:
-        return False
-    if cfg.connectivity_presets is None or base_hand_preset_name not in cfg.connectivity_presets:
-        return True
-    return isinstance(cfg.connectivity_presets[base_hand_preset_name], dict)
+    _ = base_hand_preset_name  # 当前函数保留 hand 参数，是为了调用点语义仍然清楚：判断的是“这个 base hand 能否展开”
+    return cfg.Made.class_type is HandBuilder
 
 
 def _extract_base_topology_spec(
@@ -433,7 +428,7 @@ def _configured_connectivity_value(
     cfg: Any,
     *,
     base_hand_preset_name: str,
-) -> list[str] | dict[str, list[str]] | None:
+) -> dict[str, list[str]] | None:
     r"""读取某个 base hand 的 connectivity façade 配置。"""
 
     if cfg.connectivity_presets is None:
@@ -449,39 +444,7 @@ def _build_connectivity_selection_registry(
     r"""为某个 topology 展开可用的 slot-level connectivity 选择空间。"""
 
     configured = _configured_connectivity_value(cfg, base_hand_preset_name=topology.base_hand_preset)
-    if isinstance(configured, list):
-        return _build_legacy_connectivity_selection_registry(topology=topology, configured_names=configured)
     return _build_slot_level_connectivity_selection_registry(topology=topology, configured_slot_pools=configured)
-
-
-def _build_legacy_connectivity_selection_registry(
-    *,
-    topology: PremadeTopologySpec,
-    configured_names: list[str],
-) -> dict[str, dict[str, str]]:
-    r"""把旧版 hand-level connectivity 名列表映射回 slot recipe 组合。
-
-    这里**只**服务 single-family 兼容层；mixed / missing 的主语义已经转向 slot-level
-    candidate pool，不再试图强行把 legacy hand-level 名字解释到新 topology 上。
-    """
-
-    if topology.topology_kind != "single_family":
-        return {}
-
-    registry: dict[str, dict[str, str]] = {}
-    for name in configured_names:
-        preset = get_hand_connectivity_preset_data(name)
-        if preset.family != topology.family:
-            raise ValueError(
-                f"Connectivity preset {name!r} belongs to family {preset.family!r}, "
-                f"but topology {topology.name!r} belongs to family {topology.family!r}"
-            )
-        registry[name] = {
-            slot_name: preset.finger_slots[slot_name]
-            for slot_name in topology.surviving_slots
-            if slot_name in preset.finger_slots
-        }
-    return registry
 
 
 def _build_slot_level_connectivity_selection_registry(
@@ -529,29 +492,8 @@ def _build_slot_level_connectivity_selection_registry(
         slot_recipe_names = {
             slot_name: recipe_name for slot_name, recipe_name in zip(ordered_slots, combination)
         }
-        legacy_alias = _match_legacy_hand_connectivity_alias(topology=topology, slot_recipe_names=slot_recipe_names)
-        selection_name = legacy_alias or _format_slot_level_connectivity_name(slot_recipe_names)
-        registry[selection_name] = slot_recipe_names
+        registry[_format_slot_level_connectivity_name(slot_recipe_names)] = slot_recipe_names
     return registry
-
-
-def _match_legacy_hand_connectivity_alias(
-    *,
-    topology: PremadeTopologySpec,
-    slot_recipe_names: dict[str, str],
-) -> str | None:
-    r"""若当前 slot recipe 组合恰好等于旧 hand-level alias，则返回该 alias。"""
-
-    if topology.topology_kind != "single_family":
-        return None
-    if tuple(slot_name for slot_name in _PREMADE_SLOT_ORDER if slot_name in slot_recipe_names) != ("thumb", "index", "middle", "ring"):
-        return None
-
-    for preset_name in list_hand_connectivity_preset_names(topology.family):
-        preset = get_hand_connectivity_preset_data(preset_name)
-        if preset.finger_slots == slot_recipe_names:
-            return preset_name
-    return None
 
 
 def _format_slot_level_connectivity_name(slot_recipe_names: dict[str, str]) -> str:

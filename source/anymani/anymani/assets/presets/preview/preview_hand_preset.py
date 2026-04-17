@@ -14,6 +14,7 @@ bootstrap_python_path()
 
 from anymani.assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from anymani.assets.presets import (
+    get_hand_connectivity_preset_data,
     get_hand_builder_preset_data,
     make_human_like_builder_cfg,
     make_human_like_builder_cfg_from_preset,
@@ -125,6 +126,15 @@ def main() -> int:
     made_cfg, label = _build_made_cfg_and_label(args)
     if args.connectivity_preset is not None:
         label = f"{label} + connectivity={args.connectivity_preset}"
+    slot_level_connectivity = None
+    if args.connectivity_preset is not None and args.hand_preset is not None:
+        hand_connectivity = get_hand_connectivity_preset_data(args.connectivity_preset)
+        slot_level_connectivity = {
+            args.hand_preset: {
+                slot_name: [recipe_name]
+                for slot_name, recipe_name in hand_connectivity.finger_slots.items()
+            }
+        }
     generator_cfg = HandGeneratorCfg(
         mode="full",
         artifact_level=args.artifact_level,
@@ -132,11 +142,7 @@ def main() -> int:
         handedness=getattr(made_cfg, "handedness", "all"),
         Made=made_cfg,
         hand_presets=[args.hand_preset] if args.connectivity_preset is not None and args.hand_preset is not None else [],
-        connectivity_presets=(
-            {args.hand_preset: [args.connectivity_preset]}
-            if args.connectivity_preset is not None and args.hand_preset is not None
-            else None
-        ),
+        connectivity_presets=slot_level_connectivity,
         output_layout=args.output_layout,
     )
     result = HandGenerator(generator_cfg).generate()

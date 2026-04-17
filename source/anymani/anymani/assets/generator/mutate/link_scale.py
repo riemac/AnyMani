@@ -39,12 +39,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-import random
-from typing import Literal
+from typing import Any, Literal
 
 from ...asset_base import AssetCfgBase, HandCfg
 from ...asset_schema_core import PoseCfg
 from ._base import MutatorBase
+from ._distribution import ScalarDistributionCfg
 
 
 # ============================================================================
@@ -66,8 +66,14 @@ class LinkScaleCfg(AssetCfgBase):
     """扰动模式。``absolute`` 以绝对长度（meter）施加偏移 $d_i$；
     ``relative`` 以百分比形式施加比例扰动 $\varepsilon_i$。"""
 
-    sigma: float = 0.05
-    """扰动强度。``absolute`` 模式下单位为 meter；``relative`` 模式下为比例（如 0.05 表示 ±5%）。"""
+    delta_distribution: ScalarDistributionCfg = field(
+        default_factory=lambda: ScalarDistributionCfg(kind="normal", mean=0.0, sigma=0.05)
+    )
+    """单个 joint 缩放量的基础分布。
+
+    - `relative` 模式下，这个值直接解释为比例扰动 $\varepsilon$
+    - `absolute` 模式下，这个值直接解释为长度增量 $\Delta l$
+    """
 
     clip_ratio: float = 0.3
     """缩放比例裁剪上限；最终比例限定在 ``[1 - clip_ratio, 1 + clip_ratio]`` 内。
@@ -76,15 +82,12 @@ class LinkScaleCfg(AssetCfgBase):
     clip_absolute: float | None = None
     """绝对偏移裁剪上限（meter）；为 ``None`` 时不额外裁剪。仅在 ``absolute`` 模式下有意义。"""
 
-    per_joint_sigma: dict[str, float] = field(default_factory=dict)
-    """可选的每 joint 单独 sigma 覆盖；键为 joint 名，值为对应 sigma。
-    未在此 dict 中出现的 joint 使用全局 ``sigma``。"""
+    per_joint_delta_distribution: dict[str, ScalarDistributionCfg] = field(default_factory=dict)
+    """可选的每 joint 单独分布覆盖；键为 joint 名。"""
 
     def __post_init__(self):
         if self.class_type is None:
             self.class_type = LinkScaleMutator
-        if self.sigma < 0:
-            raise ValueError(f"sigma must be >= 0, got {self.sigma}")
         if not 0.0 < self.clip_ratio <= 1.0:
             raise ValueError(f"clip_ratio must be in (0, 1], got {self.clip_ratio}")
 
@@ -106,7 +109,35 @@ class LinkScaleMutator(MutatorBase):
     def __init__(self, cfg: LinkScaleCfg):
         self.cfg = cfg
 
-    def mutate(self, target: HandCfg) -> HandCfg | None:
+    def describe_sampling(self, target: HandCfg) -> dict[str, ScalarDistributionCfg]:
+        r"""给出当前 hand 上每个可缩放 joint 的独立采样分布。"""
+
+        target_names = set(self.cfg.target_joints)
+        distribution_plan: dict[str, ScalarDistributionCfg] = {}
+        for joint in target.iter_joints():
+            if joint.joint_type == "fixed":
+                continue
+            if target_names and joint.name not in target_names:
+                continue
+
+            x, y, z = joint.origin.pos
+            length = math.sqrt(x * x + y * y + z * z)
+            if length <= 1e-9:
+                continue
+
+            distribution_cfg = self.cfg.per_joint_delta_distribution.get(joint.name, self.cfg.delta_distribution).copy()
+            if self.cfg.scale_mode == "relative":
+                distribution_cfg.clip_min = -self.cfg.clip_ratio if distribution_cfg.clip_min is None else distribution_cfg.clip_min
+                distribution_cfg.clip_max = self.cfg.clip_ratio if distribution_cfg.clip_max is None else distribution_cfg.clip_max
+            elif self.cfg.clip_absolute is not None:
+                clip_abs = float(self.cfg.clip_absolute)
+                distribution_cfg.clip_min = -clip_abs if distribution_cfg.clip_min is None else distribution_cfg.clip_min
+                distribution_cfg.clip_max = clip_abs if distribution_cfg.clip_max is None else distribution_cfg.clip_max
+
+            distribution_plan[joint.name] = distribution_cfg
+        return distribution_plan
+
+    def mutate(self, target: HandCfg, *, sampled_params: dict[str, Any] | None = None) -> HandCfg | None:
         r"""对已构建的 `HandCfg` 执行连杆长度缩放。
 
         Args:
@@ -116,9 +147,10 @@ class LinkScaleMutator(MutatorBase):
             HandCfg | None: 缩放后的整手配置；若所有关节长度为零则返回 ``None``。
         """
 
-        mutated = target.copy()  # 连杆缩放不改拓扑，因此深拷贝后原地改 `origin.pos` 即可
-        target_names = set(self.cfg.target_joints)  # 空集语义：作用于全部非 fixed joint
-        saw_scalable_joint = False  # 用于实现“若所有关节长度都为零则返回 None”的契约
+        mutated = target.copy()
+        target_names = set(self.cfg.target_joints)
+        sampled = sampled_params or {}
+        saw_scalable_joint = False
 
         for joint in mutated.iter_joints():
             if joint.joint_type == "fixed":
@@ -132,18 +164,12 @@ class LinkScaleMutator(MutatorBase):
                 continue  # 零长度 joint 无法定义缩放方向，直接跳过
 
             saw_scalable_joint = True
-            sigma = float(self.cfg.per_joint_sigma.get(joint.name, self.cfg.sigma))  # 每关节允许独立覆盖扰动强度
+            delta_value = float(sampled.get(joint.name, 0.0))
 
             if self.cfg.scale_mode == "relative":
-                epsilon = random.gauss(0.0, sigma)  # 比例扰动 $\varepsilon$
-                epsilon = max(min(epsilon, self.cfg.clip_ratio), -self.cfg.clip_ratio)
-                new_length = length * (1.0 + epsilon)  # $l' = l(1+\varepsilon)$
+                new_length = length * (1.0 + delta_value)
             else:
-                delta = random.gauss(0.0, sigma)  # 绝对扰动 $\Delta l$
-                if self.cfg.clip_absolute is not None:
-                    clip_abs = float(self.cfg.clip_absolute)
-                    delta = max(min(delta, clip_abs), -clip_abs)
-                new_length = max(length + delta, 1e-9)  # $l'=\max(l+\Delta l,\varepsilon)$
+                new_length = max(length + delta_value, 1e-9)
 
             scale = new_length / length  # 方向保持不变，只缩放模长
             joint.origin = PoseCfg(

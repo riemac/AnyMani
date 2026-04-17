@@ -1,133 +1,158 @@
 # FIXME：post-mutate 是基于 Monte Carlo Sampling 的联合采样思想来构造的
-# 
-r"""后序变异流水线：把多个单体工具按顺序串联调度。
+#
+r"""后序变异流水线：用开放 term container 编排多个局部连续参数工具。
 
-本模块是 `mutate/` 子包的顶层调度者，对应 `资产生产概略.png` 中
-`pre-made → validator → HandCfgs → post-mutate → HandCfgs` 的 post-mutate 阶段。
+本模块对应 `pre-made -> validator -> HandCfg -> post-mutate -> HandCfg` 里的
+post-mutate 阶段，但这里的职责现在被显式收窄为：
 
-分类说明
---------
+1. 持有一组声明式 `MutatorTerm`
+2. 给出这些 term 的联合分布描述
+3. 按 `order` 把上游已采样参数依次 lower 成确定性 hand 变换
 
-- **结构类工具**（拓扑变化）：`joint_delete`、`finger_replace`
-- **参数类工具**（纯参数修改）：`link_scale`、`limit_tweak`、`mount_perturb`
-- **几何类工具**（末端几何替换）：`tip_replace`
-
-设计说明
---------
-
-### 流水线语义
-
-`HandMutator` 按 `order` 字段声明的工具名顺序依次执行。每一步都传入上一步的
-输出 `HandCfg`；若某步返回 `None`，流水线按 `on_reject` 策略处理：
-
-- ``"abort"``：立即终止，整个 mutate 调用返回 `None`
-- ``"skip"``：跳过该步，继续下一个工具
-
-### 可选性
-
-所有子工具配置字段默认为 `None`，表示"不启用该工具"。运行时只实例化非 `None`
-的工具，并按 `order` 中出现的顺序执行（若 `order` 中列出了某个工具名但对应 cfg
-为 `None`，则该名称被忽略）。
-
-### 轻量校验钩子
-
-流水线内置一个可选的"步间轻量校验钩子"（`step_validate`），在每步工具执行后
-调用，用于提前拦截明显违反结构约束的中间态，避免让错误状态传递到后续工具。
+# NOTE:
+`joint_delete` 已明确回归 pre-made connectivity 主线，因此不再属于这里的 term；
+`finger_replace` 当前仓内没有真实调用链，也不再纳入 post-mutate container。
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from ...asset_base import AssetCfgBase, HandCfg
 from ...validator import HandValidator, HandValidatorCfg
 from ._base import MutatorBase
-from .finger_replace import FingerReplaceCfg, FingerReplaceMutator
-from .joint_delete import JointDeleteCfg, JointDeleteMutator
-from .limit_tweak import LimitTweakCfg, LimitTweakMutator
-from .link_scale import LinkScaleCfg, LinkScaleMutator
-from .mount_perturb import MountPerturbCfg, MountPerturbMutator
-from .tip_replace import TipReplaceCfg, TipReplaceMutator
-
-# 所有合法工具名（与 HandMutatorCfg 字段名一一对应）
-_TOOL_KEYS = Literal[
-    "joint_delete",
-    "link_scale",
-    "tip_replace",
-    "limit_tweak",
-    "mount_perturb",
-    "finger_replace",
-]
+from ._distribution import ScalarDistributionCfg
 
 
-# ============================================================================
-#  流水线配置类
-# ============================================================================
+@dataclass
+class MutatorTerm(AssetCfgBase):
+    r"""单个 post-mutate term 的声明式包装壳。
+
+    用户真正声明的是 term 名字与其 `cfg`：
+
+    ```python
+    class MyMutatorCfg(HandMutatorCfg):
+        scale = MutatorTerm(cfg=LinkScaleCfg(...))
+        tip = MutatorTerm(cfg=TipReplaceCfg(...))
+    ```
+
+    这样新增工具时只需要：
+
+    1. 写好新的 `*Cfg`
+    2. 写好对应 `*Mutator`
+    3. 在用户自己的 `HandMutatorCfg` 子类里把它挂成一个类属性
+
+    而不需要再回头改 `HandMutatorCfg` 本身。
+    """
+
+    cfg: AssetCfgBase = ...
+    """term 真正持有的具体 mutator cfg。"""
+
+    def to_dict(self) -> dict[str, Any]:
+        r"""把 term 序列化成 YAML / summary 友好的结构。"""
+
+        return {
+            "cfg_type": type(self.cfg).__name__,
+            "cfg": self.cfg.to_dict(),
+        }
 
 
 @dataclass
 class HandMutatorCfg(AssetCfgBase):
-    r"""整手后序变异流水线配置。
+    r"""post-mutate 开放式 term container。
 
-    把多个单体工具按顺序串起来。未配置（保持 ``None``）的工具在执行时
-    自动跳过；`order` 决定执行顺序。
+    与旧版“固定字段容器”不同，这个 cfg 不再预声明具体工具字段，而是只保留：
+
+    - `order`
+    - `on_reject`
+    - `step_validate`
+    - `terms`
+
+    其中 `terms` 可以来自两条路径：
+
+    1. Python 子类上的 `MutatorTerm` 类属性
+    2. loader / 调试脚本直接传入的 `terms={...}`
     """
 
     class_type: type["HandMutator"] | None = None
-    """关联的整手后序变异运行时类。"""
+    """关联的流水线运行时类。"""
 
-    joint_delete: JointDeleteCfg | None = None
-    """关节删除工具配置；为 ``None`` 时不执行。"""
-
-    link_scale: LinkScaleCfg | None = None
-    """连杆长度缩放工具配置；为 ``None`` 时不执行。"""
-
-    tip_replace: TipReplaceCfg | None = None
-    """指尖替换工具配置；为 ``None`` 时不执行。"""
-
-    limit_tweak: LimitTweakCfg | None = None
-    """关节限位微调工具配置；为 ``None`` 时不执行。"""
-
-    mount_perturb: MountPerturbCfg | None = None
-    """挂载点扰动工具配置；为 ``None`` 时不执行。"""
-
-    finger_replace: FingerReplaceCfg | None = None
-    """整根手指替换工具配置；为 ``None`` 时不执行。"""
-
-    order: tuple[str, ...] = (
-        "joint_delete",
-        "finger_replace",
-        "link_scale",
-        "tip_replace",
-        "limit_tweak",
-        "mount_perturb",
-    )
-    """工具执行顺序。默认先做结构类（拓扑），再做几何类，最后做参数类。
-    若某工具名对应 cfg 为 ``None``，则该名称在执行时被自动忽略。"""
+    order: tuple[str, ...] = ()
+    """term 执行顺序。空元组表示按声明顺序自动展开。"""
 
     on_reject: Literal["abort", "skip"] = "abort"
-    """某步工具返回 ``None`` 时的处理策略。``abort`` 立即返回 ``None``；
-    ``skip`` 跳过该步继续下一个工具。"""
+    """某个 term 返回 `None` 时的处理策略。"""
 
     step_validate: bool = False
-    """是否在每步工具执行后插入轻量步间校验。开启可提前拦截中间态错误，
-    但会增加调用开销。"""
+    """是否在每个 term 执行后立刻跑一次 post-mutate 轻量校验。"""
+
+    terms: dict[str, MutatorTerm] = field(default_factory=dict)
+    """显式传入的 term 映射；主要服务 loader / 测试 / 动态构造场景。"""
 
     def __post_init__(self):
         if self.class_type is None:
             self.class_type = HandMutator
 
+        merged_terms: "OrderedDict[str, MutatorTerm]" = OrderedDict()
 
-# ============================================================================
-#  流水线运行时壳
-# ============================================================================
+        # 先按 MRO 自左向右收集类属性上的 term，保证“基类先、子类后”的声明顺序稳定。
+        for cfg_class in reversed(type(self).__mro__):
+            for name, value in cfg_class.__dict__.items():
+                if isinstance(value, MutatorTerm):
+                    merged_terms[name] = value.copy()
+
+        # 再用显式传入的 `terms={...}` 覆盖同名项；这条路径更像 loader/runtime override。
+        for name, term in self.terms.items():
+            if not isinstance(term, MutatorTerm):
+                raise TypeError(f"Mutator term {name!r} must be a MutatorTerm, got {type(term).__name__}")
+            merged_terms[name] = term.copy()
+
+        self.terms = dict(merged_terms)
+        for name, term in self.terms.items():
+            setattr(self, name, term)
+
+        if not self.order:
+            self.order = tuple(self.terms.keys())
+        else:
+            unknown_names = [name for name in self.order if name not in self.terms]
+            if unknown_names:
+                raise ValueError(f"Unknown mutator terms in order: {unknown_names}")
+            remaining_names = [name for name in self.terms if name not in self.order]
+            self.order = tuple((*self.order, *remaining_names))
+
+    def has_terms(self) -> bool:
+        r"""当前 container 是否至少启用了一个 term。"""
+
+        return bool(self.terms)
+
+    def ordered_terms(self) -> list[tuple[str, MutatorTerm]]:
+        r"""按最终执行顺序返回 term 列表。"""
+
+        return [(name, self.terms[name]) for name in self.order if name in self.terms]
+
+    def to_dict(self) -> dict[str, Any]:
+        r"""把开放式 term container 压平成 YAML / summary 友好的 mapping。"""
+
+        dumped: dict[str, Any] = {
+            "order": list(self.order),
+            "on_reject": self.on_reject,
+            "step_validate": self.step_validate,
+        }
+        for name, term in self.ordered_terms():
+            dumped[name] = term.to_dict()
+        return dumped
 
 
 class HandMutator(MutatorBase):
-    r"""整手后序变异流水线运行时类。
+    r"""post-mutate 流水线运行时壳。
 
-    按 `cfg.order` 依次实例化并执行各单体工具，把 `HandCfg` 逐步传递并更新。
+    它现在只负责编排，不再拥有任何“固定工具表”知识：
+
+    - term 的名字来自 `HandMutatorCfg`
+    - term 的具体类型来自 `term.cfg.class_type`
+    - term 的随机性来自上游注入的 `sampled_terms`
     """
 
     cfg: HandMutatorCfg
@@ -135,115 +160,63 @@ class HandMutator(MutatorBase):
     def __init__(self, cfg: HandMutatorCfg):
         self.cfg = cfg
 
-    def mutate(self, target: HandCfg) -> HandCfg | None:
-        r"""按流水线配置串联执行后序变异工具。
+    def describe_sampling(self, target: HandCfg) -> dict[str, dict[str, ScalarDistributionCfg]]:
+        r"""描述整个 post-mutate container 的独立联合分布。"""
+
+        distribution_plan: dict[str, dict[str, ScalarDistributionCfg]] = {}
+        for term_name, tool in self._build_tools():
+            distribution_plan[term_name] = tool.describe_sampling(target)
+        return distribution_plan
+
+    def mutate(
+        self,
+        target: HandCfg,
+        *,
+        sampled_params: dict[str, dict[str, Any]] | None = None,
+    ) -> HandCfg | None:
+        r"""按 `order` 顺序执行 post-mutate term。
 
         Args:
-            target (HandCfg): 待变异的整手配置（通常来自 pre-made 阶段产物）。
+            target (HandCfg): 当前 pre-made 基座 hand。
+            sampled_params (dict[str, dict[str, Any]] | None): 上游已经采样好的
+                `term_name -> {local_param_name -> sampled_value}` 映射。
 
         Returns:
-            HandCfg | None: 变异后的整手配置；若流水线在 ``on_reject="abort"`` 时
-            中途遇到拒绝，则返回 ``None``。
+            HandCfg | None: 成功时返回后序派生 hand；拒绝时返回 `None`。
         """
 
-        current = target  # 流水线始终把上一步输出显式传给下一步，不在层间隐藏状态
+        current = target
         validator = HandValidator(HandValidatorCfg()) if self.cfg.step_validate else None
+        sampled_terms = sampled_params or {}
 
-        for tool_key, tool in self._build_tools():
-            result = tool.mutate(current)
+        for term_name, tool in self._build_tools():
+            result = tool.mutate(current, sampled_params=sampled_terms.get(term_name, {}))
             if result is None:
                 if self.cfg.on_reject == "abort":
                     return None
-                continue  # `skip` 语义：保留当前状态，直接进入下一工具
+                continue
 
             if validator is not None:
-                validation = validator.validate_post_mutate(result)  # step_validate 语义属于 mutate 之后的后验闸门
+                validation = validator.validate_post_mutate(result)
                 if not validation:
                     if self.cfg.on_reject == "abort":
                         return None
                     continue
 
-            current = result  # 只有通过 mutate + 可选 step_validate 后才推进流水线状态
+            current = result
 
         return current
 
-        # TODO:算法之一（pipeline orchestration）
-        # ────────────────────────────────────────
-        # 输入
-        #   target: 已构建好的 `HandCfg`
-        #   cfg.order: 工具执行顺序元组（字符串名列表）
-        #   cfg.{tool_key}: 各工具的配置（None 则跳过）
-        #   cfg.on_reject: "abort" | "skip"
-        #   cfg.step_validate: 是否启用步间校验
-        #
-        # 输出：HandCfg | None
-        #
-        # ── 工具实例化 ──
-        #   _TOOL_MAP = {
-        #     "joint_delete":  (JointDeleteMutator,  cfg.joint_delete),
-        #     "link_scale":    (LinkScaleMutator,    cfg.link_scale),
-        #     "tip_replace":   (TipReplaceMutator,   cfg.tip_replace),
-        #     "limit_tweak":   (LimitTweakMutator,   cfg.limit_tweak),
-        #     "mount_perturb": (MountPerturbMutator, cfg.mount_perturb),
-        #     "finger_replace":(FingerReplaceMutator,cfg.finger_replace),
-        #   }
-        #   active_tools = [(key, MutClass(tool_cfg))
-        #                   for key in order
-        #                   if _TOOL_MAP[key][1] is not None]
-        #
-        # ── 流水线执行 ──
-        #   current = target
-        #   for key, tool in active_tools:
-        #     result = tool.mutate(current)
-        #     if result is None:
-        #       if on_reject == "abort": return None
-        #       else:  # "skip"
-        #         continue  # current 不更新，继续下一步
-        #     current = result
-        #     if step_validate:
-        #       # 步间轻量校验（如检查全局 joint/link 唯一性）
-        #       # 若校验失败：按 on_reject 处理
-        #       pass
-        #   return current
-        #
-        # ── 与 preset 的交叉验证 ──
-        #   流水线层不直接校验 preset 约束，但建议在 step_validate 里插入
-        #   "结构改变类工具后的轻量一致性检查"；参数类工具的 preset 约束
-        #   由 validator 阶段统一检查。
-        #
-        # IDEA：流水线层应尽量薄，只负责编排顺序和拒绝策略，不吞掉底层工具
-        # 的语义。单体工具的逻辑不应泄露进流水线层。
-
     def _build_tools(self) -> list[tuple[str, MutatorBase]]:
-        r"""根据 cfg.order 和各工具配置，构造有序的 (key, mutator) 列表。
-
-        Returns:
-            list[tuple[str, MutatorBase]]: 按执行顺序排列的 (工具名, 工具实例) 对。
-        """
-
-        tool_table = {
-            "joint_delete": (JointDeleteMutator, self.cfg.joint_delete),
-            "link_scale": (LinkScaleMutator, self.cfg.link_scale),
-            "tip_replace": (TipReplaceMutator, self.cfg.tip_replace),
-            "limit_tweak": (LimitTweakMutator, self.cfg.limit_tweak),
-            "mount_perturb": (MountPerturbMutator, self.cfg.mount_perturb),
-            "finger_replace": (FingerReplaceMutator, self.cfg.finger_replace),
-        }
+        r"""根据开放式 term container 动态实例化 mutator。"""
 
         tools: list[tuple[str, MutatorBase]] = []
-        for key in self.cfg.order:
-            if key not in tool_table:
-                raise ValueError(f"Unknown mutator key in order: {key!r}")
-            tool_class, tool_cfg = tool_table[key]
-            if tool_cfg is None:
-                continue  # 未启用的工具不进入执行列表
-            tools.append((key, tool_class(tool_cfg)))
+        for term_name, term in self.cfg.ordered_terms():
+            mutator_class = getattr(term.cfg, "class_type", None)
+            if mutator_class is None:
+                raise ValueError(f"Mutator term {term_name!r} has no class_type on cfg {type(term.cfg).__name__}")
+            tools.append((term_name, mutator_class(term.cfg)))
         return tools
 
-        # TODO:算法之二（tool instantiation）
-        # ────────────────────────────────────────
-        # 依据 cfg.order 顺序，跳过 cfg.{key} 为 None 的工具，
-        # 构造 (key, ToolClass(tool_cfg)) 列表并返回。
 
-
-__all__ = ["HandMutatorCfg", "HandMutator"]
+__all__ = ["MutatorTerm", "HandMutatorCfg", "HandMutator"]

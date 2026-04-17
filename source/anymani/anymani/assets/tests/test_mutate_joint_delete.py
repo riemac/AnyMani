@@ -6,7 +6,7 @@
 2. 删除后 finger 链重新接通；
 3. `merge` 会把被删 joint 的几何并入上一保留容器；
 4. `drop` 会按“配置项消失后的物理缩短”语义重连 surviving 链；
-5. `HandGenerator` 已能在 full 模式下执行这条结构级 mutate。
+5. 这条工具现在主要服务 pre-made connectivity lower，而不是 post-mutate 容器。
 
 # NOTE:
 第 4 条正是这轮新增的关键保护：
@@ -17,8 +17,7 @@
 from __future__ import annotations
 
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
-from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
-from assets.generator.mutate import HandMutatorCfg, JointDeleteCfg, JointDeleteMutator
+from assets.generator.mutate import JointDeleteCfg, JointDeleteMutator
 from assets.presets import make_human_like_builder_cfg
 
 
@@ -145,28 +144,3 @@ def test_joint_delete_drop_reanchors_remaining_chain_to_mount_when_root_joint_is
     assert after_index.joints[0].parent == after_index.parent_link
     assert after_index.joints[0].origin.pos == original_root_origin.pos
     assert after_index.joints[0].origin.rpy == original_root_origin.rpy
-
-
-def test_hand_generator_executes_joint_delete_pipeline():
-    """`HandGenerator` 在 full 模式下应能执行 `joint_delete`。"""
-
-    result = HandGenerator(
-        HandGeneratorCfg(
-            mode="full",
-            artifact_level="hand_cfg",
-            Made=_make_allegro_builder_cfg(),
-            Mutate=HandMutatorCfg(
-                joint_delete=JointDeleteCfg(
-                    target_finger="index",
-                    deleted_joints=("index_j2",),
-                    regroup_strategy="merge",
-                ),
-                order=("joint_delete",),
-            ),
-        )
-    ).generate()
-
-    assert result is not None
-    assert result.hand_cfg is not None
-    assert result.hand_cfg.dof_count == 15
-    assert [joint.name for joint in _finger_by_name(result.hand_cfg, "index").joints] == ["index_j0", "index_j1", "index_j2", "index_tip"]

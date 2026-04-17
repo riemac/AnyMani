@@ -8,7 +8,7 @@ r"""整手导出编排层：把 URDF / Sidecar / Tree 文件按 artifact_level �
 
 - **URDF**：主体仿真资产，必须符合 URDF 1.0 标准
 - **Sidecar**：元数据与溯源 YAML，与 URDF 同级存放
-- **Tree 文件**：可视化调试文件（tree.txt / tree.mmd），由 `render_trees()` 生成
+- **Tree 文件**：可视化调试文件（tree.txt），由 `render_trees()` 生成
 
 设计说明
 --------
@@ -39,8 +39,7 @@ r"""整手导出编排层：把 URDF / Sidecar / Tree 文件按 artifact_level �
     └── a3f2c0b1/
         ├── hand.urdf
         ├── hand.yaml     (sidecar)
-        ├── tree.txt
-        └── tree.mmd
+        └── tree.txt
 
 ``sample_id`` 来自 ``HandGenerationResult.metadata["id"]``；若无则用 ``uuid4``。
 """
@@ -87,9 +86,6 @@ class HandExporterCfg(AssetCfgBase):
 
     export_tree_txt: bool = True
     """是否在 ``bundle`` 模式下写出 ASCII 树状文件（tree.txt）。"""
-
-    export_tree_mermaid: bool = True
-    """是否在 ``bundle`` 模式下写出 Mermaid 树状文件（tree.mmd）。"""
 
     def __post_init__(self):
         if self.class_type is None:
@@ -160,10 +156,6 @@ class HandExporter(ExporterBase):
                 tree_txt = out_dir / "tree.txt"
                 tree_txt.write_text(result.tree_txt, encoding="utf-8")
                 combined.written.append(tree_txt)
-            if self.cfg.export_tree_mermaid and result.tree_mermaid is not None:
-                tree_mmd = out_dir / "tree.mmd"
-                tree_mmd.write_text(result.tree_mermaid, encoding="utf-8")
-                combined.written.append(tree_mmd)
 
         return combined
 
@@ -204,17 +196,12 @@ class HandExporter(ExporterBase):
         #     if sidecar_result.written:
         #       result.sidecar_path = sidecar_result.written[0]
         #
-        #     result.render_trees()   # 确保 tree_txt / tree_mermaid 已生成
+        #     result.render_trees()   # 确保 tree_txt 已生成
         #
         #     if cfg.export_tree_txt and result.tree_txt:
         #       tree_path = out_dir / "tree.txt"
         #       tree_path.write_text(result.tree_txt)
         #       combined.written.append(tree_path)
-        #
-        #     if cfg.export_tree_mermaid and result.tree_mermaid:
-        #       mmd_path = out_dir / "tree.mmd"
-        #       mmd_path.write_text(result.tree_mermaid)
-        #       combined.written.append(mmd_path)
         #
         # return combined
         #

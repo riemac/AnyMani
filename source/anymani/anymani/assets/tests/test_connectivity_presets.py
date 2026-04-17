@@ -4,12 +4,12 @@
 
 1. connectivity registry 的主体是**显式 joint / child-link delete recipe**，
    不再把科研语义压扁成 `retained_revolute=k`；
-2. `HandGeneratorCfg` 的 pre-made façade 只保留
-   `hand_presets` 与 `connectivity_presets` 两个顶层字段；
+2. `HandGeneratorCfg` 的 pre-made façade 直接暴露
+   `hand_presets` 与 slot-level `connectivity_presets`；
 3. pre-made 主线在 joint-centric 语义下应使用 `drop`：
    删除 joint 时同步删除其 child-link 几何，而不是 merge 回父段；
-4. `generate_batch(sampling_strategy="enumerate")` 已能显式遍历
-   `base hand preset × connectivity preset` 的离散空间；
+4. `generate_batch()` 已按固定 pre-made 语义显式遍历
+   `base hand preset × slot-level connectivity pool` 的离散空间；
 5. `preview_hand_preset.py` 现在仍可通过 `--connectivity-preset` 形成最短人工巡检回路。
 """
 
@@ -31,6 +31,23 @@ from assets.presets import (
 
 REPO_ROOT = Path(__file__).resolve().parents[5]  # 仓库根目录 `/home/hac/isaac/AnyMani`
 PREVIEW_HAND_SCRIPT = REPO_ROOT / "source" / "anymani" / "anymani" / "assets" / "presets" / "preview" / "preview_hand_preset.py"
+
+
+def _slot_level_selection(hand_preset: str, connectivity_preset: str) -> dict[str, dict[str, list[str]]]:
+    r"""把 hand-level alias 展开成当前生成器真正接受的 slot-level candidate pool。
+
+    这个 helper 只服务测试迁移：科研侧平时仍然可以在 registry 层用
+    `allegro_full` / `leap_t3_i3_m2_r2` 这类 alias 做人工查询，但 generator façade
+    现在只接受 `hand_preset -> {slot -> [finger_connectivity_name]}`。
+    """
+
+    hand_connectivity = get_hand_connectivity_preset_data(connectivity_preset)
+    return {
+        hand_preset: {
+            slot_name: [recipe_name]
+            for slot_name, recipe_name in hand_connectivity.finger_slots.items()
+        }
+    }
 
 
 def test_connectivity_registry_exposes_family_specific_full_alias():
@@ -82,7 +99,9 @@ def test_hand_generator_applies_connectivity_preset_and_drops_deleted_child_link
             output_dir=tmp_path,
             handedness="right",
             hand_presets=["single_palm_leap"],
-            connectivity_presets={"single_palm_leap": ["leap_t3_i3_m2_r2"]},
+            connectivity_presets=_slot_level_selection("single_palm_leap", "leap_t3_i3_m2_r2"),
+            mixed=False,
+            missing=False,
             output_layout="recursive",
         )
     ).generate()
@@ -110,7 +129,7 @@ def test_hand_generator_applies_connectivity_preset_and_drops_deleted_child_link
     assert sidecar["handedness"] == "right"
     assert sidecar["topology_group_name"] == "single_palm_leap"
     assert sidecar["topology_name"] == "right_t3_i3_m2_r2"
-    assert sidecar["connectivity_preset"] == "leap_t3_i3_m2_r2"
+    assert sidecar["connectivity_preset"] == "thumb-drop_j3__index-drop_j3__middle-drop_j2_j3__ring-drop_j2_j3"
     assert sidecar["per_finger_connectivity"]["thumb"]["deleted_joints"] == ["thumb_j3"]
     assert sidecar["per_finger_connectivity"]["index"]["deleted_joint_suffixes"] == ["j3"]
     assert sidecar["per_finger_connectivity"]["index"]["deleted_joints"] == ["index_j3"]
@@ -139,24 +158,32 @@ def test_hand_generator_enumerate_walks_registered_connectivity_space(tmp_path):
             mode="made",
             artifact_level="hand_cfg",
             output_dir=tmp_path,
-            sampling_strategy="enumerate",
             handedness="right",
             hand_presets=["single_palm_allegro"],
-            connectivity_presets={"single_palm_allegro": ["allegro_full", "allegro_t3_i3_m2_r2"]},
+            mixed=False,
+            missing=False,
+            connectivity_presets={
+                "single_palm_allegro": {
+                    "thumb": ["allegro_thumb_full"],
+                    "index": ["allegro_non_thumb_full"],
+                    "middle": ["allegro_non_thumb_full"],
+                    "ring": ["allegro_non_thumb_full", "allegro_non_thumb_drop_j2_j3"],
+                }
+            },
             max_enumerate=2,
         )
     )
 
     results = list(generator.generate_batch())
-    connectivity_to_dof = {
-        result.metadata["connectivity_preset"]: result.hand_cfg.dof_count
+    topology_to_dof = {
+        result.metadata["topology_name"]: result.hand_cfg.dof_count
         for result in results
         if result.hand_cfg is not None
     }
 
     assert len(results) == 2
-    assert connectivity_to_dof["allegro_full"] == 16
-    assert connectivity_to_dof["allegro_t3_i3_m2_r2"] == 10
+    assert topology_to_dof["right_t4_i4_m4_r4"] == 16
+    assert topology_to_dof["right_t4_i4_m4_r2"] == 14
 
 
 def test_preview_hand_script_accepts_connectivity_preset_and_writes_recursive_output(tmp_path):
