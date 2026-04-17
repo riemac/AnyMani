@@ -115,6 +115,24 @@ RecolorFacade = str | dict[str, tuple[float, float, float, float]] | bool | None
 # NOTE:
 # 这里故意不用 `QuickRunCfg` 之类的额外包装层，而是把你最常改的字段直接摊成顶部常量。
 # 真正的运行配置仍然只有一个：下面的 `RUN_CFG: HandGeneratorCfg`。
+#
+# `CONNECTIVITY_PRESETS` 这里填的**不是** `connectivity_presets.py` 里的
+# `HandConnectivityPreset` 整手 alias（例如 `allegro_full` / `leap_t3_i3_m2_r2`），
+# 而是更底层、真正参与 slot-level lower 的 `FingerConnectivityPreset.name`：
+#
+# - `allegro_thumb_full`
+# - `allegro_non_thumb_full`
+# - `leap_thumb_full`
+# - `leap_non_thumb_full`
+#
+# 也就是说，这里的科研语义是：
+#
+# - 先指定 base hand：`single_palm_allegro` / `single_palm_leap`
+# - 再指定这个 hand 的每个 slot 允许枚举哪些已注册 finger connectivity recipe
+#
+# 若你想从旧的 hand-level alias 出发，应先把它手动展开成：
+# `hand_preset -> {slot -> [finger_connectivity_preset_name, ...]}`
+# 再填到这里。
 
 HAND_PRESETS: list[str] = ["single_palm_allegro", "single_palm_leap"]  # 当前纳入 pre-made 枚举的 canonical palm anchor
 CONNECTIVITY_PRESETS: ConnectivityFacade = {
