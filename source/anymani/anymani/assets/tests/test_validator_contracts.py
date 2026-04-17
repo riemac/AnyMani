@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.builder.joint_builders_primitive import PrimJointBuilderCfg
+from assets.generator.mutate import JointDeleteCfg, JointDeleteMutator
 from assets.presets import get_finger_builder_preset, make_human_like_builder_cfg
 from assets.validator.finger_rules import FingerValidator, FingerValidatorCfg
 from assets.validator.hand_rules import HandValidator, HandValidatorCfg
@@ -96,13 +97,113 @@ def test_hand_validator_upgrades_dof_warning_to_error_in_strict_mode():
 
     hand = _build_allegro_hand()
     relaxed = HandValidator(
-        HandValidatorCfg(dof_max=8, check_finger_spacing=False, strict=False)
+        HandValidatorCfg(
+            post_mutate=HandValidatorCfg.PostMutateCfg(
+                dof_max=8,
+                check_finger_spacing=False,
+                strict=False,
+            )
+        )
     ).validate(hand)
     strict = HandValidator(
-        HandValidatorCfg(dof_max=8, check_finger_spacing=False, strict=True)
+        HandValidatorCfg(
+            post_mutate=HandValidatorCfg.PostMutateCfg(
+                dof_max=8,
+                check_finger_spacing=False,
+                strict=True,
+            )
+        )
     ).validate(hand)
 
     assert relaxed.passed is True
     assert any("dof" in warning for warning in relaxed.warnings)
     assert strict.passed is False
     assert any("dof" in error for error in strict.errors)
+
+
+def test_hand_validator_rejects_missing_thumb_under_current_premade_contract():
+    """当前 pre-made 范围内，缺拇指 topology 必须直接被 hand-level validator 拒绝。"""
+
+    hand = HumanLikeHandBuilder(
+        make_human_like_builder_cfg(
+            name="no_thumb_demo",
+            family="allegro",
+            handedness="right",
+            palm_cfg="com_allegro",
+            finger_cfg="allegro_non_thumb_v1",
+            thumb_cfg="allegro_thumb_v1",
+        ).replace(thumb_cfg=None)
+    ).build()
+
+    result = HandValidator(
+        HandValidatorCfg(
+            pre_made=HandValidatorCfg.PreMadeCfg(
+                check_finger_spacing=False,
+            )
+        )
+    ).validate_pre_made(hand)
+
+    assert result.passed is False
+    assert any("missing required thumb" in error for error in result.errors)
+
+
+def test_hand_validator_rejects_when_all_non_thumb_fingers_drop_below_three_revolute_dof():
+    """若所有 non-thumb 都被裁到 <3 DOF，则当前科研边界下应直接拒绝。"""
+
+    hand = _build_allegro_hand()
+    for finger_name in ("index", "middle", "ring"):
+        mutated = JointDeleteMutator(
+            JointDeleteCfg(
+                target_finger=finger_name,
+                deleted_joints=(f"{finger_name}_j2", f"{finger_name}_j3"),
+                regroup_strategy="drop",
+                respect_preset=False,
+            )
+        ).mutate(hand)
+        assert mutated is not None
+        hand = mutated
+
+    result = HandValidator(
+        HandValidatorCfg(
+            pre_made=HandValidatorCfg.PreMadeCfg(
+                check_finger_spacing=False,
+            )
+        )
+    ).validate_pre_made(hand)
+
+    assert result.passed is False
+    assert any("at least one non-thumb finger" in error for error in result.errors)
+
+
+def test_hand_validator_pre_made_rejects_palm_thumb_family_mismatch():
+    """pre-made mixed 中，thumb family 必须与 palm family 一致。"""
+
+    hand = _build_allegro_hand().replace(
+        metadata={
+            "premade_topology": {
+                "base_hand_preset": "single_palm_allegro",
+                "handedness": "right",
+                "topology_kind": "mixed",
+                "topology_anchor": "mixed",
+                "topology_name": "right_leap_t4_allegro_i4_m4_r4",
+                "surviving_slots": ["thumb", "index", "middle", "ring"],
+                "slot_finger_presets": {
+                    "thumb": "leap_thumb_v1",
+                    "index": "allegro_non_thumb_v1",
+                    "middle": "allegro_non_thumb_v1",
+                    "ring": "allegro_non_thumb_v1",
+                },
+                "slot_family_map": {
+                    "thumb": "leap",
+                    "index": "allegro",
+                    "middle": "allegro",
+                    "ring": "allegro",
+                },
+            }
+        }
+    )
+
+    result = HandValidator(HandValidatorCfg()).validate_pre_made(hand)
+
+    assert result.passed is False
+    assert any("thumb family" in error for error in result.errors)

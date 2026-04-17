@@ -51,7 +51,7 @@ def _finger_by_name(hand, finger_name: str):
 
 
 def test_joint_delete_mutator_relinks_chain_and_merges_deleted_geometry():
-    """`joint_delete` 应删除目标 joint、重接链，并把几何并到上一保留容器。"""
+    """`joint_delete` 应删除目标 joint、重接链、压紧 joint 名，并把几何并到上一保留容器。"""
 
     hand = _build_allegro_hand()
     before_index = _finger_by_name(hand, "index")
@@ -67,7 +67,8 @@ def test_joint_delete_mutator_relinks_chain_and_merges_deleted_geometry():
 
     assert mutated is not None
     after_index = _finger_by_name(mutated, "index")
-    assert [joint.name for joint in after_index.joints] == ["index_j0", "index_j1", "index_j3", "index_tip"]
+    assert [joint.name for joint in after_index.joints] == ["index_j0", "index_j1", "index_j2", "index_tip"]
+    assert [joint.child for joint in after_index.joints] == ["index_mcp1", "index_mcp2", "index_dip", "index_tip"]
     assert all(current.parent == previous.child for previous, current in zip(after_index.joints[:-1], after_index.joints[1:]))
     assert len(after_index.joints[1].collisions) > before_collision_count
     assert mutated.dof_count == hand.dof_count - 1
@@ -139,7 +140,8 @@ def test_joint_delete_drop_reanchors_remaining_chain_to_mount_when_root_joint_is
 
     assert mutated is not None
     after_index = _finger_by_name(mutated, "index")
-    assert [joint.name for joint in after_index.joints] == ["index_j1", "index_j2", "index_j3", "index_tip"]
+    assert [joint.name for joint in after_index.joints] == ["index_j0", "index_j1", "index_j2", "index_tip"]
+    assert [joint.child for joint in after_index.joints] == ["index_mcp2", "index_pip", "index_dip", "index_tip"]
     assert after_index.joints[0].parent == after_index.parent_link
     assert after_index.joints[0].origin.pos == original_root_origin.pos
     assert after_index.joints[0].origin.rpy == original_root_origin.rpy
@@ -167,4 +169,4 @@ def test_hand_generator_executes_joint_delete_pipeline():
     assert result is not None
     assert result.hand_cfg is not None
     assert result.hand_cfg.dof_count == 15
-    assert [joint.name for joint in _finger_by_name(result.hand_cfg, "index").joints] == ["index_j0", "index_j1", "index_j3", "index_tip"]
+    assert [joint.name for joint in _finger_by_name(result.hand_cfg, "index").joints] == ["index_j0", "index_j1", "index_j2", "index_tip"]

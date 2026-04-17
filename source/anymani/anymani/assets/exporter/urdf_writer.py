@@ -68,12 +68,13 @@ URDF 要求 ``<limit>`` 有 effort 和 velocity，但 HandCfg 没有存储它们
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from ..asset_base import AssetCfgBase, HandCfg
-from ..asset_schema_core import CollisionGeometryCfg, InertialCfg, MeshGeometryCfg, PoseCfg, VisualGeometryCfg
+from ..asset_schema_core import CollisionGeometryCfg, InertialCfg, MaterialCfg, MeshGeometryCfg, PoseCfg, VisualGeometryCfg
 from ._base import ExporterBase, ExportResult
 
 
@@ -114,9 +115,33 @@ class UrdfWriterCfg(AssetCfgBase):
     overwrite: bool = True
     """若目标文件已存在，是否覆盖。``False`` 时记入 skipped 并跳过。"""
 
+    recolored_materials: dict[str, MaterialCfg] = field(default_factory=dict)
+    """按 link 名覆盖 visual material 的映射。
+
+    key 是最终写进 URDF 的 `<link name="...">`，例如：
+
+    - `palm`
+    - `index_mcp1`
+    - `thumb_tip`
+
+    value 是要注入到该 link **所有 `<visual>`** 上的材质。collision 不消费这个字段。
+    """
+
     def __post_init__(self):
         if self.class_type is None:
             self.class_type = UrdfWriter
+        normalized_materials: dict[str, MaterialCfg] = {}
+        for link_name, material in self.recolored_materials.items():
+            if isinstance(material, MaterialCfg):
+                material_cfg = material.copy()
+            elif isinstance(material, Mapping):
+                material_cfg = MaterialCfg(**material)
+            else:
+                raise TypeError(
+                    f"recolored_materials[{link_name!r}] must be MaterialCfg or mapping, got {material!r}"
+                )
+            normalized_materials[str(link_name)] = material_cfg
+        self.recolored_materials = normalized_materials
 
 
 # ============================================================================
@@ -328,6 +353,9 @@ def _build_link_elem(
             visual_elem.attrib["name"] = visual.name
         ET.SubElement(visual_elem, "origin", attrib=_pose_attrib(visual.origin))
         visual_elem.append(_build_geometry_elem(visual.geometry, cfg))
+        material = cfg.recolored_materials.get(name) or visual.material
+        if material is not None:
+            visual_elem.append(_build_material_elem(material))
 
     for collision in collisions:
         collision_elem = ET.SubElement(link, "collision")
@@ -424,6 +452,16 @@ def _build_geometry_elem(geom, cfg: UrdfWriterCfg) -> ET.Element:
     else:
         raise ValueError(f"Unsupported URDF geometry kind: {kind}")
     return geometry_elem
+
+
+def _build_material_elem(material: MaterialCfg) -> ET.Element:
+    r"""把 `MaterialCfg` lower 成 URDF `<material>` 元素。"""
+
+    material_elem = ET.Element("material")
+    if material.name:
+        material_elem.attrib["name"] = material.name
+    ET.SubElement(material_elem, "color", attrib={"rgba": _fmt_triplet(material.rgba)})
+    return material_elem
 
 
 def _pose_attrib(pose: PoseCfg) -> dict[str, str]:

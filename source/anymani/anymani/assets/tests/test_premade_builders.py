@@ -105,6 +105,13 @@ def test_regular_finger_preset_builds_allegro_chain():
     assert finger.joints[-1].is_tip is True
     assert finger.joints[0].parent == "palm"
     assert all(current.parent == previous.child for previous, current in zip(finger.joints[:-1], finger.joints[1:]))
+    assert [joint.child for joint in finger.joints] == [
+        "index_mcp1",
+        "index_mcp2",
+        "index_pip",
+        "index_dip",
+        "index_tip",
+    ]
 
 
 def test_regular_thumb_preset_builds_thumb_chain():
@@ -120,6 +127,13 @@ def test_regular_thumb_preset_builds_thumb_chain():
     # 第二个关节是 thumb 链里最容易被特殊坐标约定影响的点；
     # 这里至少锁住它不是退化零偏移。
     assert not math.isclose(sum(abs(value) for value in finger.joints[1].origin.pos), 0.0, abs_tol=1e-9)
+    assert [joint.child for joint in finger.joints] == [
+        "thumb_cmc1",
+        "thumb_cmc2",
+        "thumb_pip",
+        "thumb_dip",
+        "thumb_tip",
+    ]
 
 
 def test_single_palm_builder_builds_box_palm():

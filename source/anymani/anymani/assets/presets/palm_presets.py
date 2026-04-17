@@ -20,7 +20,11 @@ from .units import cm
 if TYPE_CHECKING:
     from ..builder.palm_builders import ComPalmBuilderCfg, SinglePalmBuilderCfg
 
+"""Allegro 单体 box palm 的参数锚点。
 
+这里显式把 `mount_preset` 一起记录下来，避免 single-box palm 的挂载语义
+再散落到 hand-level resolver 里隐式猜测。
+"""
 ALLEGRO_SINGLE_PALM_BOX_PRESET: dict[str, Any] = {
     "mount_preset": "single_box_allegro",
     "shape": "box",
@@ -28,13 +32,9 @@ ALLEGRO_SINGLE_PALM_BOX_PRESET: dict[str, Any] = {
     "length": cm(9.44),
     "height": cm(4.2),
 }
-"""Allegro 单体 box palm 的参数锚点。
-
-这里显式把 `mount_preset` 一起记录下来，避免 single-box palm 的挂载语义
-再散落到 hand-level resolver 里隐式猜测。
-"""
 
 
+"""LEAP 单体 box palm 的参数锚点。"""
 LEAP_SINGLE_PALM_BOX_PRESET: dict[str, Any] = {
     "mount_preset": "single_box_leap",
     "shape": "box",
@@ -42,9 +42,15 @@ LEAP_SINGLE_PALM_BOX_PRESET: dict[str, Any] = {
     "length": cm(8.0),
     "height": cm(4.6),
 }
-"""LEAP 单体 box palm 的参数锚点。"""
 
 
+"""复合 palm preset 的原始几何/惯量/挂载 recipe。"""
+# TODO:这里是有问题的
+# 1. 我希望保持和 AnyMani/source/anymani/anymani/assets/doc/Single-Palm.jpg 一样的 palm frame 约定，尽量在 palm mesh 底部中心放置 palm frame（能做到的话，近似做到），
+#    朝向约定则严格一致
+# 2. 左右手预设。single palm 因为就单一对称，左右手只需按规则映射替换 thumb 的位置。但 compound palm 若是左右手，palm本身也需要预置 左右手 compound palm preset
+#    而 compound 需要同时预设 左/右手palm 及对应挂载点
+# 3. compound 提取自 如果只是为了增加 palm 的丰富度，目前的边际收益不大。未来再考虑 compound palm 的处理
 COM_PALM_PRESET_DATA: dict[str, dict[str, Any]] = {
     "allegro": {
         "collisions": [
@@ -87,7 +93,6 @@ COM_PALM_PRESET_DATA: dict[str, dict[str, Any]] = {
         "mount_preset": "leap",
     },
 }
-"""复合 palm preset 的原始几何/惯量/挂载 recipe。"""
 
 
 def get_single_palm_box_preset(name: str) -> "SinglePalmBuilderCfg":

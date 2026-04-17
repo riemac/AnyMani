@@ -43,7 +43,11 @@ def test_hand_validator_reports_mount_spacing_warning_without_rejecting():
     """validator 应允许 warning 放行，但把 spacing 问题记录下来。"""
 
     hand = _build_allegro_hand()
-    validator = HandValidator(HandValidatorCfg(min_finger_spacing=0.05))
+    validator = HandValidator(
+        HandValidatorCfg(
+            post_mutate=HandValidatorCfg.PostMutateCfg(min_finger_spacing=0.05)
+        )
+    )
 
     result = validator.validate(hand)
 
@@ -101,4 +105,6 @@ def test_hand_generator_returns_bundle_and_exports_to_configured_directory(tmp_p
     assert result.sidecar_path is not None and result.sidecar_path.is_file()
     assert result.tree_txt is not None
     assert result.tree_mermaid is not None
-    assert result.urdf_path.parent.parent == tmp_path
+    run_root = result.urdf_path.parent.parent
+    assert run_root.parent == tmp_path
+    assert (run_root / "summary.yaml").is_file()

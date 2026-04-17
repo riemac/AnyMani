@@ -1,3 +1,5 @@
+# FIXME：post-mutate 是基于 Monte Carlo Sampling 的联合采样思想来构造的
+# 
 r"""后序变异流水线：把多个单体工具按顺序串联调度。
 
 本模块是 `mutate/` 子包的顶层调度者，对应 `资产生产概略.png` 中
@@ -155,7 +157,7 @@ class HandMutator(MutatorBase):
                 continue  # `skip` 语义：保留当前状态，直接进入下一工具
 
             if validator is not None:
-                validation = validator.validate(result)  # 这里用默认 validator 做轻量结构闸门
+                validation = validator.validate_post_mutate(result)  # step_validate 语义属于 mutate 之后的后验闸门
                 if not validation:
                     if self.cfg.on_reject == "abort":
                         return None

@@ -63,8 +63,8 @@ def test_hand_generator_applies_connectivity_preset_and_drops_deleted_child_link
 
     $$
     \text{single\_palm\_leap}
-    \xrightarrow{\text{connectivity }\,t3/i2/m2/r2,\ \text{drop geometry}}
-    \text{dof}=3+2+2+2=9
+    \xrightarrow{\text{connectivity }\,t3/i3/m2/r2,\ \text{drop geometry}}
+    \text{dof}=3+3+2+2=10
     $$
 
     用户这轮指出的问题正是：旧实现把被删 joint 的 mesh merge 回父段，
@@ -80,37 +80,46 @@ def test_hand_generator_applies_connectivity_preset_and_drops_deleted_child_link
             mode="made",
             artifact_level="bundle",
             output_dir=tmp_path,
+            handedness="right",
             hand_presets=["single_palm_leap"],
-            connectivity_presets={"single_palm_leap": ["leap_t3_i2_m2_r2"]},
+            connectivity_presets={"single_palm_leap": ["leap_t3_i3_m2_r2"]},
             output_layout="recursive",
         )
     ).generate()
 
     assert result is not None
     assert result.hand_cfg is not None
-    assert result.hand_cfg.dof_count == 9
+    assert result.hand_cfg.dof_count == 10
     assert result.urdf_path is not None and result.urdf_path.is_file()
     assert result.sidecar_path is not None and result.sidecar_path.is_file()
-    assert result.urdf_path.parent.parent.name == "leap_t3_i2_m2_r2"
+    assert result.urdf_path.parent.parent.name == "right_t3_i3_m2_r2"
     assert result.urdf_path.parent.parent.parent.name == "single_palm_leap"
-    assert result.urdf_path.parent.parent.parent.parent.name == "pre_made"
+    summary_path = result.urdf_path.parent.parent.parent.parent / "summary.yaml"
+    assert summary_path.is_file()
 
     index = next(finger for finger in result.hand_cfg.fingers if finger.name == "index")
     surviving_joint_names = [joint.name for joint in index.joints]
     surviving_collision_names = [collision.name for joint in index.joints for collision in joint.collisions]
 
-    assert surviving_joint_names == ["index_root_fixed", "index_j0", "index_j1", "index_tip"]
-    assert "index_j2_col" not in surviving_collision_names
+    assert surviving_joint_names == ["index_root_fixed", "index_j0", "index_j1", "index_j2", "index_tip"]
     assert "index_j3_col" not in surviving_collision_names
 
     sidecar = yaml.safe_load(result.sidecar_path.read_text(encoding="utf-8"))
+    summary = yaml.safe_load(summary_path.read_text(encoding="utf-8"))
     assert sidecar["base_hand_preset"] == "single_palm_leap"
-    assert sidecar["connectivity_preset"] == "leap_t3_i2_m2_r2"
+    assert sidecar["handedness"] == "right"
+    assert sidecar["topology_group_name"] == "single_palm_leap"
+    assert sidecar["topology_name"] == "right_t3_i3_m2_r2"
+    assert sidecar["connectivity_preset"] == "leap_t3_i3_m2_r2"
     assert sidecar["per_finger_connectivity"]["thumb"]["deleted_joints"] == ["thumb_j3"]
-    assert sidecar["per_finger_connectivity"]["index"]["deleted_joint_suffixes"] == ["j2", "j3"]
-    assert sidecar["per_finger_connectivity"]["index"]["deleted_joints"] == ["index_j2", "index_j3"]
+    assert sidecar["per_finger_connectivity"]["index"]["deleted_joint_suffixes"] == ["j3"]
+    assert sidecar["per_finger_connectivity"]["index"]["deleted_joints"] == ["index_j3"]
     assert sidecar["per_finger_connectivity"]["index"]["regroup_strategy"] == "drop"
-    assert sidecar["per_finger_connectivity"]["index"]["remaining_revolute"] == 2
+    assert sidecar["per_finger_connectivity"]["index"]["remaining_revolute"] == 3
+    assert summary["run"]["mode"] == "made"
+    assert summary["config"]["handedness"] == "right"
+    assert summary["stats"]["succeeded"] == 1
+    assert summary["stats"]["topology_count"] == 1
 
 
 def test_hand_generator_enumerate_walks_registered_connectivity_space(tmp_path):
@@ -131,8 +140,9 @@ def test_hand_generator_enumerate_walks_registered_connectivity_space(tmp_path):
             artifact_level="hand_cfg",
             output_dir=tmp_path,
             sampling_strategy="enumerate",
+            handedness="right",
             hand_presets=["single_palm_allegro"],
-            connectivity_presets={"single_palm_allegro": ["allegro_full", "allegro_t3_i2_m2_r2"]},
+            connectivity_presets={"single_palm_allegro": ["allegro_full", "allegro_t3_i3_m2_r2"]},
             max_enumerate=2,
         )
     )
@@ -146,7 +156,7 @@ def test_hand_generator_enumerate_walks_registered_connectivity_space(tmp_path):
 
     assert len(results) == 2
     assert connectivity_to_dof["allegro_full"] == 16
-    assert connectivity_to_dof["allegro_t3_i2_m2_r2"] == 9
+    assert connectivity_to_dof["allegro_t3_i3_m2_r2"] == 10
 
 
 def test_preview_hand_script_accepts_connectivity_preset_and_writes_recursive_output(tmp_path):
@@ -163,8 +173,10 @@ def test_preview_hand_script_accepts_connectivity_preset_and_writes_recursive_ou
             str(PREVIEW_HAND_SCRIPT),
             "--hand-preset",
             "single_palm_allegro",
+            "--handedness",
+            "right",
             "--connectivity-preset",
-            "allegro_t3_i2_m2_r2",
+            "allegro_t3_i3_m2_r2",
             "--output-dir",
             str(output_dir),
         ],
@@ -175,6 +187,7 @@ def test_preview_hand_script_accepts_connectivity_preset_and_writes_recursive_ou
 
     written_urdfs = list(output_dir.rglob("hand.urdf"))
     assert len(written_urdfs) == 1
-    assert "connectivity=allegro_t3_i2_m2_r2" in completed.stdout
+    assert "connectivity=allegro_t3_i3_m2_r2" in completed.stdout
     assert "single_palm_allegro" in written_urdfs[0].as_posix()
-    assert "allegro_t3_i2_m2_r2" in written_urdfs[0].as_posix()
+    assert "right_t3_i3_m2_r2" in written_urdfs[0].as_posix()
+    assert len(list(output_dir.glob("*/summary.yaml"))) == 1

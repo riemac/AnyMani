@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import random
-from typing import Literal
+from typing import Any, Literal
 
 from ...asset_base import AssetCfgBase, HandCfg
 from ...asset_schema_core import CollisionGeometryCfg, InertialCfg, PoseCfg, VisualGeometryCfg
@@ -302,7 +302,28 @@ class JointDeleteMutator(MutatorBase):
 
         if not new_joints:
             return None
-        return finger.replace(joints=new_joints)
+
+        # 这一步是本轮新增 contract 的关键：
+        #
+        # - surviving **joint 名** 要重新压紧成 `j0..jN`
+        # - surviving **child link 名** 则继续保留 `mcp/cmc/pip/dip/tip` 这类原始语义
+        #
+        # 这样当原始 `j0` 被删掉时，人眼读到：
+        #
+        # - `index_j0 -> index_mcp2`
+        #
+        # 就能立刻明白“当前链上的第一个可动关节，接到的是原 anatomy 里的 mcp2 段”，
+        # 不必再从跳号的 `j1/j2/j3` 倒推删了谁。
+        renumbered_joints, surviving_joint_name_map = _renumber_surviving_joints(
+            finger_name=finger.name,
+            joints=new_joints,
+        )
+        finger_metadata = dict(finger.metadata)
+        joint_delete_metadata = dict(finger_metadata.get("joint_delete", {}))
+        joint_delete_metadata["deleted_joints"] = sorted(delete_set)
+        joint_delete_metadata["surviving_joint_name_map"] = surviving_joint_name_map
+        finger_metadata["joint_delete"] = joint_delete_metadata
+        return finger.replace(joints=renumbered_joints, metadata=finger_metadata)
 
 
 def _compose_pose(lhs: PoseCfg, rhs: PoseCfg) -> PoseCfg:
@@ -312,6 +333,70 @@ def _compose_pose(lhs: PoseCfg, rhs: PoseCfg) -> PoseCfg:
         pos=(lhs.pos[0] + rhs.pos[0], lhs.pos[1] + rhs.pos[1], lhs.pos[2] + rhs.pos[2]),
         rpy=(lhs.rpy[0] + rhs.rpy[0], lhs.rpy[1] + rhs.rpy[1], lhs.rpy[2] + rhs.rpy[2]),
     )
+
+
+def _renumber_surviving_joints(*, finger_name: str, joints: list) -> tuple[list, list[dict[str, Any]]]:
+    r"""把 surviving revolute joint 压紧成连续的 `j0..jN`。
+
+    这里刻意只重命名 **revolute joints**：
+
+    - `root_fixed` 这类结构性 fixed joint 保持原名；
+    - `tip` 继续保持 `{finger}_tip`；
+    - child link 名完全不动，因为它们现在承担 anatomy 语义。
+
+    这样 joint 名与 child link 名的职责就被彻底拆开：
+
+    - joint 名：当前 surviving 链中的序次
+    - child link 名：原始骨架段的语义身份
+
+    Args:
+        finger_name (str): 当前 finger 的逻辑名，如 `index` / `thumb`。
+        joints (list): 删除和重连之后、尚未重命名的 joint 列表。
+
+    Returns:
+        tuple[list, list[dict[str, Any]]]:
+            - 新的 joint 列表
+            - 从旧名到新名的显式映射，供 sidecar / debug / 人工巡检复用
+    """
+
+    renumbered_joints = []
+    surviving_joint_name_map: list[dict[str, Any]] = []
+    compact_revolute_index = 0
+
+    for joint in joints:
+        original_name = joint.metadata.get("original_joint_name", joint.name)
+        previous_name = joint.name
+
+        if joint.joint_type == "revolute":
+            new_name = f"{finger_name}_j{compact_revolute_index}"
+            compact_revolute_index += 1
+        elif joint.is_tip:
+            new_name = f"{finger_name}_tip"
+        else:
+            # 例如 LEAP non-thumb 的 `root_fixed`，名字本身已经承载稳定结构语义，
+            # 不应该被压进 `j*` 序列里。
+            new_name = joint.name
+
+        new_metadata = dict(joint.metadata)
+        new_metadata["original_joint_name"] = original_name
+        new_metadata["previous_joint_name"] = previous_name
+        new_metadata["current_joint_name"] = new_name
+        if joint.joint_type == "revolute":
+            new_metadata["joint_index"] = compact_revolute_index - 1
+
+        renumbered_joints.append(joint.replace(name=new_name, metadata=new_metadata))
+        surviving_joint_name_map.append(
+            {
+                "previous_name": previous_name,
+                "current_name": new_name,
+                "original_name": original_name,
+                "child_link": str(joint.child),
+                "joint_type": joint.joint_type,
+                "is_tip": bool(joint.is_tip),
+            }
+        )
+
+    return renumbered_joints, surviving_joint_name_map
 
 
 def _merge_deleted_joint_into_container(container, joint, joint_pose_in_container: PoseCfg) -> None:

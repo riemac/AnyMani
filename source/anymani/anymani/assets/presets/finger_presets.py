@@ -21,17 +21,6 @@ from ..builder.finger_buiders import (
     RegularThumbBuilderCfg,
 )
 
-
-ALLEGRO_FINGER_PRESET = AllegroFingerBuilderCfg(
-    name="index",
-    num_joints=4,
-    width=cm(2.7),  # 默认人工测量锚点仍按 cm 录入，更符合手部资产调参直觉
-    height=cm(2.0),  # builder 侧最终只看到 SI(m)，这里的 `cm(...)` 只承担显式换算
-    length=[cm(1.8), cm(5.4), cm(3.8), cm(2.2)],
-    mesh_offsets=[0.0, 0.0, cm(-0.6), 0.0],
-    axes=[(0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
-    tip={"type": "cs", "radius": cm(1.2), "height": cm(1.0)},
-)
 """Allegro 非拇指执行型 preset。
 
 这里刻意把几何参数完整展开写死，而不是再套一个更隐式的中间层，
@@ -43,27 +32,26 @@ ALLEGRO_FINGER_PRESET = AllegroFingerBuilderCfg(
 - 旋转轴
 - 指尖类型
 """
-
-
-LEAP_FINGER_PRESET = LeapFingerBuilderCfg(
+ALLEGRO_FINGER_PRESET = AllegroFingerBuilderCfg(
     name="index",
     num_joints=4,
-    width=cm(3.4),
-    height=cm(2.05),
-    length=[cm(3.9), cm(1.5), cm(3.6), cm(2.0)],
-    mesh_offsets=[0.0, 0.0, 0.0, 0.0],
-    fixed_part=cm(1.3),
-    axes=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+    width=cm(2.7),  # 默认人工测量锚点仍按 cm 录入，更符合手部资产调参直觉
+    height=cm(2.0),  # builder 侧最终只看到 SI(m)，这里的 `cm(...)` 只承担显式换算
+    length=[cm(1.8), cm(5.4), cm(3.8), cm(2.2)],
+    mesh_offsets=[0.0, 0.0, cm(-0.6), 0.0],
+    axes=[(0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
     tip={"type": "cs", "radius": cm(1.2), "height": cm(1.0)},
 )
-"""LEAP 非拇指执行型 preset。
 
-# Question:
-原始设计里，LEAP 的 tip 更贴近 custom `white_tip.obj` 语义；当前 v1 为了
-先打通 pre-made 闭环，执行路径仍采用 `cylinder + sphere` primitive tip。
+
+"""Allegro 拇指执行型 preset。
+
+轴语义严格对齐 `Thumb.png` 中的科研约定：
+
+- CMC1: 绕 $x$
+- CMC2: 绕 $y$
+- MCP / IP: 绕 $z$
 """
-
-
 ALLEGRO_THUMB_PRESET = RegularThumbBuilderCfg(
     name="thumb",
     lengths=[cm(4.5), cm(1.7), cm(4.3), cm(4.0)],
@@ -76,16 +64,31 @@ ALLEGRO_THUMB_PRESET = RegularThumbBuilderCfg(
     axes=[(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (0.0, 0.0, 1.0)],
     tip={"type": "cs", "radius": cm(1.2), "height": cm(1.0)},
 )
-"""Allegro 拇指执行型 preset。
 
-轴语义严格对齐 `Thumb.png` 中的科研约定：
 
-- CMC1: 绕 $x$
-- CMC2: 绕 $y$
-- MCP / IP: 绕 $z$
+"""LEAP 非拇指执行型 preset。
+
+# Question:
+原始设计里，LEAP 的 tip 更贴近 custom `white_tip.obj` 语义；当前 v1 为了
+先打通 pre-made 闭环，执行路径仍采用 `cylinder + sphere` primitive tip。
 """
+LEAP_FINGER_PRESET = LeapFingerBuilderCfg(
+    name="index",
+    num_joints=4,
+    width=cm(3.4),
+    height=cm(2.05),
+    length=[cm(3.9), cm(1.5), cm(3.6), cm(2.0)],
+    mesh_offsets=[0.0, 0.0, 0.0, 0.0],
+    fixed_part=cm(1.3),
+    axes=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+    tip={"type": "cs", "radius": cm(1.2), "height": cm(1.8)},
+)
 
+"""LEAP 拇指执行型 preset。
 
+本轮虽然不恢复 LEAP 的 custom `leap_cube` tip，但共享的 thumb 链路轴语义仍与
+`Thumb.png` 保持一致：CMC1 为 $x$，CMC2 为 $y$，后续为 $z$。
+"""
 LEAP_THUMB_PRESET = RegularThumbBuilderCfg(
     name="thumb",
     lengths=[cm(2.8), cm(1.7), cm(4.7), cm(2.3)],
@@ -96,21 +99,10 @@ LEAP_THUMB_PRESET = RegularThumbBuilderCfg(
     cmc1_offset=(0.0, cm(-0.33)),
     non_cmc1_offset=[0.0, 0.0, 0.0],
     axes=[(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (0.0, 0.0, 1.0)],
-    tip={"type": "cs", "radius": cm(1.2), "height": cm(1.0)},
+    tip={"type": "cs", "radius": cm(1.2), "height": cm(1.8)},
 )
-"""LEAP 拇指执行型 preset。
-
-本轮虽然不恢复 LEAP 的 custom `leap_cube` tip，但共享的 thumb 链路轴语义仍与
-`Thumb.png` 保持一致：CMC1 为 $x$，CMC2 为 $y$，后续为 $z$。
-"""
 
 
-FINGER_PRESET_REGISTRY: dict[str, RegularFingerBuilderCfg] = {
-    "allegro_non_thumb_v1": ALLEGRO_FINGER_PRESET,
-    "leap_non_thumb_v1": LEAP_FINGER_PRESET,
-    "allegro_thumb_v1": ALLEGRO_THUMB_PRESET,
-    "leap_thumb_v1": LEAP_THUMB_PRESET,
-}
 """finger preset 的轻量注册表。
 
 这里保留显式字典而不是更重的动态注册机制，原因是科研期的需求更偏向：
@@ -119,6 +111,12 @@ FINGER_PRESET_REGISTRY: dict[str, RegularFingerBuilderCfg] = {
 - 名称稳定，方便 sidecar/provenance 回溯
 - 修改时不必追框架魔法
 """
+FINGER_PRESET_REGISTRY: dict[str, RegularFingerBuilderCfg] = {
+    "allegro_non_thumb_v1": ALLEGRO_FINGER_PRESET,
+    "leap_non_thumb_v1": LEAP_FINGER_PRESET,
+    "allegro_thumb_v1": ALLEGRO_THUMB_PRESET,
+    "leap_thumb_v1": LEAP_THUMB_PRESET,
+}
 
 
 def get_finger_builder_preset(name: str) -> RegularFingerBuilderCfg:

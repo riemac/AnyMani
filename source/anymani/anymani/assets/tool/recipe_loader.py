@@ -230,10 +230,11 @@ def _build_mutate_cfg(raw: dict[str, Any]) -> HandMutatorCfg:
     return HandMutatorCfg(**data)
 
 
-def _build_validate_cfg(raw: dict[str, Any]) -> HandValidatorCfg:
-    r"""递归实例化 Validate 块。"""
+def _build_validate_stage_cfg(raw: dict[str, Any], *, stage_cfg_cls: type[Any]) -> Any:
+    r"""递归实例化单个 validator 阶段块。"""
 
     data = deepcopy(raw)
+    data.pop("class_type", None)  # stage cfg 只是纯规则容器，不需要 runtime class 入口
     finger_raw = data.get("finger")
     if isinstance(finger_raw, dict):
         finger_data = deepcopy(finger_raw)
@@ -241,7 +242,52 @@ def _build_validate_cfg(raw: dict[str, Any]) -> HandValidatorCfg:
         if isinstance(joint_raw, dict):
             finger_data["joint"] = JointValidatorCfg(**joint_raw)
         data["finger"] = FingerValidatorCfg(**finger_data)
-    return HandValidatorCfg(**data)
+    return stage_cfg_cls(**data)
+
+
+def _build_validate_cfg(raw: dict[str, Any]) -> HandValidatorCfg:
+    r"""递归实例化 Validate 块。
+
+    当前同时兼容两种 YAML 形状：
+
+    1. 新的显式阶段形状：
+       `Validate: {pre_made: {...}, post_mutate: {...}}`
+    2. 旧的平面形状：
+       `Validate: {strict: false, finger: {...}, ...}`
+
+    对旧形状，loader 会把同一组规则同时复制到 `pre_made` 与 `post_mutate`，
+    这样历史 recipe 不会因为这轮 staged-validator 重构直接失效。
+    """
+
+    data = deepcopy(raw)
+    pre_made_raw = data.get("pre_made")
+    post_mutate_raw = data.get("post_mutate")
+
+    if isinstance(pre_made_raw, dict) or isinstance(post_mutate_raw, dict):
+        if isinstance(pre_made_raw, dict):
+            data["pre_made"] = _build_validate_stage_cfg(
+                pre_made_raw,
+                stage_cfg_cls=HandValidatorCfg.PreMadeCfg,
+            )
+        if isinstance(post_mutate_raw, dict):
+            data["post_mutate"] = _build_validate_stage_cfg(
+                post_mutate_raw,
+                stage_cfg_cls=HandValidatorCfg.PostMutateCfg,
+            )
+        return HandValidatorCfg(**data)
+
+    legacy_stage_raw = deepcopy(data)
+    legacy_stage_raw.pop("class_type", None)
+    return HandValidatorCfg(
+        pre_made=_build_validate_stage_cfg(
+            legacy_stage_raw,
+            stage_cfg_cls=HandValidatorCfg.PreMadeCfg,
+        ),
+        post_mutate=_build_validate_stage_cfg(
+            legacy_stage_raw,
+            stage_cfg_cls=HandValidatorCfg.PostMutateCfg,
+        ),
+    )
 
 
 def _build_export_cfg(raw: dict[str, Any]) -> HandExporterCfg:

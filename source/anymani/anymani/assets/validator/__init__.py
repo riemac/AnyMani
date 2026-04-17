@@ -11,7 +11,9 @@ r"""验证器子包：层次化 HandCfg 软约束检查。
 
     from anymani.assets.generator.validator import HandValidator, HandValidatorCfg
 
-    cfg = HandValidatorCfg(dof_min=4, dof_max=20, strict=False)
+    cfg = HandValidatorCfg(
+        post_mutate=HandValidatorCfg.PostMutateCfg(dof_min=4, dof_max=20, strict=False),
+    )
     result = HandValidator(cfg).validate(my_hand_cfg)
     if not result:
         print("Validation failed:", result.errors)

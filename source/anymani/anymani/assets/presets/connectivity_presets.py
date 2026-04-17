@@ -391,6 +391,39 @@ def list_hand_connectivity_preset_names(family: str | None = None) -> tuple[str,
     return tuple(sorted(names))
 
 
+def list_finger_connectivity_preset_names(
+    *,
+    family: str | None = None,
+    finger_kind: Literal["non_thumb", "thumb"] | None = None,
+) -> tuple[str, ...]:
+    r"""按稳定枚举顺序列出 finger-level connectivity recipe 名。
+
+    这个 helper 的主要使用场景，是 pre-made 新 façade 里的 slot-level candidate pool：
+
+    - topology 先决定“这个 slot 当前来自哪个 family、属于 thumb 还是 non-thumb”
+    - 然后再由这里给出该 slot 合法的 finger-level connectivity 候选集
+
+    与 `list_hand_connectivity_preset_names()` 的区别在于：
+
+    - hand-level 列表服务 legacy alias / 兼容层
+    - finger-level 列表服务新的 slot 级枚举主线
+    """
+
+    ordered_names: list[str] = []
+    seen: set[str] = set()
+    for (current_family, current_kind), names in _FINGER_CONNECTIVITY_ENUMERATION_ORDER.items():
+        if family is not None and current_family != family:
+            continue
+        if finger_kind is not None and current_kind != finger_kind:
+            continue
+        for name in names:
+            if name in seen:
+                continue
+            ordered_names.append(name)
+            seen.add(name)
+    return tuple(ordered_names)
+
+
 def get_default_hand_connectivity_preset_name(family: str) -> str:
     r"""返回某个 family 的默认 full connectivity preset 名。"""
 
@@ -405,6 +438,7 @@ __all__ = [
     "HAND_CONNECTIVITY_PRESET_REGISTRY",
     "get_finger_connectivity_preset_data",
     "get_hand_connectivity_preset_data",
+    "list_finger_connectivity_preset_names",
     "list_hand_connectivity_preset_names",
     "get_default_hand_connectivity_preset_name",
 ]

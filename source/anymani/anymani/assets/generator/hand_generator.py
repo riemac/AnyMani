@@ -33,25 +33,32 @@ r"""手部资产生成器主入口草案。
 
 from __future__ import annotations
 
-import hashlib
-import math
-import random
-import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Literal
 from uuid import uuid4
 
+import yaml
+
 from ..asset_base import AssetCfgBase, HandCfg
 from ..asset_builders import HandBuilder, HandBuilderCfg
 from ..exporter import HandExporter, HandExporterCfg
-from ..presets.connectivity_presets import (
-    get_finger_connectivity_preset_data,
-    get_hand_connectivity_preset_data,
-    list_hand_connectivity_preset_names,
-)
-from ..presets.hand_presets import get_hand_builder_preset_data, make_human_like_builder_cfg_from_preset
 from ..validator import HandValidator, HandValidatorCfg
+from ._generation_result import HandGenerationResult
+from ._premade import (
+    apply_connectivity_preset as _apply_premade_connectivity_preset,
+    build_base_hand as _build_premade_base_hand,
+    candidate_hand_preset_names as _candidate_premade_hand_preset_names,
+    connectivity_names_for_hand_preset as _connectivity_names_for_premade_hand_preset,
+    normalize_connectivity_mapping,
+    normalize_name_list,
+    resolve_export_root as _resolve_premade_export_root,
+    resolve_single_premade_selection as _resolve_single_premade_selection,
+    stable_premade_id,
+)
+from ._recolor import RecolorSpec, describe_recolor_spec, normalize_recolor_spec, resolve_visual_recolor_materials
+from ._tree_render import render_hand_tree_mermaid, render_hand_tree_txt
 
 try:
     from .mutate import HandMutator, HandMutatorCfg
@@ -88,139 +95,6 @@ def _has_enabled_mutation(cfg: HandMutatorCfg) -> bool:
         getattr(cfg, key) is not None
         for key in ("joint_delete", "link_scale", "tip_replace", "limit_tweak", "mount_perturb", "finger_replace")
     )
-
-
-def _normalize_name_list(values: list[str] | tuple[str, ...] | None, *, field_name: str) -> list[str]:
-    r"""把 recipe / YAML 侧的名称列表统一规约为 `list[str]`。
-
-    这次 pre-made façade 的显式设计就是：
-
-    - `hand_presets: list[str]`
-    - `connectivity_presets: dict[str, list[str]] | None`
-
-    因而这里不再像上一版那样往 tuple 收，而是显式回到 list。
-    这样科研侧在读配置时，看到的形状会和 `FIXME` 里的契约完全一致。
-    """
-
-    if values is None:
-        return []
-    if isinstance(values, str):
-        return [str(values)]
-    if isinstance(values, tuple):
-        return [str(item) for item in values]
-    if isinstance(values, list):
-        return [str(item) for item in values]
-    raise TypeError(f"{field_name} must be a list/tuple of str or None, got {values!r}")
-
-
-def _normalize_connectivity_mapping(
-    values: dict[str, list[str] | tuple[str, ...]] | None,
-) -> dict[str, list[str]] | None:
-    r"""把 `connectivity_presets` 统一规约为 `dict[str, list[str]] | None`。
-
-    这里的规约目标不是“做复杂兼容层”，而是把 YAML / Python 两侧常见写法收拢成
-    同一形状，避免后续 pre-made 主循环到处判断 tuple / list / None。
-    """
-
-    if values is None:
-        return None
-    if not isinstance(values, dict):
-        raise TypeError(f"connectivity_presets must be a mapping or None, got {values!r}")
-
-    normalized: dict[str, list[str]] = {}
-    for hand_preset_name, preset_names in values.items():
-        normalized[str(hand_preset_name)] = _normalize_name_list(
-            preset_names,
-            field_name=f"connectivity_presets[{hand_preset_name!r}]",
-        )
-    return normalized
-
-
-def _stable_premade_id(*parts: str) -> str:
-    r"""为 pre-made 的离散 recipe 组合生成稳定短 ID。
-
-    在 `enumerate` 路径里，我们希望：
-
-    - 同一个 `(base_hand_preset, connectivity_preset)` 组合，多次生成时 ID 稳定；
-    - sidecar / output path 能直接靠这组 provenance 回溯；
-    - 但目录名又不要长到影响人工浏览。
-
-    因而这里对 provenance 字符串做 md5，再取前 8 位十六进制作为稳定短签名。
-    """
-
-    payload = "::".join(parts).encode("utf-8")
-    return hashlib.md5(payload).hexdigest()[:8]
-
-
-def _resolve_deleted_joint_names(finger, *, deleted_joint_suffixes: tuple[str, ...]) -> tuple[str, ...]:
-    r"""把 slot-agnostic 的 delete recipe 展开成当前 finger 上的真实 joint 名。
-
-    例如，当 finger 为 `index`，而 recipe 写的是 `("j2", "j3")` 时，这里会解析成：
-
-    - `index_j2`
-    - `index_j3`
-
-    这样 connectivity preset 的科学语义仍然是“显式删除哪些 joint”，
-    只是为了避免对 index / middle / ring 重复抄写，允许 recipe 在注册层使用后缀表达。
-    """
-
-    joint_name_set = {joint.name for joint in finger.joints}  # 当前 finger 真实存在的 joint 名全集
-    resolved: list[str] = []
-    for suffix in deleted_joint_suffixes:
-        candidate = str(suffix)  # 允许 recipe 直接写完整 joint 名，也允许只写后缀
-        if candidate not in joint_name_set and not candidate.startswith(f"{finger.name}_"):
-            candidate = f"{finger.name}_{candidate}"  # 把 `j2` 展开成 `index_j2` / `thumb_j2` 这类真实名字
-        if candidate not in joint_name_set:
-            raise ValueError(
-                f"Deleted joint token {suffix!r} cannot be resolved on finger {finger.name!r}; "
-                f"available joints are {[joint.name for joint in finger.joints]!r}"
-            )
-        resolved.append(candidate)
-    return tuple(resolved)
-
-
-# ============================================================================
-#  生成结果包
-# ============================================================================
-
-
-@dataclass
-class HandGenerationResult:
-    r"""一次生成调用的轻量结果包。
-
-    这个结果包的设计目标是“按需承载产物”，而不是强迫每次都生成完整
-    产物链。若用户只想看结构，可以只填 `hand_cfg`；若用户想落盘，则可以
-    同时填 `urdf_path` 与 `sidecar_path`。
-    """
-
-    hand_cfg: HandCfg | None = None
-    """内存中的手部配置；轻量模式下可直接返回。"""
-
-    urdf_path: Path | None = None
-    """导出的 URDF 路径；若未请求导出则为 `None`。"""
-
-    sidecar_path: Path | None = None
-    """附带元数据文件路径；例如 yaml / json sidecar。"""
-
-    metadata: dict[str, Any] = field(default_factory=dict)
-    """生成过程的辅助信息，例如 preset 名、随机种子、拒绝原因统计等。"""
-
-    tree_txt: str | None = None
-    """ASCII 树状可视化；通过 `render_trees()` 填充，也可落盘为 `.txt` 文件。"""
-
-    tree_mermaid: str | None = None
-    """Mermaid 树状可视化；通过 `render_trees()` 填充，可直接嵌入 Markdown。"""
-
-    def render_trees(self) -> "HandGenerationResult":
-        """从 `self.hand_cfg` 就地生成 txt 和 Mermaid 两种树状可视化，并返回自身。
-
-        若 `hand_cfg` 为 `None` 则无操作。
-        """
-
-        if self.hand_cfg is not None:
-            self.tree_txt = render_hand_tree_txt(self.hand_cfg)
-            self.tree_mermaid = render_hand_tree_mermaid(self.hand_cfg)
-        return self
 
 
 # ============================================================================
@@ -289,10 +163,10 @@ class HandGeneratorCfg(AssetCfgBase):
     强烈建议在实验前先预估枚举空间大小，避免无意触发笛卡尔爆炸。"""
 
     Made: HandBuilderCfg = field(default_factory=HandBuilderCfg)
-    """前序生成配置入口；负责把生成空间中的选择落到一个初始 `HandCfg`。"""
+    """前序生成配置入口；主要负责关节拓扑维度的变体，把生成空间中的选择落到一个初始 `HandCfg`。"""
 
     Mutate: HandMutatorCfg = field(default_factory=HandMutatorCfg)
-    """后序变异配置入口；可为空操作，也可串联多个局部工具。"""
+    """后序变异配置入口；主要负责非关节拓扑维度的变体，可为空操作，也可串联多个局部工具。"""
 
     Validate: HandValidatorCfg = field(default_factory=HandValidatorCfg)
     """手级验证配置入口；用于生成后校验结构和语义约束。"""
@@ -307,6 +181,9 @@ class HandGeneratorCfg(AssetCfgBase):
     测试或批量脚本也可以显式覆盖成临时目录。
     """
 
+    handedness: Literal["left", "right", "all"] = "all"
+    """TODO: 生成哪种 handedness 的手。`all` 表示同时生成左右手；`left` / `right` 则只生成单一 handedness。"""
+
     hand_presets: list[str] = field(default_factory=list)
     """pre-made 阶段参与生成的 base hand preset 名列表。
 
@@ -315,20 +192,53 @@ class HandGeneratorCfg(AssetCfgBase):
     因为它本身就是“用户手写离散列表”的语义对象。
     """
 
-    connectivity_presets: dict[str, list[str]] | None = None
-    """base hand preset -> connectivity preset 名列表的映射。
+    connectivity_presets: dict[str, list[str] | dict[str, list[str]]] | None = None
+    """pre-made connectivity façade。
 
-    - key: `hand_preset` 名，例如 `single_palm_allegro`
-    - value: 该 hand 允许搭配的 `HandConnectivityPreset` 名列表
+    # FIXME：只支持1套形状：
 
-    若为 `None`，或缺少某个 hand preset 的键，则运行时回退到该 family 全部合法 preset。
+    **slot-level 主语义**
+       `hand_preset -> {slot -> [finger_connectivity_preset_name, ...]}`
+
+    第二种才是 mixed / missing topology 真正依赖的 candidate-pool 语义。
+    """
+
+    mixed: bool = True
+    """TODO:是否混合不同 family 的手指拓扑。如果为 True，则在 pre-made 阶段允许在同一只手上组合 leap/allegro 的手指变体；如果为 False，则默认每只手只能选一个 family 的 preset 进行派生。"""
+
+    missing: bool = True
+    """是否把“缺失一根 non-thumb”的 topology 纳入 pre-made。
+
+    你已明确要求 missing topology 属于 pre-made 主线的一部分，因此这里默认开启；
+    若旧脚本只想保留 canonical single-family 空间，可显式写 `missing=False`。
+    """
+
+    recolored: RecolorSpec = None
+    """控制 URDF visual recolor 的 façade 字段。
+
+    已确认的 contract 如下：
+
+    - `None` / `False`：关闭 recolor
+    - `str`：命名 palette，名称来自 `assets/presets/color_presets.py`
+    - `dict[child_link_name, rgba]`：按 child link 名做局部覆盖
+
+    注意两点：
+
+    1. recolor 只作用于 `<visual>`，不会改 `<collision>`；
+    2. 命名 palette 的 anatomy 规则为：
+       - palm / LEAP `root_fixed_link`：红
+       - CMC1 / MCP1：黄
+       - CMC2 / MCP2：青
+       - PIP：绿
+       - DIP：蓝
+       - TIP：紫
     """
 
     output_layout: Literal["flat", "recursive"] = "recursive"
     """pre-made 产物的目录组织模式。
 
-    - ``recursive``：`generated/pre_made/{hand_preset}/{connectivity_preset}/{sample_id}/`
-    - ``flat``：`generated/pre_made_flat/{sample_id}/`
+    - ``recursive``：`generated/<timestamp>/{group}/{topology}/{sample_id}/`
+    - ``flat``：`generated/<timestamp>/flat/{sample_id}/`
 
     # NOTE:
     这个字段仍然收口在 `HandGeneratorCfg`，因为用户已经明确要求：
@@ -339,8 +249,9 @@ class HandGeneratorCfg(AssetCfgBase):
         if self.class_type is None:
             self.class_type = HandGenerator
         self.output_dir = Path(self.output_dir)  # 统一在 cfg 边界内把路径收口为 `Path`
-        self.hand_presets = _normalize_name_list(self.hand_presets, field_name="hand_presets")
-        self.connectivity_presets = _normalize_connectivity_mapping(self.connectivity_presets)
+        self.hand_presets = normalize_name_list(self.hand_presets, field_name="hand_presets")
+        self.connectivity_presets = normalize_connectivity_mapping(self.connectivity_presets)
+        self.recolored = normalize_recolor_spec(self.recolored)
 
         # pre-made façade 一旦显式给出 `connectivity_presets`，就必须同时给出 hand preset 列表；
         # 否则运行时连“这张映射是给谁的”都无法确定。
@@ -373,18 +284,129 @@ class HandGenerator:
 
     def __init__(self, cfg: HandGeneratorCfg):
         self.cfg = cfg
+        self._run_root: Path | None = None
+        self._run_summary: dict[str, Any] | None = None
+
+    def _ensure_run_context(self) -> tuple[Path, dict[str, Any]]:
+        r"""为当前 generator 实例懒创建一次时间戳 run 根目录与 summary 文档。"""
+
+        if self._run_root is not None and self._run_summary is not None:
+            return self._run_root, self._run_summary
+
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        output_root = Path(self.cfg.output_dir)
+        run_root = output_root / timestamp
+
+        collision_index = 2
+        while run_root.exists():
+            run_root = output_root / f"{timestamp}_{collision_index:02d}"
+            collision_index += 1  # 同秒重复启动时追加后缀，避免不同 run 相互覆盖
+
+        run_root.mkdir(parents=True, exist_ok=False)
+
+        from ..tool.recipe_loader import RecipeLoader
+
+        pre_made_enabled = self.cfg.mode in {"made", "full"}
+        post_mutate_enabled = self.cfg.mode == "full" and _has_enabled_mutation(self.cfg.Mutate)
+        self._run_root = run_root
+        self._run_summary = {
+            "run": {
+                "timestamp": run_root.name,
+                "root_dir": str(run_root),
+                "mode": self.cfg.mode,
+                "artifact_level": self.cfg.artifact_level,
+                "sampling_strategy": self.cfg.sampling_strategy,
+                "phases": {
+                    "pre_made": pre_made_enabled,
+                    "post_mutate": post_mutate_enabled,
+                    "combined": pre_made_enabled and post_mutate_enabled,
+                },
+            },
+            "config": RecipeLoader.dump(self.cfg),
+            "stats": {
+                "attempted": 0,
+                "succeeded": 0,
+                "rejected": 0,
+                "rejected_by_stage": {},
+                "by_topology": {},
+            },
+        }
+        self._write_run_summary()
+        return self._run_root, self._run_summary
+
+    def _write_run_summary(self) -> None:
+        r"""把当前 run summary 刷到 `<run_root>/summary.yaml`。"""
+
+        if self._run_root is None or self._run_summary is None:
+            return
+
+        stats = self._run_summary["stats"]
+        stats["topology_count"] = len(stats["by_topology"])
+        summary_path = self._run_root / "summary.yaml"
+        summary_path.write_text(
+            yaml.safe_dump(self._run_summary, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+
+    def _result_topology_key(self, result: HandGenerationResult) -> str:
+        r"""把单个结果映射成 summary 里的 topology 路径键。"""
+
+        topology_name = str(result.metadata.get("topology_name") or result.metadata.get("family") or "unknown_topology")
+        topology_group_name = str(
+            result.metadata.get("topology_group_name")
+            or result.metadata.get("base_hand_preset")
+            or result.metadata.get("family")
+            or "ungrouped"
+        )
+        topology_kind = str(result.metadata.get("topology_kind") or "single_family")
+        if topology_kind == "mixed":
+            return f"mixed/{topology_group_name}/{topology_name}"
+        return f"{topology_group_name}/{topology_name}"
+
+    def _record_generation_rejection(self, *, stage: str) -> None:
+        r"""把一次被拒绝的样本尝试写入 run summary。"""
+
+        _, summary = self._ensure_run_context()
+        stats = summary["stats"]
+        stats["attempted"] += 1
+        stats["rejected"] += 1
+        rejected_by_stage = dict(stats.get("rejected_by_stage") or {})
+        rejected_by_stage[stage] = int(rejected_by_stage.get(stage, 0)) + 1
+        stats["rejected_by_stage"] = rejected_by_stage
+        self._write_run_summary()
+
+    def _record_generation_success(self, result: HandGenerationResult) -> None:
+        r"""把一次成功样本写入 run summary。"""
+
+        _, summary = self._ensure_run_context()
+        stats = summary["stats"]
+        stats["attempted"] += 1
+        stats["succeeded"] += 1
+
+        topology_key = self._result_topology_key(result)
+        by_topology = dict(stats.get("by_topology") or {})
+        by_topology[topology_key] = int(by_topology.get(topology_key, 0)) + 1
+        stats["by_topology"] = by_topology
+        self._write_run_summary()
 
     def _candidate_hand_preset_names(self) -> tuple[str, ...]:
-        r"""返回当前 generator 可见的 base hand preset 名集合。
+        r"""返回当前 generator 可见的 premade topology registry key 集合。
 
-        pre-made façade 现在只保留 `hand_presets` 这一条 hand 入口，
-        因而这里的职责也相应收敛为：把 list 规整成稳定 tuple，供 sample / enumerate 共用。
+        # NOTE:
+        用户在 cfg 里仍然只写 base `hand_presets`，但运行时真正被枚举的是：
+
+        - base hand preset
+        - handedness
+        - missing / mixed topology 扩展
+
+        共同形成的内部 topology registry key。这样 `enumerate` 才能稳定覆盖
+        左右手与各类 pre-made 拓扑，而不把它们错误压扁成同一个名字。
         """
 
-        return tuple(self.cfg.hand_presets)
+        return _candidate_premade_hand_preset_names(self.cfg)
 
     def _connectivity_names_for_hand_preset(self, *, hand_preset_name: str) -> tuple[str, ...]:
-        r"""返回某个 base hand preset 允许搭配的 connectivity preset 名集合。
+        r"""返回某个 premade topology registry key 允许搭配的 connectivity 名集合。
 
         规则直接对应 `HandGeneratorCfg.connectivity_presets` 的科研语义：
 
@@ -395,30 +417,7 @@ class HandGenerator:
            connectivity preset 的跨 family 错配。
         """
 
-        hand_preset_data = get_hand_builder_preset_data(hand_preset_name)  # hand preset 是 family 真源
-        family = str(hand_preset_data["family"])
-
-        if self.cfg.connectivity_presets is None or hand_preset_name not in self.cfg.connectivity_presets:
-            names = list_hand_connectivity_preset_names(family)  # 缺省时自动展开该 family 全部合法 connectivity
-        else:
-            configured = tuple(self.cfg.connectivity_presets[hand_preset_name])
-            if not configured:
-                raise ValueError(
-                    f"connectivity_presets[{hand_preset_name!r}] is empty; "
-                    "please provide at least one connectivity preset name or remove the key to use family defaults."
-                )
-            names = configured
-
-        compatible: list[str] = []
-        for name in names:
-            preset = get_hand_connectivity_preset_data(name)
-            if preset.family != family:
-                raise ValueError(
-                    f"Connectivity preset {name!r} belongs to family {preset.family!r}, "
-                    f"but hand preset {hand_preset_name!r} belongs to family {family!r}"
-                )
-            compatible.append(name)
-        return tuple(compatible)
+        return _connectivity_names_for_premade_hand_preset(self.cfg, hand_preset_name=hand_preset_name)
 
     def _resolve_single_premade_selection(self) -> tuple[str | None, str | None] | None:
         r"""为 `generate()` 的单样本路径解析本次要使用的 pre-made 选择。
@@ -435,14 +434,7 @@ class HandGenerator:
         3. 两者组成一次 pre-made 样本。
         """
 
-        hand_candidates = self._candidate_hand_preset_names()
-        if not hand_candidates:
-            return None
-
-        hand_preset_name = random.choice(hand_candidates)  # pre-made sample 第一步：抽 base hand preset
-        connectivity_names = self._connectivity_names_for_hand_preset(hand_preset_name=hand_preset_name)
-        connectivity_preset_name = random.choice(connectivity_names)  # pre-made sample 第二步：抽该 hand 允许的 connectivity
-        return hand_preset_name, connectivity_preset_name
+        return _resolve_single_premade_selection(self.cfg)
 
     def _build_base_hand(self, *, hand_preset_name: str | None) -> tuple[HandCfg, str]:
         r"""构建本次样本的 canonical base hand。
@@ -461,15 +453,7 @@ class HandGenerator:
           concrete builder cfg，帮助你在不改 hand preset 名称的前提下快速调试
         """
 
-        if self.cfg.Made.class_type is not HandBuilder:
-            builder_cfg = self.cfg.Made  # 显式 `Made` 一旦具体化，就说明用户要以它作为真实基座
-        elif hand_preset_name is not None:
-            builder_cfg = make_human_like_builder_cfg_from_preset(hand_preset_name)
-        else:
-            raise ValueError("HandGenerator requires a concrete Made cfg or at least one hand preset when using the pre-made facade")
-
-        builder = builder_cfg.class_type(builder_cfg)
-        return builder.build(), builder_cfg.__class__.__name__
+        return _build_premade_base_hand(self.cfg, hand_preset_name=hand_preset_name)
 
     def _apply_connectivity_preset(
         self,
@@ -497,82 +481,12 @@ class HandGenerator:
         
         """
 
-        connectivity_preset = get_hand_connectivity_preset_data(connectivity_preset_name)
-        if connectivity_preset.family != hand_cfg.family:
-            raise ValueError(
-                f"Connectivity preset {connectivity_preset.name!r} belongs to family {connectivity_preset.family!r}, "
-                f"but the built hand belongs to {hand_cfg.family!r}"
-            )
-
-        # 这里局部导入 `JointDeleteMutator`，是为了保留当前模块原先的 fallback 结构：
-        # 没有 mutate 子包的环境下，`HandGenerator` 其它轻量路径仍可 import。
-        from .mutate import JointDeleteCfg, JointDeleteMutator
-
-        mutated = hand_cfg.copy()
-        per_finger_connectivity: dict[str, Any] = {}
-
-        # 按 slot recipe 顺序逐根手指 lower。
-        # 每一步都只改当前 finger，其余 finger 保持不动，便于 sidecar 回溯。
-        for finger_name, finger_recipe_name in connectivity_preset.finger_slots.items():
-            current_finger = next((finger for finger in mutated.fingers if finger.name == finger_name), None)
-            if current_finger is None:
-                continue  # 当前 hand 若没有这个 slot，就跳过，不对未来 little-finger 扩展设死约束
-
-            finger_recipe = get_finger_connectivity_preset_data(finger_recipe_name)
-            deleted_joint_names = _resolve_deleted_joint_names(
-                current_finger,
-                deleted_joint_suffixes=finger_recipe.deleted_joint_suffixes,
-            )
-            deleted_joint_set = set(deleted_joint_names)  # 便于同时回溯被删 joint 与被删 child-link
-            deleted_child_links = [
-                str(joint.child)
-                for joint in current_finger.joints
-                if joint.name in deleted_joint_set
-            ]
-            remaining_revolute = sum(
-                1
-                for joint in current_finger.joints
-                if joint.joint_type == "revolute" and joint.name not in deleted_joint_set
-            )
-            per_finger_connectivity[finger_name] = {
-                "finger_connectivity_preset": finger_recipe.name,
-                "deleted_joint_suffixes": list(finger_recipe.deleted_joint_suffixes),
-                "deleted_joints": list(deleted_joint_names),
-                "deleted_child_links": deleted_child_links,
-                "remaining_revolute": remaining_revolute,
-                "regroup_strategy": finger_recipe.regroup_strategy,
-            }
-
-            if not deleted_joint_names:
-                continue  # full chain 这类 recipe 不需要真正执行 delete
-
-            lowered = JointDeleteMutator(
-                JointDeleteCfg(
-                    target_finger=finger_name,
-                    deleted_joints=deleted_joint_names,
-                    regroup_strategy=finger_recipe.regroup_strategy,
-                    respect_preset=False,  # legality 已由 connectivity registry 定义，这里不再让 generic mutator 额外裁决
-                    keep_terminal_joint=True,
-                )
-            ).mutate(mutated)
-            if lowered is None:
-                raise ValueError(
-                    f"Failed to lower connectivity preset {connectivity_preset_name!r} on finger {finger_name!r}"
-                )
-            mutated = lowered
-
-        hand_metadata = dict(mutated.metadata)
-        hand_metadata["premade_connectivity"] = {
-            "base_hand_preset": hand_preset_name,
-            "connectivity_preset": connectivity_preset_name,
-            "per_finger": per_finger_connectivity,
-        }
-        mutated = mutated.replace(metadata=hand_metadata)
-        return mutated, {
-            "base_hand_preset": hand_preset_name,
-            "connectivity_preset": connectivity_preset_name,
-            "per_finger_connectivity": per_finger_connectivity,
-        }
+        return _apply_premade_connectivity_preset(
+            self.cfg,
+            hand_cfg,
+            connectivity_preset_name=connectivity_preset_name,
+            hand_preset_name=hand_preset_name,
+        )
 
     def _resolve_export_root(self, *, result: HandGenerationResult) -> Path:
         r"""根据 pre-made provenance 与 `output_layout` 计算本次导出的根目录。
@@ -586,15 +500,8 @@ class HandGenerator:
         `HandGeneratorCfg` 这个唯一 façade。
         """
 
-        if result.hand_cfg is None or "connectivity_preset" not in result.metadata:
-            return self.cfg.output_dir
-
-        connectivity_preset_name = str(result.metadata["connectivity_preset"])
-        if self.cfg.output_layout == "flat":
-            return self.cfg.output_dir / "pre_made_flat"
-
-        hand_anchor = str(result.metadata.get("base_hand_preset") or result.hand_cfg.family)
-        return self.cfg.output_dir / "pre_made" / hand_anchor / connectivity_preset_name
+        run_root, _ = self._ensure_run_context()
+        return _resolve_premade_export_root(self.cfg, result=result, run_root=run_root)
 
     def _generate_once(
         self,
@@ -619,6 +526,8 @@ class HandGenerator:
         if self.cfg.mode == "mutate":
             raise NotImplementedError("mode='mutate' is intentionally deferred in the first pre-made slice.")
 
+        self._ensure_run_context()  # 一次 generator 实例对应一次 run；首次尝试时就固定时间戳根目录
+
         hand_cfg, builder_cfg_name = self._build_base_hand(hand_preset_name=hand_preset_name)
 
         premade_metadata: dict[str, Any] = {}
@@ -629,23 +538,30 @@ class HandGenerator:
                 hand_preset_name=hand_preset_name,
             )
 
+        validator = HandValidator(self.cfg.Validate)
+        pre_made_validation = validator.validate_pre_made(hand_cfg)
+        if not pre_made_validation:
+            self._record_generation_rejection(stage="pre_made_validate")
+            return None  # pre-made 结构闸门拒绝后，不再允许继续进入 mutate / export
+
+        validation_warnings = list(pre_made_validation.warnings)
+
         # 后序派生：只有在 `mode="full"` 且至少启用一个 mutate 工具时才进入。
         # 这样 `mode="made"` 不会因为空 mutate cfg 产生额外语义分支。
         if self.cfg.mode == "full" and _has_enabled_mutation(self.cfg.Mutate):
             hand_cfg = HandMutator(self.cfg.Mutate).mutate(hand_cfg)  # `HandCfg -> HandCfg | None`
             if hand_cfg is None:
+                self._record_generation_rejection(stage="mutate")
                 return None  # 变异被拒绝；拒绝语义统一表现为“本次样本无结果”
-
-        # 统一在 made / mutate 之后做手级 validator，保证输出侧永远消费的是
-        # 同一种“已通过当前约束”的 `HandCfg`。
-        validator = HandValidator(self.cfg.Validate)
-        validation = validator.validate(hand_cfg)  # 结构、命名、链式一致性等检查结果
-        if not validation:
-            return None  # validator 拒绝时不抛异常，而是返回空样本给上层批处理逻辑
+            post_mutate_validation = validator.validate_post_mutate(hand_cfg)
+            if not post_mutate_validation:
+                self._record_generation_rejection(stage="post_mutate_validate")
+                return None
+            validation_warnings.extend(post_mutate_validation.warnings)
 
         sample_id = uuid4().hex[:8]
         if connectivity_preset_name is not None and self.cfg.sampling_strategy == "enumerate":
-            sample_id = _stable_premade_id(
+            sample_id = stable_premade_id(
                 hand_preset_name or hand_cfg.family,
                 connectivity_preset_name,
             )
@@ -653,11 +569,15 @@ class HandGenerator:
         metadata = {
             "id": sample_id,  # 8 位短 ID，sample 路径默认随机，enumerate 路径按 recipe 稳定化
             "builder_cfg": builder_cfg_name,  # 记录 base hand 最终使用的 builder cfg 类型
-            "warnings": validation.warnings,  # validator 的非致命 warning，保留给 sidecar / 调试消费
+            "warnings": validation_warnings,  # 汇总 pre-made / post-mutate 两阶段 warning，保留给 sidecar / 调试消费
             "family": hand_cfg.family,
+            "handedness": hand_cfg.handedness,
         }
         metadata.update({key: value for key, value in premade_metadata.items() if value is not None})
         metadata["output_layout"] = self.cfg.output_layout
+        recolor_metadata = describe_recolor_spec(self.cfg.recolored)
+        if recolor_metadata is not None:
+            metadata["recolored"] = recolor_metadata
 
         result = HandGenerationResult(
             hand_cfg=hand_cfg,
@@ -667,10 +587,17 @@ class HandGenerator:
         # `artifact_level="hand_cfg"` 表示用户只想拿内存中的 hand schema；
         # 其余两档则交给 exporter 负责落盘。
         if self.cfg.artifact_level != "hand_cfg":
-            export_cfg = self.cfg.Export.replace(artifact_level=self.cfg.artifact_level)  # 把主入口的粒度选择下传给 exporter
+            resolved_recolor_materials = resolve_visual_recolor_materials(hand_cfg, self.cfg.recolored)
+            export_cfg = self.cfg.Export.replace(
+                artifact_level=self.cfg.artifact_level,  # 把主入口的粒度选择下传给 exporter
+                Urdf=self.cfg.Export.Urdf.replace(
+                    recolored_materials=resolved_recolor_materials,
+                ),
+            )
             exporter = HandExporter(export_cfg)  # 导出器负责 URDF / sidecar / tree 文件
             exporter.export(result, output_dir=self._resolve_export_root(result=result))  # 目录布局仍由 HandGenerator façade 决定
 
+        self._record_generation_success(result)
         return result
 
     def generate(self) -> HandGenerationResult | None:
@@ -745,14 +672,16 @@ class HandGenerator:
         2. `enumerate`：显式遍历离散空间，理论总产物数近似为
            $|\mathcal{P}| \times |\mathcal{M}|$
 
-        当前已经落地的是 `sample` 路线的最小可用实现：不断调用 `generate()`
-        直到得到 `n_samples` 个通过 validator 的样本；`enumerate` 仍明确后延。
+        当前这两条路线都已经落地：
+
+        1. `sample`：不断调用 `generate()`，直到得到 `n_samples` 个通过 validator 的样本
+        2. `enumerate`：显式遍历 `hand_presets × connectivity presets` 的 pre-made 离散空间，
+           并在每个 canonical 组合上再按需叠加 post-mutate
 
         Yields:
             HandGenerationResult: 每次成功生成的轻量结果包。
 
         Raises:
-            NotImplementedError: 当请求 `sampling_strategy="enumerate"` 时抛出。
             RuntimeError: 当拒绝样本过多，超过最大尝试次数时抛出。
         """
 
@@ -838,155 +767,6 @@ class HandGenerator:
                 continue  # 被拒绝样本只消耗尝试次数，不消耗成功预算
             yield result  # lazy 产出，支持边生成边落盘/边消费
             success_count += 1  # 只有成功样本才推进批次完成度
-
-# ============================================================================
-#  树状渲染工具
-# ============================================================================
-
-
-def _axis_label(axis: tuple[float, float, float]) -> str:
-    """把旋转轴向量压缩成 '+X' / '-Y' / '+Z' 这样的简短标签。"""
-
-    labels = ("X", "Y", "Z")
-    idx = max(range(3), key=lambda i: abs(axis[i]))
-    sign = "-" if axis[idx] < 0 else "+"
-    return f"{sign}{labels[idx]}"
-
-
-def _link_length(origin: Any) -> float:
-    """从 PoseCfg.pos 计算子 link 相对父 link 的平移距离（米）。"""
-
-    if origin is None:
-        return 0.0
-    x, y, z = origin.pos
-    return math.sqrt(x * x + y * y + z * z)
-
-
-def _fmt_vec(v: tuple[float, float, float]) -> str:
-    x, y, z = v
-    return f"({x:+.3f}, {y:+.3f}, {z:+.3f})"
-
-
-def render_hand_tree_txt(hand_cfg: "HandCfg") -> str:
-    r"""把 `HandCfg` 渲染为富信息 ASCII 树字符串。
-
-    每条 joint 行包含：joint 名、child link 名、关节类型、旋转轴、
-    两岸距离（link length）、关节限位、指尖标记。
-    """
-
-    lines: list[str] = []
-
-    # ── 顶层 palm 行 ──────────────────────────────────────────────────────
-    dof = hand_cfg.dof_count
-    lines.append(
-        f"{hand_cfg.palm.name}"
-        f"  [family={hand_cfg.family} · {hand_cfg.handedness} · dof={dof}]"
-    )
-
-    n_fingers = len(hand_cfg.fingers)
-    for f_idx, finger in enumerate(hand_cfg.fingers):
-        is_last_finger = f_idx == n_fingers - 1
-        f_branch = "└── " if is_last_finger else "├── "
-        f_cont = "    " if is_last_finger else "│   "
-
-        # ── finger 挂载行 ─────────────────────────────────────────────────
-        mount_pos = _fmt_vec(finger.mount.pos) if finger.mount else "(+0.000, +0.000, +0.000)"
-        mount_rpy = _fmt_vec(finger.mount.rpy) if finger.mount else "(+0.000, +0.000, +0.000)"
-        lines.append(f"{f_branch}[{finger.name}]  mount={mount_pos} m  rpy={mount_rpy} rad")
-
-        n_joints = len(finger.joints)
-        for j_idx, joint in enumerate(finger.joints):
-            is_last = j_idx == n_joints - 1
-            j_prefix = f"{f_cont}{'└── ' if is_last else '├── '}"
-
-            # 旋转轴与距离
-            axis_str = _axis_label(joint.axis) if joint.joint_type != "fixed" else "fixed"
-            length = _link_length(joint.origin)
-
-            # 关节限位
-            limit_str = ""
-            if joint.limit is not None and joint.joint_type == "revolute":
-                lo = joint.limit.lower
-                hi = joint.limit.upper
-                limit_str = f"  [{lo:+.2f}, {hi:+.2f}] rad"
-
-            tip_str = "  ★ TIP" if joint.is_tip else ""
-
-            lines.append(
-                f"{j_prefix}{joint.name}  →  {joint.child}"
-                f"  {joint.joint_type}  axis={axis_str}  len={length:.4f} m"
-                f"{limit_str}{tip_str}"
-            )
-
-    return "\n".join(lines)
-
-
-def render_hand_tree_mermaid(hand_cfg: "HandCfg") -> str:
-    r"""把 `HandCfg` 渲染为 Mermaid ``graph TD`` 代码块字符串。
-
-    节点标签包含 joint 名、child link 名、关节类型、旋转轴、link length、
-    关节限位；指尖节点使用圆角双圆括号区分。返回值可直接嵌入 Markdown
-    三反引号代码块中渲染。
-    """
-
-    def node_id(name: str) -> str:
-        """把任意名称转为合法 Mermaid 节点 ID。"""
-        return re.sub(r"[^a-zA-Z0-9_]", "_", name)
-
-    lines: list[str] = ["```mermaid", "graph TD"]
-
-    # ── palm 节点 ─────────────────────────────────────────────────────────
-    dof = hand_cfg.dof_count
-    palm_id = node_id(hand_cfg.palm.name)
-    lines.append(
-        f'    {palm_id}["{hand_cfg.palm.name}'
-        f"<br/>family={hand_cfg.family} · {hand_cfg.handedness} · dof={dof}\"]"
-    )
-
-    for finger in hand_cfg.fingers:
-        prev_id = palm_id
-
-        for j_idx, joint in enumerate(finger.joints):
-            child_id = node_id(joint.child)
-
-            # ── 节点标签 ──────────────────────────────────────────────────
-            axis_str = _axis_label(joint.axis) if joint.joint_type != "fixed" else "fixed"
-            length = _link_length(joint.origin)
-
-            limit_part = ""
-            if joint.limit is not None and joint.joint_type == "revolute":
-                lo = joint.limit.lower
-                hi = joint.limit.upper
-                limit_part = f"<br/>[{lo:+.2f}, {hi:+.2f}] rad"
-
-            tip_part = "<br/>★ TIP" if joint.is_tip else ""
-
-            label = (
-                f"{joint.name} → {joint.child}"
-                f"<br/>{joint.joint_type} · axis={axis_str} · len={length:.3f} m"
-                f"{limit_part}{tip_part}"
-            )
-
-            # 指尖用双圆括号，普通节点用方括号
-            if joint.is_tip:
-                lines.append(f'    {child_id}(("{label}"))')
-            else:
-                lines.append(f'    {child_id}["{label}"]')
-
-            # ── 边标签 ────────────────────────────────────────────────────
-            if j_idx == 0:
-                # 第一段边：标注 finger 名称和挂载位置
-                mount_pos = _fmt_vec(finger.mount.pos) if finger.mount else "+0.000,+0.000,+0.000"
-                edge_lbl = f'|"[{finger.name}] mount={mount_pos}"|'
-            else:
-                edge_lbl = ""
-
-            lines.append(f"    {prev_id} -->{edge_lbl} {child_id}")
-            prev_id = child_id
-
-    lines.append("```")
-    return "\n".join(lines)
-
 
 __all__ = [
     "HandGenerationResult",

@@ -59,6 +59,8 @@ def resolve_palm_builder_cfg(raw: Any) -> Any:
 def resolve_finger_builder_cfg(raw: Any) -> Any:
     r"""把 finger preset/配置表达解析成 typed finger builder cfg。"""
 
+    if raw is None:
+        return None
     if isinstance(raw, (AllegroFingerBuilderCfg, LeapFingerBuilderCfg, RegularThumbBuilderCfg)):
         return raw
     if isinstance(raw, str):

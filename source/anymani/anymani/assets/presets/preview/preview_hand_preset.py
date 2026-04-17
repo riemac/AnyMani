@@ -129,6 +129,7 @@ def main() -> int:
         mode="full",
         artifact_level=args.artifact_level,
         output_dir=output_dir,
+        handedness=getattr(made_cfg, "handedness", "all"),
         Made=made_cfg,
         hand_presets=[args.hand_preset] if args.connectivity_preset is not None and args.hand_preset is not None else [],
         connectivity_presets=(

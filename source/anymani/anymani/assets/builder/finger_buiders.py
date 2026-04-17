@@ -58,6 +58,18 @@ from .joint_builders_custom import CustomTipBuilderCfg
 from .joint_builders_primitive import PrimJointBuilderCfg
 
 
+# 当前 Allegro / LEAP regular finger 的 revolute 段，都先收敛到 4 段语义骨架。
+# 这里把“child link 的解剖语义名”显式写成常量表，而不是散落在 builder 逻辑里，
+# 原因有三：
+#
+# 1. 后续 `joint_delete` 重编号时，joint 名会被压紧成 `j0..jN`，但 child link 名不应丢失
+#    “这段原本是谁”的语义；
+# 2. recolored 的默认 palette 也要以这些 link 语义名为键；
+# 3. 科研人员人工巡检 URDF 时，最重要的是一眼看出骨架部位，而不是倒推 builder 序号。
+_NON_THUMB_CHILD_LINK_SUFFIXES: tuple[str, ...] = ("mcp1", "mcp2", "pip", "dip")
+_THUMB_CHILD_LINK_SUFFIXES: tuple[str, ...] = ("cmc1", "cmc2", "pip", "dip")
+
+
 def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
     r"""规范化指尖 recipe，并把长度统一成米制。
 
@@ -363,8 +375,13 @@ class LeapFingerBuilderCfg(RegularFingerBuilderCfg):
     """固定部分长度 $l_f$。
 
     LEAP 非拇指中，第一个运动关节轴到 palm 边缘之间通常还有一小段固定部分。
-    当前实现不把它单独建成一个 fixed joint，而是把它直接折算为
-    “从 palm 到第一个 joint frame 的前置 $y$ 向长度”。
+    当前科研语义已经收敛为：
+
+    - 这不是一个“隐含在 joint origin 里的位移量”；
+    - 而是一段需要被真实建模、真实导出、真实可视化的 fixed 根部段。
+
+    也就是说，后续 builder 会把它 lower 成一个显式 fixed joint/link，
+    用来承载 `Leap-Non-Thumb.png` 图里的根部固定 mesh。
     """
 
     def __post_init__(self):
@@ -541,7 +558,10 @@ class RegularFingerBuilder(FingerBuilder):
             joints = self._build_thumb_chain()  # thumb 不能完全套普通 serial chain
         else:
             root_fixed_length = self.cfg.fixed_part if isinstance(self.cfg, LeapFingerBuilderCfg) else 0.0
-            joints = self._build_serial_chain(root_fixed_length=root_fixed_length)  # LEAP 用 `l_f` 表达 palm 到第一个 joint frame 的前置长度
+            joints = self._build_serial_chain(
+                root_fixed_length=root_fixed_length,
+                emit_root_fixed_segment=isinstance(self.cfg, LeapFingerBuilderCfg) and root_fixed_length > 0.0,
+            )  # LEAP non-thumb 需要把 `l_f` lower 成显式 fixed 根部段，而不只是前置平移
         return FingerCfg(
             name=self.cfg.name,  # finger 名会继续传播到 exporter / validator / sidecar
             parent_link=self.cfg.parent_link,  # hand-level 装配前的默认 parent
@@ -550,7 +570,7 @@ class RegularFingerBuilder(FingerBuilder):
             metadata={"builder": self.cfg.__class__.__name__},  # 保留 provenance 便于追溯
         )
 
-    def _build_serial_chain(self, *, root_fixed_length: float) -> list[Any]:
+    def _build_serial_chain(self, *, root_fixed_length: float, emit_root_fixed_segment: bool = False) -> list[Any]:
         r"""构建普通串联链。
 
         这里对应 Allegro / LEAP 非拇指的共同主干。推进下一关节时，真正使用的
@@ -569,11 +589,21 @@ class RegularFingerBuilder(FingerBuilder):
         # 宽度 $w$，高度 $h$，或半径 $r$，mesh 偏移 $d\in\mathbb{R}^{N}$，
         # 指尖类型及其参数，固定部分长度 $l_f$。
         #
-        # 当前实现让 Allegro / LEAP 共用同一条 serial-chain 骨干：
+        # 当前实现让 Allegro / LEAP 共用同一条 serial-chain 骨干，但在 LEAP 上
+        # 多做一步：
+        #
         # - Allegro：从 palm 到第一个 joint frame 的前置长度为 $0$
-        # - LEAP：从 palm 到第一个 joint frame 的前置长度为 $l_f$
+        # - LEAP：先显式建出一段长度为 $l_f$ 的 fixed 根部段，再从它的顶端长出 `j0`
+        #
+        # 这样做的原因不是“结构更复杂”，而是为了忠实表达 `Leap-Non-Thumb.png`
+        # 里的语义：`l_f` 本身就是一段真实存在的 mesh，而不是隐藏在 joint origin
+        # 里的抽象位移。
         joints = []
         parent_link = self.cfg.parent_link  # 第一个 joint 默认挂在 palm 上
+        if emit_root_fixed_segment:
+            root_fixed_joint = self._build_root_fixed_segment(length=root_fixed_length)  # 先把 `l_f` 变成显式 fixed 根部段
+            joints.append(root_fixed_joint)
+            parent_link = root_fixed_joint.child  # 后续 `j0` 继续挂在 fixed 根部段之后
         previous_valid_length = root_fixed_length  # 先吃掉 palm 侧固定部分长度；Allegro 情况下该值为 0
         for index in range(self.cfg.num_joints):
             origin = PoseCfg(pos=(0.0, previous_valid_length, 0.0)) if index > 0 or root_fixed_length > 0.0 else PoseCfg()
@@ -584,6 +614,60 @@ class RegularFingerBuilder(FingerBuilder):
 
         joints.append(self._build_tip_joint(parent_link=parent_link, tip_origin_y=previous_valid_length))  # 最后一段后面补 fixed tip joint
         return joints
+
+    def _build_root_fixed_segment(self, *, length: float):
+        r"""构建 LEAP non-thumb 的显式 fixed 根部段。
+
+        `Leap-Non-Thumb.png` 中的 $l_f$ 不属于任何一个 revolute joint 本体，
+        它是 palm 与 `{0}` 之间那段真实存在的固定 link。当前这里显式把它 lower 成：
+
+        - 一个 `fixed` joint
+        - 一个承载根部 mesh 的 child link
+
+        从而避免出现“第一个关节被前移了，但根部 mesh 本体缺席”的渲染空洞。
+
+        Args:
+            length (float): fixed 根部段长度 $l_f$。
+
+        Returns:
+            JointCfg: 承载 fixed 根部 mesh 的 joint-centric link 描述。
+        """
+
+        first_mesh = dict(self.cfg.mesh_shape[0])  # 根部 fixed 段的横截面默认复用第一段 non-thumb mesh
+        mesh_kind = str(first_mesh.get("type", first_mesh.get("kind", "box"))).lower()
+        if mesh_kind == "box":
+            root_mesh = _build_box_mesh(
+                length=length,
+                width=float(first_mesh["width"]),
+                height=float(first_mesh["height"]),
+                offset=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            )
+        elif mesh_kind == "cylinder":
+            root_mesh = _build_cylinder_mesh(
+                length=length,
+                radius=float(first_mesh["radius"]),
+                offset=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            )
+        else:
+            raise ValueError(f"Unsupported first mesh kind for fixed root segment: {mesh_kind!r}")
+
+        builder_cfg = PrimJointBuilderCfg(
+            name=f"{self.cfg.name}_root_fixed",  # 把根部 fixed 段单独命名出来，便于预览和测试识别
+            parent=self.cfg.parent_link,
+            child=f"{self.cfg.name}_root_fixed_link",
+            joint_type="fixed",
+            origin=PoseCfg(),  # 根部 fixed 段从 finger 根 frame 直接长出
+            axis=(0.0, 0.0, 0.0),
+            limit=None,
+            mesh=root_mesh,
+            metadata={
+                "finger_name": self.cfg.name,
+                "joint_index": "root_fixed",
+                "fixed_root_segment": True,
+            },
+        )
+        builder = builder_cfg.class_type(builder_cfg)
+        return builder.build()
 
     def _build_thumb_chain(self) -> list[Any]:
         r"""构建拇指链。
@@ -647,12 +731,27 @@ class RegularFingerBuilder(FingerBuilder):
         return joints
 
     def _build_joint(self, *, index: int, parent_link: str, origin: PoseCfg):
-        r"""把第 `index` 个运动关节落成 `JointCfg`。"""
+        r"""把第 `index` 个运动关节落成 `JointCfg`。
+
+        这里刻意把：
+
+        - **joint 名**：`{finger}_j{index}`
+        - **child link 名**：`{finger}_{semantic_link_name}`
+
+        分开处理。其动机不是“多一层封装更优雅”，而是为了服务你这轮明确提出的
+        两条科研语义：
+
+        1. joint 名只承担“当前 surviving 链里的第几个可动关节”这一职责；
+        2. child link 名承担“这段骨架在原始 anatomy / kinematic intent 上是谁”的职责。
+
+        因而即便后续 `joint_delete` 把 surviving joint 压紧成 `j0..jN`，child link
+        仍可以继续保留 `mcp1/mcp2/pip/dip` 或 `cmc1/cmc2/pip/dip` 这类显式语义名。
+        """
         mesh = dict(self.cfg.mesh_shape[index])  # 复制一份 recipe，避免修改 cfg 常量
         builder_cfg = PrimJointBuilderCfg(
             name=f"{self.cfg.name}_j{index}",  # joint 名稳定由 finger 名和序号组成
             parent=parent_link,  # parent 指向上一段 child link
-            child=f"{self.cfg.name}_link_{index}",  # 当前 child link 名
+            child=self._revolute_child_link_name(index=index),  # child link 名改为解剖语义名，而不是数字后缀
             joint_type="revolute",  # 运动关节统一为 revolute
             origin=origin,  # 当前 joint frame 相对 parent link frame 的位姿
             axis=self.cfg.axes[index],  # 当前关节旋转轴
@@ -679,7 +778,7 @@ class RegularFingerBuilder(FingerBuilder):
         common_kwargs = {
             "name": f"{self.cfg.name}_tip",  # tip joint 命名稳定，便于 exporter / validator 识别
             "parent": parent_link,  # tip 接在最后一个运动关节之后
-            "child": f"{self.cfg.name}_tip_link",  # tip link 也独立命名
+            "child": self._tip_child_link_name(),  # tip child link 统一去掉历史 `_link` 后缀
             "joint_type": "fixed",  # 指尖关节为 fixed
             "origin": PoseCfg(pos=(0.0, tip_origin_y, 0.0)),  # tip joint frame 落在最后一段有效长度末端
             "axis": (0.0, 0.0, 0.0),  # fixed joint 不需要有效转轴
@@ -709,6 +808,51 @@ class RegularFingerBuilder(FingerBuilder):
             )
         builder = builder_cfg.class_type(builder_cfg)
         return builder.build()
+
+    def _revolute_child_link_name(self, *, index: int) -> str:
+        r"""返回第 `index` 个 revolute joint 的语义化 child link 名。
+
+        当前仅面向你这轮已经收敛范围的 regular fingers：
+
+        - non-thumb：`mcp1, mcp2, pip, dip`
+        - thumb：`cmc1, cmc2, pip, dip`
+
+        这里故意不把 LEAP non-thumb 的 `root_fixed_link` 混进来，因为它属于
+        运动链前面的显式 fixed 根部段，语义上并不是 revolute child link。
+
+        Args:
+            index (int): 当前 revolute joint 在 canonical chain 中的序号。
+
+        Returns:
+            str: 形如 `{finger}_mcp1` / `{finger}_cmc2` / `{finger}_pip` 的 child link 名。
+
+        Raises:
+            ValueError: 当 `index` 超出当前 4 段 regular finger 语义范围时抛出。
+        """
+
+        semantic_suffixes = (
+            _THUMB_CHILD_LINK_SUFFIXES
+            if isinstance(self.cfg, RegularThumbBuilderCfg)
+            else _NON_THUMB_CHILD_LINK_SUFFIXES
+        )  # thumb 与 non-thumb 的 anatomy 命名从这里分流
+        if not 0 <= index < len(semantic_suffixes):
+            raise ValueError(
+                f"RegularFingerBuilder currently only defines semantic child-link names for "
+                f"{len(semantic_suffixes)} revolute joints, got index={index} for finger {self.cfg.name!r}"
+            )
+        return f"{self.cfg.name}_{semantic_suffixes[index]}"  # 最终 child link 名 = finger 前缀 + anatomy suffix
+
+    def _tip_child_link_name(self) -> str:
+        r"""返回 fixed tip joint 的统一 child link 名。
+
+        当前明确去掉历史上的 `_tip_link` 后缀，改为 `{finger}_tip`。
+        这样做的目的，是让 tip 这一最末端语义在 URDF 树里更直接，也让 recolored /
+        sidecar / 人工巡检时的键名更短、更稳定。
+        """
+
+        return f"{self.cfg.name}_tip"  # tip link 统一使用短名，不再额外带 `_link`
+
+
 __all__ = [
     "RegularFingerBuilderCfg",
     "AllegroFingerBuilderCfg",

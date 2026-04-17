@@ -91,7 +91,8 @@ def test_recipe_loader_builds_typed_cfg_and_bridges_legacy_export_dir(tmp_path):
     assert cfg.Made.finger_cfg.__class__.__name__ == "AllegroFingerBuilderCfg"
     assert cfg.Made.thumb_cfg.__class__.__name__ == "RegularThumbBuilderCfg"
     assert isinstance(cfg.Validate, HandValidatorCfg)
-    assert cfg.Validate.finger.joint.min_link_length == 1e-5
+    assert cfg.Validate.pre_made.finger.joint.min_link_length == 1e-5
+    assert cfg.Validate.post_mutate.finger.joint.min_link_length == 1e-5
     assert isinstance(cfg.Export, HandExporterCfg)
     assert cfg.Export.Sidecar.experiment_tag == "tooling_regression"
 
@@ -159,8 +160,10 @@ def test_loaded_recipe_drives_hand_generator_directly_for_bundle_mode(tmp_path):
     assert result.hand_cfg is not None
     assert result.urdf_path is not None and result.urdf_path.is_file()
     assert result.sidecar_path is not None and result.sidecar_path.is_file()
-    assert result.urdf_path.parent.parent == out_dir
-    assert result.sidecar_path.parent.parent == out_dir
+    run_root = result.urdf_path.parent.parent
+    assert run_root.parent == out_dir
+    assert result.sidecar_path.parent.parent == run_root
+    assert (run_root / "summary.yaml").is_file()
 
 
 def test_recipe_loader_keeps_premade_facade_fields_as_generator_contract(tmp_path):
