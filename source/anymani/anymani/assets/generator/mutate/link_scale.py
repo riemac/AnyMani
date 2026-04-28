@@ -1,95 +1,115 @@
-r"""连杆长度缩放工具：在已有 HandCfg 上对 link 两岸距离做 ± 扰动。
+# FIXME: 配置类继承 MutatorBaseCfg
+r"""连杆长度缩放变异算子：在已有 HandCfg 上对 link 两岸距离做 ± 扰动。
 
-对应 `资产生产概略.png` 中 `连杆长度 已有长度 ± l% 扰动` 项，以及
-`前后序.png` 中归属后序的 `link 长度微调 (±Δ)`，理由是"已构建好的 HandCfg 上做 scale"。
-
-有效长度公式
-------------
-
-$$
-l_{\text{valid},\,i} = l_i + d_i, \quad d_i \sim \mathcal{N}(0,\; \sigma_i)
-$$
-
-其中 $l_i$ 是 joint $i$ 的 `origin.pos` 的欧氏模长，$d_i$ 是正态采样的绝对偏移量。
-若配置 `scale_mode = "relative"`，则扰动以比例形式施加：
-
-$$
-l_{\text{valid},\,i} = l_i \cdot (1 + \varepsilon_i), \quad \varepsilon_i \sim \mathcal{N}(0,\; \sigma_\%/100)
-$$
-
-设计说明
---------
-
-### 缩放语义
-
-实际修改的是 joint 的 `origin.pos`，即把 pos 向量在其方向上做等比缩放。
-不改变旋转（`origin.rpy`），不改变拓扑。
-
-### 选择性支持
-
-可以通过 `target_joints` 指定只作用于部分关节，默认作用于全部非固定关节。
-
-### 裁剪保护
-
-`clip_ratio` 限制最终比例落在 `[1 - clip, 1 + clip]` 范围内，确保不产生
-负长度或极端形变。
+需结合 `AnyMani/source/anymani/anymani/assets/doc/长度变异示意.jpg` 理解
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, MISSING
 import math
 from typing import Any, Literal
+from ...asset_schema_core import Vector2, Vector6
 
 from ...asset_base import AssetCfgBase, HandCfg
 from ...asset_schema_core import PoseCfg
-from ._base import MutatorBase
-from ._distribution import ScalarDistributionCfg
+from ._base import MutatorBaseCfg, MutatorBase
 
 
 # ============================================================================
 #  配置类
 # ============================================================================
 
+# FIXME: 暴露统一对外配置接口，便于用户使用，由 __post_init__() 解析后赋给内部统一规范属性
+# 需求: 这个是服务于修改连杆尺寸的变异算子配置类
+# 输入: 有很多不同种的模式，应对不同情况和精细度的需求
+# mode1: 统一修改连杆长度，设置连杆长度和分布类型、分布参数 $l=(l_{min},\ l_{max}),\ D_{type},\ D_{params}$。默认用均匀分布
+# mode2: 按 joint 类型，每个类型单独设置分布类型和参数，如 $l=(l_{min}^{MCP1},\ l_{max}^{MCP1}),\ D_{type}^{MCP1},\ D_{params}^{MCP1}$。默认用均匀分布
+# 此外，也允许对宽度、高度设置变异，提供更细粒度的控制，注意这里是 link mesh 为 box 类型的才可以。但默认为长度，因为这个属性用的最多，也适用于 cylinder
+#
+class LinkScaleCfg(MutatorBaseCfg):
+    r"""连杆尺寸缩放算子配置类。
 
-@dataclass
-class LinkScaleCfg(AssetCfgBase):
-    r"""连杆长度缩放工具配置。"""
-
-    class_type: type["LinkScaleMutator"] | None = None
-    """关联的运行时类。"""
-
-    target_joints: tuple[str, ...] = ()
-    """需要缩放的关节名称集合；空元组表示作用于全部非固定关节。"""
-
-    scale_mode: Literal["absolute", "relative"] = "relative"
-    """扰动模式。``absolute`` 以绝对长度（meter）施加偏移 $d_i$；
-    ``relative`` 以百分比形式施加比例扰动 $\varepsilon_i$。"""
-
-    delta_distribution: ScalarDistributionCfg = field(
-        default_factory=lambda: ScalarDistributionCfg(kind="normal", mean=0.0, sigma=0.05)
-    )
-    """单个 joint 缩放量的基础分布。
-
-    - `relative` 模式下，这个值直接解释为比例扰动 $\varepsilon$
-    - `absolute` 模式下，这个值直接解释为长度增量 $\Delta l$
+    主要是对 pre-made 产生后的某具体拓扑灵巧手 (HandCfg) 其手指 joint/child link 的尺寸进行缩放变异，不包括手掌和指尖（leap non-thumb finger 的固定部分也被视为手掌的一部分）。
+    缩放变异是在原有 HandCfg 基础上，对其尺寸进行扰动变异，是增量型的，而非重新在指定范围赋予新的尺寸值
     """
 
-    clip_ratio: float = 0.3
-    """缩放比例裁剪上限；最终比例限定在 ``[1 - clip_ratio, 1 + clip_ratio]`` 内。
-    仅在 ``relative`` 模式下有意义。"""
+    class_type: type["LinkScaleMutator"] = LinkScaleMutator
+    """关联的运行时类。"""
 
-    clip_absolute: float | None = None
-    """绝对偏移裁剪上限（meter）；为 ``None`` 时不额外裁剪。仅在 ``absolute`` 模式下有意义。"""
+    link_type: str = "box"
+    """Joint/child link mesh 的种类。默认为 urdf 中最常见的 "box"。这个需要和实际 HandCfg/urdf 对应"""
 
-    per_joint_delta_distribution: dict[str, ScalarDistributionCfg] = field(default_factory=dict)
-    """可选的每 joint 单独分布覆盖；键为 joint 名。"""
+    scale_type: Literal["abs", "rel"] = "rel"
+    """缩放语义：是绝对长度扰动(cm)，还是相对比例扰动(%)。默认为相对比例扰动。"""
+
+    link_scale: Vector2 | Vector6 | dict[str, Vector2 | Vector6]  = field(default=MISSING)
+    """连杆尺寸变异范围配置。可以是单一的 `(min, max)`，也可以是针对不同 joint type 的细粒度配置字典。也可以控制宽度和高度。
+
+    - Vector2: $l=(l_{min},\ l_{max})$. 适用于所有 joint/child link 的尺寸修改范围。例如
+        - (-1, 1)，且缩放语义为 `abs`时，为表示长度在原基础上 ±1cm 的范围内扰动。
+        - (0.9, 1.1)，且缩放语义为 `rel`时，为表示长度在原基础上 ±10% 的范围内扰动。
+    - Vector6: $l=(l_{min},\ l_{max},\ w_{min},\ w_{max},\ h_{min},\ h_{max})$，适用于同时控制长度、宽度和高度的范围。注意这里是仅适用于 "box" 的连杆类型
+    - dict[str, Vector2 | Vector6]: 针对不同 joint type 的细粒度配置字典。
+        > 这里的 joint type 匹配是一个复杂点，可能涉及到需要重构 HandCfg 的相关属性。
+        > 目前的产物 `AnyMani/source/anymani/anymani/assets/generated/2026-04-17_13-39-16/single_palm_leap/left_t3_i1_m4_r4/02f3d7f4/hand.urdf`
+        > 观察它的 link 名称，一个想法是 child link 名称的精准匹配。首先匹配时要分 thumb finger 和 non-thumb finger
+        > 例如典型真实人手的 thumb finger，有 CMC, MCP, DIP 3种 joint 类型。而 non-thumb finger 包括 MCP, PIP, DIP 3种 joint 类型。
+        > 而像 leap/allegro, 我这里对 thumb 的 CMC 还进一步细化为 CMC1/CMC2, non-thumb 的 MCP 细化为 MCP1/MCP2
+        > 其中两种类型重名，但其中 MCP 的语义和实际运动能力在 thumb 和 non-thumb 并不一致。
+        > 但目前 HandCfg 相关属性不包含这些信息。仅 urdf 产物里的命名对 link 命名显示指定，建议在 HandCfg 里设置相关属性。
+        > 综合来说，这里的目的是跨手指同类型关节（通过名称匹配机制）的统一变异范围处理。
+    """
+
+    clip: Vector2 | Vector6 | dict[str, Vector2 | Vector6] | None = None
+    """变动幅度裁剪范围，是对尺寸增量的绝对值 (cm)限制。不论缩放是长度扰动还是相对比例扰动皆一致。
+
+    - Vector2: $(\Delta s_{min}, \Delta s_{max})$，适用于所有 joint/child link 的所有尺寸类型（长宽高）变动幅度裁剪范围。例如 (-0.5, 1) 表示变化在 [原尺寸-0.5, 原尺寸+1.5]cm 范围内
+    - Vector6: $(\Delta l_{min}, \Delta l_{max}, \Delta w_{min}, \Delta w_{max}, \Delta h_{min}, \Delta h_{max})$，适用于分别控制长度、宽度和高度的变动幅度裁剪范围。注意这里是仅适用于 "box" 的连杆类型
+    - dict[str, Vector2 | Vector6]: 针对不同 joint type 的细粒度配置字典，语义同上 link_scale 的 dict 配置
+    - None: 不进行额外裁剪
+    """
+
+    distrib: Literal["uniform", "normal"] | dict[str, Any] = "uniform"
+    """分布类型。可选正态分布/均匀分布。适用于所选中的全部关节对象，但这不表示不同关节每次采样相同，他们有不同的种子数。
+
+    支持以下两种输入格式：
+    1. 字符串简写（使用默认参数）：
+       - "uniform"：在 `link_size` 定义的范围内做均匀采样（默认）。
+       - "normal"：以原尺寸为中心，`link_size` 定义的范围作为 ±3σ 的区间，做正态分布采样。
+
+    2. 字典详细配置（用于自定义分布参数）：
+       - {"type": "normal", "sigma_rule": 1}：使用 1σ 法则（即范围的半宽作为 1σ，分布更平缓，贴近均匀分布）。这个 sigma_rule 必须大于0
+       - {"type": "normal", "sigma": 1/3}：直接指定 σ 为各关节子连杆的尺寸范围半宽的 1/3, 相当于 3σ 法则。 $W=(b-a)/2, W=n\sigma, \sigma=W/n=(b-a)/2n$，
+       - {"type": "uniform"}：等同于 "uniform"。
+    """
+
+    boundary_policy: Literal["none", "clip", "truncate", "resample"] | None = None
+    r"""连杆尺寸扰动的边界处理策略。
+
+    该字段只规定采样得到的尺寸扰动超出 `link_scale` 或 `clip` 所定义边界时如何处理，
+    不改变扰动语义 `scale_type`，也不改变基础分布 `distrib`。
+
+    - ``"none"``：不做额外边界处理，适合均匀分布已经严格落在合法区间内的情形。
+    - ``"clip"``：把越界样本裁剪到边界上，实现简单，但会增加边界点的概率质量。
+    - ``"truncate"``：直接使用截断分布采样，概率语义更干净。
+    - ``"resample"``：拒绝越界样本并重新采样，即 rejection sampling。
+
+    默认值为 ``None`` 时，可由运行时根据 `distrib` 自动选择：
+    均匀分布通常等价于 ``"none"``；正态分布通常使用 ``"truncate"`` 或 ``"resample"``。
+    """
+
+    _link_meshes: list[Any] = field(default_factory=list)
+    """内部使用的 link mesh 列表。无论是配置长度、宽度还是某类关节类型，最后都经__post_init__()解析成为内部的某种规范统一表示，并交由运行时类处理"""
+
+    _distribution: Any = field(init=False, repr=False)
+    """内部解析 disturb / distrib / boundary_policy 后生成的 scipy.stats 冻结分布对象，供运行时直接调用 .rvs()。
+
+    封装了分布形态和采样策略的“采样器工厂（Sampler Callable），主要是因为不同分布类型和采样方法的差异，需要统一接口。
+    """
 
     def __post_init__(self):
-        if self.class_type is None:
-            self.class_type = LinkScaleMutator
-        if not 0.0 < self.clip_ratio <= 1.0:
-            raise ValueError(f"clip_ratio must be in (0, 1], got {self.clip_ratio}")
+        pass
 
 
 # ============================================================================
@@ -108,116 +128,7 @@ class LinkScaleMutator(MutatorBase):
 
     def __init__(self, cfg: LinkScaleCfg):
         self.cfg = cfg
-
-    def describe_sampling(self, target: HandCfg) -> dict[str, ScalarDistributionCfg]:
-        r"""给出当前 hand 上每个可缩放 joint 的独立采样分布。"""
-
-        target_names = set(self.cfg.target_joints)
-        distribution_plan: dict[str, ScalarDistributionCfg] = {}
-        for joint in target.iter_joints():
-            if joint.joint_type == "fixed":
-                continue
-            if target_names and joint.name not in target_names:
-                continue
-
-            x, y, z = joint.origin.pos
-            length = math.sqrt(x * x + y * y + z * z)
-            if length <= 1e-9:
-                continue
-
-            distribution_cfg = self.cfg.per_joint_delta_distribution.get(joint.name, self.cfg.delta_distribution).copy()
-            if self.cfg.scale_mode == "relative":
-                distribution_cfg.clip_min = -self.cfg.clip_ratio if distribution_cfg.clip_min is None else distribution_cfg.clip_min
-                distribution_cfg.clip_max = self.cfg.clip_ratio if distribution_cfg.clip_max is None else distribution_cfg.clip_max
-            elif self.cfg.clip_absolute is not None:
-                clip_abs = float(self.cfg.clip_absolute)
-                distribution_cfg.clip_min = -clip_abs if distribution_cfg.clip_min is None else distribution_cfg.clip_min
-                distribution_cfg.clip_max = clip_abs if distribution_cfg.clip_max is None else distribution_cfg.clip_max
-
-            distribution_plan[joint.name] = distribution_cfg
-        return distribution_plan
-
-    def mutate(self, target: HandCfg, *, sampled_params: dict[str, Any] | None = None) -> HandCfg | None:
-        r"""对已构建的 `HandCfg` 执行连杆长度缩放。
-
-        Args:
-            target (HandCfg): 待变异的整手配置。
-
-        Returns:
-            HandCfg | None: 缩放后的整手配置；若所有关节长度为零则返回 ``None``。
-        """
-
-        mutated = target.copy()
-        target_names = set(self.cfg.target_joints)
-        sampled = sampled_params or {}
-        saw_scalable_joint = False
-
-        for joint in mutated.iter_joints():
-            if joint.joint_type == "fixed":
-                continue
-            if target_names and joint.name not in target_names:
-                continue
-
-            x, y, z = joint.origin.pos  # 原始位移向量 $\mathbf{p}$
-            length = math.sqrt(x * x + y * y + z * z)  # 原始长度 $l=\|\mathbf{p}\|_2$
-            if length <= 1e-9:
-                continue  # 零长度 joint 无法定义缩放方向，直接跳过
-
-            saw_scalable_joint = True
-            delta_value = float(sampled.get(joint.name, 0.0))
-
-            if self.cfg.scale_mode == "relative":
-                new_length = length * (1.0 + delta_value)
-            else:
-                new_length = max(length + delta_value, 1e-9)
-
-            scale = new_length / length  # 方向保持不变，只缩放模长
-            joint.origin = PoseCfg(
-                pos=(x * scale, y * scale, z * scale),
-                rpy=joint.origin.rpy,
-            )
-
-        return mutated if saw_scalable_joint else None
-
-        # TODO:算法之一（link length perturbation）
-        # ────────────────────────────────────────
-        # 输入
-        #   target: 已构建好的 `HandCfg`
-        #   cfg.target_joints: 需要缩放的关节名集合（空 = 全部非固定关节）
-        #   cfg.scale_mode: "absolute" | "relative"
-        #   cfg.sigma: 全局扰动强度
-        #   cfg.per_joint_sigma: 每关节单独 sigma 覆盖字典
-        #   cfg.clip_ratio / cfg.clip_absolute: 裁剪边界
-        #
-        # 输出：HandCfg（深拷贝 + 修改 origin.pos）
-        #
-        # ── 按 scale_mode 分支 ──
-        #
-        #   [relative 模式]
-        #   对每个目标 joint j：
-        #     σ_j = per_joint_sigma.get(j.name, sigma)
-        #     ε_j ~ N(0, σ_j)，裁剪到 [-clip_ratio, clip_ratio]
-        #     pos_new = pos_j × (1 + ε_j)
-        #     注意：pos_j 是向量，缩放后保持方向，只改变模长
-        #     l_j = ||pos_j||，若 l_j < ε（1e-6）则跳过该关节（长度为零无法缩放）
-        #
-        #   [absolute 模式]
-        #   对每个目标 joint j：
-        #     σ_j = per_joint_sigma.get(j.name, sigma)
-        #     d_j ~ N(0, σ_j)，若 clip_absolute 不为 None 则裁剪到 [-clip, clip]
-        #     l_j = ||pos_j||，方向 n_j = pos_j / l_j
-        #     l_new = max(l_j + d_j, ε)  # 保证非负
-        #     pos_new = n_j × l_new
-        #
-        # ── 重建 HandCfg ──
-        #   深拷贝 target，对每个目标 joint 修改 origin.pos，返回新对象
-        #
-        # ── 与 preset 的交叉验证 ──
-        #   有效长度公式：l_valid = l_i + d_i（absolute）或 l_i × (1+ε_i)（relative）
-        #   若某个 finger preset 规定了关节长度的参考范围，缩放后应在该范围内；
-        #   当前草案不强制校验，留给 validator 阶段检查。
-        #
-        # IDEA：sigma 初始值 0.05 对应 ±5% 扰动，适合在已有手上做小范围局部搜索。
+        # 这里还需要读取具体拓扑的手再处理，因为不同关节拓扑的手可能有不同的自由度等，因此不能只读取 LinkScaleCfg
 
 
 __all__ = ["LinkScaleCfg", "LinkScaleMutator"]

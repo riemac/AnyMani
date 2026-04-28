@@ -107,3 +107,44 @@ def test_hand_generator_returns_bundle_and_exports_to_configured_directory(tmp_p
     run_root = result.urdf_path.parent.parent
     assert run_root.parent == tmp_path
     assert (run_root / "summary.yaml").is_file()
+
+
+def test_hand_generator_can_explicitly_skip_hand_level_validator(tmp_path):
+    r"""`Validate=None` 时，generator 应跳过 hand-level validator，而不是隐式启用默认规则。
+
+    这里故意构造一只“缺拇指”的 hand：
+
+    - 若 pre-made validator 开着，当前 contract 下它必须被拒绝；
+    - 若 `Validate=None`，则应沿着“只看 builder / exporter，不做 hand-level 合法性闸门”的
+      研究排查路径继续产出。
+    """
+
+    invalid_made_cfg = _make_allegro_builder_cfg().replace(thumb_cfg=None)
+
+    validated_result = HandGenerator(
+        HandGeneratorCfg(
+            mode="made",
+            artifact_level="hand_cfg",
+            output_dir=tmp_path / "validated",
+            Made=invalid_made_cfg,
+            Validate=HandValidatorCfg(
+                pre_made=HandValidatorCfg.PreMadeCfg(
+                    check_finger_spacing=False,
+                )
+            ),
+        )
+    ).generate()
+
+    skipped_result = HandGenerator(
+        HandGeneratorCfg(
+            mode="made",
+            artifact_level="hand_cfg",
+            output_dir=tmp_path / "skipped",
+            Made=invalid_made_cfg,
+            Validate=None,
+        )
+    ).generate()
+
+    assert validated_result is None
+    assert skipped_result is not None
+    assert skipped_result.hand_cfg is not None

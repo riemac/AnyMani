@@ -135,6 +135,9 @@ def test_hand_generator_applies_connectivity_preset_and_drops_deleted_child_link
     assert sidecar["per_finger_connectivity"]["index"]["deleted_joints"] == ["index_j3"]
     assert sidecar["per_finger_connectivity"]["index"]["regroup_strategy"] == "drop"
     assert sidecar["per_finger_connectivity"]["index"]["remaining_revolute"] == 3
+    assert sidecar["hand_cfg"]["family"] == "leap"
+    assert sidecar["hand_cfg"]["handedness"] == "right"
+    assert sidecar["hand_cfg"]["metadata"]["premade_connectivity"]["base_hand_preset"] == "single_palm_leap"
     assert summary["run"]["mode"] == "made"
     assert summary["config"]["handedness"] == "right"
     assert summary["stats"]["succeeded"] == 1

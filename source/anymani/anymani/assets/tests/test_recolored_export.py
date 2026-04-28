@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import xml.etree.ElementTree as ET
+import yaml
 
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from assets.presets import make_human_like_builder_cfg
@@ -80,13 +81,17 @@ def test_named_recolored_palette_injects_visual_materials_and_colors_leap_root_f
 
     assert result is not None
     assert result.urdf_path is not None and result.urdf_path.is_file()
+    assert result.sidecar_path is not None and result.sidecar_path.is_file()
 
     color_map = _visual_color_map(result.urdf_path)
+    sidecar = yaml.safe_load(result.sidecar_path.read_text(encoding="utf-8"))
     assert all(rgba == "1 0 0 1" for rgba in color_map["palm"])
     assert all(rgba == "1 0 0 1" for rgba in color_map["index_root_fixed_link"])
     assert all(rgba == "1 1 0 1" for rgba in color_map["index_mcp1"])
     assert all(rgba == "0 1 1 1" for rgba in color_map["thumb_cmc2"])
     assert all(rgba == "1 0 1 1" for rgba in color_map["thumb_tip"])
+    assert sidecar["hand_cfg"]["family"] == "leap"
+    assert sidecar["hand_cfg"]["handedness"] == "right"
     assert _collision_material_count(result.urdf_path) == 0
 
 
@@ -105,10 +110,14 @@ def test_recolored_dict_only_overrides_requested_visual_link(tmp_path):
 
     assert result is not None
     assert result.urdf_path is not None and result.urdf_path.is_file()
+    assert result.sidecar_path is not None and result.sidecar_path.is_file()
 
     color_map = _visual_color_map(result.urdf_path)
+    sidecar = yaml.safe_load(result.sidecar_path.read_text(encoding="utf-8"))
     assert color_map["index_tip"]
     assert all(rgba == "0.25 0.5 0.75 1" for rgba in color_map["index_tip"])
     assert "index_dip" not in color_map
     assert "palm" not in color_map
+    assert sidecar["hand_cfg"]["family"] == "allegro"
+    assert sidecar["hand_cfg"]["fingers"]
     assert _collision_material_count(result.urdf_path) == 0

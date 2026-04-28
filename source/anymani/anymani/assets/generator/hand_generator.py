@@ -46,6 +46,7 @@ from ..asset_builders import HandBuilder, HandBuilderCfg
 from ..exporter import HandExporter, HandExporterCfg
 from ..validator import HandValidator, HandValidatorCfg
 from ._generation_result import HandGenerationResult
+from ._post_mutate_restore import PostMutateSource, load_post_mutate_source
 from ._premade import (
     apply_connectivity_preset as _apply_premade_connectivity_preset,
     build_base_hand as _build_premade_base_hand,
@@ -175,8 +176,17 @@ class HandGeneratorCfg(AssetCfgBase):
     Mutate: HandMutatorCfg = field(default_factory=HandMutatorCfg)
     """后序变异配置入口；主要负责非关节拓扑维度的变体，可为空操作，也可串联多个局部工具。"""
 
-    Validate: HandValidatorCfg = field(default_factory=HandValidatorCfg)
-    """手级验证配置入口；用于生成后校验结构和语义约束。"""
+    Validate: HandValidatorCfg | None = None
+    """手级验证配置入口；为 ``None`` 时显式禁用 hand-level validator。
+
+    # NOTE:
+    这里把 validator 语义从“总是隐式开启”改成“显式声明才启用”，原因不是弱化合法性，
+    而是把控制权重新交还给研究者：
+
+    - quick.py 这类科研入口应在顶部直接写出“本次到底启没启 validator”
+    - 若用户正在做 topology / exporter / schema 的局部排查，也需要一条完全跳过
+      hand-level validator 的直通路径
+    """
 
     Export: HandExporterCfg = field(default_factory=HandExporterCfg)
     """手级导出器配置入口；用于把 HandCfg 导出为 URDF / sidecar / tree 文件等产物。"""
@@ -186,6 +196,23 @@ class HandGeneratorCfg(AssetCfgBase):
 
     默认写到 `assets/generated/`，与当前子项目的目录约定保持一致；
     测试或批量脚本也可以显式覆盖成临时目录。
+    """
+
+    source_topology_dir: Path | str | None = None
+    """独立 post-mutate 的来源 topology 目录。
+
+    只在 `mode="mutate"` 时生效，约定输入形状固定为：
+
+    `.../generated/<timestamp>/<group>/<topology_name>/`
+
+    # NOTE:
+    首版 mutate-only 入口故意不接受“整个时间戳目录”或“单个样本目录”，
+    因为用户已经把工作流钉死为：
+
+    - 传入 topology 目录；
+    - 自动找到唯一 pre-made 原始样本；
+    - 首次运行时把它改名为 `*_origin`；
+    - 新 post-mutate 样本作为同级兄弟目录继续写入。
     """
 
     handedness: Literal["left", "right", "all"] = "all"
@@ -273,6 +300,8 @@ class HandGeneratorCfg(AssetCfgBase):
         if self.class_type is None:
             self.class_type = HandGenerator
         self.output_dir = Path(self.output_dir)  # 统一在 cfg 边界内把路径收口为 `Path`
+        if self.source_topology_dir is not None:
+            self.source_topology_dir = Path(self.source_topology_dir)
         self.hand_presets = normalize_name_list(self.hand_presets, field_name="hand_presets")
         self.connectivity_presets = normalize_connectivity_mapping(self.connectivity_presets)
         self.recolored = normalize_recolor_spec(self.recolored)
@@ -290,6 +319,12 @@ class HandGeneratorCfg(AssetCfgBase):
                 "When hand_presets contains multiple base hand presets, Made must stay abstract; "
                 "otherwise one concrete builder cfg would be incorrectly reused for all preset anchors."
             )
+        if self.mode == "mutate" and self.source_topology_dir is None:
+            raise ValueError("mode='mutate' requires 'source_topology_dir' to point at one topology directory")
+        if self.mode != "mutate" and self.source_topology_dir is not None:
+            raise ValueError("'source_topology_dir' is only valid when mode='mutate'")
+        if self.mode == "mutate" and not _has_enabled_mutation(self.Mutate):
+            raise ValueError("mode='mutate' requires at least one enabled mutator term")
 
 
 # ============================================================================
@@ -310,32 +345,45 @@ class HandGenerator:
         self.cfg = cfg
         self._run_root: Path | None = None
         self._run_summary: dict[str, Any] | None = None
+        self._mutate_source: PostMutateSource | None = None
 
     def _ensure_run_context(self) -> tuple[Path, dict[str, Any]]:
-        r"""为当前 generator 实例懒创建一次时间戳 run 根目录与 summary 文档。"""
+        r"""为当前 generator 实例懒创建一次 run 根目录与 summary 文档。
+
+        pre-made / full 与 mutate-only 的根目录语义不同：
+
+        - pre-made / full：每次运行都新建 `generated/<timestamp>/`
+        - mutate-only：直接复用用户给定的 topology 目录，在该目录下写 summary
+        """
 
         if self._run_root is not None and self._run_summary is not None:
             return self._run_root, self._run_summary
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        output_root = Path(self.cfg.output_dir)
-        run_root = output_root / timestamp
+        if self.cfg.mode == "mutate":
+            if self.cfg.source_topology_dir is None:  # 防御式分支；正常情况下已在 cfg 期校验掉
+                raise ValueError("mode='mutate' requires 'source_topology_dir'")
+            run_root = Path(self.cfg.source_topology_dir)
+            run_root.mkdir(parents=True, exist_ok=True)
+        else:
+            output_root = Path(self.cfg.output_dir)
+            run_root = output_root / timestamp
 
-        collision_index = 2
-        while run_root.exists():
-            run_root = output_root / f"{timestamp}_{collision_index:02d}"
-            collision_index += 1  # 同秒重复启动时追加后缀，避免不同 run 相互覆盖
+            collision_index = 2
+            while run_root.exists():
+                run_root = output_root / f"{timestamp}_{collision_index:02d}"
+                collision_index += 1  # 同秒重复启动时追加后缀，避免不同 run 相互覆盖
 
-        run_root.mkdir(parents=True, exist_ok=False)
+            run_root.mkdir(parents=True, exist_ok=False)
 
         from ..tool.recipe_loader import RecipeLoader
 
         pre_made_enabled = self.cfg.mode in {"made", "full"}
-        post_mutate_enabled = self.cfg.mode == "full" and _has_enabled_mutation(self.cfg.Mutate)
+        post_mutate_enabled = self.cfg.mode in {"mutate", "full"} and _has_enabled_mutation(self.cfg.Mutate)
         self._run_root = run_root
         self._run_summary = {
             "run": {
-                "timestamp": run_root.name,
+                "timestamp": timestamp,
                 "root_dir": str(run_root),
                 "mode": self.cfg.mode,
                 "artifact_level": self.cfg.artifact_level,
@@ -356,6 +404,20 @@ class HandGenerator:
         }
         self._write_run_summary()
         return self._run_root, self._run_summary
+
+    def _load_mutate_source(self) -> PostMutateSource:
+        r"""懒加载独立 post-mutate 的来源样本。
+
+        这里缓存的是“同一个 topology 目录里的唯一 pre-made 原点”，这样一轮
+        `n_samples=20` 的 Monte Carlo 采样不会重复做 20 次磁盘扫描与 YAML 解析。
+        """
+
+        if self._mutate_source is not None:
+            return self._mutate_source
+        if self.cfg.source_topology_dir is None:
+            raise ValueError("Independent post-mutate requires 'source_topology_dir'")
+        self._mutate_source = load_post_mutate_source(self.cfg.source_topology_dir)
+        return self._mutate_source
 
     def _write_run_summary(self) -> None:
         r"""把当前 run summary 刷到 `<run_root>/summary.yaml`。"""
@@ -524,6 +586,8 @@ class HandGenerator:
         """
 
         run_root, _ = self._ensure_run_context()
+        if self.cfg.mode == "mutate":
+            return run_root
         return _resolve_premade_export_root(self.cfg, result=result, run_root=run_root)
 
     def _generate_once(
@@ -545,50 +609,58 @@ class HandGenerator:
         语义上，而不是各写一份相似但悄悄分叉的实现。
         """
 
-        # `mode="mutate"` 的语义要求调用方先提供一份现成 `HandCfg`。
-        # 当前 `HandGeneratorCfg` 还没有这个输入槽位，因此这里显式拒绝，
-        # 避免伪装成“支持 mutate-only”。
-        if self.cfg.mode == "mutate":
-            raise NotImplementedError("mode='mutate' is intentionally deferred in the first pre-made slice.")
-
         self._ensure_run_context()  # 一次 generator 实例对应一次 run；首次尝试时就固定时间戳根目录
 
-        hand_cfg, builder_cfg_name = self._build_base_hand(hand_preset_name=hand_preset_name)
+        validator = HandValidator(self.cfg.Validate) if self.cfg.Validate is not None else None
+        validation_warnings: list[str] = []
 
-        premade_metadata: dict[str, Any] = {}
-        if connectivity_preset_name is not None:
-            hand_cfg, premade_metadata = self._apply_connectivity_preset(
-                hand_cfg,
-                connectivity_preset_name=connectivity_preset_name,
-                hand_preset_name=hand_preset_name,
-            )
+        if self.cfg.mode == "mutate":
+            mutate_source = self._load_mutate_source()
+            hand_cfg = mutate_source.hand_cfg.copy()  # 每个 post-mutate 样本都从同一 pre-made 原点重新起步
+            builder_cfg_name = str(mutate_source.metadata.get("builder_cfg", "restored_hand_cfg"))
+            premade_metadata = dict(mutate_source.metadata)
+        else:
+            hand_cfg, builder_cfg_name = self._build_base_hand(hand_preset_name=hand_preset_name)
 
-        validator = HandValidator(self.cfg.Validate)
-        pre_made_validation = validator.validate_pre_made(hand_cfg)
-        if not pre_made_validation:
-            self._record_generation_rejection(stage="pre_made_validate")
-            return None  # pre-made 结构闸门拒绝后，不再允许继续进入 mutate / export
+            premade_metadata: dict[str, Any] = {}
+            if connectivity_preset_name is not None:
+                hand_cfg, premade_metadata = self._apply_connectivity_preset(
+                    hand_cfg,
+                    connectivity_preset_name=connectivity_preset_name,
+                    hand_preset_name=hand_preset_name,
+                )
 
-        validation_warnings = list(pre_made_validation.warnings)
+            # pre-made 结构闸门是“可选的显式闸门”：
+            # - `Validate is None`：完全跳过 hand-level validator；
+            # - 否则：在 connectivity lower 之后、mutate / export 之前执行。
+            if validator is not None:
+                pre_made_validation = validator.validate_pre_made(hand_cfg)
+                if not pre_made_validation:
+                    self._record_generation_rejection(stage="pre_made_validate")
+                    return None  # pre-made 结构闸门拒绝后，不再允许继续进入 mutate / export
+                validation_warnings.extend(pre_made_validation.warnings)
         sampled_terms: dict[str, dict[str, float]] | None = None
 
-        # 后序派生：只有在 `mode="full"` 且至少启用一个 mutate 工具时才进入。
-        # 这样 `mode="made"` 不会因为空 mutate cfg 产生额外语义分支。
-        if self.cfg.mode == "full" and _has_enabled_mutation(self.cfg.Mutate):
+        # 后序派生的两种合法入口：
+        #
+        # 1. `mode="full"`：在 pre-made 基座上继续采样后序变体；
+        # 2. `mode="mutate"`：从 sidecar `hand_cfg` 快照恢复后再采样。
+        if self.cfg.mode in {"full", "mutate"} and _has_enabled_mutation(self.cfg.Mutate):
             mutator = HandMutator(self.cfg.Mutate)
             sampled_terms = sampled_mutation_terms or _sample_mutation_terms(mutator, hand_cfg)
             hand_cfg = mutator.mutate(hand_cfg, sampled_params=sampled_terms)
             if hand_cfg is None:
                 self._record_generation_rejection(stage="mutate")
                 return None  # 变异被拒绝；拒绝语义统一表现为“本次样本无结果”
-            post_mutate_validation = validator.validate_post_mutate(hand_cfg)
-            if not post_mutate_validation:
-                self._record_generation_rejection(stage="post_mutate_validate")
-                return None
-            validation_warnings.extend(post_mutate_validation.warnings)
+            if validator is not None:
+                post_mutate_validation = validator.validate_post_mutate(hand_cfg)
+                if not post_mutate_validation:
+                    self._record_generation_rejection(stage="post_mutate_validate")
+                    return None
+                validation_warnings.extend(post_mutate_validation.warnings)
 
         sample_id = uuid4().hex[:8]
-        if connectivity_preset_name is not None and enumerated:
+        if self.cfg.mode != "mutate" and connectivity_preset_name is not None and enumerated:
             sample_id = stable_premade_id(
                 hand_preset_name or hand_cfg.family,
                 connectivity_preset_name,
@@ -596,7 +668,7 @@ class HandGenerator:
 
         metadata = {
             "id": sample_id,  # 8 位短 ID，sample 路径默认随机，enumerate 路径按 recipe 稳定化
-            "builder_cfg": builder_cfg_name,  # 记录 base hand 最终使用的 builder cfg 类型
+            "builder_cfg": builder_cfg_name,  # 记录 base hand 最终使用的 builder cfg 类型；mutate-only 则标记为恢复来源
             "warnings": validation_warnings,  # 汇总 pre-made / post-mutate 两阶段 warning，保留给 sidecar / 调试消费
             "family": hand_cfg.family,
             "handedness": hand_cfg.handedness,
@@ -637,14 +709,16 @@ class HandGenerator:
 
         1. `mode="made"`：执行 `builder -> validator -> export`
         2. `mode="full"`：执行 `builder -> mutate -> validator -> export`
-        3. `artifact_level="hand_cfg"`：只保留内存中的 `HandCfg`
-        4. `artifact_level="urdf" / "bundle"`：落盘导出由 `HandExporter` 负责
+        3. `mode="mutate"`：从已有 topology 目录里的 `hand.yaml.hand_cfg`
+           快照恢复，再执行 `mutate -> validator -> export`
+        4. `artifact_level="hand_cfg"`：只保留内存中的 `HandCfg`
+        5. `artifact_level="urdf" / "bundle"`：落盘导出由 `HandExporter` 负责
 
         你原先写在函数尾部的 `# TODO:算法之一（mode-aware generation pipeline）`
-        并不是“完全没做”，而是**规格已部分落地**。真正还没有落地的是：
+        并不是“完全没做”，而是**规格已部分落地**。当前仍然保留的边界是：
 
-        - `mode="mutate"` 的“只做后序、外部输入 HandCfg”入口
-        - 更细的 mode 分支统计 / provenance 记录
+        - mutate-only 只支持从 pre-made sidecar 的 `hand_cfg` 快照恢复
+        - 更细的 mode 分支统计 / provenance 记录还可以继续加密
 
         因此这里应把算法规格放在活代码前面，而不是留在 `return` 后面变成
         死注释；死注释既破坏可读性，也会让读者误判“这段到底做没做”。
@@ -653,8 +727,6 @@ class HandGenerator:
             HandGenerationResult: 一次生成调用的轻量结果包。
 
         Raises:
-            NotImplementedError: 当请求 `mode="mutate"` 时抛出；该分支仍待接入
-                “外部给定 HandCfg -> 后序变异 -> 校验/导出”的独立入口。
             ValueError: 当 `Made` 仍是抽象 `HandBuilderCfg` 而非具体 builder cfg 时抛出。
         """
 
@@ -673,16 +745,19 @@ class HandGenerator:
         # ── 当前已落地部分 ──
         #   1. `mode=made`：执行 made -> validate -> export。
         #   2. `mode=full`：执行 made -> mutate -> validate -> export。
-        #   3. `artifact_level=hand_cfg`：不强迫用户落盘 URDF。
-        #   4. `artifact_level=bundle`：`HandCfg` 与导出物可同时保留。
+        #   3. `mode=mutate`：从 sidecar `hand_cfg` 快照恢复后执行 mutate。
+        #   4. `artifact_level=hand_cfg`：不强迫用户落盘 URDF。
+        #   5. `artifact_level=bundle`：`HandCfg` 与导出物可同时保留。
         #
-        # ── 当前未落地部分 ──
-        #   1. `mode=mutate`：尚未提供“外部输入 HandCfg 后仅做后序工具”的入口。
+        # ── 当前未完全落地部分 ──
+        #   1. 更广义的“URDF 反向恢复 HandCfg”尚未提供。
         #   2. 更细粒度的 provenance / rejection 统计仍可继续扩充。
         #
         # IDEA：主入口的价值不是把每一步都做满，而是把默认路径做顺，
         # 同时给用户足够多的“中间停靠点”。
 
+        if self.cfg.mode == "mutate":
+            return self._generate_once(hand_preset_name=None, connectivity_preset_name=None)
         selection = self._resolve_single_premade_selection()
         if selection is None:
             return self._generate_once(hand_preset_name=None, connectivity_preset_name=None)
@@ -706,6 +781,23 @@ class HandGenerator:
         Raises:
             RuntimeError: 当拒绝样本过多，超过最大尝试次数时抛出。
         """
+
+        if self.cfg.mode == "mutate":
+            target_count = max(int(self.cfg.n_samples), 0)
+            success_count = 0
+            attempt_count = 0
+            max_attempts = max(target_count * 10, 10)
+
+            while success_count < target_count:
+                attempt_count += 1
+                if attempt_count > max_attempts:
+                    raise RuntimeError("too many rejected samples during mutate-only generate_batch()")
+                result = self._generate_once(hand_preset_name=None, connectivity_preset_name=None)
+                if result is None:
+                    continue
+                yield result
+                success_count += 1
+            return
 
         hand_preset_names = self._candidate_hand_preset_names()
         if hand_preset_names:

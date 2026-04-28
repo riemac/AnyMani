@@ -124,6 +124,7 @@ def test_recipe_loader_save_and_load_round_trip_keeps_current_contract(tmp_path)
     assert "class_type" not in recipe_path.read_text(encoding="utf-8")
     assert isinstance(loaded, HandGeneratorCfg)
     assert loaded.output_dir == tmp_path / "generated"
+    assert loaded.Validate is None
     assert isinstance(loaded.Made, HumanLikeHandBuilderCfg)
     assert isinstance(loaded.Made.palm_cfg, ComPalmBuilderCfg)
     assert loaded.Made.finger_cfg.__class__.__name__ == "AllegroFingerBuilderCfg"

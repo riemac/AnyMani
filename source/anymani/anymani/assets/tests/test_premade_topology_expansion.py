@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
+from assets.validator.hand_rules import HandValidatorCfg
 
 
 def test_generate_batch_enumerates_missing_topologies_when_slot_level_connectivity_pool_is_used(tmp_path):
@@ -77,6 +78,12 @@ def test_generate_batch_builds_mixed_family_topologies_and_exports_under_mixed_r
                         "ring": ["allegro_non_thumb_full"],
                     }
                 },
+                Validate=HandValidatorCfg(
+                    pre_made=HandValidatorCfg.PreMadeCfg(
+                        check_finger_spacing=False,
+                        check_palm_thumb_binding=True,
+                    )
+                ),
             )
         ).generate_batch()
     )

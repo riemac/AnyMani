@@ -65,25 +65,6 @@ def _bootstrap_python_path() -> None:
         sys.path.insert(0, str(SOURCE_ROOT))  # 把当前源码根插到最前面，显式压过其它环境缓存包
 
 
-# NOTE:
-# `quick.py` 既要支持：
-#
-# 1. 终端里直接 `python quick.py` 作为脚本直跑；
-# 2. 测试 / notebook 里通过包名导入 `assets.generator.quick`。
-#
-# 这两条入口若都强行写死成 `import anymani.assets...`，
-# 会导致导入树分裂成：
-#
-# - `assets.*`
-# - `anymani.assets.*`
-#
-# 两套彼此不同的类对象。对当前代码基线而言，这会直接破坏
-# `HandGeneratorCfg` / `HandBuilder` 的 `is` 身份判断，
-# 让 quick façade 在测试里看起来像是“能构造 cfg，但运行时突然退回抽象 builder”。
-#
-# 因而这里必须按调用方式分支：
-# - **脚本直跑**：bootstrap 后再走 `anymani.assets...`
-# - **包内导入**：坚持使用相对导入，确保 quick.py 与调用方共享同一套类对象
 if __package__ in {None, ""}:
     _bootstrap_python_path()
 
@@ -91,11 +72,13 @@ if __package__ in {None, ""}:
     from anymani.assets.presets.connectivity_presets import (
         list_finger_connectivity_preset_names,
     )
+    from anymani.assets.validator.hand_rules import HandValidatorCfg
 else:
     from .hand_generator import HandGenerator, HandGeneratorCfg
     from ..presets.connectivity_presets import (
         list_finger_connectivity_preset_names,
     )
+    from ..validator.hand_rules import HandValidatorCfg
 
 
 # ============================================================================
@@ -135,20 +118,21 @@ RecolorFacade = str | dict[str, tuple[float, float, float, float]] | bool | None
 # 再填到这里。
 
 HAND_PRESETS: list[str] = ["single_palm_allegro", "single_palm_leap"]  # 当前纳入 pre-made 枚举的 canonical palm anchor
-CONNECTIVITY_PRESETS: ConnectivityFacade = {
-    "single_palm_allegro": {
-        "thumb": ["allegro_thumb_full"],  # thumb 必须与 palm family 绑定，因此这里只给 allegro thumb
-        "index": ["allegro_non_thumb_full", "leap_non_thumb_full"],  # non-thumb 允许跨 family，直接把 mixed candidate pool 写死在顶部
-        "middle": ["allegro_non_thumb_full", "leap_non_thumb_full"],
-        "ring": ["allegro_non_thumb_full", "leap_non_thumb_full"],
-    },
-    "single_palm_leap": {
-        "thumb": ["leap_thumb_full"],  # leap palm 同理只配 leap thumb
-        "index": ["allegro_non_thumb_full", "leap_non_thumb_full"],
-        "middle": ["allegro_non_thumb_full", "leap_non_thumb_full"],
-        "ring": ["allegro_non_thumb_full", "leap_non_thumb_full"],
-    },
-}  # 若真想炸完整 registry，再手动改回 `None`
+# CONNECTIVITY_PRESETS: ConnectivityFacade = {
+#     "single_palm_allegro": {
+#         "thumb": ["allegro_thumb_full"],  # thumb 必须与 palm family 绑定，因此这里只给 allegro thumb
+#         "index": ["allegro_non_thumb_full", "leap_non_thumb_full"],  # non-thumb 允许跨 family，直接把 mixed candidate pool 写死在顶部
+#         "middle": ["allegro_non_thumb_full", "leap_non_thumb_full"],
+#         "ring": ["allegro_non_thumb_full", "leap_non_thumb_full"],
+#     },
+#     "single_palm_leap": {
+#         "thumb": ["leap_thumb_full"],  # leap palm 同理只配 leap thumb
+#         "index": ["allegro_non_thumb_full", "leap_non_thumb_full"],
+#         "middle": ["allegro_non_thumb_full", "leap_non_thumb_full"],
+#         "ring": ["allegro_non_thumb_full", "leap_non_thumb_full"],
+#     },
+# }  # 若真想炸完整 registry，再手动改回 `None`
+CONNECTIVITY_PRESETS = None  # `None` = 自动展开 registry 里所有合法 slot-level recipe；否则只枚举这里指定的子集
 HANDEDNESS: Literal["left", "right", "all"] = "all"  # `all` = 同时生成左右手；后续目录命名会显式带 `left_` / `right_`
 MIXED = True  # 是否把 mixed-family topology 纳入 pre-made 主线
 MISSING = True  # 是否把“缺失一根 non-thumb”的 topology 也纳入 pre-made 主线
@@ -157,6 +141,13 @@ MAX_ENUMERATE: int | None = None  # `None` = 真正跑完整合法空间；小�
 ARTIFACT_LEVEL: Literal["hand_cfg", "urdf", "bundle"] = "bundle"  # quick façade 默认直接导出完整 bundle 便于人工巡检
 OUTPUT_LAYOUT: Literal["flat", "recursive"] = "recursive"  # mixed / missing / connectivity 回溯时，递归布局更适合人工浏览
 OUTPUT_DIR: Path = REPO_ROOT / "source" / "anymani" / "anymani" / "assets" / "generated"  # 产物根目录仍沿用项目自己的 generated/
+PRE_MADE_VALIDATOR_CFG: HandValidatorCfg | None = HandValidatorCfg(
+    pre_made=HandValidatorCfg.PreMadeCfg(
+        finger_count_min=3,  # 当前 pre-made 主线允许 missing topology，因此最少保留 3 根手指
+        require_non_thumb_with_min_revolute_dof=3,  # 至少保留 1 根 non-thumb finger 仍具有 >=3 个 revolute DOF
+        check_palm_thumb_binding=True,  # mixed 时 thumb family 必须与 palm family 绑定
+    )
+)  # 显式写 `None` = 本次 quick 运行完全禁用 hand-level validator
 _SHOW_REGISTRY = True  # 是否在真正生成前先打印 connectivity registry 摘要
 _PRINT_RESULT_LIMIT: int | None = 40  # 终端最多 preview 多少条结果；`0` = 只看 summary，`None` = 打印全部
 
@@ -172,6 +163,7 @@ RUN_CFG = HandGeneratorCfg(
     connectivity_presets=CONNECTIVITY_PRESETS,  # `None` 表示自动展开全部合法 slot-level connectivity
     mixed=MIXED,  # 是否允许 mixed-family topology
     missing=MISSING,  # 是否允许 missing-finger topology
+    Validate=PRE_MADE_VALIDATOR_CFG,  # quick.py 顶部显式声明 pre-made validator；避免研究者看不出当前是否启用
     recolored=RECOLORED,  # visual recolor façade，透传给正式 generator/exporter
     output_layout=OUTPUT_LAYOUT,  # recursive / flat
     max_enumerate=MAX_ENUMERATE,  # 若不为 None，则用于快速 smoke-test
@@ -210,6 +202,14 @@ def print_registry_summary(run_cfg: HandGeneratorCfg) -> None:
     print(f"output_dir       = {run_cfg.output_dir}")  # 导出根目录
     print(f"max_enumerate    = {run_cfg.max_enumerate}")  # 若非 None，则是 smoke-test 上限
     print(f"connectivity_cfg = {run_cfg.connectivity_presets}")  # `None` 表示自动展开全部合法 slot-level recipe
+    print(f"validator_on     = {run_cfg.Validate is not None}")  # 让研究者一眼看出 hand-level validator 是否启用
+    if run_cfg.Validate is not None:
+        print(f"pre_made.finger_count_min = {run_cfg.Validate.pre_made.finger_count_min}")  # pre-made 最少手指数
+        print(
+            "pre_made.require_non_thumb_with_min_revolute_dof = "
+            f"{run_cfg.Validate.pre_made.require_non_thumb_with_min_revolute_dof}"
+        )  # pre-made 至少一根 non-thumb 的最小剩余 revolute DOF
+        print(f"pre_made.check_palm_thumb_binding = {run_cfg.Validate.pre_made.check_palm_thumb_binding}")  # mixed 中 thumb/palm family 绑定
     print()
 
 

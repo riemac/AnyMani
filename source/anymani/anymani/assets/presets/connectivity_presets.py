@@ -143,7 +143,7 @@ def _build_finger_connectivity_registry() -> dict[str, FingerConnectivityPreset]
         # Allegro 非拇指：full / drop j3 / drop j2+j3
         # ------------------------------------------------------------------
         "allegro_non_thumb_full": FingerConnectivityPreset(
-            name="allegro_non_thumb_full",
+            name="allegro_non_thumb_full",  # 这个name名称才是合法注册，给外部用的str字段
             family="allegro",
             finger_kind="non_thumb",
             deleted_joint_suffixes=(),

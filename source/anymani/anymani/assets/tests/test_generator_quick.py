@@ -9,9 +9,10 @@
 
 from __future__ import annotations
 
-import assets.generator.quick as quick_module
+import assets.generator.quick_pre_made as quick_module
 from assets.generator.hand_generator import HandGeneratorCfg
-from assets.generator.quick import enumerate_premade_bundles, main
+from assets.generator.quick_pre_made import enumerate_premade_bundles, main
+from assets.validator.hand_rules import HandValidatorCfg
 
 
 def _single_family_full_pool(hand_preset: str, family: str) -> dict[str, dict[str, list[str]]]:
@@ -59,6 +60,10 @@ def test_quick_run_cfg_is_direct_hand_generator_cfg():
     r"""quick.py 顶部的唯一正式运行入口应直接是 `HandGeneratorCfg`。"""
 
     assert isinstance(quick_module.RUN_CFG, HandGeneratorCfg)
+    assert isinstance(quick_module.RUN_CFG.Validate, HandValidatorCfg)
+    assert quick_module.RUN_CFG.Validate.pre_made.finger_count_min == 3
+    assert quick_module.RUN_CFG.Validate.pre_made.require_non_thumb_with_min_revolute_dof == 3
+    assert quick_module.RUN_CFG.Validate.pre_made.check_palm_thumb_binding is True
 
 
 def test_quick_facade_main_accepts_small_custom_cfg(monkeypatch, tmp_path):

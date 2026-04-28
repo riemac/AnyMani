@@ -22,12 +22,14 @@ r"""整手导出编排层：把 URDF / Sidecar / Tree 文件按 artifact_level �
 +===================+==================+==================+===================+
 | ``hand_cfg``      | ✗                | ✗                | ✗                  |
 +-------------------+------------------+------------------+-------------------+
-| ``urdf``          | ✓                | ✗                | ✗                  |
+| ``urdf``          | ✓                | ✓                | ✗                  |
 +-------------------+------------------+------------------+-------------------+
 | ``bundle``        | ✓                | ✓                | ✓                  |
 +-------------------+------------------+------------------+-------------------+
 
 ``hand_cfg`` 时 `HandExporter` 直接返回空 `ExportResult`（不调用任何子导出器）。
+``urdf`` 现在也会写 `hand.yaml`，因为独立 post-mutate 需要稳定的 `hand_cfg`
+恢复入口，而不是再从 URDF 逆向解析。
 
 ### 目录结构约定
 
@@ -76,7 +78,7 @@ class HandExporterCfg(AssetCfgBase):
 
     artifact_level: Literal["hand_cfg", "urdf", "bundle"] = "bundle"
     """产物粒度；与 ``HandGeneratorCfg.artifact_level`` 保持同步。
-    ``hand_cfg`` 时直接返回空结果，``urdf`` 只写 URDF，``bundle`` 写全套。"""
+    ``hand_cfg`` 时直接返回空结果，``urdf`` 写 URDF + sidecar，``bundle`` 写全套。"""
 
     Urdf: UrdfWriterCfg = field(default_factory=UrdfWriterCfg)
     """URDF 写入器配置。"""
@@ -141,16 +143,16 @@ class HandExporter(ExporterBase):
         if urdf_result.written:
             result.urdf_path = urdf_result.written[0]
 
-        if self.cfg.artifact_level == "bundle":
-            sidecar_result = SidecarExporter(self.cfg.Sidecar).export(
-                result.hand_cfg,
-                out_dir,
-                extra={**result.metadata, "id": resolved_id},
-            )
-            combined.merge(sidecar_result)
-            if sidecar_result.written:
-                result.sidecar_path = sidecar_result.written[0]
+        sidecar_result = SidecarExporter(self.cfg.Sidecar).export(
+            result.hand_cfg,
+            out_dir,
+            extra={**result.metadata, "id": resolved_id},
+        )
+        combined.merge(sidecar_result)
+        if sidecar_result.written:
+            result.sidecar_path = sidecar_result.written[0]
 
+        if self.cfg.artifact_level == "bundle":
             result.render_trees()
             if self.cfg.export_tree_txt and result.tree_txt is not None:
                 tree_txt = out_dir / "tree.txt"

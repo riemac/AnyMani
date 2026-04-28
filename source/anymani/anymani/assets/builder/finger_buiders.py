@@ -1,4 +1,4 @@
-r"""TODO:自定义手指构建器配置类 `FingerBuilderCfg` 和运行时类 `FingerBuilder`。
+r"""自定义手指构建器配置类 `FingerBuilderCfg` 和运行时类 `FingerBuilder`。
 
 补充背景：以真实人手为例，此处我分为拇指型和非拇指型，用于和机器手做对照。
 以下说明不是“可有可无的背景文字”，而是后续 finger-level 算法设计的语义依据。
@@ -12,7 +12,7 @@ r"""TODO:自定义手指构建器配置类 `FingerBuilderCfg` 和运行时类 `F
     并且与 PIP 存在肌腱耦合、欠驱动意味更浓。
 - 拇指型：thumb 是整个人手里最特殊的手指。
   - CMC（Carpometacarpal Joint）：鞍状关节，承担拇指最核心的对掌能力。
-  - MCP：以屈曲/伸展为主。
+  - MCP：以屈曲/伸展为主。 # FIXME: 小BUG，目前我生成的手资产，拇指的后两个关节被命名为PIP,DIP,与这里的约定不符合，需修改相关代码
   - IP：远端铰链关节。
 
 当前资产建模上，又主要面对几类机器手：
@@ -239,12 +239,10 @@ class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
     r"""Allegro 非拇指配置。
 
     这里直接保留了你 TODO 里的第一版 preset 直觉：
-
     $$
     l=(1.8, 5.4, 3.8, 2.2)\text{cm},\quad
     d=(0, 0, -0.6, 0)\text{cm}.
     $$
-
     默认仍以 box primitive 为主，因为这更贴近 Allegro“规整块体”的碰撞体直觉。
     """
 
@@ -279,25 +277,19 @@ class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
     """各段 joint mesh 沿 finger 生长方向的长度列表。
 
     builder 侧标准输入是 SI(m)，因此默认值直接写成：
-
     $$
     l=(0.018, 0.054, 0.038, 0.022)\text{m}.
     $$
-
     它与原始科研锚点
-
     $$
     l=(1.8, 5.4, 3.8, 2.2)\text{cm}
     $$
-
     完全等价，只是把单位表达显式切换到了 SI。
 
     原始 TODO 里的 Allegro 非拇指四段经验长度为：
-
     $$
     l=(1.8, 5.4, 3.8, 2.2)\text{cm}.
     $$
-
     它表达的是几何段长，而不是 joint-to-joint 纯运动学长度；
     真正用于推进下一 joint 的量，会在 builder 中进一步结合 `mesh_offsets`
     变成有效长度。
@@ -364,11 +356,9 @@ class LeapFingerBuilderCfg(RegularFingerBuilderCfg):
     """各段 joint mesh 沿 finger 生长方向的长度列表。
 
     默认值对应你原始 TODO 里 LEAP 非拇指的第一版简化近似：
-
     $$
     l=(3.9, 1.5, 3.6, 2.0)\text{cm}.
     $$
-
     这些量描述的是“每段 mesh 的主长度”，而不是完整 fingertip 合并后的真实 mesh。
     """
     fixed_part: float | None = None

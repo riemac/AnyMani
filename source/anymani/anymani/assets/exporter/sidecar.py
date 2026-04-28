@@ -1,11 +1,12 @@
-r"""Sidecar 导出器：把 HandCfg 的元数据与溯源信息写为 YAML 文件。
+r"""Sidecar 导出器：把 HandCfg 的元数据、溯源信息与完整快照写为 YAML 文件。
 
-Sidecar 是每个导出产物目录里与 URDF 同级的一个轻量 YAML 文件，记录：
+Sidecar 是每个导出产物目录里与 URDF 同级的一个 YAML 文件，记录：
 
 - 整手结构摘要（family / handedness / dof / finger_count）
 - 生成溯源（generation config hash / timestamp / random seed）
 - 关键参数统计（每根 finger 的总链长、关节限位范围）
 - 可追踪字段（id / experiment tag）
+- 以及一个可直接恢复的完整 `hand_cfg` 快照
 
 设计说明
 --------
@@ -19,8 +20,9 @@ Sidecar 是每个导出产物目录里与 URDF 同级的一个轻量 YAML 文件
 ### 与 RecipeLoader.dump() 的关系
 
 `RecipeLoader.dump()` 序列化的是生成器的**配置**（HandGeneratorCfg）；
-`SidecarExporter` 记录的是这次生成的**产物描述**（HandCfg 结构摘要 + 上下文）。
-两者互补——前者让你知道"用什么设置生成的"，后者让你知道"生成出了什么"。
+`SidecarExporter` 记录的是这次生成的**产物描述**（HandCfg 结构摘要 + 上下文）
+并且额外保存完整 `hand_cfg` 快照。两者互补——前者让你知道"用什么设置生成的"，
+后者让你知道"生成出了什么"，并支持后续恢复。
 
 典型 Sidecar 输出
 -----------------
@@ -98,7 +100,7 @@ class SidecarCfg(AssetCfgBase):
 class SidecarExporter(ExporterBase):
     r"""Sidecar YAML 写入器。
 
-    把 `HandCfg` 的结构摘要和溯源信息写出为轻量 YAML 文件，与 URDF 同目录存放。
+        把 `HandCfg` 的结构摘要、溯源信息与完整快照写出为 YAML 文件，与 URDF 同目录存放。
     """
 
     cfg: SidecarCfg
@@ -165,6 +167,10 @@ class SidecarExporter(ExporterBase):
         for key, value in doc_extra.items():
             if key not in consumed_keys:
                 doc[key] = value
+
+        # 这里显式保留完整 `HandCfg` 快照，而不是再要求后续从 URDF 逆向提取。
+        # 这样 independent post-mutate 可以直接从 `hand.yaml` 恢复内存对象。
+        doc["hand_cfg"] = target.to_dict()
 
         out_path = output_dir / self.cfg.filename
         if out_path.exists() and not self.cfg.overwrite:
