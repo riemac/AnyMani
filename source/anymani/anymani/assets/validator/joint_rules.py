@@ -118,46 +118,5 @@ class JointValidator(ValidatorBase):
         result.passed = len(result.errors) == 0
         return result
 
-        # TODO:算法之一（joint-level rule checking）
-        # ────────────────────────────────────────
-        # 输入
-        #   target: JointCfg
-        #   cfg.check_limit_range: 是否启用限位范围检查
-        #   cfg.limit_max_range: 限位范围上限（rad）
-        #   cfg.check_link_length: 是否启用 link 长度检查
-        #   cfg.min_link_length: 最小 link 长度（meter）
-        #   cfg.strict: 是否升级 warnings → errors
-        #
-        # 输出：ValidationResult
-        #
-        # result = ValidationResult()
-        #
-        # ── 规则 1：限位范围合规（仅 revolute 关节）──
-        #   if target.joint_type == "revolute" and cfg.check_limit_range:
-        #     lo, hi = target.limit.lower, target.limit.upper
-        #     range = hi - lo
-        #     if range > cfg.limit_max_range:
-        #       result.warnings.append(
-        #         f"joint '{target.name}': limit range {range:.3f} rad > {cfg.limit_max_range:.3f}"
-        #       )
-        #
-        # ── 规则 2：有效 link 长度检查 ──
-        #   if cfg.check_link_length and target.origin is not None:
-        #     l = ||target.origin.pos||
-        #     if l < cfg.min_link_length:
-        #       result.warnings.append(
-        #         f"joint '{target.name}': link length {l:.6f} m < min {cfg.min_link_length}"
-        #       )
-        #
-        # ── strict 升级 ──
-        #   if cfg.strict: result = result.as_strict()
-        #
-        # result.passed = len(result.errors) == 0
-        # return result
-        #
-        # ── 与 preset 的交叉验证 ──
-        #   若 finger preset 声明了该 joint 的建议长度范围，可在此处
-        #   额外与 preset 对照检查（通过 metadata 字段传入 preset 约束）。
-
 
 __all__ = ["JointValidatorCfg", "JointValidator"]

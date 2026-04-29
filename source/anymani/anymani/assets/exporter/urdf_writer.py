@@ -182,66 +182,6 @@ class UrdfWriter(ExporterBase):
         tree.write(out_path, encoding="unicode", xml_declaration=True)
         return ExportResult(written=[out_path])
 
-        # TODO:算法之一（HandCfg → URDF XML）
-        # ────────────────────────────────────────
-        # 输入
-        #   target: HandCfg
-        #   output_dir: Path
-        #   cfg: UrdfWriterCfg
-        #
-        # 输出：ExportResult（写入路径 or 错误）
-        #
-        # ── 初始化 XML ──
-        #   import xml.etree.ElementTree as ET
-        #   robot = ET.Element("robot", attrib={"name": target.name})
-        #
-        # ── Palm link ──
-        #   palm_elem = _build_link_elem(target.palm.name, target.palm.inertial,
-        #                                target.palm.collisions, target.palm.visuals,
-        #                                cfg)
-        #   robot.append(palm_elem)
-        #
-        # ── 遍历每根 finger ──
-        #   for finger in target.fingers:
-        #     prev_parent = target.palm.name
-        #
-        #     [use_mount_link=True]
-        #     # 插入虚拟 mount joint + link
-        #     mount_link_name = f"{finger.name}_mount_link"
-        #     mount_joint_name = f"{finger.name}_mount_joint"
-        #     robot.append(_build_fixed_joint(mount_joint_name, prev_parent,
-        #                                     mount_link_name, finger.mount))
-        #     robot.append(_build_zero_mass_link(mount_link_name))
-        #     prev_parent = mount_link_name
-        #
-        #     # 遍历 joint 链
-        #     for joint in finger.joints:
-        #       robot.append(_build_joint_elem(joint, prev_parent, cfg))
-        #       robot.append(_build_link_elem(joint.child, joint.inertial,
-        #                                     joint.collisions, joint.visuals, cfg))
-        #       prev_parent = joint.child
-        #
-        #   [use_mount_link=False]
-        #   # 对第一个 joint 叠加 mount 变换（仿射叠加到 origin）
-        #   first_joint = finger.joints[0]
-        #   origin_combined = _compose_pose(finger.mount, first_joint.origin)
-        #   ...
-        #
-        # ── 写入文件 ──
-        #   out_path = output_dir / cfg.filename
-        #   if out_path.exists() and not cfg.overwrite:
-        #     return ExportResult(skipped=[out_path])
-        #   output_dir.mkdir(parents=True, exist_ok=True)
-        #   ET.indent(robot)
-        #   tree = ET.ElementTree(robot)
-        #   tree.write(str(out_path), encoding="unicode", xml_declaration=True)
-        #   return ExportResult(written=[out_path])
-        #
-        # ── 注意事项 ──
-        #   URDF 里 `<joint type>` 的合法值为：revolute / fixed / continuous /
-        #   prismatic / floating / planar。当前项目只用 revolute / fixed。
-        #   几何 primitive 里注意单位：URDF 默认 meter，与 HandCfg 单位一致。
-
     def to_urdf_string(self, target: HandCfg) -> str:
         r"""把 `HandCfg` 渲染为 URDF XML 字符串（不落盘）。
 
@@ -258,13 +198,9 @@ class UrdfWriter(ExporterBase):
         ET.indent(robot)
         return ET.tostring(robot, encoding="unicode", xml_declaration=True)
 
-        # TODO:算法之二（HandCfg → URDF str）
-        # 与 export() 的 XML 构建逻辑相同，最后用
-        # ET.tostring(robot, encoding="unicode", xml_declaration=True) 返回字符串。
-
 
 # ============================================================================
-#  内部构建辅助（接口声明，实现留空）
+#  内部构建辅助
 # ============================================================================
 
 
@@ -366,10 +302,6 @@ def _build_link_elem(
 
     return link
 
-    # TODO:算法之三（link XML 构建）
-    # ── 包含 <inertial> / <visual> / <collision> 子元素 ──
-    # ── collision/visual 几何按类型分发到 _build_geometry_elem() ──
-
 
 def _build_joint_elem(joint, parent_override: str, cfg: UrdfWriterCfg) -> ET.Element:
     r"""构建 ``<joint>`` XML 元素。
@@ -402,10 +334,6 @@ def _build_joint_elem(joint, parent_override: str, cfg: UrdfWriterCfg) -> ET.Ele
             )
 
     return joint_elem
-
-    # TODO:算法之四（joint XML 构建）
-    # ── 包含 <parent> / <child> / <origin> / <axis> / <limit> 子元素 ──
-    # ── limit 的 effort / velocity 用 cfg.default_* 填充 ──
 
 
 def _build_fixed_joint(name: str, parent: str, child: str, origin: PoseCfg) -> ET.Element:
@@ -474,12 +402,6 @@ def _fmt_triplet(values) -> str:
 
 def _fmt_scalar(value: float) -> str:
     return f"{float(value):.9g}"
-
-    # TODO:算法之五（geometry XML 分发）
-    # ── box → <box size="w d h"> ──
-    # ── cylinder → <cylinder radius="r" length="h"> ──
-    # ── sphere → <sphere radius="r"> ──
-    # ── mesh → <mesh filename="..." scale="..."> ──
 
 
 __all__ = ["UrdfWriterCfg", "UrdfWriter"]

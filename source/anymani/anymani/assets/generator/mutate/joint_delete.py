@@ -174,54 +174,6 @@ class JointDeleteMutator(MutatorBase):
         except Exception:
             return None
 
-        # TODO:算法之一（joint delete + relink + regroup）
-        # ────────────────────────────────────────
-        # 输入
-        #   target: 已经构建好的 `HandCfg`
-        #   cfg.target_finger: 目标手指名，None 时由运行时从所有 finger 中随机选一个
-        #   cfg.deleted_joints: 需要删除的关节名称序列，空元组时由运行时从链中随机选
-        #   cfg.regroup_strategy: 几何重组策略 { "merge" | "drop" | "keep" }
-        #   cfg.respect_preset: 是否遵守 preset 的保留约束
-        #   cfg.keep_terminal_joint: 是否强制保留 is_tip=True 的末端关节
-        #
-        # 输出：HandCfg | None
-        #
-        # ── 选取目标 ──
-        #   1. 若 target_finger 为 None，从 hand.fingers 中随机选一个
-        #   2. 若 deleted_joints 为空，从该 finger 的可删 joint 子集中随机选 1~N 个
-        #      可删子集 = 全关节列表 - 末端关节（若 keep_terminal_joint=True）
-        #                            - preset 保留集（若 respect_preset=True）
-        #
-        # ── 约束过滤 ──
-        #   3. 若删除后剩余关节数 < preset 规定的最小关节数，拒绝并返回 None
-        #   4. 若删除集合包含不可删关节，从集合中剔除（或拒绝，取决于 strict 参数，
-        #      当前草案默认剔除非法项后继续）
-        #
-        # ── 链式重连 ──
-        #   5. 对于每个被删 joint j（child link = L_j, parent link = L_p）：
-        #      a. 找到 j 的后继 joint j_next（parent 原为 L_j）
-        #      b. 将 j_next.parent 改写为 L_p
-        #      c. 将 j_next.origin 更新为：origin_new = origin_p ∘ origin_j_next
-        #         （即在 L_p 坐标系下叠加原有 j_next 的局部变换）
-        #
-        # ── Regroup（几何重组） ──
-        #   6. 按 regroup_strategy 处理被删 joint 的 child link 几何：
-        #      - "merge"：将 L_j 的 collisions/visuals（变换到 L_p 坐标系后）并入 L_p
-        #      - "drop" ：丢弃 L_j 的几何
-        #      - "keep" ：将 L_j 的几何作为额外 sub-link 保留（挂在 j_next 下）
-        #
-        # ── 重建 HandCfg ──
-        #   7. 用更新后的 joint 列表重建 FingerCfg（过滤掉被删 joint）
-        #   8. 用新 FingerCfg 重建 HandCfg（深拷贝其余 finger 不变）
-        #   9. 返回新 HandCfg
-        #
-        # ── 与 preset 的交叉验证 ──
-        #   被删关节集合必须是 preset 规定的"可删子集"的子集；
-        #   若删后违反最小关节数约束，应当明确拒绝（返回 None）而不是静默修复。
-        #
-        # IDEA：joint delete 是后序工具里拓扑改变最大的操作；其输出必须
-        # 能通过 HandValidator 的全局链式一致性检查，建议在此处嵌入轻量预检。
-
     def _delete_from_finger(self, hand: HandCfg, finger, delete_set: set[str]):
         r"""在单根 finger 上执行 joint 删除 + 重连。
 

@@ -3,7 +3,7 @@
 这个文件保存的不是 fingertip 几何，也不是 finger 的底层长度/宽度测量值，
 而是 **pre-made 阶段合法的 joint / child-link 删减 recipe**。
 
-这次重写的核心动机，直接来自你在 `FIXME` 里的两条批评：
+这次重写的核心动机，直接来自你此前提出的两条批评：
 
 1. 不能再把 connectivity recipe 抽象成 `retained_revolute=k` 这种“只剩计数”的语义；
 2. 应当回到更直率的第一性原理表达：

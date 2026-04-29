@@ -24,7 +24,7 @@ r"""hand preset 常量、注册表与整手组合辅助。
 - 若 `handedness="left"`，则交给 `HumanLikeHandBuilder` 按 palm frame 约定
   自动执行 $x \mapsto -x,\ \text{yaw} \mapsto -\text{yaw}$ 的镜像。
 
-这正对应你在 `平面示意-左手.png`、`平面示意-右手.png` 以及旧 TODO 算法里
+这正对应你在 `平面示意-左手.png`、`平面示意-右手.png` 以及旧算法草案里
 反复强调的意图：hand preset 记录“组合锚点”，左右手唯一映射属于 hand 装配层。
 """
 

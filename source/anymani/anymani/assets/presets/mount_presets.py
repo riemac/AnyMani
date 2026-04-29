@@ -57,7 +57,7 @@ LEAP_SINGLE_BOX_MOUNT_PRESET: dict[str, PoseCfg] = {
 """Single-box LEAP palm 的显式挂载点 preset（右手基准）。
 
 这组数值不是“从 family 猜”的，而是直接来自用户早期写在
-`HumanLikeHandBuilder.build()` TODO 里的 single-palm 记录。
+`HumanLikeHandBuilder.build()` 草案里的 single-palm 记录。
 """
 
 

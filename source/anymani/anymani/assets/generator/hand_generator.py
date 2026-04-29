@@ -216,7 +216,7 @@ class HandGeneratorCfg(AssetCfgBase):
     """
 
     handedness: Literal["left", "right", "all"] = "all"
-    """TODO: 生成哪种 handedness 的手。`all` 表示同时生成左右手；`left` / `right` 则只生成单一 handedness。"""
+    """生成哪种 handedness 的手。`all` 表示同时生成左右手；`left` / `right` 则只生成单一 handedness。"""
 
     hand_presets: list[str] = field(default_factory=list)
     """pre-made 阶段参与生成的 base hand preset 名列表。
@@ -255,7 +255,7 @@ class HandGeneratorCfg(AssetCfgBase):
     """
 
     mixed: bool = True
-    """TODO:是否混合不同 family 的手指拓扑。如果为 True，则在 pre-made 阶段允许在同一只手上组合 leap/allegro 的手指变体；如果为 False，则默认每只手只能选一个 family 的 preset 进行派生。"""
+    """是否混合不同 family 的手指拓扑。如果为 True，则在 pre-made 阶段允许在同一只手上组合 leap/allegro 的手指变体；如果为 False，则默认每只手只能选一个 family 的 preset 进行派生。"""
 
     missing: bool = True
     """是否把“缺失一根 non-thumb”的 topology 纳入 pre-made。
@@ -714,8 +714,7 @@ class HandGenerator:
         4. `artifact_level="hand_cfg"`：只保留内存中的 `HandCfg`
         5. `artifact_level="urdf" / "bundle"`：落盘导出由 `HandExporter` 负责
 
-        你原先写在函数尾部的 `# TODO:算法之一（mode-aware generation pipeline）`
-        并不是“完全没做”，而是**规格已部分落地**。当前仍然保留的边界是：
+        当前仍然保留的边界是：
 
         - mutate-only 只支持从 pre-made sidecar 的 `hand_cfg` 快照恢复
         - 更细的 mode 分支统计 / provenance 记录还可以继续加密
@@ -730,7 +729,7 @@ class HandGenerator:
             ValueError: 当 `Made` 仍是抽象 `HandBuilderCfg` 而非具体 builder cfg 时抛出。
         """
 
-        # TODO:算法之一（mode-aware generation pipeline）
+        # 算法规格：mode-aware generation pipeline
         # ────────────────────────────────────────
         # 输入
         #   cfg.mode: `made` / `mutate` / `full`
@@ -750,8 +749,8 @@ class HandGenerator:
         #   5. `artifact_level=bundle`：`HandCfg` 与导出物可同时保留。
         #
         # ── 当前未完全落地部分 ──
-        #   1. 更广义的“URDF 反向恢复 HandCfg”尚未提供。
-        #   2. 更细粒度的 provenance / rejection 统计仍可继续扩充。
+        #   TODO: 更广义的“URDF 反向恢复 HandCfg”尚未提供。
+        #   TODO: 更细粒度的 provenance / rejection 统计仍可继续扩充。
         #
         # IDEA：主入口的价值不是把每一步都做满，而是把默认路径做顺，
         # 同时给用户足够多的“中间停靠点”。

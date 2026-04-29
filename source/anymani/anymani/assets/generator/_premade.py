@@ -122,7 +122,7 @@ def normalize_name_list(values: list[str] | tuple[str, ...] | None, *, field_nam
     - `connectivity_presets: dict[str, list[str]] | None`
 
     因而这里不再像上一版那样往 tuple 收，而是显式回到 list。
-    这样科研侧在读配置时，看到的形状会和 `FIXME` 里的契约完全一致。
+    这样科研侧在读配置时，看到的形状会和既定契约完全一致。
     """
 
     if values is None:

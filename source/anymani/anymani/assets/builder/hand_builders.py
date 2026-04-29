@@ -1,4 +1,4 @@
-r"""TODO:整手级构建器：负责把 palm 与 fingers 装配成 `HandCfg`。
+r"""整手级构建器：负责把 palm 与 fingers 装配成 `HandCfg`。
 
 这里的职责边界与你在 `前后序.png`、`资产生产概略.png` 中的设计是一致的：
 
@@ -47,7 +47,7 @@ def _to_pose_dict(values: dict[str, PoseCfg]) -> dict[str, PoseCfg]:
 def _mirror_thumb_pose_about_palm_yz_plane(pose: PoseCfg) -> PoseCfg:
     r"""把 canonical right-hand 的 thumb 挂载位姿镜像为 left-hand 版本。
 
-    这里实现的，正是用户旧 TODO 与 `平面示意-左手.png` / `平面示意-右手.png`
+    这里实现的，正是用户旧算法草案与 `平面示意-左手.png` / `平面示意-右手.png`
     共同约束出的 palm-frame 规则：
 
     1. 不管左手右手，palm frame 都保持同一套 $x/y/z$ 约定；

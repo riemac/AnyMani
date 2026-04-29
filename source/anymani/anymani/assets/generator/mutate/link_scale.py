@@ -1,4 +1,3 @@
-# FIXME: 配置类继承 MutatorBaseCfg
 r"""连杆长度缩放变异算子：在已有 HandCfg 上对 link 两岸距离做 ± 扰动。
 
 需结合 `AnyMani/source/anymani/anymani/assets/doc/长度变异示意.jpg` 理解

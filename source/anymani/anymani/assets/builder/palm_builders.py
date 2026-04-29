@@ -1,4 +1,4 @@
-r"""TODO:掌部构建器：把掌级几何参数落为 `PalmCfg`。
+r"""掌部构建器：把掌级几何参数落为 `PalmCfg`。
 
 本文件对应你在 `assets/doc/Single-Palm.jpg`、`allegro-palm.png`、
 `leap-palm.png` 中画出的掌部建模约定。当前首轮实现只做 pre-made，
@@ -218,7 +218,7 @@ class SinglePalmBuilder(PalmBuilder):
 
         其中 `ellipse` 需要额外说明：
 
-        理论上，你原始 TODO 的意图是“把椭球体视作球体经各向异性 scale 后的结果”，
+        理论上，你原始设想的意图是“把椭球体视作球体经各向异性 scale 后的结果”，
         也就是底层语义上接近：
 
         $$
@@ -229,7 +229,7 @@ class SinglePalmBuilder(PalmBuilder):
         这条思路本身没有问题，我之前把它误写成“schema 不能表达，所以只能球近似”，
         这是我实现时的错误表达。更准确地说是：
 
-        - 你的 TODO 说的是一种**期望的几何表达方式**
+        - 你的原始设想说的是一种**期望的几何表达方式**
         - 但当前这版 `canonical schema + 标准 URDF writer` 还没有真正打通
           “scaled primitive” 这条通道
         - 标准 URDF 1.0 里 primitive (`box/cylinder/sphere`) 本身没有通用
@@ -240,7 +240,7 @@ class SinglePalmBuilder(PalmBuilder):
         - 惯量仍按**均质椭球体**公式计算
         - 几何导出先落为一个外包球 `sphere-envelope`
 
-        这样做的原因不是 TODO 不清楚，而是我这次先优先保证
+        这样做的原因不是原始设想不清楚，而是我这次先优先保证
         `schema -> exporter -> test` 纵向闭环稳定。若后续你决定椭圆 palm
         是正式训练对象，推荐的升级方向是二选一：
 
@@ -259,24 +259,24 @@ class SinglePalmBuilder(PalmBuilder):
         #   y -> 朝指方向，即 palm 的“生长方向”
         #   z -> 掌厚方向
         #
-        # --- TODO:算法之一：box（像 LEAP、Allegro 这类手较常用）
+        # --- 算法之一：box（像 LEAP、Allegro 这类手较常用）
         # 输入：宽 $w$ (x), 长 $l$ (y), 高 $h$ (z), 质量 $m$
         # 几何中心：$\mathbf{c} = (0,\; l/2,\; 0)$
         #
-        # --- TODO:算法之二：cylinder（比较适合夹爪手）
+        # --- 算法之二：cylinder（比较适合夹爪手）
         # 输入：半径 $r$, 高 $h$ (z), 质量 $m$
         # 几何中心：$\mathbf{c} = (0,\; 0,\; 0)$
         #
-        # --- TODO:算法之三：ellipse（夹爪手和类人手都可以用）
+        # --- 算法之三：ellipse（夹爪手和类人手都可以用）
         # 输入：x 半轴 $a$, y 半轴 $b$, 高 $h$ (z), 质量 $m$
         # 期望表达：`sphere + scale(a, b, c)`，其中 $c = h/2$
         #
-        # --- TODO:算法之四：sphere（很少用，先保留接口）
+        # --- 算法之四：sphere（很少用，先保留接口）
         # 输入：半径 $r$, 质量 $m$
         # 几何中心：$\mathbf{c} = (0,\; r,\; 0)$
         # ================================================================
         if self.cfg.shape == "box":
-            # box palm 对应你原始 TODO 的“算法之一”。
+            # box palm 对应你原始算法说明里的“算法之一”。
             width = float(self.cfg.width)
             length = float(self.cfg.length)
             height = float(self.cfg.height)
@@ -285,7 +285,7 @@ class SinglePalmBuilder(PalmBuilder):
             inertia = _box_inertia(width, length, height, mass)  # 长方体理论惯量
             geometry = {"type": "box", "size": (width, length, height)}
         elif self.cfg.shape == "cylinder":
-            # cylinder palm 对应你原始 TODO 的“算法之二”。
+            # cylinder palm 对应你原始算法说明里的“算法之二”。
             radius = float(self.cfg.radius)
             height = float(self.cfg.height)
             origin = PoseCfg()  # 圆柱体质心直接与 palm frame 重合
@@ -293,14 +293,14 @@ class SinglePalmBuilder(PalmBuilder):
             inertia = _cylinder_inertia(radius, height, mass)  # 圆柱理论惯量
             geometry = {"type": "cylinder", "radius": radius, "length": height}
         elif self.cfg.shape == "sphere":
-            # sphere palm 对应你原始 TODO 的“算法之四”。
+            # sphere palm 对应你原始算法说明里的“算法之四”。
             radius = float(self.cfg.radius)
             origin = PoseCfg(pos=(0.0, radius, 0.0))  # 球心位于底极点上方 $r$
             mass = _estimate_mass(4.0 * math.pi * radius**3 / 3.0)  # 体积 $V=4\pi r^3/3$
             inertia = _sphere_inertia(radius, mass)  # 球理论惯量
             geometry = {"type": "sphere", "radius": radius}
         else:
-            # ellipse palm 对应你原始 TODO 的“算法之三”。
+            # ellipse palm 对应你原始算法说明里的“算法之三”。
             a = float(self.cfg.a)
             b = float(self.cfg.b)
             c = float(self.cfg.height) / 2.0  # 半轴 $c=h/2$

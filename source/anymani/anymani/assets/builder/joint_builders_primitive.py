@@ -1,4 +1,4 @@
-r"""TODO:基础几何关节构建器：把 primitive recipe 落为 `JointCfg`。
+r"""基础几何关节构建器：把 primitive recipe 落为 `JointCfg`。
 
 这一层只回答一个问题：
 
@@ -233,13 +233,13 @@ class PrimJointBuilder(JointBuilder):
     def _build_box(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
         r"""构建 box link。
 
-        默认采用你 TODO 里的“新约”：
+        默认采用你原始建模草案里的“新约”：
 
         $$
         x_m = d_x,\quad y_m = \frac{l}{2} + d_y,\quad z_m = d_z.
         $$
         """
-        # --- TODO:算法之一: Box（最常用，一般用作手指 link / palm 的构成）
+        # --- 算法之一: Box（最常用，一般用作手指 link / palm 的构成）
         # 输入：偏移量 $d=(d_x,d_y,d_z)$，box 尺寸 $s=(s_x,s_y,s_z)$。
         # 输出：joint frame 下的 box mesh frame：
         # $x_m=d_x,\ y_m=s_y/2+d_y,\ z_m=d_z$。
@@ -281,7 +281,7 @@ class PrimJointBuilder(JointBuilder):
         默认沿 $z$ 轴，因此这里额外施加一个 $(-\\pi/2, 0, 0)$ 的旋转，把几何
         从默认朝向旋到 finger builder 需要的朝向。
         """
-        # --- TODO:算法之二: Cylinder（Box 的替代，一般也用作手指 link）
+        # --- 算法之二: Cylinder（Box 的替代，一般也用作手指 link）
         # 输入：偏移量 $d=(d_x,d_y,d_z)$，cylinder 尺寸 $(r,h)$。
         # 输出：joint frame 下的 cylinder mesh frame：
         # $x_m=d_x,\ y_m=h/2+d_y,\ z_m=d_z$。
@@ -310,7 +310,7 @@ class PrimJointBuilder(JointBuilder):
 
     def _build_sphere(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
         r"""构建 sphere link。"""
-        # --- TODO:算法之三: Sphere（当前很少单独用作 finger link，本轮保留接口）
+        # --- 算法之三: Sphere（当前很少单独用作 finger link，本轮保留接口）
         mesh = self.cfg.mesh
         radius = float(mesh["radius"])  # 球半径
         offset = _pose_from_value(mesh.get("offset", mesh.get("origin")))  # 增量位姿
@@ -370,10 +370,10 @@ class ComPrimJointBuilder(JointBuilder):
     def _build_cylinder_sphere_tip(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
         r"""构建 `cylinder + sphere` 指尖。
 
-        这里保持你原始 TODO 的语义：球心落在圆柱顶面中心，使球的最大截面与
+        这里保持你原始算法说明的语义：球心落在圆柱顶面中心，使球的最大截面与
         圆柱顶面重合，从而形成自然的 fingertip 过渡。
         """
-        # --- TODO:算法之一 ---：cylinder + sphere 构造指尖的复合 mesh（最常用）
+        # --- 算法之一 ---：cylinder + sphere 构造指尖的复合 mesh（最常用）
         # 输入：半径 $r$，高度 $h$，偏移 $d$。
         # 输出：
         # - 圆柱中心：$(d_x,\ d_y+h/2,\ d_z)$
@@ -436,7 +436,7 @@ class ComPrimJointBuilder(JointBuilder):
 
     def _build_box_sphere_tip(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
         r"""构建 `box + sphere` 指尖。"""
-        # --- TODO:算法之二 ---：box + sphere 构造指尖的复合 mesh
+        # --- 算法之二 ---：box + sphere 构造指尖的复合 mesh
         # 输入：半径 $r$，高度 $h$，宽度 $w$，必要时加 depth。
         mesh = self.cfg.mesh
         radius = float(mesh["radius"])  # 半球帽半径

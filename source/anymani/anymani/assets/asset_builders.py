@@ -1,4 +1,4 @@
-r"""TODO:手部资产生成的 Builder 层骨架。
+r"""手部资产生成的 Builder 层骨架。
 
 这里不是具体的几何构建算法文件，而是“算法应该被放在哪一层”的总框架文件。
 对这个项目而言，Builder 分层本身就是研究设计的一部分，因此这里不应该只剩
@@ -189,7 +189,7 @@ class Builder:
         raise NotImplementedError("Builder 骨架已保留，但具体构建算法需后续实现。")
 
 
-class JointBuilder(Builder):  # TODO:预计打算Primitive / Custom子类，然后再对每种子类用工厂模式，避免过度类膨胀
+class JointBuilder(Builder):
     r"""关节级构建器。
 
     预期职责是：根据 joint-level 的显式参数与规则，生成一个 `JointCfg`。

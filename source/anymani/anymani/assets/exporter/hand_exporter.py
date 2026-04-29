@@ -161,56 +161,5 @@ class HandExporter(ExporterBase):
 
         return combined
 
-        # TODO:算法之一（artifact_level-aware orchestration）
-        # ────────────────────────────────────────
-        # 输入
-        #   result: HandGenerationResult（含 hand_cfg / metadata）
-        #   output_dir: Path
-        #   sample_id: str | None
-        #   cfg.artifact_level: "hand_cfg" | "urdf" | "bundle"
-        #
-        # 输出：ExportResult
-        #
-        # ── 快速路径：hand_cfg 模式 ──
-        #   if cfg.artifact_level == "hand_cfg":
-        #     return ExportResult()
-        #
-        # ── sample_id 确定 ──
-        #   if sample_id is None:
-        #     sample_id = result.metadata.get("id") or uuid4().hex[:8]
-        #   out_dir = output_dir / sample_id
-        #
-        # ── 总结果容器 ──
-        #   combined = ExportResult()
-        #   hand = result.hand_cfg
-        #
-        # ── URDF 导出（urdf + bundle 均需要）──
-        #   urdf_result = UrdfWriter(cfg.Urdf).export(hand, out_dir)
-        #   combined.merge(urdf_result)
-        #   if urdf_result.written:
-        #     result.urdf_path = urdf_result.written[0]
-        #
-        # ── Sidecar + Tree（仅 bundle 模式）──
-        #   if cfg.artifact_level == "bundle":
-        #     extra = {**result.metadata, "id": sample_id}
-        #     sidecar_result = SidecarExporter(cfg.Sidecar).export(hand, out_dir, extra)
-        #     combined.merge(sidecar_result)
-        #     if sidecar_result.written:
-        #       result.sidecar_path = sidecar_result.written[0]
-        #
-        #     result.render_trees()   # 确保 tree_txt 已生成
-        #
-        #     if cfg.export_tree_txt and result.tree_txt:
-        #       tree_path = out_dir / "tree.txt"
-        #       tree_path.write_text(result.tree_txt)
-        #       combined.written.append(tree_path)
-        #
-        # return combined
-        #
-        # IDEA：HandExporter 的价值是"让调用方不需要知道哪些模式下产生哪些文件"；
-        # 所有 artifact_level 的决策都在这里集中处理。上层无论是
-        # `HandGenerator` 正式主线，还是后续的 hand quick-check 脚本，
-        # 都只需要调用 `HandExporter.export(result, output_dir)`。
-
 
 __all__ = ["HandExporterCfg", "HandExporter"]

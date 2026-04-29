@@ -132,7 +132,7 @@ def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
 
 
 # --- 手指的声明式配置类 --- #
-# TODO: 经过大量手指调研，决定先划分为：
+# 经过大量手指调研，决定先划分为：
 # 1. 含球类关节的手指
 # 2. 不含球类关节的手指
 #
@@ -238,7 +238,7 @@ class RegularFingerBuilderCfg(FingerBuilderCfg):
 class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
     r"""Allegro 非拇指配置。
 
-    这里直接保留了你 TODO 里的第一版 preset 直觉：
+    这里直接保留了你第一版 preset 直觉：
     $$
     l=(1.8, 5.4, 3.8, 2.2)\text{cm},\quad
     d=(0, 0, -0.6, 0)\text{cm}.
@@ -251,7 +251,7 @@ class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
 
     这里的宽度对应统一 finger frame 下的 $x$ 方向尺寸。
     对 Allegro 非拇指而言，若走 box 路线，则除 tip 外的各段通常都共用这一个宽度。
-    默认值按你原始 TODO 里的经验值取约 $2.7$cm。
+    默认值按你原始经验值取约 $2.7$cm。
     """
 
     height: float | None = None
@@ -259,7 +259,7 @@ class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
 
     这里的高度对应统一 finger frame 下的 $z$ 方向尺寸。
     对 Allegro 非拇指而言，若走 box 路线，则除 tip 外的各段通常都共用这一个高度。
-    默认值按你原始 TODO 里的经验值取约 $2.0$cm。
+    默认值按你原始经验值取约 $2.0$cm。
     """
 
     radius: float | None = None
@@ -286,7 +286,7 @@ class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
     $$
     完全等价，只是把单位表达显式切换到了 SI。
 
-    原始 TODO 里的 Allegro 非拇指四段经验长度为：
+    原始算法说明里的 Allegro 非拇指四段经验长度为：
     $$
     l=(1.8, 5.4, 3.8, 2.2)\text{cm}.
     $$
@@ -301,7 +301,7 @@ class AllegroFingerBuilderCfg(RegularFingerBuilderCfg):
         height = _to_si(self.height or 0.020)  # Allegro 非拇指默认高度 $h=0.020\text{m}=2.0\text{cm}$
         radius = _to_si(self.radius) if self.radius is not None else None  # 若显式给半径，则允许切到 cylinder 路线
         defaults = _normalize_pose_list([0.0, 0.0, -0.006, 0.0][: self.num_joints], count=self.num_joints, field_name="allegro_default_offsets")
-        merged_offsets = self.mesh_offsets or defaults  # 默认只保留第三段负向 $y$ 偏移，对应原始 TODO 中的末段重叠近似
+        merged_offsets = self.mesh_offsets or defaults  # 默认只保留第三段负向 $y$ 偏移，对应原始算法说明中的末段重叠近似
         self.mesh_offsets = merged_offsets
         if not self.axes:
             self.axes = [(0.0, 1.0, 0.0)] + [(1.0, 0.0, 0.0)] * max(self.num_joints - 1, 0)  # 0 号绕 $y$，其余近似绕 $x$
@@ -355,7 +355,7 @@ class LeapFingerBuilderCfg(RegularFingerBuilderCfg):
     length: list[float] = field(default_factory=lambda: [0.039, 0.015, 0.036, 0.020])
     """各段 joint mesh 沿 finger 生长方向的长度列表。
 
-    默认值对应你原始 TODO 里 LEAP 非拇指的第一版简化近似：
+    默认值对应你原始算法说明里 LEAP 非拇指的第一版简化近似：
     $$
     l=(3.9, 1.5, 3.6, 2.0)\text{cm}.
     $$
@@ -382,7 +382,7 @@ class LeapFingerBuilderCfg(RegularFingerBuilderCfg):
         self.fixed_part = _to_si(self.fixed_part or 0.013)  # palm 侧固定段长度 $l_f=0.013\text{m}=1.3\text{cm}$
         if not self.axes:
             defaults = [(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
-            self.axes = defaults[: self.num_joints]  # 保留你 TODO 里的 LEAP 非拇指轴语义
+            self.axes = defaults[: self.num_joints]  # 保留你原始算法说明里的 LEAP 非拇指轴语义
         if not self.tip:
             # User confirmed that the first testing path may use cylinder+sphere.
             self.tip = {"type": "cs", "radius": 0.012, "height": 0.010}
@@ -564,17 +564,17 @@ class RegularFingerBuilder(FingerBuilder):
         r"""构建普通串联链。
 
         这里对应 Allegro / LEAP 非拇指的共同主干。推进下一关节时，真正使用的
-        不是单纯 `mesh length`，而是你原始 TODO 里强调的“有效长度”：
+        不是单纯 `mesh length`，而是你原始算法说明里强调的“有效长度”：
 
         $$
         c_{\text{valid}, i} = l_i + d_i.
         $$
         """
-        # --- TODO:算法之一 ---：allegro 非拇指型手指构造
+        # --- 算法之一 ---：allegro 非拇指型手指构造
         # 输入：手指关节数 $N$（2~4），joint mesh 长度 $l\in \mathbb{R}^N$，
         # mesh 偏移 $d\in\mathbb{R}^{N}$，指尖类型及其参数。
         #
-        # --- TODO:算法之二 ---：leap 非拇指型手指构造
+        # --- 算法之二 ---：leap 非拇指型手指构造
         # 输入：手指关节数 $N$(1~4)，joint mesh 长度 $l\in \mathbb{R}^N$，
         # 宽度 $w$，高度 $h$，或半径 $r$，mesh 偏移 $d\in\mathbb{R}^{N}$，
         # 指尖类型及其参数，固定部分长度 $l_f$。
@@ -669,7 +669,7 @@ class RegularFingerBuilder(FingerBuilder):
 
         因此 `CMC1 -> CMC2` 这一步不能直接套普通 serial chain。
         """
-        # --- TODO:算法之三与算法之四 ---：allegro 和 leap 拇指型手指构造
+        # --- 算法之三与算法之四 ---：allegro 和 leap 拇指型手指构造
         # 真正的关键不是简单串联，而是把：
         # - $P_i$：joint frame 串联位置
         # - $mP_i$：mesh 相对于本 joint frame 的位置
