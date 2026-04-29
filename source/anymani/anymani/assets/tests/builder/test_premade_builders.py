@@ -130,7 +130,7 @@ def test_regular_thumb_preset_builds_thumb_chain():
     assert [joint.child for joint in finger.joints] == [
         "thumb_cmc1",
         "thumb_cmc2",
-        "thumb_pip",
+        "thumb_mcp",
         "thumb_dip",
         "thumb_tip",
     ]

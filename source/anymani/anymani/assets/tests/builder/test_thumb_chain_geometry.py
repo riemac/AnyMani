@@ -18,7 +18,7 @@ import sys
 from assets.presets import get_finger_builder_preset
 
 
-REPO_ROOT = Path(__file__).resolve().parents[5]
+REPO_ROOT = Path(__file__).resolve().parents[6]
 PREVIEW_FINGER_SCRIPT = REPO_ROOT / "source" / "anymani" / "anymani" / "assets" / "presets" / "preview" / "preview_finger_preset.py"
 
 

@@ -170,6 +170,14 @@ class HandGeneratorCfg(AssetCfgBase):
     max_enumerate: int | None = None
     """pre-made 笛卡尔展开的最大产物数上限；为 ``None`` 时不截断。"""
 
+    post_mutate_max_attempt_factor: int = 10
+    """post-mutate validator 补采预算系数。
+
+    若目标成功数为 $N$，最多允许尝试 $N\times f$ 个候选。这样可以实现
+    “目标 100、首轮成功 94、下一轮补 6” 的缺口补采，同时避免 validator
+    拒绝率异常时无限循环。
+    """
+
     Made: HandBuilderCfg = field(default_factory=HandBuilderCfg)
     """前序生成配置入口；主要负责关节拓扑维度的变体，把生成空间中的选择落到一个初始 `HandCfg`。"""
 
@@ -785,17 +793,40 @@ class HandGenerator:
             target_count = max(int(self.cfg.n_samples), 0)
             success_count = 0
             attempt_count = 0
-            max_attempts = max(target_count * 10, 10)
+            max_attempts = max(target_count * int(self.cfg.post_mutate_max_attempt_factor), 10)
+            mutator = HandMutator(self.cfg.Mutate)
+            source_hand = self._load_mutate_source().hand_cfg
 
             while success_count < target_count:
-                attempt_count += 1
-                if attempt_count > max_attempts:
-                    raise RuntimeError("too many rejected samples during mutate-only generate_batch()")
-                result = self._generate_once(hand_preset_name=None, connectivity_preset_name=None)
-                if result is None:
-                    continue
-                yield result
-                success_count += 1
+                remaining = target_count - success_count
+                batch_budget = min(remaining, max_attempts - attempt_count)
+                if batch_budget <= 0:
+                    raise RuntimeError(
+                        "too many rejected samples during mutate-only generate_batch(); "
+                        f"succeeded={success_count}, target={target_count}, attempted={attempt_count}, "
+                        f"budget={max_attempts}"
+                    )
+
+                # 联合采样在这里按“缺口”批量完成：若目标 100 已成功 94，
+                # 下一轮只采 6 组联合参数，而不是重新采满 100。
+                try:
+                    sampled_batch = mutator.sample_batch(source_hand, batch_size=batch_budget)
+                except Exception:
+                    sampled_batch = [_sample_mutation_terms(mutator, source_hand) for _ in range(batch_budget)]
+
+                for sampled_terms in sampled_batch:
+                    attempt_count += 1
+                    result = self._generate_once(
+                        hand_preset_name=None,
+                        connectivity_preset_name=None,
+                        sampled_mutation_terms=sampled_terms,
+                    )
+                    if result is None:
+                        continue
+                    yield result
+                    success_count += 1
+                    if success_count >= target_count:
+                        break
             return
 
         hand_preset_names = self._candidate_hand_preset_names()

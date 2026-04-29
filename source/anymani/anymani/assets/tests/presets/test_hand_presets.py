@@ -25,7 +25,7 @@ from assets.builder.hand_builders import HumanLikeHandBuilder
 from assets.presets import get_hand_builder_preset_data, make_human_like_builder_cfg_from_preset
 
 
-REPO_ROOT = Path(__file__).resolve().parents[5]  # 仓库根目录 `/home/hac/isaac/AnyMani`
+REPO_ROOT = Path(__file__).resolve().parents[6]  # 仓库根目录 `/home/hac/isaac/AnyMani`
 PREVIEW_HAND_SCRIPT = REPO_ROOT / "source" / "anymani" / "anymani" / "assets" / "presets" / "preview" / "preview_hand_preset.py"
 
 

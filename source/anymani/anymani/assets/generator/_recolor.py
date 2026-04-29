@@ -138,7 +138,7 @@ def _infer_semantic_color_key(link_name: str) -> str | None:
     if link_name.endswith("_root_fixed_link"):
         return "root_fixed"
 
-    for semantic_key in ("cmc1", "cmc2", "mcp1", "mcp2", "pip", "dip", "tip"):
+    for semantic_key in ("cmc1", "cmc2", "mcp1", "mcp2", "mcp", "pip", "dip", "tip"):
         if link_name.endswith(f"_{semantic_key}"):
             return semantic_key
     return None

@@ -95,10 +95,10 @@ SOURCE_TOPOLOGY_DIR: Path = (
     / "anymani"
     / "assets"
     / "generated"
-    / "2026-04-17_13-39-16"
-    / "single_palm_allegro"
+    / "2026-04-29_21-38-48"
+    / "single_palm_leap"
     / "left_t4_i4_m4_r4"
-)  # 用户当前指定的首个独立 post-mutate 测试点
+)  # 本轮验收默认指向 Leap full topology；重新跑 quick_pre_made.py 后按新 timestamp 更新即可
 
 N_SAMPLES: int = 20  # post-mutate 固定走 Monte Carlo 联合采样；这里控制对同一 pre-made 原点采几次
 ARTIFACT_LEVEL: ArtifactLevel = "bundle"  # 独立 post-mutate 默认保留完整 bundle，方便人工逐个检查

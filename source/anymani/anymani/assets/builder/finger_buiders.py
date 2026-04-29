@@ -67,7 +67,7 @@ from .joint_builders_primitive import PrimJointBuilderCfg
 # 2. recolored 的默认 palette 也要以这些 link 语义名为键；
 # 3. 科研人员人工巡检 URDF 时，最重要的是一眼看出骨架部位，而不是倒推 builder 序号。
 _NON_THUMB_CHILD_LINK_SUFFIXES: tuple[str, ...] = ("mcp1", "mcp2", "pip", "dip")
-_THUMB_CHILD_LINK_SUFFIXES: tuple[str, ...] = ("cmc1", "cmc2", "pip", "dip")
+_THUMB_CHILD_LINK_SUFFIXES: tuple[str, ...] = ("cmc1", "cmc2", "mcp", "dip")
 
 
 def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
@@ -735,7 +735,7 @@ class RegularFingerBuilder(FingerBuilder):
         2. child link 名承担“这段骨架在原始 anatomy / kinematic intent 上是谁”的职责。
 
         因而即便后续 `joint_delete` 把 surviving joint 压紧成 `j0..jN`，child link
-        仍可以继续保留 `mcp1/mcp2/pip/dip` 或 `cmc1/cmc2/pip/dip` 这类显式语义名。
+        仍可以继续保留 `mcp1/mcp2/pip/dip` 或 `cmc1/cmc2/mcp/dip` 这类显式语义名。
         """
         mesh = dict(self.cfg.mesh_shape[index])  # 复制一份 recipe，避免修改 cfg 常量
         builder_cfg = PrimJointBuilderCfg(
@@ -805,7 +805,7 @@ class RegularFingerBuilder(FingerBuilder):
         当前仅面向你这轮已经收敛范围的 regular fingers：
 
         - non-thumb：`mcp1, mcp2, pip, dip`
-        - thumb：`cmc1, cmc2, pip, dip`
+        - thumb：`cmc1, cmc2, mcp, dip`
 
         这里故意不把 LEAP non-thumb 的 `root_fixed_link` 混进来，因为它属于
         运动链前面的显式 fixed 根部段，语义上并不是 revolute child link。
@@ -814,7 +814,7 @@ class RegularFingerBuilder(FingerBuilder):
             index (int): 当前 revolute joint 在 canonical chain 中的序号。
 
         Returns:
-            str: 形如 `{finger}_mcp1` / `{finger}_cmc2` / `{finger}_pip` 的 child link 名。
+            str: 形如 `{finger}_mcp1` / `{finger}_cmc2` / `{finger}_mcp` 的 child link 名。
 
         Raises:
             ValueError: 当 `index` 超出当前 4 段 regular finger 语义范围时抛出。

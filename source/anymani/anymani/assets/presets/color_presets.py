@@ -21,6 +21,7 @@ DEFAULT_COLOR_PRESET_NAME = "anatomy_v1"
 - palm / LEAP fixed root：红
 - CMC1 / MCP1：黄
 - CMC2 / MCP2：青
+- thumb MCP：绿（与 non-thumb PIP 同属第三活动段的 visual cue）
 - PIP：绿
 - DIP：蓝
 - TIP：紫
@@ -35,6 +36,7 @@ COLOR_PRESETS: dict[str, dict[str, tuple[float, float, float, float]]] = {
         "mcp1": (1.0, 1.0, 0.0, 1.0),
         "cmc2": (0.0, 1.0, 1.0, 1.0),
         "mcp2": (0.0, 1.0, 1.0, 1.0),
+        "mcp": (0.0, 1.0, 0.0, 1.0),
         "pip": (0.0, 1.0, 0.0, 1.0),
         "dip": (0.0, 0.0, 1.0, 1.0),
         "tip": (1.0, 0.0, 1.0, 1.0),

@@ -7,12 +7,13 @@ r"""后序变异工具的公共基础协议。
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
-from ...asset_base import HandCfg
+from ...asset_base import AssetCfgBase, HandCfg
 
 
-# TODO: post-mutator 所包含的通用属性，后续变异配置类都复用
 @dataclass
 class MutatorBaseCfg(AssetCfgBase):
     """所有后序变异算子配置的最小公共基类。
@@ -32,6 +33,56 @@ class MutatorBaseCfg(AssetCfgBase):
     class_type: type["MutatorBase"] | None = None
 
 
+@dataclass(frozen=True)
+class SampleSpec:
+    r"""pipeline 可批量采样的最小随机变量描述。
+
+    各 mutator 仍保留自己的高层配置语义；只有在进入联合 Monte Carlo
+    采样前，才把复杂配置 lowering 成若干 `SampleSpec`。这避免把所有
+    post-mutate 算子硬压成同一种 public distribution cfg。
+    """
+
+    name: str
+    distribution: Any
+
+
+@dataclass
+class PatchOp:
+    r"""一次延迟写入操作。
+
+    `path` 是冲突检测和 metadata 的稳定语义键；`apply` 只在最终
+    `HandPatch.apply()` 阶段作用于深拷贝后的 `HandCfg`。
+    """
+
+    path: tuple[Any, ...]
+    apply: Callable[[HandCfg], None] = field(repr=False)
+
+
+@dataclass
+class HandPatch:
+    r"""post-mutate 的函数式 patch 容器。
+
+    每个 term 只基于同一个原始 `HandCfg` 生成 patch；pipeline 负责把 patch
+    组合后一次性应用，避免 A term 原地改完再把中间对象交给 B term。
+    """
+
+    ops: list[PatchOp] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def add(self, path: tuple[Any, ...], apply: Callable[[HandCfg], None]) -> None:
+        self.ops.append(PatchOp(path=path, apply=apply))
+
+    def extend(self, other: "HandPatch") -> None:
+        self.ops.extend(other.ops)
+        self.metadata.update(other.metadata)
+
+    def apply(self, target: HandCfg) -> HandCfg:
+        mutated = target.copy()
+        for op in self.ops:
+            op.apply(mutated)
+        return mutated.replace(fingers=mutated.fingers, palm=mutated.palm, metadata=dict(mutated.metadata))
+
+
 class MutatorBase:
     r"""所有后序变异算子的最小基类。
 
@@ -43,5 +94,22 @@ class MutatorBase:
     def __init__(self, cfg: MutatorBaseCfg) -> None:
         self.cfg = cfg
 
+    def describe_sampling(self, target: HandCfg) -> dict[str, Any]:
+        r"""把当前算子的高层随机语义 lowering 成 pipeline 可采样变量。"""
 
-__all__ = ["MutatorBase"]
+        return {}
+
+    def plan_patch(self, target: HandCfg, sampled_params: dict[str, Any] | None = None) -> HandPatch:
+        r"""基于同一个原始 `HandCfg` 生成延迟 patch。"""
+
+        return HandPatch()
+
+    def mutate(self, target: HandCfg, *, sampled_params: dict[str, Any] | None = None) -> HandCfg | None:
+        r"""兼容单算子直接调用：plan patch 后一次性 apply。"""
+
+        try:
+            return self.plan_patch(target, sampled_params=sampled_params).apply(target)
+        except Exception:
+            return None
+
+__all__ = ["HandPatch", "MutatorBase", "MutatorBaseCfg", "PatchOp", "SampleSpec"]

@@ -73,13 +73,14 @@ def _finger_by_name(hand, finger_name: str):
     raise KeyError(finger_name)
 
 
-def test_link_scale_mutator_rescales_target_joint_origin_only():
-    """`link_scale` 应只缩放目标 joint 的 `origin.pos`，并保持方向不变。"""
+def test_link_scale_mutator_rescales_link_length_and_advances_next_joint_origin():
+    """`link_scale` 应改变自身 link 长度，并用新 $L_i+d_i$ 推进下游 joint。"""
 
     hand = _build_allegro_hand()
-    before_index = _joint_by_name(hand, "index_j1").origin.pos
+    before_index_origin = _joint_by_name(hand, "index_j1").origin.pos
+    before_index_size = _joint_by_name(hand, "index_j1").collisions[0].geometry.size
+    before_next_origin = _joint_by_name(hand, "index_j2").origin.pos
     before_middle = _joint_by_name(hand, "middle_j1").origin.pos
-    before_length = math.sqrt(sum(value * value for value in before_index))
 
     mutated = LinkScaleMutator(
         LinkScaleCfg(
@@ -91,13 +92,14 @@ def test_link_scale_mutator_rescales_target_joint_origin_only():
     ).mutate(hand, sampled_params={"index_j1": 0.1})
 
     assert mutated is not None
-    after_index = _joint_by_name(mutated, "index_j1").origin.pos
+    after_index_origin = _joint_by_name(mutated, "index_j1").origin.pos
+    after_index_size = _joint_by_name(mutated, "index_j1").collisions[0].geometry.size
+    after_next_origin = _joint_by_name(mutated, "index_j2").origin.pos
     after_middle = _joint_by_name(mutated, "middle_j1").origin.pos
-    after_length = math.sqrt(sum(value * value for value in after_index))
-    assert not math.isclose(after_length, before_length, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(after_index_size[1], before_index_size[1] * 1.1, rel_tol=0.0, abs_tol=1e-12)
+    assert after_next_origin[1] > before_next_origin[1]
+    assert after_index_origin == before_index_origin
     assert after_middle == before_middle
-    assert math.isclose(after_index[0], 0.0, rel_tol=0.0, abs_tol=1e-12)
-    assert math.isclose(after_index[2], 0.0, rel_tol=0.0, abs_tol=1e-12)
 
 
 def test_tip_replace_mutator_swaps_primitive_tip_body_geometry():
