@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import assets.generator.quick_post_mutate as quick_post_mutate_module
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from assets.generator.mutate import HandMutatorCfg, MountPerturbCfg, MutatorTerm, ScalarDistributionCfg
+import assets.scripts.quick_post_mutate as quick_post_mutate_module
 from assets.validator.hand_rules import HandValidatorCfg
 
 

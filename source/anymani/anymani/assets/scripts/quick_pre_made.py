@@ -45,7 +45,7 @@ from typing import Any, Literal
 
 
 # 当前文件位于：
-#   `.../AnyMani/source/anymani/anymani/assets/generator/quick.py`
+#   `.../AnyMani/source/anymani/anymani/assets/scripts/quick_pre_made.py`
 # 因此：
 # - `parents[5]` 是 AnyMani 仓库根目录；
 # - `source/anymani/` 才是应加进 `sys.path` 的源码根。
@@ -74,7 +74,7 @@ if __package__ in {None, ""}:
     )
     from anymani.assets.validator.hand_rules import HandValidatorCfg
 else:
-    from .hand_generator import HandGenerator, HandGeneratorCfg
+    from ..generator.hand_generator import HandGenerator, HandGeneratorCfg
     from ..presets.connectivity_presets import (
         list_finger_connectivity_preset_names,
     )

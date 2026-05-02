@@ -1,10 +1,10 @@
-r"""tooling 层回归测试：`RecipeLoader -> HandGenerator` 直连契约。
+r"""scripts 层回归测试：`RecipeLoader -> HandGenerator` 直连契约。
 
-这组测试锁住新的工具层边界：
+这组测试锁住新的脚本层边界：
 
 1. `RecipeLoader` 仍负责 YAML / dict → typed `HandGeneratorCfg`
 2. 历史 `export_dir` 仍兼容到当前 `output_dir`
-3. tooling 层不再通过 `GeneratorRunner` 额外包一层运行逻辑
+3. scripts 层不再通过 `GeneratorRunner` 额外包一层运行逻辑
 4. 声明式 recipe 加载后，应直接驱动 `HandGenerator`
 
 也就是说，这里验证的是：
@@ -32,7 +32,7 @@ from assets.exporter.hand_exporter import HandExporterCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from assets.generator.mutate import HandMutatorCfg, MountPerturbCfg
 from assets.presets import make_human_like_builder_cfg
-from assets.tool.recipe_loader import RecipeLoader
+from assets.scripts.recipe_loader import RecipeLoader
 from assets.validator.hand_rules import HandValidatorCfg
 
 
@@ -132,7 +132,7 @@ def test_recipe_loader_save_and_load_round_trip_keeps_current_contract(tmp_path)
 
 
 def test_loaded_recipe_drives_hand_generator_directly_for_hand_cfg_mode(tmp_path):
-    """`hand_cfg` 模式下，tooling 层应只返回内存中的 `HandCfg`。"""
+    """`hand_cfg` 模式下，scripts 层应只返回内存中的 `HandCfg`。"""
 
     cfg = RecipeLoader.load_dict(_tool_recipe_dict(str(tmp_path / "ignored"), artifact_level="hand_cfg"))
     cfg = cfg.replace(output_dir=tmp_path / "hand_cfg_outputs")
@@ -169,7 +169,7 @@ def test_loaded_recipe_drives_hand_generator_directly_for_bundle_mode(tmp_path):
 
 
 def test_recipe_loader_keeps_premade_facade_fields_as_generator_contract(tmp_path):
-    r"""`RecipeLoader` 应保留 pre-made façade 字段，而不是在 tooling 层吞掉它们。
+    r"""`RecipeLoader` 应保留 pre-made façade 字段，而不是在 scripts 层吞掉它们。
 
     这里锁住的是这轮新增的顶层声明式契约：
 

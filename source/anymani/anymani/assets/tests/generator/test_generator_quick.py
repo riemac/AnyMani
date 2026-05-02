@@ -9,9 +9,9 @@
 
 from __future__ import annotations
 
-import assets.generator.quick_pre_made as quick_module
 from assets.generator.hand_generator import HandGeneratorCfg
-from assets.generator.quick_pre_made import enumerate_premade_bundles, main
+import assets.scripts.quick_pre_made as quick_module
+from assets.scripts.quick_pre_made import enumerate_premade_bundles, main
 from assets.validator.hand_rules import HandValidatorCfg
 
 

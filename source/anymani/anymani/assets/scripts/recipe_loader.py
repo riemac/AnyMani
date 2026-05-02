@@ -133,7 +133,7 @@ class RecipeLoader:
         data = deepcopy(raw)
 
         # 历史 recipe 曾使用 `export_dir`；当前统一收口为 `output_dir`。
-        # 这里做兼容桥接，避免旧实验描述在 tooling 层直接报废。
+        # 这里做兼容桥接，避免旧实验描述在 scripts 层直接报废。
         if "export_dir" in data and "output_dir" not in data:
             data["output_dir"] = data.pop("export_dir")
 

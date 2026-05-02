@@ -53,8 +53,8 @@ if __package__ in {None, ""}:
     )
     from anymani.assets.validator.hand_rules import HandValidatorCfg
 else:
-    from .hand_generator import HandGenerationResult, HandGenerator, HandGeneratorCfg
-    from .mutate import (
+    from ..generator.hand_generator import HandGenerationResult, HandGenerator, HandGeneratorCfg
+    from ..generator.mutate import (
         HandMutatorCfg,
         LimitTweakCfg,
         LinkScaleCfg,

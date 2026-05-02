@@ -491,7 +491,7 @@ class HandGenerator:
 
             run_root.mkdir(parents=True, exist_ok=False)
 
-        from ..tool.recipe_loader import RecipeLoader
+        from ..scripts.recipe_loader import RecipeLoader
 
         pre_made_enabled = self.cfg.mode in {"made", "full"}
         post_mutate_enabled = self.cfg.mode in {"mutate", "full"} and _has_enabled_mutation(self.cfg.Mutate)
