@@ -673,7 +673,7 @@ class HandGenerator:
         这里刻意采用“两层语义分离”：
 
         - 合法 recipe 在 `assets/presets/connectivity_presets.py`
-        - 真正执行删除/重连的 runtime 在 `mutate/joint_delete.py`
+        - 真正执行删除/重连的 runtime 在 `generator/_connectivity_lowering.py`
 
         也就是说，本函数本质上做的是：
 

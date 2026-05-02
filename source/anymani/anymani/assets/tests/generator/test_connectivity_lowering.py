@@ -1,12 +1,12 @@
-"""`joint_delete` 回归测试。
+r"""pre-made connectivity lowering 回归测试。
 
-这里锁住的是当前 `JointDeleteMutator` 的两类核心语义：
+这里锁住的是当前 `JointDeleteMutator` 作为 connectivity lower 执行器的两类核心语义：
 
 1. 显式删除指定 joint；
 2. 删除后 finger 链重新接通；
 3. `merge` 会把被删 joint 的几何并入上一保留容器；
 4. `drop` 会按“配置项消失后的物理缩短”语义重连 surviving 链；
-5. 这条工具现在主要服务 pre-made connectivity lower，而不是 post-mutate 容器。
+5. 这条工具服务 pre-made connectivity lower，而不是 post-mutate 容器。
 
 # NOTE:
 第 4 条正是这轮新增的关键保护：
@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
-from assets.generator.mutate import JointDeleteCfg, JointDeleteMutator
+from assets.generator._connectivity_lowering import JointDeleteCfg, JointDeleteMutator
 from assets.presets import make_human_like_builder_cfg
 
 

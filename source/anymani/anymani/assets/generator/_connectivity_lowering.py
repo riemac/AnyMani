@@ -1,9 +1,21 @@
-# FIXME: 迁移出去
-r"""关节删除工具：从 finger 运动学链中裁剪 joint，并做合理重连。
+r"""pre-made connectivity lowering：从 finger 运动学链中裁剪 joint 并重连。
 
-这是前后序里拓扑改变最大的操作，也是"从已有手派生新手"的核心路径之一，属于重合区，两个阶段都能调用。
-在图 `资产生产概略.png` 中对应 `pre-made` 的 `joint delete + regroup` 分支；
-在图 `前后序.png` 中明确归属后序，理由是"拓扑裁剪，在 HandCfg 上操作"。
+本模块服务 pre-made 阶段的 `connectivity_preset` lower 路径，而不是
+post-mutate term。它把 registry 中声明的“删哪些 joint / child-link”
+落实到一个已经 build 好的 `HandCfg` 上：
+
+$$
+\text{connectivity preset}
+\xrightarrow{\text{resolve deleted joints}}
+\text{JointDeleteMutator}
+\xrightarrow{\text{drop / merge regroup}}
+\text{new HandCfg}
+$$
+
+# NOTE:
+类名仍保留 `JointDeleteCfg / JointDeleteMutator`，是为了降低迁移风险；
+但架构语义已经从“后变异算子”收敛为“pre-made connectivity lowering
+内部执行器”。
 
 分类说明
 --------
@@ -37,13 +49,12 @@ r"""关节删除工具：从 finger 运动学链中裁剪 joint，并做合理�
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import random
 from typing import Any, Literal
 
-from ...asset_base import AssetCfgBase, HandCfg
-from ...asset_schema_core import CollisionGeometryCfg, InertialCfg, PoseCfg, VisualGeometryCfg
-from ._base import MutatorBase
+from ..asset_base import AssetCfgBase, HandCfg
+from ..asset_schema_core import CollisionGeometryCfg, InertialCfg, PoseCfg, VisualGeometryCfg
 
 
 # ============================================================================
@@ -88,7 +99,7 @@ class JointDeleteCfg(AssetCfgBase):
 # ============================================================================
 
 
-class JointDeleteMutator(MutatorBase):
+class JointDeleteMutator:
     r"""关节删除运行时壳。
 
     负责对已构建好的 `HandCfg` 执行 joint 删除 + 重连，并按 `regroup_strategy`

@@ -4,7 +4,6 @@ r"""手部资产生成器的后序变异工具包。
 
 - ``_base``         → MutatorBase（最小基类协议）
 - ``_distribution`` → ScalarDistributionCfg（独立标量分布描述）
-- ``joint_delete``  → JointDeleteCfg, JointDeleteMutator（关节删除 + 重连）
 - ``link_scale``    → LinkScaleCfg, LinkScaleMutator（连杆长度缩放）
 - ``tip_replace``   → TipReplaceCfg, TipReplaceMutator（指尖几何替换）
 - ``limit_tweak``   → LimitTweakCfg, LimitTweakMutator（关节限位微调）
@@ -14,7 +13,6 @@ r"""手部资产生成器的后序变异工具包。
 
 from ._base import MutatorBase
 from ._distribution import ScalarDistributionCfg, sample_scalar_distribution
-from .joint_delete import JointDeleteCfg, JointDeleteMutator
 from .limit_tweak import LimitTweakCfg, LimitTweakMutator
 from .link_scale import LinkScaleCfg, LinkScaleMutator
 from .mount_perturb import MountPerturbCfg, MountPerturbMutator
@@ -30,9 +28,6 @@ __all__ = [
     "MutatorTerm",
     "HandMutatorCfg",
     "HandMutator",
-    # 结构类
-    "JointDeleteCfg",
-    "JointDeleteMutator",
     # 几何类
     "TipReplaceCfg",
     "TipReplaceMutator",

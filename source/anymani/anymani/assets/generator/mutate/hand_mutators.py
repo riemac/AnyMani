@@ -4,7 +4,6 @@ r"""向后兼容的 re-export 桩（已拆分到各独立模块）。
 
 - ``.pipeline``       → HandMutatorCfg, HandMutator
 - ``._distribution``  → ScalarDistributionCfg
-- ``.joint_delete``   → JointDeleteCfg, JointDeleteMutator
 - ``.mount_perturb``  → MountPerturbCfg, MountPerturbMutator
 - ``.link_scale``     → LinkScaleCfg, LinkScaleMutator
 - ``.tip_replace``    → TipReplaceCfg, TipReplaceMutator
@@ -14,7 +13,6 @@ r"""向后兼容的 re-export 桩（已拆分到各独立模块）。
 """
 
 from ._distribution import ScalarDistributionCfg
-from .joint_delete import JointDeleteCfg, JointDeleteMutator
 from .limit_tweak import LimitTweakCfg, LimitTweakMutator
 from .link_scale import LinkScaleCfg, LinkScaleMutator
 from .mount_perturb import MountPerturbCfg, MountPerturbMutator
@@ -26,8 +24,6 @@ __all__ = [
     "MutatorTerm",
     "HandMutatorCfg",
     "HandMutator",
-    "JointDeleteCfg",
-    "JointDeleteMutator",
     "MountPerturbCfg",
     "MountPerturbMutator",
     "LinkScaleCfg",

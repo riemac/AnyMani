@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.builder.joint_builders_primitive import PrimJointBuilderCfg
-from assets.generator.mutate import JointDeleteCfg, JointDeleteMutator
+from assets.generator._connectivity_lowering import JointDeleteCfg, JointDeleteMutator
 from assets.presets import get_finger_builder_preset, make_human_like_builder_cfg
 from assets.validator.finger_rules import FingerValidator, FingerValidatorCfg
 from assets.validator.hand_rules import HandValidator, HandValidatorCfg

@@ -904,8 +904,8 @@ def apply_connectivity_preset(
     2. new slot-level selection，例如 `thumb-full__index-drop_j3__middle-full__ring-full`
     """
 
-    # 局部导入 `JointDeleteMutator`，保留当前 generator 主路径的 fallback import 习惯。
-    from .mutate import JointDeleteCfg, JointDeleteMutator
+    # 局部导入 connectivity lowering 执行器，避免把 pre-made topology 裁剪误暴露为 post-mutate term。
+    from ._connectivity_lowering import JointDeleteCfg, JointDeleteMutator
 
     mutated = hand_cfg.copy()
     topology_metadata = _extract_premade_topology_metadata(mutated, hand_preset_name=hand_preset_name)
