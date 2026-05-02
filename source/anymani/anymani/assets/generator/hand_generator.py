@@ -567,8 +567,6 @@ class HandGenerator:
         r"""把一次被拒绝的样本尝试写入 run summary。"""
 
         self._last_rejection_stage = stage
-        if not write_summary:
-            return
 
         _, summary = self._ensure_run_context()
         stats = summary["stats"]
@@ -577,14 +575,13 @@ class HandGenerator:
         rejected_by_stage = dict(stats.get("rejected_by_stage") or {})
         rejected_by_stage[stage] = int(rejected_by_stage.get(stage, 0)) + 1
         stats["rejected_by_stage"] = rejected_by_stage
-        self._write_run_summary()
+        if write_summary:
+            self._write_run_summary()
 
     def _record_generation_success(self, result: HandGenerationResult, *, write_summary: bool = True) -> None:
         r"""把一次成功样本写入 run summary。"""
 
         self._last_rejection_stage = None
-        if not write_summary:
-            return
 
         _, summary = self._ensure_run_context()
         stats = summary["stats"]
@@ -595,7 +592,8 @@ class HandGenerator:
         by_topology = dict(stats.get("by_topology") or {})
         by_topology[topology_key] = int(by_topology.get(topology_key, 0)) + 1
         stats["by_topology"] = by_topology
-        self._write_run_summary()
+        if write_summary:
+            self._write_run_summary()
 
     def _candidate_hand_preset_names(self) -> tuple[str, ...]:
         r"""返回当前 generator 可见的 premade topology registry key 集合。
@@ -948,9 +946,12 @@ class HandGenerator:
         """
 
         if worker_result.result is not None:
-            self._record_generation_success(worker_result.result)
+            self._record_generation_success(worker_result.result, write_summary=False)
             return worker_result.result
-        self._record_generation_rejection(stage=worker_result.rejection_stage or "premade_worker_rejected")
+        self._record_generation_rejection(
+            stage=worker_result.rejection_stage or "premade_worker_rejected",
+            write_summary=False,
+        )
         return None
 
     def _generate_premade_serial(self, *, tasks: list[_PremadeTask]) -> list[HandGenerationResult]:
@@ -993,27 +994,43 @@ class HandGenerator:
 
         run_root, _ = self._ensure_run_context()
         success_limit = self.cfg.max_enumerate
-        scheduled_tasks = tasks if success_limit is None else tasks[:success_limit]
-        worker_count = self._premade_parallel_worker_count(task_count=len(scheduled_tasks))
+        worker_count = self._premade_parallel_worker_count(task_count=len(tasks))
         if worker_count <= 1:
-            return self._generate_premade_serial(tasks=scheduled_tasks)
-
-        indexed_results: list[tuple[int, _PremadeWorkerResult]] = []
-        with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            future_to_index = {
-                executor.submit(_generate_premade_worker, self.cfg, run_root, task): index
-                for index, task in enumerate(scheduled_tasks)
-            }
-            for future in as_completed(future_to_index):
-                indexed_results.append((future_to_index[future], future.result()))
+            return self._generate_premade_serial(tasks=tasks)
 
         ordered_results: list[HandGenerationResult] = []
-        for _, worker_result in sorted(indexed_results, key=lambda item: item[0]):
-            if success_limit is not None and len(ordered_results) >= success_limit:
-                break
-            result = self._record_premade_worker_result(worker_result)
-            if result is not None:
-                ordered_results.append(result)
+        task_cursor = 0
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            while task_cursor < len(tasks):
+                if success_limit is None:
+                    batch_size = len(tasks) - task_cursor
+                else:
+                    remaining_success = success_limit - len(ordered_results)
+                    if remaining_success <= 0:
+                        break
+                    # `max_enumerate` 的语义是“成功产物数上限”。因此并行路径按缺口提交：
+                    # 先提交缺口数量的候选；若 validator 拒绝了一部分，再继续补同等缺口。
+                    # 这避免 smoke test 为了拿 512 个成功样本而提前跑完整 5788 个候选。
+                    batch_size = min(len(tasks) - task_cursor, max(remaining_success, worker_count))
+
+                batch_tasks = tasks[task_cursor : task_cursor + batch_size]
+                task_cursor += batch_size
+
+                indexed_results: list[tuple[int, _PremadeWorkerResult]] = []
+                future_to_index = {
+                    executor.submit(_generate_premade_worker, self.cfg, run_root, task): index
+                    for index, task in enumerate(batch_tasks)
+                }
+                for future in as_completed(future_to_index):
+                    indexed_results.append((future_to_index[future], future.result()))
+
+                for _, worker_result in sorted(indexed_results, key=lambda item: item[0]):
+                    if success_limit is not None and len(ordered_results) >= success_limit:
+                        break
+                    result = self._record_premade_worker_result(worker_result)
+                    if result is not None:
+                        ordered_results.append(result)
+        self._write_run_summary()
         return ordered_results
 
     def generate_batch(self) -> Iterator[HandGenerationResult]:
