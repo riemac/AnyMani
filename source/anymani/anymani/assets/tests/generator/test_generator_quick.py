@@ -61,6 +61,9 @@ def test_quick_run_cfg_is_direct_hand_generator_cfg():
 
     assert isinstance(quick_module.RUN_CFG, HandGeneratorCfg)
     assert isinstance(quick_module.RUN_CFG.Validate, HandValidatorCfg)
+    assert quick_module.RUN_CFG.recolored == "anatomy_soft_v1"
+    assert quick_module.RUN_CFG.premade_parallel is True
+    assert quick_module.RUN_CFG.premade_parallel_fallback == "serial"
     assert quick_module.RUN_CFG.Validate.pre_made.finger_count_min == 3
     assert quick_module.RUN_CFG.Validate.pre_made.require_non_thumb_with_min_revolute_dof == 3
     assert quick_module.RUN_CFG.Validate.pre_made.check_palm_thumb_binding is True

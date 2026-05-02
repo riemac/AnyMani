@@ -94,29 +94,6 @@ RecolorFacade = str | dict[str, tuple[float, float, float, float]] | bool | None
 #  用户可编辑区
 # ============================================================================
 
-
-# NOTE:
-# 这里故意不用 `QuickRunCfg` 之类的额外包装层，而是把你最常改的字段直接摊成顶部常量。
-# 真正的运行配置仍然只有一个：下面的 `RUN_CFG: HandGeneratorCfg`。
-#
-# `CONNECTIVITY_PRESETS` 这里填的**不是** `connectivity_presets.py` 里的
-# `HandConnectivityPreset` 整手 alias（例如 `allegro_full` / `leap_t3_i3_m2_r2`），
-# 而是更底层、真正参与 slot-level lower 的 `FingerConnectivityPreset.name`：
-#
-# - `allegro_thumb_full`
-# - `allegro_non_thumb_full`
-# - `leap_thumb_full`
-# - `leap_non_thumb_full`
-#
-# 也就是说，这里的科研语义是：
-#
-# - 先指定 base hand：`single_palm_allegro` / `single_palm_leap`
-# - 再指定这个 hand 的每个 slot 允许枚举哪些已注册 finger connectivity recipe
-#
-# 若你想从旧的 hand-level alias 出发，应先把它手动展开成：
-# `hand_preset -> {slot -> [finger_connectivity_preset_name, ...]}`
-# 再填到这里。
-
 HAND_PRESETS: list[str] = ["single_palm_allegro", "single_palm_leap"]  # 当前纳入 pre-made 枚举的 canonical palm anchor
 # CONNECTIVITY_PRESETS: ConnectivityFacade = {
 #     "single_palm_allegro": {
@@ -136,7 +113,7 @@ CONNECTIVITY_PRESETS = None  # `None` = 自动展开 registry 里所有合法 sl
 HANDEDNESS: Literal["left", "right", "all"] = "all"  # `all` = 同时生成左右手；后续目录命名会显式带 `left_` / `right_`
 MIXED = True  # 是否把 mixed-family topology 纳入 pre-made 主线
 MISSING = True  # 是否把“缺失一根 non-thumb”的 topology 也纳入 pre-made 主线
-RECOLORED: RecolorFacade = "anatomy_v1"  # URDF visual recolor façade；默认直接打开 anatomy palette
+RECOLORED: RecolorFacade = "anatomy_soft_v1"  # URDF visual recolor façade；默认使用低饱和 anatomy palette，避免 RGB 原色过艳
 MAX_ENUMERATE: int | None = None  # `None` = 真正跑完整合法空间；小整数 = 先做 smoke-test / 局部巡检
 ARTIFACT_LEVEL: Literal["hand_cfg", "urdf", "bundle"] = "bundle"  # quick façade 默认直接导出完整 bundle 便于人工巡检
 OUTPUT_LAYOUT: Literal["flat", "recursive"] = "recursive"  # mixed / missing / connectivity 回溯时，递归布局更适合人工浏览
@@ -148,6 +125,9 @@ PRE_MADE_VALIDATOR_CFG: HandValidatorCfg | None = HandValidatorCfg(
         check_palm_thumb_binding=True,  # mixed 时 thumb family 必须与 palm family 绑定
     )
 )  # 显式写 `None` = 本次 quick 运行完全禁用 hand-level validator
+PREMADE_PARALLEL = True  # pre-made 默认样本级并行：每个 worker 独立 build / validate / export
+PREMADE_PARALLEL_WORKERS: int | None = None  # `None` = 按 CPU 自动推断；小整数可用于限制本机负载
+PREMADE_PARALLEL_FALLBACK: Literal["serial", "raise"] = "serial"  # 并行环境异常时默认回退串行，优先保证科研产物落盘
 _SHOW_REGISTRY = True  # 是否在真正生成前先打印 connectivity registry 摘要
 _PRINT_RESULT_LIMIT: int | None = 40  # 终端最多 preview 多少条结果；`0` = 只看 summary，`None` = 打印全部
 
@@ -167,6 +147,9 @@ RUN_CFG = HandGeneratorCfg(
     recolored=RECOLORED,  # visual recolor façade，透传给正式 generator/exporter
     output_layout=OUTPUT_LAYOUT,  # recursive / flat
     max_enumerate=MAX_ENUMERATE,  # 若不为 None，则用于快速 smoke-test
+    premade_parallel=PREMADE_PARALLEL,  # pre-made 样本级并行开关；默认开启
+    premade_parallel_workers=PREMADE_PARALLEL_WORKERS,  # 并行 worker 数；None 表示自动推断
+    premade_parallel_fallback=PREMADE_PARALLEL_FALLBACK,  # 并行失败时的回退策略
 )
 
 
@@ -201,6 +184,9 @@ def print_registry_summary(run_cfg: HandGeneratorCfg) -> None:
     print(f"output_layout    = {run_cfg.output_layout}")  # recursive / flat
     print(f"output_dir       = {run_cfg.output_dir}")  # 导出根目录
     print(f"max_enumerate    = {run_cfg.max_enumerate}")  # 若非 None，则是 smoke-test 上限
+    print(f"premade_parallel = {run_cfg.premade_parallel}")  # 是否启用样本级并行
+    print(f"parallel_workers = {run_cfg.premade_parallel_workers}")  # None 表示 generator 自动推断
+    print(f"parallel_fallback= {run_cfg.premade_parallel_fallback}")  # 并行异常时 serial / raise
     print(f"connectivity_cfg = {run_cfg.connectivity_presets}")  # `None` 表示自动展开全部合法 slot-level recipe
     print(f"validator_on     = {run_cfg.Validate is not None}")  # 让研究者一眼看出 hand-level validator 是否启用
     if run_cfg.Validate is not None:

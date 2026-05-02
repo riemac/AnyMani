@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+import yaml
 
+import assets.generator.hand_generator as hand_generator_module
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.exporter.urdf_writer import UrdfWriter, UrdfWriterCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
@@ -148,3 +150,96 @@ def test_hand_generator_can_explicitly_skip_hand_level_validator(tmp_path):
     assert validated_result is None
     assert skipped_result is not None
     assert skipped_result.hand_cfg is not None
+
+
+def _single_family_full_pool(hand_preset: str, family: str) -> dict[str, dict[str, list[str]]]:
+    r"""构造一份单 topology 的 full-chain connectivity pool。
+
+    这个小 helper 用于把并行测试的变量压到最低：
+
+    - 只测 generator 的任务级并行；
+    - 不把 mixed / missing / connectivity registry 全空间也卷进来。
+    """
+
+    thumb_recipe = f"{family}_thumb_full"  # thumb 与 palm family 绑定，避免 validator 因 family 错配拒绝
+    non_thumb_recipe = f"{family}_non_thumb_full"  # non-thumb 保持完整三指，形成一个稳定合法样本
+    return {
+        hand_preset: {
+            "thumb": [thumb_recipe],
+            "index": [non_thumb_recipe],
+            "middle": [non_thumb_recipe],
+            "ring": [non_thumb_recipe],
+        }
+    }
+
+
+def test_premade_generate_batch_parallelizes_sample_level_and_main_process_writes_summary(tmp_path):
+    r"""pre-made 默认并行应保持“worker 产样本、主进程写 summary”的边界。
+
+    这里锁住的不是绝对速度，而是并行语义：
+
+    - worker 可以独立完成 build / validator / export；
+    - run-level `summary.yaml` 只能由主进程汇总写出；
+    - 成功数、attempted 数与产物数一致。
+    """
+
+    cfg = HandGeneratorCfg(
+        mode="made",
+        artifact_level="bundle",
+        output_dir=tmp_path,
+        handedness="all",
+        hand_presets=["single_palm_leap"],
+        connectivity_presets=_single_family_full_pool("single_palm_leap", "leap"),
+        mixed=False,
+        missing=False,
+        max_enumerate=2,
+        premade_parallel=True,
+        premade_parallel_workers=2,
+    )
+
+    results = list(HandGenerator(cfg).generate_batch())
+
+    assert len(results) == 2
+    assert all(result.urdf_path is not None and result.urdf_path.is_file() for result in results)
+    summary_paths = list(tmp_path.glob("*/summary.yaml"))
+    assert len(summary_paths) == 1
+    summary = yaml.safe_load(summary_paths[0].read_text(encoding="utf-8"))
+    assert summary["stats"]["attempted"] == 2
+    assert summary["stats"]["succeeded"] == 2
+    assert summary["stats"]["rejected"] == 0
+
+
+def test_premade_parallel_failure_falls_back_to_serial(monkeypatch, tmp_path):
+    r"""进程池路径异常时，generator 应回退到原串行枚举。
+
+    这个测试模拟的是 worker / pickle / executor 环境失败，而不是样本本身非法。
+    样本非法应由 validator 记录拒绝；并行基础设施失败才触发 serial fallback。
+    """
+
+    def _raise_parallel_failure(self, *, tasks):
+        raise RuntimeError("synthetic parallel executor failure")
+
+    monkeypatch.setattr(hand_generator_module.HandGenerator, "_generate_premade_parallel", _raise_parallel_failure)
+
+    cfg = HandGeneratorCfg(
+        mode="made",
+        artifact_level="hand_cfg",
+        output_dir=tmp_path,
+        handedness="right",
+        hand_presets=["single_palm_allegro"],
+        connectivity_presets=_single_family_full_pool("single_palm_allegro", "allegro"),
+        mixed=False,
+        missing=False,
+        max_enumerate=1,
+        premade_parallel=True,
+        premade_parallel_fallback="serial",
+    )
+
+    results = list(HandGenerator(cfg).generate_batch())
+
+    assert len(results) == 1
+    summary_paths = list(tmp_path.glob("*/summary.yaml"))
+    assert len(summary_paths) == 1
+    summary = yaml.safe_load(summary_paths[0].read_text(encoding="utf-8"))
+    assert summary["stats"]["attempted"] == 1
+    assert summary["stats"]["succeeded"] == 1

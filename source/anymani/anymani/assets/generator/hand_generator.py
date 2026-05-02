@@ -33,8 +33,10 @@ r"""手部资产生成器主入口草案。
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any, Iterator, Literal
 from uuid import uuid4
@@ -113,6 +115,77 @@ def _sample_mutation_terms(mutator: HandMutator, target: HandCfg) -> dict[str, d
     return sampled_terms
 
 
+@dataclass(frozen=True)
+class _PremadeTask:
+    r"""一个可独立并行执行的 pre-made 离散样本任务。
+
+    pre-made 的第一性原理是离散组合枚举，而不是连续参数采样：
+
+    $$
+    \mathcal{D}_{\text{pre}} =
+    \{(\text{topology}_i,\ \text{connectivity}_j)\}
+    $$
+
+    因而每个元素天然互不依赖，可以交给一个 worker 完整执行
+    `build -> validate -> export`。这就是工程上的 task/data parallelism，
+    不是把单个 hand 内部的 validator 规则拆碎并行。
+    """
+
+    hand_preset_name: str
+    """内部 premade topology registry key。"""
+
+    connectivity_preset_name: str
+    """当前 topology 下的 connectivity selection 名。"""
+
+    enumerated: bool
+    """是否使用稳定 sample id；纯 pre-made 枚举应为 True。"""
+
+
+@dataclass
+class _PremadeWorkerResult:
+    r"""worker 返回给主进程的最小结果包。
+
+    worker 可以写 URDF / sidecar / tree，但不能写 run-level `summary.yaml`。
+    summary 是全局统计文件，必须由主进程单点串行维护，否则并行写 YAML 会产生
+    竞争条件，也会让拒绝统计难以复现。
+    """
+
+    result: HandGenerationResult | None
+    """成功时返回完整生成结果；失败/拒绝时为 None。"""
+
+    rejection_stage: str | None = None
+    """validator / mutate 拒绝阶段；成功时为 None。"""
+
+
+def _generate_premade_worker(
+    cfg: "HandGeneratorCfg",
+    run_root: Path | str,
+    task: _PremadeTask,
+) -> _PremadeWorkerResult:
+    r"""在独立 worker 中执行一个 pre-made 样本任务。
+
+    Args:
+        cfg (HandGeneratorCfg): 主进程传入的生成配置快照。
+        run_root (Path | str): 主进程已经创建好的 run 根目录。
+        task (_PremadeTask): 当前离散 topology/connectivity 样本。
+
+    Returns:
+        _PremadeWorkerResult: 成功结果或拒绝阶段。
+    """
+
+    worker_generator = HandGenerator(cfg)  # worker 内部独立持有 runtime façade，避免共享可变状态
+    worker_generator._run_root = Path(run_root)  # 导出目录必须与主 run 对齐
+    worker_generator._run_summary = {"stats": {"by_topology": {}}}  # 占位 summary；worker 不会写全局 YAML
+    worker_generator._last_rejection_stage = None  # 记录本样本被哪个阶段拒绝，供主进程汇总
+    result = worker_generator._generate_once(
+        hand_preset_name=task.hand_preset_name,
+        connectivity_preset_name=task.connectivity_preset_name,
+        enumerated=task.enumerated,
+        record_summary=False,
+    )
+    return _PremadeWorkerResult(result=result, rejection_stage=worker_generator._last_rejection_stage)
+
+
 # ============================================================================
 #  生成器配置
 # ============================================================================
@@ -169,6 +242,35 @@ class HandGeneratorCfg(AssetCfgBase):
 
     max_enumerate: int | None = None
     """pre-made 笛卡尔展开的最大产物数上限；为 ``None`` 时不截断。"""
+
+    premade_parallel: bool = True
+    """是否默认对 pre-made 离散样本启用样本级并行。
+
+    这里的“并行”特指 task/data parallelism：
+
+    - 一个 worker 负责一个 `(topology, connectivity)` 样本；
+    - worker 内部顺序完成 `build -> pre-made validator -> export`；
+    - 主进程只做任务分发与 `summary.yaml` 汇总。
+
+    # NOTE:
+    这不是 GPU 并行。pre-made 主耗时来自 Python 对象构建、离散规则检查和文件写出，
+    并不是可以一次性搬到 CUDA 上的连续张量计算；GPU 更适合 post-mutate 的联合
+    Monte Carlo 参数采样。
+    """
+
+    premade_parallel_workers: int | None = None
+    """pre-made 样本级并行 worker 数。
+
+    为 ``None`` 时按 CPU 数自动推断，但会保留一个核心给系统/交互环境，避免全量生成时
+    把本机完全打满导致 IDE 或仿真环境卡死。
+    """
+
+    premade_parallel_fallback: Literal["serial", "raise"] = "serial"
+    """pre-made 并行路径失败时的处理策略。
+
+    - ``"serial"``：回退到原串行枚举路径，优先保证科研流程能产出；
+    - ``"raise"``：直接抛出并行异常，便于专门排查 worker / pickle / 导出错误。
+    """
 
     post_mutate_max_attempt_factor: int = 10
     """post-mutate validator 补采预算系数。
@@ -313,6 +415,10 @@ class HandGeneratorCfg(AssetCfgBase):
         self.hand_presets = normalize_name_list(self.hand_presets, field_name="hand_presets")
         self.connectivity_presets = normalize_connectivity_mapping(self.connectivity_presets)
         self.recolored = normalize_recolor_spec(self.recolored)
+        if self.premade_parallel_workers is not None and self.premade_parallel_workers < 1:
+            raise ValueError("premade_parallel_workers must be >= 1 when provided")
+        if self.premade_parallel_fallback not in {"serial", "raise"}:
+            raise ValueError("premade_parallel_fallback must be either 'serial' or 'raise'")
 
         # pre-made façade 一旦显式给出 `connectivity_presets`，就必须同时给出 hand preset 列表；
         # 否则运行时连“这张映射是给谁的”都无法确定。
@@ -354,6 +460,7 @@ class HandGenerator:
         self._run_root: Path | None = None
         self._run_summary: dict[str, Any] | None = None
         self._mutate_source: PostMutateSource | None = None
+        self._last_rejection_stage: str | None = None
 
     def _ensure_run_context(self) -> tuple[Path, dict[str, Any]]:
         r"""为当前 generator 实例懒创建一次 run 根目录与 summary 文档。
@@ -456,8 +563,12 @@ class HandGenerator:
             return f"mixed/{topology_group_name}/{topology_name}"
         return f"{topology_group_name}/{topology_name}"
 
-    def _record_generation_rejection(self, *, stage: str) -> None:
+    def _record_generation_rejection(self, *, stage: str, write_summary: bool = True) -> None:
         r"""把一次被拒绝的样本尝试写入 run summary。"""
+
+        self._last_rejection_stage = stage
+        if not write_summary:
+            return
 
         _, summary = self._ensure_run_context()
         stats = summary["stats"]
@@ -468,8 +579,12 @@ class HandGenerator:
         stats["rejected_by_stage"] = rejected_by_stage
         self._write_run_summary()
 
-    def _record_generation_success(self, result: HandGenerationResult) -> None:
+    def _record_generation_success(self, result: HandGenerationResult, *, write_summary: bool = True) -> None:
         r"""把一次成功样本写入 run summary。"""
+
+        self._last_rejection_stage = None
+        if not write_summary:
+            return
 
         _, summary = self._ensure_run_context()
         stats = summary["stats"]
@@ -605,6 +720,7 @@ class HandGenerator:
         connectivity_preset_name: str | None,
         enumerated: bool = False,
         sampled_mutation_terms: dict[str, dict[str, float]] | None = None,
+        record_summary: bool = True,
     ) -> HandGenerationResult | None:
         r"""执行一次单样本生成；供 `generate()` 与 `generate_batch()` 共同复用。
 
@@ -644,7 +760,7 @@ class HandGenerator:
             if validator is not None:
                 pre_made_validation = validator.validate_pre_made(hand_cfg)
                 if not pre_made_validation:
-                    self._record_generation_rejection(stage="pre_made_validate")
+                    self._record_generation_rejection(stage="pre_made_validate", write_summary=record_summary)
                     return None  # pre-made 结构闸门拒绝后，不再允许继续进入 mutate / export
                 validation_warnings.extend(pre_made_validation.warnings)
         sampled_terms: dict[str, dict[str, float]] | None = None
@@ -658,12 +774,12 @@ class HandGenerator:
             sampled_terms = sampled_mutation_terms or _sample_mutation_terms(mutator, hand_cfg)
             hand_cfg = mutator.mutate(hand_cfg, sampled_params=sampled_terms)
             if hand_cfg is None:
-                self._record_generation_rejection(stage="mutate")
+                self._record_generation_rejection(stage="mutate", write_summary=record_summary)
                 return None  # 变异被拒绝；拒绝语义统一表现为“本次样本无结果”
             if validator is not None:
                 post_mutate_validation = validator.validate_post_mutate(hand_cfg)
                 if not post_mutate_validation:
-                    self._record_generation_rejection(stage="post_mutate_validate")
+                    self._record_generation_rejection(stage="post_mutate_validate", write_summary=record_summary)
                     return None
                 validation_warnings.extend(post_mutate_validation.warnings)
 
@@ -707,7 +823,7 @@ class HandGenerator:
             exporter = HandExporter(export_cfg)  # 导出器负责 URDF / sidecar / tree 文件
             exporter.export(result, output_dir=self._resolve_export_root(result=result))  # 目录布局仍由 HandGenerator façade 决定
 
-        self._record_generation_success(result)
+        self._record_generation_success(result, write_summary=record_summary)
         return result
 
     def generate(self) -> HandGenerationResult | None:
@@ -770,6 +886,136 @@ class HandGenerator:
             return self._generate_once(hand_preset_name=None, connectivity_preset_name=None)
         return self._generate_once(hand_preset_name=selection[0], connectivity_preset_name=selection[1])
 
+    def _premade_tasks(self, *, mutate_samples_per_topology: int) -> list[_PremadeTask]:
+        r"""把 pre-made 离散空间展开成可调度任务列表。
+
+        这里不做任何 build / validate / export，只把组合空间写成显式任务：
+
+        $$
+        \mathcal{T} =
+        \{(h_i,\ c_j,\ k)\mid h_i\in\mathcal{H}, c_j\in\mathcal{C}(h_i)\}
+        $$
+
+        Args:
+            mutate_samples_per_topology (int): 每个 topology/connectivity 基座需要派生的样本数。
+
+        Returns:
+            list[_PremadeTask]: 按原串行枚举顺序排列的任务表。
+        """
+
+        tasks: list[_PremadeTask] = []
+        for hand_preset_name in self._candidate_hand_preset_names():
+            connectivity_names = self._connectivity_names_for_hand_preset(hand_preset_name=hand_preset_name)
+            for connectivity_preset_name in connectivity_names:
+                for _ in range(mutate_samples_per_topology):
+                    tasks.append(
+                        _PremadeTask(
+                            hand_preset_name=hand_preset_name,
+                            connectivity_preset_name=connectivity_preset_name,
+                            enumerated=mutate_samples_per_topology == 1,
+                        )
+                    )
+        return tasks
+
+    def _premade_parallel_worker_count(self, *, task_count: int) -> int:
+        r"""计算 pre-made 样本级并行 worker 数。
+
+        worker 数本质上是吞吐和交互性的折中：
+
+        - 太少：无法覆盖 build / validate / export 的 CPU 等待时间；
+        - 太多：文件系统写入和 Python 进程调度会开始互相争抢。
+
+        Returns:
+            int: 至少为 1、至多为任务数的 worker 数。
+        """
+
+        if task_count <= 0:
+            return 1
+        if self.cfg.premade_parallel_workers is not None:
+            return max(1, min(int(self.cfg.premade_parallel_workers), task_count))
+        cpu_count = os.cpu_count() or 2
+        inferred_workers = max(cpu_count - 1, 1)  # 留一个核心给 IDE / shell / 仿真环境，避免全机无响应
+        return max(1, min(inferred_workers, task_count))
+
+    def _record_premade_worker_result(self, worker_result: _PremadeWorkerResult) -> HandGenerationResult | None:
+        r"""把 worker 返回值并入主进程 summary，并返回可 yield 的成功结果。
+
+        Args:
+            worker_result (_PremadeWorkerResult): worker 侧成功结果或拒绝阶段。
+
+        Returns:
+            HandGenerationResult | None: 成功样本返回结果；拒绝样本返回 None。
+        """
+
+        if worker_result.result is not None:
+            self._record_generation_success(worker_result.result)
+            return worker_result.result
+        self._record_generation_rejection(stage=worker_result.rejection_stage or "premade_worker_rejected")
+        return None
+
+    def _generate_premade_serial(self, *, tasks: list[_PremadeTask]) -> list[HandGenerationResult]:
+        r"""沿用原有串行路径执行 pre-made 任务表。
+
+        这条路径承担两个职责：
+
+        1. 用户显式关闭 `premade_parallel` 时的确定性基线；
+        2. 进程池 / pickle / worker 环境异常时的 fallback。
+        """
+
+        results: list[HandGenerationResult] = []
+        success_limit = self.cfg.max_enumerate
+        for task in tasks:
+            if success_limit is not None and len(results) >= success_limit:
+                break
+            result = self._generate_once(
+                hand_preset_name=task.hand_preset_name,
+                connectivity_preset_name=task.connectivity_preset_name,
+                enumerated=task.enumerated,
+            )
+            if result is not None:
+                results.append(result)
+        return results
+
+    def _generate_premade_parallel(self, *, tasks: list[_PremadeTask]) -> list[HandGenerationResult]:
+        r"""用进程池执行 pre-made 样本级并行。
+
+        worker 粒度是一个完整样本，而不是 validator 的单条规则：
+
+        - worker 内：`build -> pre-made validator -> export`
+        - 主进程：按原任务顺序汇总 success / rejection 到 `summary.yaml`
+
+        这样可以最大化复用现有单样本语义，同时避免引入 producer-consumer pipeline
+        所需的跨阶段队列、回滚协议和 summary 竞争。
+        """
+
+        if not tasks:
+            return []
+
+        run_root, _ = self._ensure_run_context()
+        success_limit = self.cfg.max_enumerate
+        scheduled_tasks = tasks if success_limit is None else tasks[:success_limit]
+        worker_count = self._premade_parallel_worker_count(task_count=len(scheduled_tasks))
+        if worker_count <= 1:
+            return self._generate_premade_serial(tasks=scheduled_tasks)
+
+        indexed_results: list[tuple[int, _PremadeWorkerResult]] = []
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            future_to_index = {
+                executor.submit(_generate_premade_worker, self.cfg, run_root, task): index
+                for index, task in enumerate(scheduled_tasks)
+            }
+            for future in as_completed(future_to_index):
+                indexed_results.append((future_to_index[future], future.result()))
+
+        ordered_results: list[HandGenerationResult] = []
+        for _, worker_result in sorted(indexed_results, key=lambda item: item[0]):
+            if success_limit is not None and len(ordered_results) >= success_limit:
+                break
+            result = self._record_premade_worker_result(worker_result)
+            if result is not None:
+                ordered_results.append(result)
+        return ordered_results
+
     def generate_batch(self) -> Iterator[HandGenerationResult]:
         r"""批量生成整手资产。
 
@@ -831,29 +1077,28 @@ class HandGenerator:
 
         hand_preset_names = self._candidate_hand_preset_names()
         if hand_preset_names:
-            emitted = 0
-            max_enumerate = self.cfg.max_enumerate
             mutate_samples_per_topology = (
                 max(int(self.cfg.n_samples), 0)
                 if self.cfg.mode == "full" and _has_enabled_mutation(self.cfg.Mutate)
                 else 1
             )
+            tasks = self._premade_tasks(mutate_samples_per_topology=mutate_samples_per_topology)
 
-            for hand_preset_name in hand_preset_names:
-                connectivity_names = self._connectivity_names_for_hand_preset(hand_preset_name=hand_preset_name)
-                for connectivity_preset_name in connectivity_names:
-                    for _ in range(mutate_samples_per_topology):
-                        if max_enumerate is not None and emitted >= max_enumerate:
-                            return
-                        result = self._generate_once(
-                            hand_preset_name=hand_preset_name,
-                            connectivity_preset_name=connectivity_preset_name,
-                            enumerated=mutate_samples_per_topology == 1,
-                        )
-                        if result is None:
-                            continue
-                        yield result
-                        emitted += 1
+            # pre-made 的默认并行只覆盖纯 `mode="made"` 枚举。
+            # `mode="full"` 还会叠加 post-mutate 随机采样与拒绝补采，先保留串行路径，
+            # 避免把两类完全不同的并行语义揉在同一个控制流里。
+            if self.cfg.mode == "made" and self.cfg.premade_parallel:
+                try:
+                    results = self._generate_premade_parallel(tasks=tasks)
+                except Exception:
+                    if self.cfg.premade_parallel_fallback == "raise":
+                        raise
+                    results = self._generate_premade_serial(tasks=tasks)
+            else:
+                results = self._generate_premade_serial(tasks=tasks)
+
+            for result in results:
+                yield result
             return
 
         target_count = max(int(self.cfg.n_samples), 0)

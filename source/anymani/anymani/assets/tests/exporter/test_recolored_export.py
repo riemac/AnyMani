@@ -66,6 +66,12 @@ def _collision_material_count(urdf_path: Path) -> int:
     )
 
 
+def _rgba_string_to_tuple(rgba: str) -> tuple[float, float, float, float]:
+    r"""把 URDF color 字符串转回浮点 tuple，避免测试被格式化精度绑死。"""
+
+    return tuple(float(value) for value in rgba.split())  # type: ignore[return-value]
+
+
 def test_named_recolored_palette_injects_visual_materials_and_colors_leap_root_fixed(tmp_path):
     r"""命名 palette 应按 anatomy 语义落到 visual 上。"""
 
@@ -121,3 +127,41 @@ def test_recolored_dict_only_overrides_requested_visual_link(tmp_path):
     assert sidecar["hand_cfg"]["family"] == "allegro"
     assert sidecar["hand_cfg"]["fingers"]
     assert _collision_material_count(result.urdf_path) == 0
+
+
+def test_soft_recolored_palette_preserves_anatomy_hues_with_lower_saturation(tmp_path):
+    r"""`anatomy_soft_v1` 应保留 anatomy 色相语义，但避免 RGB 原色刺眼。
+
+    这里不测试“审美好坏”，只锁住两个科研可复现事实：
+
+    - palm / root_fixed 仍是红色语义；
+    - mcp1 / cmc2 / pip / dip / tip 仍对应黄 / 青 / 绿 / 蓝 / 紫语义，
+      但数值不再是 `0/1` 饱和原色。
+    """
+
+    result = HandGenerator(
+        HandGeneratorCfg(
+            mode="made",
+            artifact_level="urdf",
+            output_dir=tmp_path,
+            Made=_make_leap_builder_cfg(),
+            recolored="anatomy_soft_v1",
+        )
+    ).generate()
+
+    assert result is not None
+    assert result.urdf_path is not None and result.urdf_path.is_file()
+
+    color_map = _visual_color_map(result.urdf_path)
+    palm_rgba = _rgba_string_to_tuple(color_map["palm"][0])
+    cyan_rgba = _rgba_string_to_tuple(color_map["thumb_cmc2"][0])
+    green_rgba = _rgba_string_to_tuple(color_map["index_pip"][0])
+    blue_rgba = _rgba_string_to_tuple(color_map["index_dip"][0])
+    purple_rgba = _rgba_string_to_tuple(color_map["thumb_tip"][0])
+
+    assert palm_rgba[0] > palm_rgba[1] and palm_rgba[0] > palm_rgba[2]
+    assert cyan_rgba[1] > cyan_rgba[0] and cyan_rgba[2] > cyan_rgba[0]
+    assert green_rgba[1] > green_rgba[0] and green_rgba[1] > green_rgba[2]
+    assert blue_rgba[2] > blue_rgba[0] and blue_rgba[2] > blue_rgba[1]
+    assert purple_rgba[2] > purple_rgba[0] and purple_rgba[0] > purple_rgba[1]
+    assert all(channel < 0.95 for rgba in [palm_rgba, cyan_rgba, green_rgba, blue_rgba, purple_rgba] for channel in rgba[:3])
