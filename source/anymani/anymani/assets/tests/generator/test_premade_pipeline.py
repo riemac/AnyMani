@@ -92,14 +92,22 @@ def test_urdf_writer_serializes_joint_properties_friction_for_leap_profile():
     root = ET.fromstring(writer.to_urdf_string(hand))
     joint_elems = {joint.attrib["name"]: joint for joint in root.findall("joint")}
     index_j0 = joint_elems["index_j0"]
+    index_j1 = joint_elems["index_j1"]
 
     assert index_j0.find("limit").attrib == {
+        "lower": "-0.314",
+        "upper": "2.23",
+        "effort": "0.95",
+        "velocity": "8.48",
+    }
+    assert index_j0.find("joint_properties").attrib == {"friction": "0"}
+    assert index_j1.find("limit").attrib == {
         "lower": "-1.047",
         "upper": "1.047",
         "effort": "0.95",
         "velocity": "8.48",
     }
-    assert index_j0.find("joint_properties").attrib == {"friction": "0"}
+    assert index_j1.find("joint_properties").attrib == {"friction": "0"}
 
 
 def test_urdf_writer_folds_mount_into_first_joint_when_mount_link_disabled():

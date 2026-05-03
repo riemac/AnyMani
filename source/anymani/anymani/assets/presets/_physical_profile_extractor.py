@@ -42,12 +42,17 @@ class ExtractedJointPhysics:
 
 
 _LEAP_NON_THUMB_MAPPING: dict[str, tuple[str, ...]] = {
-    "mcp1": ("0", "4", "8"),
-    "mcp2": ("1", "5", "9"),
+    "mcp1": ("1", "5", "9"),
+    "mcp2": ("0", "4", "8"),
     "pip": ("2", "6", "10"),
     "dip": ("3", "7", "11"),
 }
-r"""LEAP 非拇指 child-link suffix 到官方 source joints 的默认映射。"""
+r"""LEAP 非拇指 child-link suffix 到官方 source joints 的默认映射。
+
+该映射按 parent-child 串联顺序，而不是按 joint 名数字顺序。
+官方 LEAP 的 `joint 1/5/9` 才是 palm 侧第一个 MCP slot；
+`joint 0/4/8` 则是从 `mcp_joint*` 接到 `pip*` 的第二个 MCP slot。
+"""
 
 
 _LEAP_THUMB_MAPPING: dict[str, tuple[str, ...]] = {

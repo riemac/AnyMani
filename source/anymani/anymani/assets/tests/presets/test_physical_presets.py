@@ -26,13 +26,19 @@ def _finger_by_name(hand, finger_name: str):
 
 
 def test_leap_physical_profile_keeps_official_limit_and_friction_values():
-    r"""LEAP profile 应保留官方 limit / effort / velocity / friction。"""
+    r"""LEAP profile 应按真实串联语义保留官方物理属性。
+
+    LEAP 官方 URDF 的 non-thumb joint 编号有一个很容易踩坑的地方：
+    `0/4/8` 在文件里排在 `1/5/9` 前面，但真实 parent-child 串联上
+    `1/5/9` 才是从 palm 接到 `mcp_joint*` 的近掌 slot。
+    """
 
     profile = get_finger_physical_profile("leap_non_thumb_v1")
     assert [item.child_suffix for item in profile] == ["mcp1", "mcp2", "pip", "dip"]
-    assert profile[0].source_joints == ("0", "4", "8")
-    assert math.isclose(profile[0].limit.lower, -1.047, rel_tol=0.0, abs_tol=1e-12)
-    assert math.isclose(profile[0].limit.upper, 1.047, rel_tol=0.0, abs_tol=1e-12)
+    assert profile[0].source_joints == ("1", "5", "9")
+    assert profile[1].source_joints == ("0", "4", "8")
+    assert math.isclose(profile[0].limit.lower, -0.314, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(profile[0].limit.upper, 2.23, rel_tol=0.0, abs_tol=1e-12)
     assert math.isclose(profile[0].limit.effort, 0.95, rel_tol=0.0, abs_tol=1e-12)
     assert math.isclose(profile[0].limit.velocity, 8.48, rel_tol=0.0, abs_tol=1e-12)
     assert profile[0].friction == 0.0
@@ -45,8 +51,10 @@ def test_finger_preset_injects_physical_profile_before_build():
     finger = cfg.class_type(cfg).build()
     joint_by_child = {joint.child.removeprefix("index_"): joint for joint in finger.joints if joint.joint_type == "revolute"}
 
-    assert math.isclose(joint_by_child["mcp1"].limit.lower, -1.047, rel_tol=0.0, abs_tol=1e-12)
-    assert math.isclose(joint_by_child["mcp2"].limit.lower, -0.314, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(joint_by_child["mcp1"].limit.lower, -0.314, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(joint_by_child["mcp1"].limit.upper, 2.23, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(joint_by_child["mcp2"].limit.lower, -1.047, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(joint_by_child["mcp2"].limit.upper, 1.047, rel_tol=0.0, abs_tol=1e-12)
     assert joint_by_child["mcp1"].joint_properties.friction == 0.0
 
 

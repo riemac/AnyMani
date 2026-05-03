@@ -104,12 +104,24 @@ def _limit(lower: float, upper: float, effort: float, velocity: float) -> JointL
 
 
 LEAP_NON_THUMB_PHYSICAL_PROFILE: tuple[JointPhysicalPreset, ...] = (
-    JointPhysicalPreset("mcp1", ("0", "4", "8"), _limit(-1.047, 1.047, 0.95, 8.48), friction=0.0),
-    JointPhysicalPreset("mcp2", ("1", "5", "9"), _limit(-0.314, 2.23, 0.95, 8.48), friction=0.0),
+    JointPhysicalPreset("mcp1", ("1", "5", "9"), _limit(-0.314, 2.23, 0.95, 8.48), friction=0.0),
+    JointPhysicalPreset("mcp2", ("0", "4", "8"), _limit(-1.047, 1.047, 0.95, 8.48), friction=0.0),
     JointPhysicalPreset("pip", ("2", "6", "10"), _limit(-0.506, 1.885, 0.95, 8.48), friction=0.0),
     JointPhysicalPreset("dip", ("3", "7", "11"), _limit(-0.366, 2.042, 0.95, 8.48), friction=0.0),
 )
-r"""LEAP 非拇指 official profile，来源 `source/anymani/assets/hands/leap_hand/leap_hand_right.urdf`。"""
+r"""LEAP 非拇指 official profile，来源 `source/anymani/assets/hands/leap_hand/leap_hand_right.urdf`。
+
+注意这里不能按数字 `0,1,2,3` 排序。LEAP 官方 URDF 的真实 parent-child 串联为：
+
+- `joint 1/5/9`: `palm_lower -> mcp_joint*`
+- `joint 0/4/8`: `mcp_joint* -> pip*`
+- `joint 2/6/10`: `pip* -> dip*`
+- `joint 3/7/11`: `dip* -> fingertip*`
+
+AnyMani 的 `mcp1/mcp2/pip/dip` 是沿 finger chain 的 anatomy slot，因此
+`mcp1` 必须绑定官方 `1/5/9`，否则会把约 $[-18^\circ,128^\circ]$ 的近掌
+MCP 限位错放到第二个 MCP slot。
+"""
 
 
 LEAP_THUMB_PHYSICAL_PROFILE: tuple[JointPhysicalPreset, ...] = (
