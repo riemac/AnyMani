@@ -10,10 +10,61 @@ r"""official joint physical profile 回归测试。
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 from assets.builder.hand_builders import HumanLikeHandBuilder
 from assets.generator._connectivity_lowering import JointDeleteCfg, JointDeleteMutator
+from assets.presets._physical_profile_extractor import extract_profile
 from assets.presets import get_finger_builder_preset, get_finger_physical_profile, make_human_like_builder_cfg
+
+
+REPO_ROOT = Path(__file__).resolve().parents[6]
+OFFICIAL_URDF_PATHS = {
+    "leap": REPO_ROOT / "source" / "anymani" / "assets" / "hands" / "leap_hand" / "leap_hand_right.urdf",
+    "allegro": REPO_ROOT / "source" / "anymani" / "assets" / "hands" / "allegro_hand" / "allegro_hand_right.urdf",
+}
+PROFILE_CASES = (
+    (
+        "leap_non_thumb_v1",
+        "leap",
+        {
+            "mcp1": ("1", "5", "9"),
+            "mcp2": ("0", "4", "8"),
+            "pip": ("2", "6", "10"),
+            "dip": ("3", "7", "11"),
+        },
+    ),
+    (
+        "leap_thumb_v1",
+        "leap",
+        {
+            "cmc1": ("12",),
+            "cmc2": ("13",),
+            "mcp": ("14",),
+            "dip": ("15",),
+        },
+    ),
+    (
+        "allegro_non_thumb_v1",
+        "allegro",
+        {
+            "mcp1": ("joint_0.0", "joint_4.0", "joint_8.0"),
+            "mcp2": ("joint_1.0", "joint_5.0", "joint_9.0"),
+            "pip": ("joint_2.0", "joint_6.0", "joint_10.0"),
+            "dip": ("joint_3.0", "joint_7.0", "joint_11.0"),
+        },
+    ),
+    (
+        "allegro_thumb_v1",
+        "allegro",
+        {
+            "cmc1": ("joint_12.0",),
+            "cmc2": ("joint_13.0",),
+            "mcp": ("joint_14.0",),
+            "dip": ("joint_15.0",),
+        },
+    ),
+)
 
 
 def _finger_by_name(hand, finger_name: str):
@@ -23,6 +74,29 @@ def _finger_by_name(hand, finger_name: str):
         if finger.name == finger_name:
             return finger
     raise KeyError(finger_name)
+
+
+def test_all_physical_profiles_match_official_urdf_slots():
+    r"""全部 Python profile 都应逐槽对齐官方 URDF source joints。
+
+    这个测试不是运行时依赖路径；它只在测试阶段调用离线 extractor，用来防止
+    `joint 名字排序` 和 `真实 parent-child 串联顺序` 再次混淆。尤其 LEAP
+    non-thumb 中 `mcp1 <- joint 1/5/9`、`mcp2 <- joint 0/4/8` 这一点必须锁死。
+    """
+
+    for preset_name, family, mapping in PROFILE_CASES:
+        extracted = extract_profile(OFFICIAL_URDF_PATHS[family], mapping)
+        profile_by_suffix = {item.child_suffix: item for item in get_finger_physical_profile(preset_name)}
+        assert set(profile_by_suffix) == set(mapping)
+        for child_suffix, source_joints in mapping.items():
+            profile_item = profile_by_suffix[child_suffix]
+            extracted_item = extracted[child_suffix][0]
+            assert profile_item.source_joints == source_joints
+            assert math.isclose(profile_item.limit.lower, extracted_item.lower, rel_tol=0.0, abs_tol=1e-12)
+            assert math.isclose(profile_item.limit.upper, extracted_item.upper, rel_tol=0.0, abs_tol=1e-12)
+            assert math.isclose(profile_item.limit.effort, extracted_item.effort, rel_tol=0.0, abs_tol=1e-12)
+            assert math.isclose(profile_item.limit.velocity, extracted_item.velocity, rel_tol=0.0, abs_tol=1e-12)
+            assert profile_item.friction == extracted_item.friction
 
 
 def test_leap_physical_profile_keeps_official_limit_and_friction_values():
