@@ -3,7 +3,7 @@ r"""手部资产脚本入口层：quick 运行脚本。
 这里统一承载研究者会直接打开、直接运行或直接调用的脚本级入口：
 
 1. `quick_pre_made.py`：完整 pre-made 拓扑枚举入口；
-2. `quick_post_mutate.py`：对单个 pre-made topology 做独立后变异入口。
+2. `quick_post_mutate.py`：对单个 pre-made sample 做独立后变异入口。
 
 # NOTE:
 这里替代历史上的 `assets/tool/`。旧目录不再保留兼容壳，是为了避免同一件事
@@ -20,7 +20,7 @@ r"""手部资产脚本入口层：quick 运行脚本。
 --------
 
 - ``quick_pre_made`` → 直接运行 pre-made 全量/局部枚举
-- ``quick_post_mutate`` → 直接运行某一 topology 的后变异
+- ``quick_post_mutate`` → 直接运行某一 pre-made sample 的后变异
 
 使用示例
 --------
