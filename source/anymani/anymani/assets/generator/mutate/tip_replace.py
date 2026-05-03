@@ -10,6 +10,7 @@ r"""TODO:指尖替换变异算子设计草稿。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any, Literal
 
 from ...asset_base import AssetCfgBase, HandCfg
@@ -23,8 +24,17 @@ from ...asset_schema_core import (
     Vector2,
     VisualGeometryCfg,
 )
+from ...builder.joint_builders_primitive import _box_inertia, _cylinder_inertia, _estimate_mass
 from ._base import HandPatch, MutatorBase
 from ._distribution import ScalarDistributionCfg, normalize_distribution
+
+
+_TIP_DEFAULT_DENSITY = 650.0
+r"""tip replacement 后重算 inertial 时使用的默认密度 $\rho$ [kg/m^3]。
+
+这里沿用 primitive/custom builders 的默认密度，保证 pre-made tip 与 post-mutate
+tip 在质量量级上连续，而不是因为变异算子切换了一套隐藏密度假设。
+"""
 
 
 # ============================================================================
@@ -302,7 +312,7 @@ def _swap_primitive_tip_body(tip_joint, *, target_geometry: str | None, size_del
     if body.kind not in {"box", "cylinder"}:
         return
     new_kind = target_geometry or ("box" if body.kind == "cylinder" else "cylinder")
-    radius, length, width, depth = _tip_body_dimensions(tip_joint, size_delta=size_delta)
+    radius, length, width, depth, cap_radius = _tip_body_dimensions(tip_joint, size_delta=size_delta)
     if new_kind == "box":
         geometry = BoxGeometryCfg(size=(width, length, depth))
         origin = PoseCfg(pos=(0.0, length / 2.0, 0.0))
@@ -311,15 +321,18 @@ def _swap_primitive_tip_body(tip_joint, *, target_geometry: str | None, size_del
         origin = PoseCfg(pos=(0.0, length / 2.0, 0.0), rpy=(-1.5707963267948966, 0.0, 0.0))
     tip_joint.collisions[0] = CollisionGeometryCfg(name=tip_joint.collisions[0].name, geometry=geometry, origin=origin)
     tip_joint.visuals[0] = VisualGeometryCfg(name=tip_joint.visuals[0].name, geometry=geometry, origin=origin)
-    tip_joint.inertial = InertialCfg(
-        mass=tip_joint.inertial.mass if tip_joint.inertial is not None else 1e-4,
-        origin=origin,
-        inertia={"ixx": 1e-7, "iyy": 1e-7, "izz": 1e-7},
+    tip_joint.inertial = _estimate_swapped_tip_inertial(
+        new_kind=new_kind,
+        radius=radius,
+        length=length,
+        width=width,
+        depth=depth,
+        cap_radius=cap_radius,
     )
     tip_joint.metadata = {**tip_joint.metadata, "post_mutate_tip_mode": "geometry_swap", "post_mutate_tip_body": new_kind}
 
 
-def _tip_body_dimensions(tip_joint, *, size_delta: float) -> tuple[float, float, float, float]:
+def _tip_body_dimensions(tip_joint, *, size_delta: float) -> tuple[float, float, float, float, float]:
     """从现有 tip 主体和 cap 估计互换后的保守尺寸。"""
 
     body = tip_joint.collisions[0].geometry
@@ -337,7 +350,62 @@ def _tip_body_dimensions(tip_joint, *, size_delta: float) -> tuple[float, float,
     width = max(1e-4, float(width) + size_delta)
     depth = max(1e-4, float(depth) + size_delta)
     radius = max(1e-4, float(radius) + size_delta / 2.0, cap_radius * 0.5)
-    return radius, length, width, depth
+    return radius, length, width, depth, cap_radius
+
+
+def _estimate_swapped_tip_inertial(
+    *,
+    new_kind: str,
+    radius: float,
+    length: float,
+    width: float,
+    depth: float,
+    cap_radius: float,
+) -> InertialCfg:
+    r"""为 geometry-swapped primitive tip 重算质量、质心与惯量。
+
+    `tip_replace` 改变的是 tip child link 的几何皮肤，因此 inertial 也必须随
+    geometry 一起更新。这里采用和 primitive builder 一致的首版近似：
+
+    - 主体为 cylinder 时，用圆柱体积估质量；
+    - 主体为 box 时，用长方体体积估质量；
+    - cap 仍近似为完整 sphere，和 pre-made `cs/bs` tip 规则保持一致；
+    - 整体惯量用等效 cylinder / box 表达，保证正定且量级合理。
+    """
+
+    cap_mass = _estimate_mass(
+        volume=4.0 * math.pi * cap_radius**3 / 3.0,
+        cfg_mass=None,
+        density=_TIP_DEFAULT_DENSITY,
+    )  # 球帽仍按完整球估体积，保持和 pre-made primitive tip 一致
+    cap_com_y = length  # 球帽中心落在主体末端中心
+
+    if new_kind == "box":
+        body_mass = _estimate_mass(
+            volume=width * length * depth,
+            cfg_mass=None,
+            density=_TIP_DEFAULT_DENSITY,
+        )  # box 主体体积 $V=wld$
+        total_mass = body_mass + cap_mass
+        com_y = (body_mass * (length / 2.0) + cap_mass * cap_com_y) / total_mass
+        return InertialCfg(
+            mass=total_mass,
+            origin=PoseCfg(pos=(0.0, com_y, 0.0)),
+            inertia=_box_inertia((width, length + 2.0 * cap_radius, depth), total_mass),
+        )
+
+    body_mass = _estimate_mass(
+        volume=math.pi * radius * radius * length,
+        cfg_mass=None,
+        density=_TIP_DEFAULT_DENSITY,
+    )  # cylinder 主体体积 $V=\pi r^2l$
+    total_mass = body_mass + cap_mass
+    com_y = (body_mass * (length / 2.0) + cap_mass * cap_com_y) / total_mass
+    return InertialCfg(
+        mass=total_mass,
+        origin=PoseCfg(pos=(0.0, com_y, 0.0)),
+        inertia=_cylinder_inertia(radius, length + 2.0 * cap_radius, total_mass),
+    )
 
 
 def _perturb_mesh_tip_offsets(tip_joint, sampled_params: dict[str, Any]) -> None:

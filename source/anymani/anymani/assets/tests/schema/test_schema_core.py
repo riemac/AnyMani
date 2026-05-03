@@ -1,6 +1,7 @@
 from assets.asset_schema_core import (
     BoxGeometryCfg,
     InertialCfg,
+    JointPropertiesCfg,
     MeshGeometryCfg,
     PoseCfg,
     make_geometry_cfg,
@@ -27,3 +28,10 @@ def test_inertial_cfg_from_primitives():
     assert box.mass > 0.0
     assert cylinder.inertia.ixx > 0.0
     assert sphere.inertia.izz > 0.0
+
+
+def test_joint_properties_cfg_normalizes_optional_friction():
+    r"""joint properties 应能表达 LEAP 官方 `<joint_properties friction="..."/>` 语义。"""
+
+    cfg = JointPropertiesCfg(friction="0.0")
+    assert cfg.friction == 0.0

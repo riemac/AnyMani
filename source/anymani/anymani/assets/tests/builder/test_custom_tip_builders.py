@@ -46,6 +46,8 @@ def test_custom_tip_builder_builds_round_mesh_tip_with_anchor_alignment():
     assert math.isclose(joint.collisions[0].origin.pos[2], -0.00950986387389, rel_tol=0.0, abs_tol=1e-9)
     assert math.isclose(joint.collisions[0].origin.rpy[1], -math.pi / 2.0, rel_tol=0.0, abs_tol=1e-12)
     assert joint.inertial.mass > 0.0
+    assert joint.inertial.origin.pos == (0.0, 0.01, 0.0)
+    assert joint.inertial.origin.pos != joint.collisions[0].origin.pos
 
 
 def test_regular_finger_builder_supports_mesh_tip_recipe():

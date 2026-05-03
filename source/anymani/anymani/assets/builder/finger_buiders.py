@@ -50,6 +50,7 @@ from ._utils import (
     _mesh_cross_section,
     _mesh_length,
     _normalize_joint_limits,
+    _normalize_joint_properties,
     _normalize_pose_list,
     _normalize_pose_value,
     _to_si,
@@ -125,6 +126,9 @@ def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
         if "approx_size" in tip:
             approx_size = _ensure_tuple(tip["approx_size"], length=3, field_name="tip.approx_size")
             normalized["approx_size"] = tuple(_to_si(value) for value in approx_size)  # 外包盒尺寸仍统一压到米制
+        if "approx_com" in tip:
+            approx_com = _ensure_tuple(tip["approx_com"], length=3, field_name="tip.approx_com")
+            normalized["approx_com"] = tuple(_to_si(value) for value in approx_com)  # 质心近似位置同样使用米制
     else:
         raise ValueError(f"Only cs/bs/mesh tip recipes are supported in v1, got {tip_type!r}")
     return normalized
@@ -216,6 +220,15 @@ class RegularFingerBuilderCfg(FingerBuilderCfg):
     joint_limits: list[Any] = field(default_factory=list)
     """逐关节限位覆盖。为空时使用宽松默认限位。"""
 
+    joint_properties: list[Any] = field(default_factory=list)
+    r"""逐关节 joint-level 物理属性。
+
+    该字段与 `joint_limits` 一样按完整 canonical revolute chain 排列。
+    physical profile 在 preset 层先根据 child link 语义名
+    `mcp1/mcp2/pip/dip` 或 `cmc1/cmc2/mcp/dip` 生成这组列表；
+    builder 只负责把第 `i` 个属性交给第 `i` 个 `JointCfg`。
+    """
+
     def __post_init__(self):
         super().__post_init__()
         if self.num_joints < 1:
@@ -230,6 +243,10 @@ class RegularFingerBuilderCfg(FingerBuilderCfg):
             raise ValueError(f"axes length must equal num_joints={self.num_joints}")
         self.axes = [_normalize_axis(_ensure_tuple(axis, length=3, field_name="axes")) for axis in self.axes]  # 旋转轴统一归一化
         self.joint_limits = _normalize_joint_limits(self.joint_limits, count=self.num_joints)  # 限位也压成统一对象
+        self.joint_properties = _normalize_joint_properties(
+            self.joint_properties,
+            count=self.num_joints,
+        )  # friction 等 joint 级物理属性同样压成定长列表
         if len(self.mesh_shape) != self.num_joints:
             raise ValueError(f"mesh_shape length must equal num_joints={self.num_joints}")
         self.class_type = RegularFingerBuilder  # 所有 regular family 先统一走一个 builder 骨干
@@ -746,6 +763,7 @@ class RegularFingerBuilder(FingerBuilder):
             origin=origin,  # 当前 joint frame 相对 parent link frame 的位姿
             axis=self.cfg.axes[index],  # 当前关节旋转轴
             limit=self.cfg.joint_limits[index],  # 当前关节限位
+            joint_properties=self.cfg.joint_properties[index],  # child-link 语义绑定的 joint 物理属性
             mesh=mesh,
             metadata={
                 "finger_name": self.cfg.name,
@@ -789,6 +807,7 @@ class RegularFingerBuilder(FingerBuilder):
                 anchor_point=tip_recipe.get("anchor_point"),
                 base_rpy=tip_recipe.get("base_rpy"),
                 approx_size=tip_recipe.get("approx_size"),
+                approx_com=tip_recipe.get("approx_com"),
                 **common_kwargs,
             )
         else:

@@ -828,6 +828,32 @@ class JointLimitCfg(AssetCfgBase):
 
 
 @dataclass
+class JointPropertiesCfg(AssetCfgBase):
+    r"""URDF joint-level 物理属性。
+
+    这里刻意只收第一轮已经从官方 LEAP / Allegro URDF 中确认需要继承的
+    joint 层属性，而不把 link 接触材质、actuator gain 或训练期随机化混进来。
+    对 AnyMani 的 pre-made 流程来说：
+
+    - `JointLimitCfg` 描述广义坐标 $q$ 的范围和驱动上界；
+    - `JointPropertiesCfg` 描述同一个 revolute joint 的轻量物理附加项；
+    - link 的 `mass / inertial` 仍由 canonical geometry 单独决定。
+
+    # NOTE:
+    LEAP 官方 URDF 使用的是 `<joint_properties friction="0.0"/>`，不是标准
+    URDF 的 `<dynamics friction="..."/>`。本 schema 保留这个来源语义，
+    exporter v1 也按 LEAP 风格写出，避免 importer 同时看到两套 friction。
+    """
+
+    friction: float | None = None
+    r"""关节摩擦系数；`None` 表示该 joint 不写 `<joint_properties>` 标签。"""
+
+    def __post_init__(self):
+        if self.friction is not None:
+            self.friction = float(self.friction)  # 允许官方 URDF 字符串解析后直接传入
+
+
+@dataclass
 class MimicCfg(AssetCfgBase):
     r"""用于 URDF mimic 关节的 schema。"""
 
@@ -953,6 +979,7 @@ __all__ = [
     "InertiaTensorCfg",
     "InertialCfg",
     "JointLimitCfg",
+    "JointPropertiesCfg",
     "MimicCfg",
     "make_geometry_cfg",
     "_FLOAT_TOLERANCE",

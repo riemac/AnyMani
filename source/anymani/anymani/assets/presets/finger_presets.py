@@ -20,6 +20,7 @@ from ..builder.finger_buiders import (
     RegularFingerBuilderCfg,
     RegularThumbBuilderCfg,
 )
+from .physical_presets import apply_physical_profile_to_finger_cfg
 
 """Allegro 非拇指执行型 preset。
 
@@ -120,12 +121,19 @@ FINGER_PRESET_REGISTRY: dict[str, RegularFingerBuilderCfg] = {
 
 
 def get_finger_builder_preset(name: str) -> RegularFingerBuilderCfg:
-    r"""按名字返回一份 finger builder preset 副本。"""
+    r"""按名字返回一份 finger builder preset 副本。
+
+    返回前会注入 official joint physical profile。这样 pre-made 运行时只消费
+    已审查的 Python preset，不再读取官方 URDF；同时用户仍然能在
+    `finger_presets.py` 里直接看到几何锚点，在 `physical_presets.py` 里直接看到
+    关节限位 / effort / velocity / friction 的数值来源。
+    """
 
     try:
-        return FINGER_PRESET_REGISTRY[name].copy()
+        cfg = FINGER_PRESET_REGISTRY[name].copy()
     except KeyError as exc:
         raise KeyError(f"Unknown finger builder preset: {name!r}") from exc
+    return apply_physical_profile_to_finger_cfg(name, cfg)
 
 
 __all__ = [

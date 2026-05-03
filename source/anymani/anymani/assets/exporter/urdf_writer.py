@@ -24,6 +24,7 @@ URDF 结构对应关系
         <origin xyz="..." rpy="..."/>
         <axis xyz="..."/>
         <limit lower="..." upper="..." effort="..." velocity="..."/>
+        <joint_properties friction="..."/>
       </joint>
       <link name="{joint.child}">
         <inertial>...</inertial>
@@ -64,6 +65,12 @@ URDF 结构对应关系
 
 URDF 要求 ``<limit>`` 有 effort 和 velocity，但 HandCfg 没有存储它们。
 默认填入 ``cfg.default_effort`` 和 ``cfg.default_velocity``，可按 preset 覆盖。
+
+### joint_properties
+
+LEAP 官方 URDF 使用 ``<joint_properties friction=\"...\"/>`` 表达关节摩擦。
+AnyMani v1 为了保持来源一致，若 `JointCfg.joint_properties.friction` 存在，
+就按同一标签写出；不额外写 ``<dynamics>``，避免 importer 重复解释 friction。
 """
 
 from __future__ import annotations
@@ -331,6 +338,12 @@ def _build_joint_elem(joint, parent_override: str, cfg: UrdfWriterCfg) -> ET.Ele
                         joint.limit.velocity if joint.limit.velocity is not None else cfg.default_velocity
                     ),
                 },
+            )
+        if joint.joint_properties is not None and joint.joint_properties.friction is not None:
+            ET.SubElement(
+                joint_elem,
+                "joint_properties",
+                attrib={"friction": _fmt_scalar(joint.joint_properties.friction)},
             )
 
     return joint_elem

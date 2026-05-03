@@ -25,6 +25,7 @@ from .asset_schema_core import (
     Handedness,
     InertialCfg,
     JointLimitCfg,
+    JointPropertiesCfg,
     JointType,
     MimicCfg,
     PoseCfg,
@@ -80,6 +81,16 @@ class JointCfg(AssetCfgBase):
     inertial: InertialCfg | Mapping[str, Any] | None = None
     """子 link 的惯性描述。"""
 
+    joint_properties: JointPropertiesCfg | Mapping[str, Any] | None = None
+    r"""joint 级附加物理属性。
+
+    这里和 `inertial` 刻意分开：
+
+    - `joint_properties` 跟随当前 revolute joint 的广义坐标 $q$；
+    - `inertial` 跟随当前 joint 所携带的 child link 刚体；
+    - pre-made 的 joint delete 删除的是这一整对 joint-child embodiment。
+    """
+
     collisions: list[CollisionGeometryCfg] = field(default_factory=list)
     """子 link 的 collision 几何列表。"""
 
@@ -124,6 +135,13 @@ class JointCfg(AssetCfgBase):
             self.limit = JointLimitCfg(lower=packed[0], upper=packed[1])
         else:
             raise TypeError(f"Unsupported joint limit: {self.limit!r}")
+
+        if self.joint_properties is not None and not isinstance(self.joint_properties, JointPropertiesCfg):
+            if not isinstance(self.joint_properties, Mapping):
+                raise TypeError(
+                    f"joint_properties must be JointPropertiesCfg or mapping, got {self.joint_properties!r}"
+                )
+            self.joint_properties = JointPropertiesCfg(**self.joint_properties)
 
         if self.inertial is not None and not isinstance(self.inertial, InertialCfg):
             if not isinstance(self.inertial, Mapping):

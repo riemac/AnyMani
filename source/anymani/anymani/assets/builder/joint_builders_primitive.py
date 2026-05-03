@@ -24,6 +24,7 @@ from ..asset_schema_core import (
     CollisionGeometryCfg,
     InertialCfg,
     JointLimitCfg,
+    JointPropertiesCfg,
     PoseCfg,
     Vector3,
     Vector6,
@@ -161,6 +162,13 @@ class PrimJointBuilderCfg(JointBuilderCfg):
     limit: JointLimitCfg | Sequence[float] | Mapping[str, Any] | None = (-math.pi, math.pi)  # 默认宽松限位
     """可选关节限位信息。"""
 
+    joint_properties: JointPropertiesCfg | Mapping[str, Any] | None = None
+    r"""可选 joint-level 物理属性。
+
+    当前主要由 physical profile 注入 LEAP 的 `<joint_properties friction="..."/>`。
+    这里不把它塞进 `metadata`，是因为 friction 会进入 URDF 正式物理标签。
+    """
+
     density: float = _DEFAULT_DENSITY  # 默认密度
     """未显式给出质量时，用于由体积反推质量的默认密度。"""
 
@@ -222,6 +230,7 @@ class PrimJointBuilder(JointBuilder):
             joint_type=self.cfg.joint_type,  # revolute / fixed
             axis=self.cfg.axis,  # 转轴方向
             limit=self.cfg.limit,  # 关节限位
+            joint_properties=self.cfg.joint_properties,  # joint 摩擦等官方 profile 属性
             origin=self.cfg.origin,  # joint frame 相对 parent 的位姿
             inertial=inertial,  # child link 的惯量描述
             collisions=collisions,  # child link collision 几何

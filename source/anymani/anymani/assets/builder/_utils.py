@@ -14,9 +14,10 @@ r"""Builder 内部共用的小工具函数。
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Sequence
 
-from ..asset_schema_core import JointLimitCfg, Vector3, Vector6, _ensure_tuple
+from ..asset_schema_core import JointLimitCfg, JointPropertiesCfg, Vector3, Vector6, _ensure_tuple
 
 
 def _to_si(value: float | int) -> float:
@@ -83,7 +84,14 @@ def _normalize_pose_list(values: Sequence[Any], *, count: int, field_name: str) 
 
 
 def _normalize_joint_limits(values: Sequence[Any] | None, *, count: int) -> list[JointLimitCfg | None]:
-    r"""把逐关节限位输入规范化。"""
+    r"""把逐关节限位输入规范化。
+
+    这里刻意同时接受三种表示：
+
+    - `JointLimitCfg`：preset / 代码内直接构造的强类型对象；
+    - `Mapping`：recipe YAML round-trip 后的完整 `<limit>` 字段；
+    - `(lower, upper)`：历史测试和手写草稿常用的最小简写。
+    """
 
     if not values:
         return [(-3.141592653589793, 3.141592653589793) for _ in range(count)]  # 首轮用对称大范围限位兜底
@@ -95,12 +103,42 @@ def _normalize_joint_limits(values: Sequence[Any] | None, *, count: int) -> list
             limits.append(None)  # 允许单个关节显式写成“无额外限位”
         elif isinstance(value, JointLimitCfg):
             limits.append(value.copy())  # 避免共享同一个可变对象
+        elif isinstance(value, Mapping):
+            limits.append(JointLimitCfg(**dict(value)))  # YAML 会把 `JointLimitCfg` 还原成 dict，需保留 effort/velocity
         elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
             low, high = _ensure_tuple(value, length=2, field_name="joint_limits")
             limits.append(JointLimitCfg(lower=float(low), upper=float(high)))
         else:
             raise TypeError(f"Unsupported joint limit value: {value!r}")
     return limits
+
+
+def _normalize_joint_properties(values: Sequence[Any] | None, *, count: int) -> list[JointPropertiesCfg | None]:
+    r"""把逐关节 joint properties 输入规范化。
+
+    `JointPropertiesCfg` 和 `JointLimitCfg` 在科研语义上同属 joint-level physics，
+    但二者不能合并：
+
+    - limit / effort / velocity 是 URDF `<limit>` 标签；
+    - friction 在 LEAP 官方资产里来自 `<joint_properties>` 标签；
+    - 若某个 family 没有 friction 来源，例如 Allegro，则保留为 `None`，避免写出伪来源。
+    """
+
+    if not values:
+        return [None for _ in range(count)]  # 没有 profile 时不凭空制造 friction 来源
+    if len(values) != count:
+        raise ValueError(f"joint_properties length must be {count}, got {len(values)}")
+    properties: list[JointPropertiesCfg | None] = []
+    for value in values:
+        if value is None:
+            properties.append(None)  # `None` 表示 exporter 不写 `<joint_properties>`
+        elif isinstance(value, JointPropertiesCfg):
+            properties.append(value.copy())  # 避免多个 joint 共享同一个可变对象
+        elif isinstance(value, Mapping):
+            properties.append(JointPropertiesCfg(**dict(value)))  # 支持 profile / recipe 的宽松 dict 输入
+        else:
+            raise TypeError(f"Unsupported joint_properties value: {value!r}")
+    return properties
 
 
 def _mesh_length(mesh: dict[str, Any]) -> float:
@@ -157,6 +195,7 @@ __all__ = [
     "_normalize_pose_value",
     "_normalize_pose_list",
     "_normalize_joint_limits",
+    "_normalize_joint_properties",
     "_mesh_length",
     "_mesh_cross_section",
     "_build_box_mesh",

@@ -106,6 +106,8 @@ def test_tip_replace_mutator_swaps_primitive_tip_body_geometry():
     """`geometry_swap` 模式应把 `cs` tip 的主体从 cylinder 换成 box。"""
 
     hand = _build_allegro_hand()
+    before_tip_joint = _finger_by_name(hand, "index").tip_joint
+    before_inertial = before_tip_joint.inertial
     mutated = TipReplaceMutator(
         TipReplaceCfg(
             target_fingers=("index",),
@@ -118,6 +120,14 @@ def test_tip_replace_mutator_swaps_primitive_tip_body_geometry():
     tip_joint = _finger_by_name(mutated, "index").tip_joint
     assert {collision.geometry.kind for collision in tip_joint.collisions} == {"box", "sphere"}
     assert {visual.geometry.kind for visual in tip_joint.visuals} == {"box", "sphere"}
+    assert tip_joint.inertial is not None
+    assert tip_joint.inertial.mass > 0.0
+    assert tip_joint.inertial.origin.pos[1] > tip_joint.collisions[0].origin.pos[1]
+    assert tip_joint.inertial.inertia.ixx > 0.0
+    assert tip_joint.inertial.inertia.iyy > 0.0
+    assert tip_joint.inertial.inertia.izz > 0.0
+    assert not math.isclose(tip_joint.inertial.mass, before_inertial.mass, rel_tol=0.0, abs_tol=1e-12)
+    assert not math.isclose(tip_joint.inertial.inertia.ixx, 1e-7, rel_tol=0.0, abs_tol=1e-12)
 
 
 def test_tip_replace_mutator_perturbs_custom_mesh_tip_origin():

@@ -79,6 +79,7 @@ _CUSTOM_TIP_PRESETS: dict[str, dict[str, object]] = {
         "unit_scale": 0.001,
         "base_rpy": _DEFAULT_BASE_RPY,
         "approx_size": (0.019, 0.020, 0.019),
+        "approx_com": (0.0, 0.010, 0.0),
     },
     "round": {
         "file_name": "round_finger_tip_soft.stl",
@@ -86,6 +87,7 @@ _CUSTOM_TIP_PRESETS: dict[str, dict[str, object]] = {
         "unit_scale": 0.001,
         "base_rpy": _DEFAULT_BASE_RPY,
         "approx_size": (0.019, 0.020, 0.019),
+        "approx_com": (0.0, 0.010, 0.0),
     },
     "wedge": {
         "file_name": "wedge_finger_tip_soft.stl",
@@ -93,6 +95,7 @@ _CUSTOM_TIP_PRESETS: dict[str, dict[str, object]] = {
         "unit_scale": 0.001,
         "base_rpy": _DEFAULT_BASE_RPY,
         "approx_size": (0.019, 0.020, 0.017),
+        "approx_com": (0.0, 0.010, 0.0),
     },
 }
 r"""custom tip 预定义锚点库。
@@ -104,6 +107,7 @@ r"""custom tip 预定义锚点库。
 - `unit_scale`：从 mesh 文件单位到米制世界的基准换算
 - `base_rpy`：canonical 朝向
 - `approx_size`：用于 inertial 的近似外包盒尺寸（米）
+- `approx_com`：用于 inertial 的近似质心位置（米，tip joint frame 下）
 
 # Question:
 `wedge` 的测试 URDF 里出现过一个“按孔径 2mm 反推”的特殊统一缩放
@@ -324,11 +328,22 @@ class CustomTipBuilderCfg(CustomJointBuilderCfg):
     approx_size: Vector3 | Sequence[float] | None = None
     """用于近似 inertial 的外包盒尺寸（米，canonical scale 下）。"""
 
+    approx_com: Vector3 | Sequence[float] | None = None
+    r"""用于近似 inertial 的质心位置（米，canonical scale 下）。
+
+    `anchor_point` 解决的是 mesh 如何贴到 tip joint；`approx_com` 解决的是
+    刚体质量中心应落在哪里。二者是不同物理量，不能再把 `mesh_origin`
+    当作 inertial origin。
+    """
+
     _mesh_scale_xyz: Vector3 = field(init=False, default=(1.0, 1.0, 1.0))
     """最终写入 URDF `<mesh scale>` 的三轴缩放。"""
 
     _approx_size_xyz: Vector3 = field(init=False, default=(0.01, 0.01, 0.01))
     """应用用户缩放之后的近似外包盒尺寸（米）。"""
+
+    _approx_com_xyz: Vector3 = field(init=False, default=(0.0, 0.005, 0.0))
+    """应用用户缩放之后的近似质心位置（米，tip joint frame 下）。"""
 
     def __post_init__(self):
         super().__post_init__()
@@ -361,12 +376,19 @@ class CustomTipBuilderCfg(CustomJointBuilderCfg):
         )
         if any(edge <= 0.0 for edge in canonical_size):
             raise ValueError(f"approx_size must be positive, got {canonical_size}")
+        canonical_com = _ensure_tuple(
+            self.approx_com if self.approx_com is not None else preset.get("approx_com", (0.0, canonical_size[1] / 2.0, 0.0)),
+            length=3,
+            field_name="custom_tip.approx_com",
+        )
 
         # 真正进 URDF 的 mesh scale = 单位换算 × 用户级缩放。
         self._mesh_scale_xyz = tuple(self.unit_scale * component for component in user_scale)
         # 惯量外包盒只需要吃“相对 canonical 形状”的用户级缩放；`canonical_size`
         # 已经在米制下，因此这里不再重复乘 `unit_scale`。
         self._approx_size_xyz = tuple(canonical_size[index] * user_scale[index] for index in range(3))
+        # 质心同样是 canonical joint frame 下的米制位置，因此只乘用户级无量纲缩放。
+        self._approx_com_xyz = tuple(canonical_com[index] * user_scale[index] for index in range(3))
 
 
 class CustomJointBuilder(JointBuilder):
@@ -406,7 +428,7 @@ class CustomJointBuilder(JointBuilder):
         )
         inertial = InertialCfg(
             mass=mass,
-            origin=mesh_origin,
+            origin=PoseCfg(pos=self.cfg._approx_com_xyz),
             inertia=_box_inertia(self.cfg._approx_size_xyz, mass),  # 当前用外包盒近似 inertial
         )
 

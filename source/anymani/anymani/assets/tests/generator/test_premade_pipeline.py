@@ -74,6 +74,34 @@ def test_urdf_writer_inserts_mount_link_when_enabled():
     assert joint_elems["index_j0"].find("parent").attrib["link"] == "index_mount_link"
 
 
+def test_urdf_writer_serializes_joint_properties_friction_for_leap_profile():
+    r"""LEAP official profile 中的 joint friction 应写成 `<joint_properties>`。"""
+
+    hand = HumanLikeHandBuilder(
+        make_human_like_builder_cfg(
+            name="leap_joint_properties_demo",
+            family="leap",
+            handedness="right",
+            palm_cfg="single_box_leap",
+            finger_cfg="leap_non_thumb_v1",
+            thumb_cfg="leap_thumb_v1",
+        )
+    ).build()
+    writer = UrdfWriter(UrdfWriterCfg(use_mount_link=True))
+
+    root = ET.fromstring(writer.to_urdf_string(hand))
+    joint_elems = {joint.attrib["name"]: joint for joint in root.findall("joint")}
+    index_j0 = joint_elems["index_j0"]
+
+    assert index_j0.find("limit").attrib == {
+        "lower": "-1.047",
+        "upper": "1.047",
+        "effort": "0.95",
+        "velocity": "8.48",
+    }
+    assert index_j0.find("joint_properties").attrib == {"friction": "0"}
+
+
 def test_urdf_writer_folds_mount_into_first_joint_when_mount_link_disabled():
     """关闭 `use_mount_link` 时，mount 应折叠进第一关节 origin。"""
 

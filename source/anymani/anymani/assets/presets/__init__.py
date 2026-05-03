@@ -66,6 +66,15 @@ from .palm_presets import (
     get_single_palm_box_preset,
     get_single_palm_box_preset_data,
 )
+from .physical_presets import (
+    ALLEGRO_NON_THUMB_PHYSICAL_PROFILE,
+    ALLEGRO_THUMB_PHYSICAL_PROFILE,
+    FINGER_PHYSICAL_PROFILE_REGISTRY,
+    LEAP_NON_THUMB_PHYSICAL_PROFILE,
+    LEAP_THUMB_PHYSICAL_PROFILE,
+    JointPhysicalPreset,
+    get_finger_physical_profile,
+)
 from .units import cm, deg, m, mm, rad
 
 
@@ -164,6 +173,13 @@ __all__ = [
     "get_single_palm_box_preset_data",
     "get_com_palm_preset",
     "get_com_palm_preset_data",
+    "JointPhysicalPreset",
+    "LEAP_NON_THUMB_PHYSICAL_PROFILE",
+    "LEAP_THUMB_PHYSICAL_PROFILE",
+    "ALLEGRO_NON_THUMB_PHYSICAL_PROFILE",
+    "ALLEGRO_THUMB_PHYSICAL_PROFILE",
+    "FINGER_PHYSICAL_PROFILE_REGISTRY",
+    "get_finger_physical_profile",
     "m",
     "cm",
     "mm",
