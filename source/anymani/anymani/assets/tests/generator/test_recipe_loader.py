@@ -211,8 +211,8 @@ def test_recipe_loader_keeps_premade_facade_fields_as_generator_contract(tmp_pat
     assert cfg.output_layout == "recursive"
 
 
-def test_recipe_loader_builds_legacy_mutate_block_into_term_container(tmp_path):
-    r"""旧式 `Mutate.mount_perturb: {...}` 仍应被桥接到新的 term container。"""
+def test_recipe_loader_builds_mutate_block_into_isaaclab_style_cfg(tmp_path):
+    r"""`Mutate.mount_perturb: {...}` 应直接桥接成 cfg 类属性 term。"""
 
     cfg = RecipeLoader.load_dict(
         {
@@ -222,11 +222,9 @@ def test_recipe_loader_builds_legacy_mutate_block_into_term_container(tmp_path):
             "Made": _made_recipe_dict(),
             "Mutate": {
                 "mount_perturb": {
-                    "target_fingers": ["index"],
-                    "translation_distribution": {
-                        "kind": "fixed",
-                        "value": 0.001,
-                    },
+                    "disturb_unit": "rad",
+                    "self_mode": "general",
+                    "pos_range": [0.001, 0.001],
                 }
             },
         }
@@ -235,5 +233,5 @@ def test_recipe_loader_builds_legacy_mutate_block_into_term_container(tmp_path):
     assert isinstance(cfg.Mutate, HandMutatorCfg)
     assert cfg.Mutate.has_terms() is True
     assert [name for name, _ in cfg.Mutate.ordered_terms()] == ["mount_perturb"]
-    assert isinstance(cfg.Mutate.terms["mount_perturb"].cfg, MountPerturbCfg)
-    assert cfg.Mutate.terms["mount_perturb"].cfg.translation_distribution.value == 0.001
+    assert isinstance(cfg.Mutate.mount_perturb, MountPerturbCfg)
+    assert cfg.Mutate.mount_perturb.pos_range == (0.001, 0.001)

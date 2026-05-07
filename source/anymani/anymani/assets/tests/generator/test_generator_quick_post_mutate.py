@@ -1,22 +1,16 @@
-r"""independent post-mutate quick façade 回归测试。
-
-这里同时覆盖两层语义：
-
-1. `HandGenerator(mode="mutate")` 的旧核心语义仍然是 topology 目录；
-2. `quick_post_mutate.py` 给研究者暴露的是更直观的 pre-made sample 目录。
-
-quick 层必须通过 staging 目录把二者接起来，并保证原始 pre-made sample 不被
-`*_origin` 重命名污染。这个约束是二次调参时最关键的可逆性保证。
-"""
+r"""独立 post-mutate 统一配置与 runner 回归测试。"""
 
 from __future__ import annotations
 
+from importlib import import_module
 from pathlib import Path
 
-from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
-from assets.generator.mutate import HandMutatorCfg, MountPerturbCfg, MutatorTerm, ScalarDistributionCfg
-import assets.scripts.quick_post_mutate as quick_post_mutate_module
-from assets.validator.hand_rules import HandValidatorCfg
+from anymani.assets.config import asset_gen_cfg as asset_cfg_module
+from anymani.assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
+from anymani.assets.generator.mutate import HandMutatorCfg, MountPerturbCfg
+from anymani.assets.scripts import generate as generate_module
+from anymani.assets.scripts import _asset_generate_runner as runner_module
+from anymani.assets.validator.hand_rules import HandValidatorCfg
 
 
 def _single_full_pool() -> dict[str, dict[str, list[str]]]:
@@ -56,30 +50,28 @@ def _make_pre_made_topology_dir(tmp_path) -> tuple[Path, str]:
 
 
 def _make_fake_source_sample(sample_dir: Path) -> None:
-    r"""创建只用于 quick staging 目录策略测试的轻量 sample 目录。
-
-    这里不需要恢复成真正 `HandCfg`，因为这些测试只检查 quick façade 的目录复制
-    与覆盖策略；真正的 `HandCfg` 恢复路径由后面的 generator smoke 测试覆盖。
-    """
-
-    sample_dir.mkdir(parents=True)  # 模拟 `.../<topology>/<sample_id>/`
-    (sample_dir / "hand.yaml").write_text("hand_cfg: {}\n", encoding="utf-8")  # staging 只要求存在 sidecar
-    (sample_dir / "hand.urdf").write_text("<robot name=\"fake\" />\n", encoding="utf-8")  # 模拟 bundle 里的 URDF
+    sample_dir.mkdir(parents=True)
+    (sample_dir / "hand.yaml").write_text("hand_cfg: {}\n", encoding="utf-8")
+    (sample_dir / "hand.urdf").write_text("<robot name=\"fake\" />\n", encoding="utf-8")
 
 
-def test_quick_post_mutate_run_cfg_is_direct_hand_generator_cfg():
-    r"""quick_post_mutate.py 顶部正式入口应直接是 `HandGeneratorCfg`。"""
+class DemoMountMutatorCfg(HandMutatorCfg):
+    r"""测试用 post-mutate cfg：只启用一个 mount perturb term。"""
 
-    assert isinstance(quick_post_mutate_module.RUN_CFG, HandGeneratorCfg)
-    assert quick_post_mutate_module.RUN_CFG.mode == "mutate"
-    assert quick_post_mutate_module.RUN_CFG.source_topology_dir == quick_post_mutate_module.SOURCE_TOPOLOGY_DIR
-    assert quick_post_mutate_module.SOURCE_TOPOLOGY_DIR == (
-        quick_post_mutate_module.SOURCE_PREMADE_SAMPLE_DIR
-        / quick_post_mutate_module.POST_MUTATE_RUN_NAME
+    mount = MountPerturbCfg(
+        disturb_unit="rad",
+        self_mode="general",
+        pos_range=(0.001, 0.001),
     )
-    assert quick_post_mutate_module.POST_MUTATE_CFG.order == quick_post_mutate_module.POST_MUTATE_PATCH_ORDER
-    assert isinstance(quick_post_mutate_module.RUN_CFG.Validate, HandValidatorCfg)
-    assert tuple(quick_post_mutate_module.RUN_CFG.Mutate.order) == (
+
+
+def test_post_mutate_config_is_direct_hand_generator_cfg():
+    r"""配置模块中的 `POST_MUTATE_CFG` 应直接是 `HandGeneratorCfg`。"""
+
+    assert isinstance(asset_cfg_module.POST_MUTATE_CFG, HandGeneratorCfg)
+    assert asset_cfg_module.POST_MUTATE_CFG.mode == "mutate"
+    assert isinstance(asset_cfg_module.POST_MUTATE_CFG.Validate, HandValidatorCfg)
+    assert tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms()) == (
         "link_scale",
         "mount_perturb",
         "limit_tweak",
@@ -87,13 +79,11 @@ def test_quick_post_mutate_run_cfg_is_direct_hand_generator_cfg():
     )
 
 
-def test_quick_post_mutate_resolves_direct_sample_path(tmp_path):
-    r"""用户直接粘贴到 sample 目录时，不需要 topology 层推断。"""
-
+def test_post_mutate_runner_resolves_direct_sample_path(tmp_path):
     source_sample_dir = tmp_path / "right_t4_i4_m4_r4" / "f5d8c069"
     _make_fake_source_sample(source_sample_dir)
 
-    resolved_dir = quick_post_mutate_module.resolve_source_premade_sample_dir(
+    resolved_dir = runner_module.resolve_source_premade_sample_dir(
         source_sample_dir,
         sample_id="f5d8c069",
     )
@@ -101,14 +91,12 @@ def test_quick_post_mutate_resolves_direct_sample_path(tmp_path):
     assert resolved_dir == source_sample_dir
 
 
-def test_quick_post_mutate_resolves_topology_path_with_sample_id(tmp_path):
-    r"""用户粘贴 topology 目录时，可用 sample ID 精确选择父拓扑下的来源样本。"""
-
+def test_post_mutate_runner_resolves_topology_path_with_sample_id(tmp_path):
     topology_dir = tmp_path / "right_t4_i4_m4_r4"
     _make_fake_source_sample(topology_dir / "f5d8c069")
     _make_fake_source_sample(topology_dir / "abcd1234")
 
-    resolved_dir = quick_post_mutate_module.resolve_source_premade_sample_dir(
+    resolved_dir = runner_module.resolve_source_premade_sample_dir(
         topology_dir,
         sample_id="f5d8c069",
     )
@@ -116,17 +104,15 @@ def test_quick_post_mutate_resolves_topology_path_with_sample_id(tmp_path):
     assert resolved_dir == topology_dir / "f5d8c069"
 
 
-def test_quick_post_mutate_plans_nested_and_sibling_run_dirs(tmp_path):
-    r"""quick façade 应能显式切换 sample 内部 run 和平级目录两种布局。"""
+def test_post_mutate_runner_plans_nested_and_sibling_run_dirs(tmp_path):
+    source_sample_dir = tmp_path / "right_t4_i4_m4_r4" / "f5d8c069"
 
-    source_sample_dir = tmp_path / "right_t4_i4_m4_r4" / "f5d8c069"  # 模拟用户最直观会复制的 sample 路径
-
-    nested_dir = quick_post_mutate_module.planned_post_mutate_topology_dir(
+    nested_dir = runner_module.planned_post_mutate_topology_dir(
         source_sample_dir=source_sample_dir,
         layout="nested",
         run_name="try_small",
     )
-    sibling_dir = quick_post_mutate_module.planned_post_mutate_topology_dir(
+    sibling_dir = runner_module.planned_post_mutate_topology_dir(
         source_sample_dir=source_sample_dir,
         layout="sibling",
         run_name="try_small",
@@ -136,24 +122,22 @@ def test_quick_post_mutate_plans_nested_and_sibling_run_dirs(tmp_path):
     assert sibling_dir == source_sample_dir.parent / "f5d8c069_post_mutate" / "try_small"
 
 
-def test_quick_post_mutate_prepare_overwrite_copies_source_without_run_recursion(tmp_path):
-    r"""`overwrite` 应只覆盖当前 run，不把旧 run 目录递归复制进 origin。"""
-
+def test_post_mutate_runner_prepare_overwrite_copies_source_without_run_recursion(tmp_path):
     source_sample_dir = tmp_path / "topology" / "f5d8c069"
     _make_fake_source_sample(source_sample_dir)
 
     stale_run_dir = source_sample_dir / "try_001"
     stale_run_dir.mkdir(parents=True)
-    (stale_run_dir / "stale.txt").write_text("old failed attempt\n", encoding="utf-8")  # 模拟上次失败调参产物
+    (stale_run_dir / "stale.txt").write_text("old failed attempt\n", encoding="utf-8")
 
     preserved_run_dir = source_sample_dir / "try_keep"
     preserved_run_dir.mkdir(parents=True)
-    (preserved_run_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")  # 其它 run 不应被覆盖策略误删
+    (preserved_run_dir / "keep.txt").write_text("keep me\n", encoding="utf-8")
     legacy_post_mutate_dir = source_sample_dir / "post_mutate"
     legacy_post_mutate_dir.mkdir()
-    (legacy_post_mutate_dir / "legacy.txt").write_text("old layout\n", encoding="utf-8")  # 旧布局目录也不应进入 origin
+    (legacy_post_mutate_dir / "legacy.txt").write_text("old layout\n", encoding="utf-8")
 
-    run_dir = quick_post_mutate_module.prepare_post_mutate_source_topology(
+    run_dir = runner_module.prepare_post_mutate_source_topology(
         source_sample_dir=source_sample_dir,
         layout="nested",
         run_name="try_001",
@@ -171,9 +155,7 @@ def test_quick_post_mutate_prepare_overwrite_copies_source_without_run_recursion
     assert (legacy_post_mutate_dir / "legacy.txt").is_file()
 
 
-def test_quick_post_mutate_prepare_new_allocates_suffix_without_touching_existing_runs(tmp_path):
-    r"""`new` 应自动追加后缀，适合保留多轮人工调参痕迹。"""
-
+def test_post_mutate_runner_prepare_new_allocates_suffix_without_touching_existing_runs(tmp_path):
     source_sample_dir = tmp_path / "topology" / "f5d8c069"
     _make_fake_source_sample(source_sample_dir)
 
@@ -182,7 +164,7 @@ def test_quick_post_mutate_prepare_new_allocates_suffix_without_touching_existin
         occupied_dir.mkdir(parents=True)
         (occupied_dir / "occupied.txt").write_text(run_name, encoding="utf-8")
 
-    run_dir = quick_post_mutate_module.prepare_post_mutate_source_topology(
+    run_dir = runner_module.prepare_post_mutate_source_topology(
         source_sample_dir=source_sample_dir,
         layout="nested",
         run_name="try_001",
@@ -195,12 +177,10 @@ def test_quick_post_mutate_prepare_new_allocates_suffix_without_touching_existin
     assert (source_sample_dir / "try_001_01" / "occupied.txt").is_file()
 
 
-def test_quick_post_mutate_nested_staging_keeps_original_sample_after_generator_run(tmp_path):
-    r"""nested staging 下 generator 只能重命名复制件，不能重命名原始 sample。"""
-
+def test_post_mutate_nested_staging_keeps_original_sample_after_generator_run(tmp_path):
     topology_dir, original_sample_name = _make_pre_made_topology_dir(tmp_path)
     source_sample_dir = topology_dir / original_sample_name
-    run_dir = quick_post_mutate_module.prepare_post_mutate_source_topology(
+    run_dir = runner_module.prepare_post_mutate_source_topology(
         source_sample_dir=source_sample_dir,
         layout="nested",
         run_name="try_nested",
@@ -213,17 +193,7 @@ def test_quick_post_mutate_nested_staging_keeps_original_sample_after_generator_
         source_topology_dir=run_dir,
         output_dir=run_dir.parent,
         n_samples=1,
-        Mutate=HandMutatorCfg(
-            terms={
-                "mount": MutatorTerm(
-                    cfg=MountPerturbCfg(
-                        target_fingers=("index",),
-                        translation_distribution=ScalarDistributionCfg(kind="fixed", value=0.001),
-                    )
-                )
-            },
-            order=("mount",),
-        ),
+        Mutate=DemoMountMutatorCfg(),
         Validate=None,
         recolored="anatomy_v1",
     )
@@ -240,8 +210,6 @@ def test_quick_post_mutate_nested_staging_keeps_original_sample_after_generator_
 
 
 def test_independent_post_mutate_renames_origin_and_writes_sibling_variants(tmp_path):
-    r"""mutate-only 应从 topology 目录恢复 `HandCfg`，并把新样本写成 `_origin` 的兄弟目录。"""
-
     topology_dir, original_sample_name = _make_pre_made_topology_dir(tmp_path)
     mutate_cfg = HandGeneratorCfg(
         mode="mutate",
@@ -249,17 +217,7 @@ def test_independent_post_mutate_renames_origin_and_writes_sibling_variants(tmp_
         source_topology_dir=topology_dir,
         output_dir=tmp_path,
         n_samples=2,
-        Mutate=HandMutatorCfg(
-            terms={
-                "mount": MutatorTerm(
-                    cfg=MountPerturbCfg(
-                        target_fingers=("index",),
-                        translation_distribution=ScalarDistributionCfg(kind="fixed", value=0.001),
-                    )
-                )
-            },
-            order=("mount",),
-        ),
+        Mutate=DemoMountMutatorCfg(),
         Validate=None,
         recolored="anatomy_v1",
     )
@@ -281,3 +239,43 @@ def test_independent_post_mutate_renames_origin_and_writes_sibling_variants(tmp_
     assert len(new_variant_dirs) == 2
     assert all((path / "hand.urdf").is_file() for path in new_variant_dirs)
     assert all(result.metadata["source_origin_sample_id"] == original_sample_name for result in results)
+
+
+def test_unified_generate_runner_accepts_post_mutate_cli(monkeypatch, tmp_path):
+    r"""统一 runner 应支持通过 CLI 选择 post-mutate 阶段。"""
+
+    topology_dir, original_sample_name = _make_pre_made_topology_dir(tmp_path)
+    custom_module = import_module("anymani.assets.config.asset_gen_cfg")
+    monkeypatch.setattr(
+        custom_module,
+        "POST_MUTATE_CFG",
+        HandGeneratorCfg(
+            mode="mutate",
+            artifact_level="hand_cfg",
+            source_topology_dir=Path("__placeholder__"),
+            output_dir=Path("__placeholder__"),
+            n_samples=1,
+            Mutate=DemoMountMutatorCfg(),
+            Validate=None,
+            recolored="anatomy_v1",
+        ),
+    )
+    monkeypatch.setattr(custom_module, "POST_MUTATE_SOURCE_PREMADE_PATH", topology_dir)
+    monkeypatch.setattr(custom_module, "POST_MUTATE_SOURCE_PREMADE_SAMPLE_ID", original_sample_name)
+    monkeypatch.setattr(custom_module, "POST_MUTATE_RUN_NAME", "try_cli")
+    monkeypatch.setattr(custom_module, "POST_MUTATE_RUN_POLICY", "overwrite")
+    monkeypatch.setattr(custom_module, "POST_MUTATE_PRINT_RESULT_LIMIT", 0)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate.py",
+            "--stage",
+            "post-mutate",
+            "--config-module",
+            "anymani.assets.config.asset_gen_cfg",
+        ],
+    )
+
+    exit_code = generate_module.main()
+
+    assert exit_code == 0

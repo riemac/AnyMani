@@ -1,22 +1,19 @@
-"""generator/quick.py façade 测试。
-
-这组测试不追求覆盖 quick.py 里每一行打印，而是锁住两件真正重要的事：
-
-1. quick façade 的顶部少量字段，确实会正确 lower 到正式 `HandGenerator` 主线；
-2. mixed / missing / recolor 这些当前研究核心语义，不会因为“只是 quick 脚本”
-   就悄悄绕开正式实现。
-"""
+"""统一资产生成配置与 runner 回归测试。"""
 
 from __future__ import annotations
 
-from assets.generator.hand_generator import HandGeneratorCfg
-import assets.scripts.quick_pre_made as quick_module
-from assets.scripts.quick_pre_made import enumerate_premade_bundles, main
-from assets.validator.hand_rules import HandValidatorCfg
+from importlib import import_module
+
+from anymani.assets.config import asset_gen_cfg as asset_cfg_module
+from anymani.assets.generator.hand_generator import HandGeneratorCfg
+from anymani.assets.scripts import generate as generate_module
+from anymani.assets.scripts import _asset_generate_runner as runner_module
+from anymani.assets.scripts._asset_generate_runner import enumerate_premade_bundles
+from anymani.assets.validator.hand_rules import HandValidatorCfg
 
 
 def _single_family_full_pool(hand_preset: str, family: str) -> dict[str, dict[str, list[str]]]:
-    r"""构造 quick façade 现在直接接受的 slot-level full-chain pool。"""
+    r"""构造 slot-level full-chain pool。"""
 
     thumb_recipe = f"{family}_thumb_full"
     non_thumb_recipe = f"{family}_non_thumb_full"
@@ -30,8 +27,8 @@ def _single_family_full_pool(hand_preset: str, family: str) -> dict[str, dict[st
     }
 
 
-def test_quick_facade_enumerates_small_recolored_space_and_writes_bundle(tmp_path):
-    r"""quick façade 应直接用 `HandGeneratorCfg` 驱动正式 pre-made bundle 导出。"""
+def test_premade_runner_enumerates_small_recolored_space_and_writes_bundle(tmp_path):
+    r"""pre-made runner helper 应直接用 `HandGeneratorCfg` 驱动正式 bundle 导出。"""
 
     cfg = HandGeneratorCfg(
         mode="made",
@@ -56,37 +53,53 @@ def test_quick_facade_enumerates_small_recolored_space_and_writes_bundle(tmp_pat
     assert result.sidecar_path is not None and result.sidecar_path.is_file()
 
 
-def test_quick_run_cfg_is_direct_hand_generator_cfg():
-    r"""quick.py 顶部的唯一正式运行入口应直接是 `HandGeneratorCfg`。"""
+def test_asset_config_exposes_direct_premade_hand_generator_cfg():
+    r"""配置模块中的 `PRE_MADE_CFG` 应直接是 `HandGeneratorCfg`。"""
 
-    assert isinstance(quick_module.RUN_CFG, HandGeneratorCfg)
-    assert isinstance(quick_module.RUN_CFG.Validate, HandValidatorCfg)
-    assert quick_module.RUN_CFG.recolored == "anatomy_soft_v1"
-    assert quick_module.RUN_CFG.premade_parallel is True
-    assert quick_module.RUN_CFG.premade_parallel_fallback == "serial"
-    assert quick_module.RUN_CFG.Validate.pre_made.finger_count_min == 3
-    assert quick_module.RUN_CFG.Validate.pre_made.require_non_thumb_with_min_revolute_dof == 3
-    assert quick_module.RUN_CFG.Validate.pre_made.check_palm_thumb_binding is True
+    assert isinstance(asset_cfg_module.PRE_MADE_CFG, HandGeneratorCfg)
+    assert isinstance(asset_cfg_module.PRE_MADE_CFG.Validate, HandValidatorCfg)
+    assert asset_cfg_module.PRE_MADE_CFG.recolored == "anatomy_soft_v1"
+    assert asset_cfg_module.PRE_MADE_CFG.premade_parallel is True
+    assert asset_cfg_module.PRE_MADE_CFG.premade_parallel_fallback == "serial"
+    assert asset_cfg_module.PRE_MADE_CFG.Validate.pre_made.finger_count_min == 3
+    assert asset_cfg_module.PRE_MADE_CFG.Validate.pre_made.require_non_thumb_with_min_revolute_dof == 3
+    assert asset_cfg_module.PRE_MADE_CFG.Validate.pre_made.check_palm_thumb_binding is True
 
 
-def test_quick_facade_main_accepts_small_custom_cfg(monkeypatch, tmp_path):
-    r"""`main(cfg)` 路径应允许测试 / notebook 直接传入 `HandGeneratorCfg`。"""
+def test_unified_generate_runner_accepts_premade_cli(monkeypatch, tmp_path):
+    r"""统一 runner 应支持通过 CLI 选择 pre-made 阶段。"""
 
-    monkeypatch.setattr(quick_module, "_SHOW_REGISTRY", False)  # 测试里关闭 registry 打印，避免噪声淹没失败信息
-    monkeypatch.setattr(quick_module, "_PRINT_RESULT_LIMIT", 0)  # 测试里只保留 summary，避免终端 preview 干扰断言阅读
-
-    cfg = HandGeneratorCfg(
-        mode="made",
-        hand_presets=["single_palm_leap"],
-        connectivity_presets=_single_family_full_pool("single_palm_leap", "leap"),
-        mixed=False,
-        missing=True,
-        recolored=False,
-        artifact_level="hand_cfg",
-        output_dir=tmp_path,
-        max_enumerate=2,
+    custom_module = import_module("anymani.assets.config.asset_gen_cfg")
+    monkeypatch.setattr(custom_module, "PRE_MADE_SHOW_REGISTRY", False)
+    monkeypatch.setattr(custom_module, "PRE_MADE_PRINT_RESULT_LIMIT", 0)
+    monkeypatch.setattr(
+        custom_module,
+        "PRE_MADE_CFG",
+        HandGeneratorCfg(
+            mode="made",
+            hand_presets=["single_palm_leap"],
+            connectivity_presets=_single_family_full_pool("single_palm_leap", "leap"),
+            mixed=False,
+            missing=True,
+            recolored=False,
+            artifact_level="hand_cfg",
+            output_dir=tmp_path,
+            max_enumerate=2,
+        ),
     )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "generate.py",
+            "--stage",
+            "pre-made",
+            "--config-module",
+            "anymani.assets.config.asset_gen_cfg",
+        ],
+    )
+    monkeypatch.setattr(runner_module, "enumerate_premade_bundles", lambda cfg: [])
+    monkeypatch.setattr(generate_module, "enumerate_premade_bundles", lambda cfg: [])
 
-    exit_code = main(cfg)
+    exit_code = generate_module.main()
 
     assert exit_code == 0

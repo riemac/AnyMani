@@ -63,7 +63,7 @@ def load_post_mutate_source(topology_dir: Path | str) -> PostMutateSource:
     r"""从一个 topology 目录恢复 mutate-only 的来源样本。
 
     这里故意把“输入 topology 目录”的语义写死，而不是做过度智能的路径猜测。
-    因为用户已经明确指定：`quick_post_mutate.py` 首版就应以 topology 目录为输入，
+    因为当前统一 runner 已经明确指定：独立 post-mutate 入口应以 topology 目录为输入，
     自动找到唯一 pre-made 原始样本并把它改名成 `*_origin`。
 
     Args:
