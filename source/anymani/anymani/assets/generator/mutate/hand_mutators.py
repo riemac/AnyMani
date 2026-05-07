@@ -3,7 +3,6 @@ r"""向后兼容的 re-export 桩（已拆分到各独立模块）。
 本文件的原始内容已拆分到以下模块，请直接导入对应模块：
 
 - ``.pipeline``       → HandMutatorCfg, HandMutator
-- ``._distribution``  → ScalarDistributionCfg
 - ``.mount_perturb``  → MountPerturbCfg, MountPerturbMutator
 - ``.link_scale``     → LinkScaleCfg, LinkScaleMutator
 - ``.tip_replace``    → TipReplaceCfg, TipReplaceMutator
@@ -12,16 +11,15 @@ r"""向后兼容的 re-export 桩（已拆分到各独立模块）。
 此文件保留仅为不破坏已有代码的 import 路径。
 """
 
-from ._distribution import ScalarDistributionCfg
+from ._base import MutatorBaseCfg
 from .limit_tweak import LimitTweakCfg, LimitTweakMutator
 from .link_scale import LinkScaleCfg, LinkScaleMutator
 from .mount_perturb import MountPerturbCfg, MountPerturbMutator
-from .pipeline import HandMutator, HandMutatorCfg, MutatorTerm
+from .pipeline import HandMutator, HandMutatorCfg
 from .tip_replace import TipReplaceCfg, TipReplaceMutator
 
 __all__ = [
-    "ScalarDistributionCfg",
-    "MutatorTerm",
+    "MutatorBaseCfg",
     "HandMutatorCfg",
     "HandMutator",
     "MountPerturbCfg",
