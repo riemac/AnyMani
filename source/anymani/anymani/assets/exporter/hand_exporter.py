@@ -33,17 +33,29 @@ r"""整手导出编排层：把 URDF / Sidecar / Tree 文件按 artifact_level �
 
 ### 目录结构约定
 
-每个产物放在 ``output_dir / {sample_id}/`` 下：
+导出器本身不再根据 `mode` 猜目录语义，而是显式接受调用方传入的
+`nest_sample_dir` 开关：
+
+- `nest_sample_dir=False`：直接写到 `output_dir/`
+- `nest_sample_dir=True`：写到 `output_dir/{sample_id}/`
+
+因此当前两条主工作流分别对应：
 
 .. code-block::
 
-    outputs/
-    └── a3f2c0b1/
-        ├── hand.urdf
-        ├── hand.yaml     (sidecar)
-        └── tree.txt
+    # pre-made
+    generated/<premade_timestamp>/<group>/<topology>/
+    ├── hand.urdf
+    ├── hand.yaml
+    └── tree.txt
 
-``sample_id`` 来自 ``HandGenerationResult.metadata["id"]``；若无则用 ``uuid4``。
+    # independent post-mutate
+    generated/<premade_timestamp>/<group>/<topology>/<mutate_timestamp>/<sample_id>/
+    ├── hand.urdf
+    ├── hand.yaml
+    └── tree.txt
+
+`sample_id` 仍来自 `HandGenerationResult.metadata["id"]`；若无则退回 `uuid4`。
 """
 
 from __future__ import annotations
@@ -116,13 +128,16 @@ class HandExporter(ExporterBase):
         result: HandGenerationResult,
         output_dir: Path,
         sample_id: str | None = None,
+        *,
+        nest_sample_dir: bool = True,
     ) -> ExportResult:
         r"""把 `HandGenerationResult` 中的产物按 artifact_level 写出到磁盘。
 
         Args:
             result (HandGenerationResult): 待导出的生成结果包。
-            output_dir (Path): 根落盘目录；产物放在 ``output_dir / sample_id /`` 下。
+            output_dir (Path): 根落盘目录。
             sample_id (str | None): 当前样本 ID；为 ``None`` 时从 result.metadata 或 uuid4 获取。
+            nest_sample_dir (bool): 是否在 `output_dir` 下再补一层 `sample_id/`。
 
         Returns:
             ExportResult: 含所有写入/跳过/错误路径的合并结果。
@@ -133,9 +148,11 @@ class HandExporter(ExporterBase):
         if result.hand_cfg is None:
             raise ValueError("HandExporter requires HandGenerationResult.hand_cfg")
 
-        resolved_id = sample_id or str(result.metadata.get("id") or uuid4().hex[:8])
-        result.metadata.setdefault("id", resolved_id)
-        out_dir = output_dir / resolved_id
+        resolved_id = sample_id or str(result.metadata.get("id") or uuid4().hex[:8])  # 逻辑样本 ID 仍稳定写入 sidecar metadata
+        result.metadata.setdefault("id", resolved_id)  # 即使 pre-made 直写 topology 根，也保留 sidecar 顶层 `id`
+
+        # pre-made 与 mutate-only 的目录差异在调用方决定；导出器只机械执行“是否再套一层样本目录”。
+        out_dir = output_dir / resolved_id if nest_sample_dir else output_dir
         combined = ExportResult()
 
         urdf_result = UrdfWriter(self.cfg.Urdf).export(result.hand_cfg, out_dir)

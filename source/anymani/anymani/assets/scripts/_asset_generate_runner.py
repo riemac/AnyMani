@@ -9,16 +9,15 @@ r"""统一资产生成 runner helper。
    - registry summary 打印；
    - 结果枚举与 preview；
 2. post-mutate 方向：
-   - 来源 sample / topology 路径解析；
-   - staging 目录准备；
-   - run 目录命名策略；
+   - 来源 topology 路径解析；
+   - mutate run 时间戳规划；
    - 结果 summary 与 preview。
 
 # NOTE:
 这里不反向依赖具体的 config 模块常量，而只接受：
 
 - `HandGeneratorCfg`
-- runner 传下来的少量路径 / layout / policy 参数
+- runner 传下来的少量路径参数
 
 这样做的原因是减少导入链长度，避免“只想 import helper 或看 `--help`，
 却因为某个配置模块 import 失败而整体不可用”。
@@ -27,9 +26,9 @@ r"""统一资产生成 runner helper。
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
-import shutil
-from typing import Any, Literal
+from typing import Any
 
 from ..generator.hand_generator import HandGenerationResult, HandGenerator, HandGeneratorCfg
 from ..presets.connectivity_presets import list_finger_connectivity_preset_names
@@ -37,12 +36,6 @@ from ..presets.connectivity_presets import list_finger_connectivity_preset_names
 
 EditablePath = str | Path
 """允许 helper 接收绝对路径、相对路径或 `Path` 对象。"""
-
-PostMutateLayout = Literal["nested", "sibling"]
-"""独立 post-mutate 的 run 目录布局模式。"""
-
-PostMutateRunPolicy = Literal["overwrite", "new", "reuse"]
-"""独立 post-mutate 的 run 目录分配策略。"""
 
 
 def print_premade_registry_summary(run_cfg: HandGeneratorCfg) -> None:
@@ -68,7 +61,6 @@ def print_premade_registry_summary(run_cfg: HandGeneratorCfg) -> None:
     print(f"missing            = {run_cfg.missing}")
     print(f"recolored          = {run_cfg.recolored}")
     print(f"artifact_level     = {run_cfg.artifact_level}")
-    print(f"output_layout      = {run_cfg.output_layout}")
     print(f"output_dir         = {run_cfg.output_dir}")
     print(f"max_enumerate      = {run_cfg.max_enumerate}")
     print(f"premade_parallel   = {run_cfg.premade_parallel}")
@@ -135,19 +127,6 @@ def print_premade_result_summary(results: list[Any], run_cfg: HandGeneratorCfg, 
         print(f"... {len(results) - len(preview_results)} more results omitted from terminal preview")
 
 
-def _sample_id_from_dir(sample_dir: Path) -> str:
-    r"""从 sample 目录名恢复 sample id。
-
-    Args:
-        sample_dir (Path): 形如 `.../<sample_id>/` 的目录。
-
-    Returns:
-        str: 去掉尾部 `/` 后的 sample id 字符串。
-    """
-
-    return sample_dir.name.rstrip("/")  # 保持和目录名一一对应，避免额外引入 rename 规则
-
-
 def _repo_root_from_runner_file() -> Path:
     r"""根据当前 helper 文件位置回推 AnyMani 仓库根目录。"""
 
@@ -180,173 +159,46 @@ def _resolve_editable_path(path_like: EditablePath) -> Path:
     return repo_root / raw_path  # 最后回退到 AnyMani 仓库根
 
 
-def resolve_source_premade_sample_dir(
-    source_path: EditablePath,
-    *,
-    sample_id: str | None = None,
-) -> Path:
-    r"""把用户填写的来源路径解析成唯一的 pre-made sample 目录。
+def resolve_source_topology_dir(source_path: EditablePath) -> Path:
+    r"""把用户填写的来源路径解析成 pre-made topology 根目录。
 
-    允许两种入口：
-
-    1. 直接给 sample 目录；
-    2. 给 topology 目录，再配合 `sample_id` 精确选择其中某个 sample。
+    新 contract 下，独立 post-mutate 只接受 topology 根目录作为来源输入。
+    topology 根必须直接包含 `hand.yaml`。
 
     Args:
-        source_path (EditablePath): 来源 sample 或 topology 路径。
-        sample_id (str | None): 当 `source_path` 是 topology 目录时，用于锁定来源样本。
+        source_path (EditablePath): 来源 topology 路径。
 
     Returns:
-        Path: 唯一确定的来源 sample 目录。
+        Path: 规范化后的 topology 根目录。
     """
 
-    resolved_path = _resolve_editable_path(source_path)  # 先规范化路径解释语义
+    resolved_path = _resolve_editable_path(source_path)  # 先规范化相对/绝对路径
     if not resolved_path.is_dir():
-        raise FileNotFoundError(f"source pre-made path does not exist or is not a directory: {resolved_path}")
-
-    # 如果路径本身就是 sample 目录，则它必须直接包含 `hand.yaml`。
-    if (resolved_path / "hand.yaml").is_file():
-        if sample_id is not None and resolved_path.name != sample_id:
-            raise ValueError(
-                "SOURCE_PREMADE_SAMPLE_ID conflicts with sample path: "
-                f"path sample={resolved_path.name!r}, requested={sample_id!r}"
-            )
-        return resolved_path
-
-    sample_dirs = sorted(path for path in resolved_path.iterdir() if path.is_dir() and (path / "hand.yaml").is_file())  # topology 目录下所有候选 sample
-    if sample_id is not None:
-        selected_dir = resolved_path / sample_id  # 用户显式指定的目标 sample 子目录
-        if selected_dir in sample_dirs:
-            return selected_dir
-        raise FileNotFoundError(f"sample_id {sample_id!r} was not found under topology directory {resolved_path}")
-
-    normal_sample_dirs = [path for path in sample_dirs if not path.name.endswith("_origin")]  # mutate-only 回放时要忽略 `_origin` 备份目录
-    if len(normal_sample_dirs) == 1:
-        return normal_sample_dirs[0]
-
-    raise ValueError(
-        "SOURCE_PREMADE_PATH points to a topology directory with multiple candidate samples; "
-        "please set SOURCE_PREMADE_SAMPLE_ID explicitly. "
-        f"candidates={[path.name for path in normal_sample_dirs]}"
-    )
+        raise FileNotFoundError(f"source topology path does not exist or is not a directory: {resolved_path}")
+    if not (resolved_path / "hand.yaml").is_file():
+        raise FileNotFoundError(
+            "Independent post-mutate now requires a topology-root sidecar; "
+            f"missing {resolved_path / 'hand.yaml'}"
+        )
+    return resolved_path
 
 
-def planned_post_mutate_topology_dir(
-    *,
-    source_sample_dir: Path,
-    layout: PostMutateLayout,
-    run_name: str,
-) -> Path:
-    r"""根据 layout 规则推导 post-mutate run 目录。
+def plan_post_mutate_run_dir(source_topology_dir: Path) -> Path:
+    r"""为一次独立 post-mutate 规划新的时间戳 run 根目录。
 
     Args:
-        source_sample_dir (Path): 原始 pre-made sample 目录。
-        layout (PostMutateLayout): `nested` 或 `sibling`。
-        run_name (str): 当前 mutate 调试轮次名。
+        source_topology_dir (Path): pre-made topology 根目录。
 
     Returns:
-        Path: 计划使用的 run 目录路径。
+        Path: 形如 `<topology>/<mutate_timestamp>/` 的新 run 根。
     """
 
-    sample_id = _sample_id_from_dir(source_sample_dir)  # 当前来源 sample 的稳定语义 id
-    if layout == "nested":
-        return source_sample_dir / run_name  # 在 sample 目录内部再嵌套一个 run 子目录
-    if layout == "sibling":
-        return source_sample_dir.parent / f"{sample_id}_post_mutate" / run_name  # 在 sample 同级新开一个 mutate-only topology 目录
-    raise ValueError(f"unknown post-mutate layout: {layout!r}")
-
-
-def _choose_run_dir(base_run_dir: Path, *, run_policy: PostMutateRunPolicy) -> Path:
-    r"""按 run policy 为 post-mutate 分配最终 run 目录。
-
-    Args:
-        base_run_dir (Path): 由 layout 推导出的理论 run 目录。
-        run_policy (PostMutateRunPolicy): `overwrite` / `reuse` / `new`。
-
-    Returns:
-        Path: 最终应使用的 run 目录路径。
-    """
-
-    if run_policy == "overwrite":
-        if base_run_dir.exists():
-            shutil.rmtree(base_run_dir)  # 仅删除当前目标 run 目录，不碰其它 run 痕迹
-        return base_run_dir
-    if run_policy == "reuse":
-        return base_run_dir  # 明确允许复用已有目录，适合只想重复恢复已有 staging 的情况
-    if run_policy != "new":
-        raise ValueError(f"unknown post-mutate run policy: {run_policy!r}")
-
-    if not base_run_dir.exists():
-        return base_run_dir
-    for index in range(1, 1000):
-        candidate = base_run_dir.with_name(f"{base_run_dir.name}_{index:02d}")  # 自动在 run 名后追加递增后缀
-        if not candidate.exists():
-            return candidate
-    raise RuntimeError(f"cannot allocate a new post-mutate run directory near {base_run_dir}")
-
-
-def _copy_source_sample_bundle(source_sample_dir: Path, staged_sample_dir: Path) -> None:
-    r"""把来源 sample 的 bundle 文件复制到 staging sample 目录。
-
-    Args:
-        source_sample_dir (Path): 原始 pre-made sample 目录。
-        staged_sample_dir (Path): 将要创建的 staging sample 目录。
-    """
-
-    staged_sample_dir.mkdir(parents=True, exist_ok=False)  # staging sample 必须是全新目录，防止混入旧文件
-    for child in source_sample_dir.iterdir():
-        target = staged_sample_dir / child.name  # 保留 bundle 内原始文件名，便于后续恢复逻辑使用
-        if child.is_file():
-            shutil.copy2(child, target)  # 保留时间戳和基本 metadata，方便人工比对
-
-
-def _copy_source_sample_for_staging(source_sample_dir: Path, run_dir: Path) -> None:
-    r"""在 run 目录下创建 mutate-only staging sample。
-
-    Args:
-        source_sample_dir (Path): 原始 pre-made sample 目录。
-        run_dir (Path): 当前 mutate run 根目录。
-    """
-
-    if not source_sample_dir.is_dir():
-        raise FileNotFoundError(f"source pre-made sample dir does not exist: {source_sample_dir}")
-    if not (source_sample_dir / "hand.yaml").is_file():
-        raise FileNotFoundError(f"source pre-made sample dir must contain hand.yaml: {source_sample_dir}")
-
-    run_dir.mkdir(parents=True, exist_ok=True)  # run 根目录允许由 overwrite/reuse/new 逻辑预先分配
-    staged_sample_dir = run_dir / _sample_id_from_dir(source_sample_dir)  # mutate-only 生成前的工作副本目录
-    origin_sample_dir = run_dir / f"{_sample_id_from_dir(source_sample_dir)}_origin"  # 生成后原始样本会被重命名到这里
-    if staged_sample_dir.exists() or origin_sample_dir.exists():
-        return  # 若 staging 或 `_origin` 已存在，说明当前 run 已做过初始化，避免重复复制
-    _copy_source_sample_bundle(source_sample_dir, staged_sample_dir)
-
-
-def prepare_post_mutate_source_topology(
-    *,
-    source_sample_dir: Path,
-    layout: PostMutateLayout,
-    run_name: str,
-    run_policy: PostMutateRunPolicy,
-) -> Path:
-    r"""为独立 post-mutate 准备正式的 staging topology 目录。
-
-    Args:
-        source_sample_dir (Path): 来源 pre-made sample 目录。
-        layout (PostMutateLayout): run 布局模式。
-        run_name (str): 当前 mutate 调试轮次名。
-        run_policy (PostMutateRunPolicy): run 目录策略。
-
-    Returns:
-        Path: 已准备好的 mutate-only run 目录。
-    """
-
-    base_run_dir = planned_post_mutate_topology_dir(
-        source_sample_dir=source_sample_dir,
-        layout=layout,
-        run_name=run_name,
-    )
-    run_dir = _choose_run_dir(base_run_dir, run_policy=run_policy)  # 先按策略分配最终 run 目录
-    _copy_source_sample_for_staging(source_sample_dir, run_dir)  # 再在该 run 下放入 staging sample 副本
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")  # mutate run 时间戳采用与 premade 一致的格式
+    run_dir = source_topology_dir / timestamp
+    collision_index = 2
+    while run_dir.exists():
+        run_dir = source_topology_dir / f"{timestamp}_{collision_index:02d}"  # 同秒重跑时继续追加后缀
+        collision_index += 1
     return run_dir
 
 
@@ -354,42 +206,29 @@ def prepare_post_mutate_run_cfg(
     run_cfg: HandGeneratorCfg,
     *,
     source_path: EditablePath,
-    sample_id: str | None,
-    layout: PostMutateLayout,
-    run_name: str,
-    run_policy: PostMutateRunPolicy,
 ) -> tuple[HandGeneratorCfg, Path, Path]:
-    r"""把 mutate-only 运行所需的 staging 路径 lower 回正式 `HandGeneratorCfg`。
+    r"""把 mutate-only 所需的 topology 路径 lower 回正式 `HandGeneratorCfg`。
 
     Args:
         run_cfg (HandGeneratorCfg): 原始 `mode="mutate"` 配置模板。
-        source_path (EditablePath): 用户填写的来源 sample/topology 路径。
-        sample_id (str | None): 当来源是 topology 目录时需要的 sample id。
-        layout (PostMutateLayout): run 目录布局模式。
-        run_name (str): 当前 mutate 调试轮次名。
-        run_policy (PostMutateRunPolicy): run 目录分配策略。
+        source_path (EditablePath): 用户填写的来源 topology 路径。
 
     Returns:
         tuple[HandGeneratorCfg, Path, Path]:
-        1. 已替换 `source_topology_dir` 与 `output_dir` 的正式运行 cfg；
-        2. 解析出的来源 sample 目录；
-        3. 已准备好的 mutate-only run 目录。
+        1. 已替换 `source_topology_dir` 的正式运行 cfg；
+        2. 解析出的来源 topology 根目录；
+        3. 计划使用的 mutate run 根目录。
     """
 
-    source_sample_dir = resolve_source_premade_sample_dir(source_path, sample_id=sample_id)  # 把人类友好的路径入口解析成唯一 sample
-    prepared_topology_dir = prepare_post_mutate_source_topology(
-        source_sample_dir=source_sample_dir,
-        layout=layout,
-        run_name=run_name,
-        run_policy=run_policy,
-    )
+    source_topology_dir = resolve_source_topology_dir(source_path)  # mutate-only 来源恢复现在只认 topology 根
+    planned_run_dir = plan_post_mutate_run_dir(source_topology_dir)  # 这里只做预览/打印，不实际 mkdir
     return (
         run_cfg.replace(
-            source_topology_dir=prepared_topology_dir,  # mutate-only 运行时真正读取的是 staging topology
-            output_dir=prepared_topology_dir.parent,  # 新样本 summary / bundle 默认写到 run 目录的父层
+            source_topology_dir=source_topology_dir,  # 运行时会由 `HandGenerator` 自己在 topology 根下创建时间戳 run
+            output_dir=source_topology_dir.parent,  # mutate-only 新 contract 下该字段不再主导路径，只保留成兼容占位
         ),
-        source_sample_dir,
-        prepared_topology_dir,
+        source_topology_dir,
+        planned_run_dir,
     )
 
 
@@ -397,37 +236,28 @@ def print_post_mutate_summary(
     run_cfg: HandGeneratorCfg,
     *,
     source_path: EditablePath,
-    source_sample_id: str | None,
-    source_sample_dir: Path,
-    layout: PostMutateLayout,
-    run_name: str,
-    run_policy: PostMutateRunPolicy,
+    source_topology_dir: Path,
+    planned_run_dir: Path,
 ) -> None:
     r"""打印独立 post-mutate 当前实际生效的运行参数。
 
     Args:
-        run_cfg (HandGeneratorCfg): 已 lower 完 staging 路径后的正式运行配置。
+        run_cfg (HandGeneratorCfg): 已 lower 完 topology 路径后的正式运行配置。
         source_path (EditablePath): 用户原始填写的来源路径。
-        source_sample_id (str | None): 用户原始填写的来源 sample id。
-        source_sample_dir (Path): 最终解析出的来源 sample 目录。
-        layout (PostMutateLayout): 当前 run 布局模式。
-        run_name (str): 当前 mutate 调试轮次名。
-        run_policy (PostMutateRunPolicy): 当前 run 目录策略。
+        source_topology_dir (Path): 最终解析出的来源 topology 根目录。
+        planned_run_dir (Path): 本轮计划使用的 mutate 时间戳 run 根。
     """
 
     print("=== independent post-mutate knobs ===")
-    print(f"source_premade_path = {source_path}")
-    print(f"source_sample_id    = {source_sample_id}")
-    print(f"source_sample_dir   = {source_sample_dir}")
-    print(f"layout              = {layout}")
-    print(f"run_name            = {run_name}")
-    print(f"run_policy          = {run_policy}")
-    print(f"source_topology_dir = {run_cfg.source_topology_dir}")
-    print(f"n_samples           = {run_cfg.n_samples}")
-    print(f"artifact_level      = {run_cfg.artifact_level}")
-    print(f"recolored           = {run_cfg.recolored}")
-    print(f"validator_on        = {run_cfg.Validate is not None}")
-    print(f"mutator_terms       = {[name for name, _ in run_cfg.Mutate.ordered_terms()]}")
+    print(f"source_topology_path = {source_path}")
+    print(f"source_topology_dir  = {source_topology_dir}")
+    print(f"planned_run_dir      = {planned_run_dir}")
+    print(f"source_topology_cfg  = {run_cfg.source_topology_dir}")
+    print(f"n_samples            = {run_cfg.n_samples}")
+    print(f"artifact_level       = {run_cfg.artifact_level}")
+    print(f"recolored            = {run_cfg.recolored}")
+    print(f"validator_on         = {run_cfg.Validate is not None}")
+    print(f"mutator_terms        = {[name for name, _ in run_cfg.Mutate.ordered_terms()]}")
     if run_cfg.Validate is not None:
         print(f"post_mutate.finger_count_min = {run_cfg.Validate.post_mutate.finger_count_min}")
         print(
@@ -472,7 +302,7 @@ def print_post_mutate_result_summary(results: list[HandGenerationResult], *, pri
     print("=== result preview ===")
     for index, result in enumerate(results[:preview_limit], start=1):
         sample_id = str(result.metadata.get("id", "-"))  # 当前新生成的变体 sample id
-        origin_id = str(result.metadata.get("source_origin_sample_id", "-"))  # 来源 pre-made 原样本 id
+        origin_id = str(result.metadata.get("source_origin_sample_id", "-"))  # 来源 pre-made 逻辑样本 id
         topology_name = str(result.metadata.get("topology_name", result.metadata.get("source_topology_dir", "-")))  # 当前来源 topology 语义名
         term_names = ",".join(sorted(result.metadata.get("post_mutate_samples", {}).keys()))  # 本轮实际涉及的 mutator term 名集合
         urdf_path = str(result.urdf_path) if result.urdf_path is not None else "(hand_cfg only)"  # 如未导出 URDF，则显式提示
@@ -485,12 +315,11 @@ def print_post_mutate_result_summary(results: list[HandGenerationResult], *, pri
 __all__ = [
     "enumerate_post_mutate_bundles",
     "enumerate_premade_bundles",
-    "planned_post_mutate_topology_dir",
+    "plan_post_mutate_run_dir",
     "prepare_post_mutate_run_cfg",
-    "prepare_post_mutate_source_topology",
     "print_post_mutate_result_summary",
     "print_post_mutate_summary",
     "print_premade_registry_summary",
     "print_premade_result_summary",
-    "resolve_source_premade_sample_dir",
+    "resolve_source_topology_dir",
 ]

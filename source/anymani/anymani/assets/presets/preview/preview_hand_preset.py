@@ -43,13 +43,7 @@ parser.add_argument(
     help="正式 HandGenerator 导出粒度；quick-check 默认只写 URDF。",
 )
 parser.add_argument(
-    "--output-layout",
-    type=str,
-    default="recursive",
-    choices=("flat", "recursive"),
-    help="当启用 connectivity preset 时，控制 pre-made 产物采用递归式还是扁平式目录。",
-)
-parser.add_argument("--output-dir", type=str, default=None, help="导出目录；不写则自动创建临时目录。")
+    "--output-dir", type=str, default=None, help="导出目录；不写则自动创建临时目录。")
 
 
 def _build_made_cfg_and_label(args) -> tuple[object, str]:
@@ -136,14 +130,13 @@ def main() -> int:
             }
         }
     generator_cfg = HandGeneratorCfg(
-        mode="full",
+        mode="made",
         artifact_level=args.artifact_level,
         output_dir=output_dir,
         handedness=getattr(made_cfg, "handedness", "all"),
         Made=made_cfg,
         hand_presets=[args.hand_preset] if args.connectivity_preset is not None and args.hand_preset is not None else [],
         connectivity_presets=slot_level_connectivity,
-        output_layout=args.output_layout,
     )
     result = HandGenerator(generator_cfg).generate()
     if result is None:

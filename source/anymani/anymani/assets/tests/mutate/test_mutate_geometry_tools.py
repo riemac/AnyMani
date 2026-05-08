@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
-from assets.generator.mutate import LinkScaleCfg, LinkScaleMutator, ScalarDistributionCfg, TipReplaceCfg, TipReplaceMutator
+from assets.generator.mutate import LinkScaleCfg, LinkScaleMutator, TipReplaceCfg, TipReplaceMutator
 from assets.presets import get_finger_builder_preset, make_human_like_builder_cfg
 
 
@@ -84,12 +84,11 @@ def test_link_scale_mutator_rescales_link_length_and_advances_next_joint_origin(
 
     mutated = LinkScaleMutator(
         LinkScaleCfg(
-            target_joints=("index_j1",),
-            scale_mode="relative",
-            delta_distribution=ScalarDistributionCfg(kind="fixed", value=0.1),
-            clip_ratio=0.1,
+            scale_type="rel",
+            link_scale=(1.1, 1.1),
+            distrib="uniform",
         )
-    ).mutate(hand, sampled_params={"index_j1": 0.1})
+    ).mutate(hand, sampled_params={"index_j1": 1.1})
 
     assert mutated is not None
     after_index_origin = _joint_by_name(mutated, "index_j1").origin.pos
@@ -110,11 +109,12 @@ def test_tip_replace_mutator_swaps_primitive_tip_body_geometry():
     before_inertial = before_tip_joint.inertial
     mutated = TipReplaceMutator(
         TipReplaceCfg(
-            target_fingers=("index",),
             mode="geometry_swap",
             target_geometry="box",
+            self_mode="general",
+            scale=(1.0, 1.0),
         )
-    ).mutate(hand)
+    ).mutate(hand, sampled_params={"index::scale": 1.0})
 
     assert mutated is not None
     tip_joint = _finger_by_name(mutated, "index").tip_joint
@@ -138,17 +138,14 @@ def test_tip_replace_mutator_perturbs_custom_mesh_tip_origin():
 
     mutated = TipReplaceMutator(
         TipReplaceCfg(
-            target_fingers=("index",),
             mode="mesh_perturb",
-            mesh_offset_distribution=ScalarDistributionCfg(kind="fixed", value=0.1),
+            self_mode="general",
+            scale=(1.1, 1.1),
         )
     ).mutate(
         hand,
         sampled_params={
-            "index::collisions::0::0": 0.1,
-            "index::collisions::0::2": 0.1,
-            "index::visuals::0::0": 0.1,
-            "index::visuals::0::2": 0.1,
+            "index::scale": 1.1,
         },
     )
 

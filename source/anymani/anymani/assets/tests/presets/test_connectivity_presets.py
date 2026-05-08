@@ -102,7 +102,6 @@ def test_hand_generator_applies_connectivity_preset_and_drops_deleted_child_link
             connectivity_presets=_slot_level_selection("single_palm_leap", "leap_t3_i3_m2_r2"),
             mixed=False,
             missing=False,
-            output_layout="recursive",
         )
     ).generate()
 
@@ -111,9 +110,9 @@ def test_hand_generator_applies_connectivity_preset_and_drops_deleted_child_link
     assert result.hand_cfg.dof_count == 10
     assert result.urdf_path is not None and result.urdf_path.is_file()
     assert result.sidecar_path is not None and result.sidecar_path.is_file()
-    assert result.urdf_path.parent.parent.name == "right_t3_i3_m2_r2"
-    assert result.urdf_path.parent.parent.parent.name == "single_palm_leap"
-    summary_path = result.urdf_path.parent.parent.parent.parent / "summary.yaml"
+    assert result.urdf_path.parent.name == "right_t3_i3_m2_r2"
+    assert result.urdf_path.parent.parent.name == "single_palm_leap"
+    summary_path = result.urdf_path.parent.parent.parent / "summary.yaml"
     assert summary_path.is_file()
 
     index = next(finger for finger in result.hand_cfg.fingers if finger.name == "index")

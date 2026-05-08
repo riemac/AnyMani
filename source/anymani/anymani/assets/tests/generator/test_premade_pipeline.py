@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+import pytest
 import yaml
 
 import assets.generator.hand_generator as hand_generator_module
+import assets.generator._premade_batch as premade_batch_module
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.exporter.urdf_writer import UrdfWriter, UrdfWriterCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
@@ -125,8 +127,8 @@ def test_urdf_writer_folds_mount_into_first_joint_when_mount_link_disabled():
     assert joint_elems["index_j0"].find("parent").attrib["link"] == hand.palm.name
 
 
-def test_hand_generator_returns_bundle_and_exports_to_configured_directory(tmp_path):
-    """generator 在 pre-made 路线上应能返回 bundle，并把产物写到指定目录。"""
+def test_hand_generator_rejects_full_mode_until_topology_root_migration_is_finished(tmp_path):
+    """`mode=\"full\"` 当前应显式报不支持，而不是悄悄沿用旧目录语义。"""
 
     cfg = HandGeneratorCfg(
         mode="full",
@@ -135,16 +137,8 @@ def test_hand_generator_returns_bundle_and_exports_to_configured_directory(tmp_p
         Made=_make_allegro_builder_cfg(),
     )
 
-    result = HandGenerator(cfg).generate()
-
-    assert result is not None
-    assert result.hand_cfg is not None
-    assert result.urdf_path is not None and result.urdf_path.is_file()
-    assert result.sidecar_path is not None and result.sidecar_path.is_file()
-    assert result.tree_txt is not None
-    run_root = result.urdf_path.parent.parent
-    assert run_root.parent == tmp_path
-    assert (run_root / "summary.yaml").is_file()
+    with pytest.raises(NotImplementedError, match="mode='full' is temporarily unsupported"):
+        HandGenerator(cfg).generate()
 
 
 def test_hand_generator_can_explicitly_skip_hand_level_validator(tmp_path):
@@ -255,7 +249,7 @@ def test_premade_parallel_failure_falls_back_to_serial(monkeypatch, tmp_path):
     def _raise_parallel_failure(self, *, tasks):
         raise RuntimeError("synthetic parallel executor failure")
 
-    monkeypatch.setattr(hand_generator_module.HandGenerator, "_generate_premade_parallel", _raise_parallel_failure)
+    monkeypatch.setattr(premade_batch_module, "run_premade_parallel", _raise_parallel_failure)
 
     cfg = HandGeneratorCfg(
         mode="made",

@@ -86,10 +86,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="anymani.assets.config.asset_gen_cfg",
         help="Python module path containing PRE_MADE_CFG / POST_MUTATE_CFG.",
     )
-    parser.add_argument("--source-path", default=None, help="Override post-mutate source topology/sample path.")
-    parser.add_argument("--sample-id", default=None, help="Override post-mutate source sample id.")
-    parser.add_argument("--run-name", default=None, help="Override post-mutate run name.")
-    parser.add_argument("--run-policy", choices=("overwrite", "new", "reuse"), default=None)
+    parser.add_argument("--source-path", default=None, help="Override post-mutate source topology path.")
     parser.add_argument("--n-samples", type=int, default=None, help="Override HandGeneratorCfg.n_samples.")
     parser.add_argument("--max-enumerate", type=int, default=None, help="Override pre-made max_enumerate.")
     return parser
@@ -163,19 +160,13 @@ def _run_post_mutate(
     module,
     *,
     source_path: str | None,
-    sample_id: str | None,
-    run_name: str | None,
-    run_policy: str | None,
     n_samples: int | None,
 ) -> int:
     r"""执行独立 post-mutate 阶段。
 
     Args:
         module: 已导入的配置模块；要求暴露 `POST_MUTATE_CFG` 与来源路径常量。
-        source_path (str | None): CLI 临时覆盖的 pre-made 来源路径。
-        sample_id (str | None): CLI 临时覆盖的来源 sample id。
-        run_name (str | None): CLI 临时覆盖的 mutate run 名称。
-        run_policy (str | None): CLI 临时覆盖的 run 目录策略。
+        source_path (str | None): CLI 临时覆盖的 pre-made topology 根路径。
         n_samples (int | None): CLI 临时覆盖的 Monte Carlo 采样数。
 
     Returns:
@@ -188,31 +179,21 @@ def _run_post_mutate(
     if n_samples is not None:
         cfg = cfg.replace(n_samples=n_samples)  # 只覆盖后变异样本数，不重写 term container
 
-    # 这些路径级参数本质上属于“本次运行调度信息”，因此优先允许 CLI 覆盖模块常量。
-    resolved_source_path = source_path or module.POST_MUTATE_SOURCE_PREMADE_PATH  # 来源可以是 sample 或 topology 目录
-    resolved_sample_id = sample_id if sample_id is not None else module.POST_MUTATE_SOURCE_PREMADE_SAMPLE_ID  # 多 sample topology 需精确锁定来源
-    resolved_run_name = run_name or module.POST_MUTATE_RUN_NAME  # 当前 mutate 调试轮次名
-    resolved_run_policy = run_policy or module.POST_MUTATE_RUN_POLICY  # overwrite/new/reuse 的目录策略
+    # 独立 post-mutate 现在只接受 topology 根；run 时间戳由 HandGenerator 运行时自动生成。
+    resolved_source_path = source_path or module.POST_MUTATE_SOURCE_TOPOLOGY_PATH
 
-    # helper 会把“用户直观填写的 sample/topology 路径”lower 成正式 mutate-only 所需的 staging topology。
-    prepared_cfg, source_sample_dir, _prepared_topology_dir = prepare_post_mutate_run_cfg(
+    # helper 会把“用户直观填写的 topology 路径”lower 成正式 mutate-only 所需的 topology-root cfg。
+    prepared_cfg, source_topology_dir, planned_run_dir = prepare_post_mutate_run_cfg(
         cfg,
         source_path=resolved_source_path,
-        sample_id=resolved_sample_id,
-        layout=module.POST_MUTATE_LAYOUT,
-        run_name=resolved_run_name,
-        run_policy=resolved_run_policy,
     )
 
-    # 先打印 summary，再真正执行 mutate，便于人工在出错前先看到来源与 staging 解析结果。
+    # 先打印 summary，再真正执行 mutate，便于人工在出错前先看到来源 topology 与本轮计划 run 根。
     print_post_mutate_summary(
         prepared_cfg,
         source_path=resolved_source_path,
-        source_sample_id=resolved_sample_id,
-        source_sample_dir=source_sample_dir,
-        layout=module.POST_MUTATE_LAYOUT,
-        run_name=resolved_run_name,
-        run_policy=resolved_run_policy,
+        source_topology_dir=source_topology_dir,
+        planned_run_dir=planned_run_dir,
     )
 
     # mutate-only 正式执行路径仍收口到 `HandGenerator(mode="mutate")`。
@@ -250,9 +231,6 @@ def main(argv: list[str] | None = None) -> int:
     return _run_post_mutate(
         module,
         source_path=args.source_path,
-        sample_id=args.sample_id,
-        run_name=args.run_name,
-        run_policy=args.run_policy,
         n_samples=args.n_samples,
     )
 

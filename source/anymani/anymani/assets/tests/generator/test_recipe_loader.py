@@ -24,6 +24,7 @@ $$
 
 from __future__ import annotations
 
+import pytest
 import yaml
 
 from assets.builder.hand_builders import HumanLikeHandBuilderCfg
@@ -53,7 +54,7 @@ def _tool_recipe_dict(output_dir: str, *, artifact_level: str) -> dict:
     """返回一份可直接喂给 `RecipeLoader` 的完整 recipe。"""
 
     return {
-        "mode": "full",
+        "mode": "made",
         "artifact_level": artifact_level,
         "sampling_strategy": "sample",
         "n_samples": 1,
@@ -102,7 +103,7 @@ def test_recipe_loader_save_and_load_round_trip_keeps_current_contract(tmp_path)
     """save/load round-trip 应保留当前 tooling 关心的 typed contract。"""
 
     cfg = HandGeneratorCfg(
-        mode="full",
+        mode="made",
         artifact_level="bundle",
         output_dir=tmp_path / "generated",
         Made=make_human_like_builder_cfg(
@@ -162,53 +163,37 @@ def test_loaded_recipe_drives_hand_generator_directly_for_bundle_mode(tmp_path):
     assert result.hand_cfg is not None
     assert result.urdf_path is not None and result.urdf_path.is_file()
     assert result.sidecar_path is not None and result.sidecar_path.is_file()
-    run_root = result.urdf_path.parent.parent
+    run_root = result.urdf_path.parent
     assert run_root.parent == out_dir
-    assert result.sidecar_path.parent.parent == run_root
+    assert result.sidecar_path.parent == run_root
     assert (run_root / "summary.yaml").is_file()
 
 
-def test_recipe_loader_keeps_premade_facade_fields_as_generator_contract(tmp_path):
-    r"""`RecipeLoader` 应保留 pre-made façade 字段，而不是在 recipe helper 层吞掉它们。
+def test_recipe_loader_rejects_removed_output_layout_field(tmp_path):
+    r"""`RecipeLoader` 应对已删除的 `output_layout` 字段给出清晰报错。
 
-    这里锁住的是这轮新增的顶层声明式契约：
-
-    - `hand_presets`
-    - `connectivity_presets`
-    - `output_layout`
-
-    它们都属于 `HandGeneratorCfg` 本体，而不是新的 wrapper / runner。
+    这轮目录 contract 已经固定，不再接受旧的 layout 风格字段。
     """
 
-    cfg = RecipeLoader.load_dict(
-        {
-            "mode": "made",
-            "artifact_level": "hand_cfg",
-            "output_dir": str(tmp_path / "generated"),
-            "sampling_strategy": "enumerate",
-            "hand_presets": ["single_palm_allegro"],
-            "connectivity_presets": {
-                "single_palm_allegro": {
-                    "thumb": ["allegro_thumb_full"],
-                    "index": ["allegro_non_thumb_full"],
-                    "middle": ["allegro_non_thumb_drop_j2"],
-                    "ring": ["allegro_non_thumb_drop_j2_j3"],
-                }
-            },
-            "output_layout": "recursive",
-        }
-    )
-
-    assert cfg.hand_presets == ["single_palm_allegro"]
-    assert cfg.connectivity_presets == {
-        "single_palm_allegro": {
-            "thumb": ["allegro_thumb_full"],
-            "index": ["allegro_non_thumb_full"],
-            "middle": ["allegro_non_thumb_drop_j2"],
-            "ring": ["allegro_non_thumb_drop_j2_j3"],
-        }
-    }
-    assert cfg.output_layout == "recursive"
+    with pytest.raises(ValueError, match="Removed HandGeneratorCfg fields"):
+        RecipeLoader.load_dict(
+            {
+                "mode": "made",
+                "artifact_level": "hand_cfg",
+                "output_dir": str(tmp_path / "generated"),
+                "sampling_strategy": "enumerate",
+                "hand_presets": ["single_palm_allegro"],
+                "connectivity_presets": {
+                    "single_palm_allegro": {
+                        "thumb": ["allegro_thumb_full"],
+                        "index": ["allegro_non_thumb_full"],
+                        "middle": ["allegro_non_thumb_drop_j2"],
+                        "ring": ["allegro_non_thumb_drop_j2_j3"],
+                    }
+                },
+                "output_layout": "recursive",
+            }
+        )
 
 
 def test_recipe_loader_builds_mutate_block_into_isaaclab_style_cfg(tmp_path):
@@ -216,7 +201,7 @@ def test_recipe_loader_builds_mutate_block_into_isaaclab_style_cfg(tmp_path):
 
     cfg = RecipeLoader.load_dict(
         {
-            "mode": "full",
+            "mode": "made",
             "artifact_level": "hand_cfg",
             "output_dir": str(tmp_path / "generated"),
             "Made": _made_recipe_dict(),

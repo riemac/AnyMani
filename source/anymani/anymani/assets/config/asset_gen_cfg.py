@@ -13,7 +13,7 @@ r"""统一资产生成配置。
 - 完整 pre-made 枚举：
   对离散 topology × connectivity 空间做系统性展开；
 - 独立 post-mutate 调试：
-  从某个已有 pre-made sample 或 topology 出发，反复做后变异实验。
+  从某个已有 pre-made topology 根出发，反复做后变异实验。
 
 # NOTE:
 执行逻辑由 `assets/scripts/generate.py` 和 `_asset_generate_runner.py`
@@ -65,12 +65,6 @@ r"""资产导出粒度。
 - `bundle`：同时保留 sidecar / urdf / tree 等完整产物。
 """
 
-PostMutateLayout = Literal["nested", "sibling"]
-r"""独立 post-mutate 的输出布局模式。"""
-
-PostMutateRunPolicy = Literal["overwrite", "new", "reuse"]
-r"""独立 post-mutate 的 run 目录策略。"""
-
 EditablePath = str | Path
 r"""允许研究者在配置文件里直接写相对路径或绝对路径。"""
 
@@ -84,6 +78,35 @@ HAND_PRESETS: list[str] = ["single_palm_allegro", "single_palm_leap"]
 
 CONNECTIVITY_PRESETS: ConnectivityFacade = None
 """为 `None` 时使用 registry 中已注册的全部合法 connectivity recipe。"""
+
+# # 部分已注册示例
+# CONNECTIVITY_PRESETS: ConnectivityFacade = {
+#     "single_palm_allegro": {
+#         "thumb": [
+#             "allegro_thumb_full",
+#             "allegro_thumb_drop_j3",
+#         ],
+#         "index": [
+#             "allegro_non_thumb_full",
+#             "allegro_non_thumb_drop_j3",
+#         ],
+#         "middle": [
+#             "allegro_non_thumb_full",
+#             "allegro_non_thumb_drop_j3",
+#         ],
+#         "ring": [
+#             "allegro_non_thumb_full",
+#             "allegro_non_thumb_drop_j3",
+#         ],
+#     },
+#     "single_palm_leap": {
+#         "thumb": ["leap_thumb_full"],
+#         "index": ["leap_non_thumb_full"],
+#         "middle": ["leap_non_thumb_full"],
+#         "ring": ["leap_non_thumb_full"],
+#     },
+# }
+
 
 HANDEDNESS: Literal["left", "right", "all"] = "all"
 """默认同时枚举左右手，避免只在单侧上做 topology 统计。"""
@@ -102,9 +125,6 @@ PRE_MADE_MAX_ENUMERATE: int | None = None
 
 PRE_MADE_ARTIFACT_LEVEL: ArtifactLevel = "bundle"
 """默认直接导出完整 bundle，便于后续 mutate-only 从 sidecar/urdf 恢复。"""
-
-PRE_MADE_OUTPUT_LAYOUT: Literal["flat", "recursive"] = "recursive"
-"""默认按递归层级输出，保留 topology 目录语义。"""
 
 PRE_MADE_OUTPUT_DIR: Path = Path(__file__).resolve().parents[1] / "generated"
 """默认写回 `assets/generated/`，保持子项目内部自包含。"""
@@ -149,7 +169,6 @@ PRE_MADE_CFG = HandGeneratorCfg(
     missing=MISSING,  # 是否允许缺指 topology
     Validate=PRE_MADE_VALIDATOR_CFG,  # pre-made hand-level validator
     recolored=PRE_MADE_RECOLORED,  # 导出前的可视 recolor 方案
-    output_layout=PRE_MADE_OUTPUT_LAYOUT,  # 目录层级输出方式
     max_enumerate=PRE_MADE_MAX_ENUMERATE,  # 离散笛卡尔空间截断预算
     premade_parallel=PREMADE_PARALLEL,  # 是否并行展开 pre-made 样本
     premade_parallel_workers=PREMADE_PARALLEL_WORKERS,  # worker 数占位
@@ -167,27 +186,15 @@ PRE_MADE_CFG = HandGeneratorCfg(
 #  post-mutate 配置
 # ============================================================================
 
-POST_MUTATE_SOURCE_PREMADE_PATH: EditablePath = (
+POST_MUTATE_SOURCE_TOPOLOGY_PATH: EditablePath = (
     "AnyMani/source/anymani/anymani/assets/generated/"
-    "2026-05-03_09-45-45/single_palm_leap/right_t4_i4_m4_r4/f5d8c069"
+    "2026-05-03_09-45-45/single_palm_leap/right_t4_i4_m4_r4"
 )
-"""独立 post-mutate 的默认来源路径。
+"""独立 post-mutate 的默认来源 topology 根目录。
 
-这里允许直接写到 sample 目录，是因为这是调试时最贴近人脑的工作流入口。
-真正执行前，runner 会把它 lower 成 mutate-only 所需的 staging topology。
+新 contract 下，这个目录自己就持有 pre-made 的 `hand.yaml`，
+runner 与 `HandGenerator` 都不再接受 sample 子目录。
 """
-
-POST_MUTATE_SOURCE_PREMADE_SAMPLE_ID: str | None = "f5d8c069"
-"""若来源路径指向 topology 目录，则用该 sample id 精确锁定来源样本。"""
-
-POST_MUTATE_LAYOUT: PostMutateLayout = "nested"
-"""默认把 mutate run 作为 sample 目录内部的嵌套子目录。"""
-
-POST_MUTATE_RUN_NAME: str = "try_001"
-"""当前 post-mutate 调试轮次名。"""
-
-POST_MUTATE_RUN_POLICY: PostMutateRunPolicy = "overwrite"
-"""默认覆盖同名 run，适合高频调参迭代。"""
 
 POST_MUTATE_N_SAMPLES: int = 100
 """联合 Monte Carlo 目标样本数 $N=100$。"""
@@ -198,11 +205,8 @@ POST_MUTATE_ARTIFACT_LEVEL: ArtifactLevel = "bundle"
 POST_MUTATE_RECOLORED: RecolorFacade = "anatomy_soft_v1"
 """后变异样本默认沿用同一套 anatomy recolor preset。"""
 
-POST_MUTATE_OUTPUT_LAYOUT: Literal["flat", "recursive"] = "recursive"
-"""后变异落盘时默认保留递归目录层级。"""
-
-POST_MUTATE_PRINT_RESULT_LIMIT: int | None = 20
-"""终端里只 preview 前 20 个后变异样本。"""
+POST_MUTATE_PRINT_RESULT_LIMIT: int | None = 10
+"""终端里只 preview 前若干个后变异样本。"""
 
 
 class QuickPostMutateCfg(HandMutatorCfg):
@@ -279,24 +283,23 @@ POST_MUTATE_VALIDATOR_CFG: HandValidatorCfg | None = HandValidatorCfg(
 """
 
 # `mode="mutate"` 目前要求 cfg 上存在 `source_topology_dir`，因此这里放一个静态占位符；
-# 真正运行前由统一 runner 根据 source sample/topology 路径替换成 staging 目录。
+# 真正运行前由统一 runner 根据来源 topology 路径替换成正式 pre-made topology 根目录。
 POST_MUTATE_CFG = HandGeneratorCfg(
     mode="mutate",  # 只做后变异，不重新枚举 pre-made 空间
     artifact_level=POST_MUTATE_ARTIFACT_LEVEL,  # 默认导出完整 bundle
-    source_topology_dir=Path("__post_mutate_topology_dir__"),  # 运行前由 runner 动态替换成 staging topology
-    output_dir=Path("__post_mutate_output_dir__"),  # 运行前由 runner 动态替换成实际输出目录
+    source_topology_dir=Path("__post_mutate_topology_dir__"),  # 运行前由 runner 动态替换成 pre-made topology 根
+    output_dir=Path("__post_mutate_output_dir__"),  # 兼容占位；新目录 contract 实际由 source_topology_dir 驱动
     n_samples=POST_MUTATE_N_SAMPLES,  # 目标联合 Monte Carlo 样本数
     Mutate=POST_MUTATE_MUTATOR_CFG,  # 当前默认 mutator term container
     Validate=POST_MUTATE_VALIDATOR_CFG,  # 后变异 hand-level validator
     recolored=POST_MUTATE_RECOLORED,  # 后变异样本的可视 recolor 方案
-    output_layout=POST_MUTATE_OUTPUT_LAYOUT,  # 后变异目录层级布局
 )
 """正式的独立 post-mutate 主入口。
 
 # NOTE:
 这里保留静态占位路径，是因为 `HandGeneratorCfg(mode="mutate")`
 目前 contract 上要求 `source_topology_dir` 已存在；而人在调试时更自然填写的是
-sample 路径或 topology 路径，二者之间的 lowering 放到 runner 层做。
+配置模块里的 topology 根路径，lowering 放到 runner 层做。
 """
 
 
@@ -322,12 +325,8 @@ ASSET_RUN_STRATEGY = AssetRunStrategyCfg(
 __all__ = [
     "ASSET_RUN_STRATEGY",
     "POST_MUTATE_CFG",
-    "POST_MUTATE_LAYOUT",
     "POST_MUTATE_PRINT_RESULT_LIMIT",
-    "POST_MUTATE_RUN_NAME",
-    "POST_MUTATE_RUN_POLICY",
-    "POST_MUTATE_SOURCE_PREMADE_PATH",
-    "POST_MUTATE_SOURCE_PREMADE_SAMPLE_ID",
+    "POST_MUTATE_SOURCE_TOPOLOGY_PATH",
     "PRE_MADE_CFG",
     "PRE_MADE_PRINT_RESULT_LIMIT",
     "PRE_MADE_SHOW_REGISTRY",

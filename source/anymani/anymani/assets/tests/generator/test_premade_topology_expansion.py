@@ -91,9 +91,9 @@ def test_generate_batch_builds_mixed_family_topologies_and_exports_under_mixed_r
     mixed_results = [result for result in results if result.metadata["topology_kind"] == "mixed"]
     assert mixed_results
     assert all(result.urdf_path is not None and "/mixed/" in result.urdf_path.as_posix() for result in mixed_results)
-    assert all(result.urdf_path.parent.parent.name == result.metadata["topology_name"] for result in mixed_results)
-    assert all(result.urdf_path.parent.parent.parent.name == result.metadata["topology_group_name"] for result in mixed_results)
-    assert all(result.urdf_path.parent.parent.parent.parent.name == "mixed" for result in mixed_results)
+    assert all(result.urdf_path.parent.name == result.metadata["topology_name"] for result in mixed_results)
+    assert all(result.urdf_path.parent.parent.name == result.metadata["topology_group_name"] for result in mixed_results)
+    assert all(result.urdf_path.parent.parent.parent.name == "mixed" for result in mixed_results)
     assert all(result.metadata["slot_family_map"]["thumb"] == "allegro" for result in mixed_results)
     assert any(result.metadata["slot_family_map"]["index"] == "leap" for result in mixed_results)
     assert all(result.metadata["topology_anchor"] == "mixed" for result in mixed_results)
