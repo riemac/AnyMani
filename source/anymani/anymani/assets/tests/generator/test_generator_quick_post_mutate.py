@@ -55,6 +55,18 @@ def _make_fake_topology(topology_dir: Path, *, sample_id: str = "fake1234") -> N
     (topology_dir / "hand.urdf").write_text("<robot name=\"fake\" />\n", encoding="utf-8")
 
 
+def _assert_urdf_has_no_mount_helper_topology(urdf_path: Path) -> None:
+    r"""断言 URDF 文本里不再残留 `mount_link` / `mount_joint` 辅助拓扑。
+
+    这里检查的是整手正式导出的 contract，而不是 palm preview 里的 marker 机制。
+    一旦这里再次出现 `*_mount_link`，说明整手导出退回了旧的非官方挂载语义。
+    """
+
+    urdf_text = urdf_path.read_text(encoding="utf-8")
+    assert "_mount_link" not in urdf_text
+    assert "_mount_joint" not in urdf_text
+
+
 class DemoMountMutatorCfg(HandMutatorCfg):
     r"""测试用 post-mutate cfg：只启用一个 mount perturb term。"""
 
@@ -150,6 +162,10 @@ def test_independent_post_mutate_restores_from_topology_root_and_writes_timestam
     assert all((mutate_run_dir / result.metadata["id"] / "hand.yaml").is_file() for result in results)
     assert (topology_dir / "hand.yaml").is_file()
     assert (topology_dir / "hand.urdf").is_file()
+
+    _assert_urdf_has_no_mount_helper_topology(topology_dir / "hand.urdf")  # pre-made topology 根导出也必须遵守同一语义
+    for result in results:
+        _assert_urdf_has_no_mount_helper_topology(result.urdf_path)  # mutate-only 派生样本不允许回退到旧 mount helper 拓扑
 
 
 def test_unified_generate_runner_accepts_post_mutate_cli(monkeypatch, tmp_path):

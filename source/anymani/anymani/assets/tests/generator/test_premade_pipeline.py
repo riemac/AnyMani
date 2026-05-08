@@ -43,6 +43,12 @@ def _build_allegro_hand():
     return HumanLikeHandBuilder(_make_allegro_builder_cfg()).build()
 
 
+def _parse_triplet(text: str) -> tuple[float, float, float]:
+    r"""把 URDF 里的 `\"x y z\"` / `\"r p y\"` 三元串解析成浮点 tuple。"""
+
+    return tuple(float(value) for value in text.split())  # type: ignore[return-value]
+
+
 def test_hand_validator_reports_mount_spacing_warning_without_rejecting():
     """validator 应允许 warning 放行，但把 spacing 问题记录下来。"""
 
@@ -60,20 +66,38 @@ def test_hand_validator_reports_mount_spacing_warning_without_rejecting():
     assert any("finger spacing" in warning for warning in result.warnings)
 
 
-def test_urdf_writer_inserts_mount_link_when_enabled():
-    """开启 `use_mount_link` 时，URDF 里应显式插入 mount joint / mount link。"""
+def test_urdf_writer_always_folds_mount_into_first_joint_origin():
+    r"""整手 URDF 应始终用第一关节 `origin` 表达挂载位姿。
+
+    这里锁住的是你刚确认过的官方语义：
+
+    - 不允许再出现 `*_mount_link` / `*_mount_joint`；
+    - `FingerCfg.mount` 必须直接折叠进 finger 链第一个 joint 的 `origin`。
+    """
 
     hand = _build_allegro_hand()
-    writer = UrdfWriter(UrdfWriterCfg(use_mount_link=True))
+    writer = UrdfWriter(UrdfWriterCfg())
 
     root = ET.fromstring(writer.to_urdf_string(hand))
-    link_names = {link.attrib["name"] for link in root.findall("link")}
     joint_elems = {joint.attrib["name"]: joint for joint in root.findall("joint")}
+    link_names = {link.attrib["name"] for link in root.findall("link")}
+    index_finger = next(finger for finger in hand.fingers if finger.name == "index")
+    first_joint = index_finger.joints[0]
 
-    assert "index_mount_link" in link_names
-    assert "index_mount_joint" in joint_elems
-    assert joint_elems["index_mount_joint"].attrib["type"] == "fixed"
-    assert joint_elems["index_j0"].find("parent").attrib["link"] == "index_mount_link"
+    expected_pos = tuple(
+        index_finger.mount.pos[axis] + first_joint.origin.pos[axis]
+        for axis in range(3)
+    )  # 挂载平移应直接吸收到第一关节局部 origin
+    expected_rpy = tuple(
+        index_finger.mount.rpy[axis] + first_joint.origin.rpy[axis]
+        for axis in range(3)
+    )  # 挂载姿态同样应折叠到第一关节的 RPY 上
+
+    assert "index_mount_link" not in link_names
+    assert "index_mount_joint" not in joint_elems
+    assert joint_elems["index_j0"].find("parent").attrib["link"] == hand.palm.name
+    assert _parse_triplet(joint_elems["index_j0"].find("origin").attrib["xyz"]) == pytest.approx(expected_pos)
+    assert _parse_triplet(joint_elems["index_j0"].find("origin").attrib["rpy"]) == pytest.approx(expected_rpy)
 
 
 def test_urdf_writer_serializes_joint_properties_friction_for_leap_profile():
@@ -89,13 +113,16 @@ def test_urdf_writer_serializes_joint_properties_friction_for_leap_profile():
             thumb_cfg="leap_thumb_v1",
         )
     ).build()
-    writer = UrdfWriter(UrdfWriterCfg(use_mount_link=True))
+    writer = UrdfWriter(UrdfWriterCfg())
 
     root = ET.fromstring(writer.to_urdf_string(hand))
+    link_names = {link.attrib["name"] for link in root.findall("link")}
     joint_elems = {joint.attrib["name"]: joint for joint in root.findall("joint")}
     index_j0 = joint_elems["index_j0"]
     index_j1 = joint_elems["index_j1"]
 
+    assert "index_mount_link" not in link_names
+    assert "index_mount_joint" not in joint_elems
     assert index_j0.find("limit").attrib == {
         "lower": "-0.314",
         "upper": "2.23",
@@ -110,21 +137,7 @@ def test_urdf_writer_serializes_joint_properties_friction_for_leap_profile():
         "velocity": "8.48",
     }
     assert index_j1.find("joint_properties").attrib == {"friction": "0"}
-
-
-def test_urdf_writer_folds_mount_into_first_joint_when_mount_link_disabled():
-    """关闭 `use_mount_link` 时，mount 应折叠进第一关节 origin。"""
-
-    hand = _build_allegro_hand()
-    writer = UrdfWriter(UrdfWriterCfg(use_mount_link=False))
-
-    root = ET.fromstring(writer.to_urdf_string(hand))
-    joint_elems = {joint.attrib["name"]: joint for joint in root.findall("joint")}
-
-    # 关闭 mount link 后，不应再看到虚拟 mount joint；
-    # 第一关节的 parent 直接回到 palm。
-    assert "index_mount_joint" not in joint_elems
-    assert joint_elems["index_j0"].find("parent").attrib["link"] == hand.palm.name
+    assert index_j0.find("parent").attrib["link"] == "index_root_fixed_link"
 
 
 def test_hand_generator_rejects_full_mode_until_topology_root_migration_is_finished(tmp_path):
