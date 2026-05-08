@@ -29,15 +29,13 @@ class JointExporterCfg(AssetCfgBase):
     r"""joint 级预览导出配置。"""
 
     class_type: type["JointExporter"] | None = None
-    Urdf: UrdfWriterCfg = field(default_factory=lambda: UrdfWriterCfg(filename="joint.urdf", use_mount_link=False))
+    Urdf: UrdfWriterCfg = field(default_factory=lambda: UrdfWriterCfg(filename="joint.urdf"))
     base_link_name: str = "joint_preview_base"
     base_box_size: Vector3 = (0.008, 0.008, 0.008)
 
     def __post_init__(self):
         if self.class_type is None:
             self.class_type = JointExporter
-        if self.Urdf.use_mount_link:
-            self.Urdf = self.Urdf.replace(use_mount_link=False)
 
 
 class JointExporter(ExporterBase):

@@ -32,7 +32,7 @@ class PalmExporterCfg(AssetCfgBase):
     r"""palm 级预览导出配置。"""
 
     class_type: type["PalmExporter"] | None = None
-    Urdf: UrdfWriterCfg = field(default_factory=lambda: UrdfWriterCfg(filename="palm.urdf", use_mount_link=False))
+    Urdf: UrdfWriterCfg = field(default_factory=lambda: UrdfWriterCfg(filename="palm.urdf"))
     show_mount_markers: bool = True
     show_stub_roots: bool = True
     marker_radius: float = 0.003
@@ -41,8 +41,6 @@ class PalmExporterCfg(AssetCfgBase):
     def __post_init__(self):
         if self.class_type is None:
             self.class_type = PalmExporter
-        if self.Urdf.use_mount_link:
-            self.Urdf = self.Urdf.replace(use_mount_link=False)
 
 
 class PalmExporter(ExporterBase):

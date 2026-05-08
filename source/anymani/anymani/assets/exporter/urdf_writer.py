@@ -40,17 +40,26 @@ URDF 结构对应关系
 ### finger mount 的处理
 
 `FingerCfg.mount` 描述 finger 挂载位姿（palm frame 下的局部变换）。
-在 URDF 里，这通过一个 ``fixed`` joint 实现：
+当前 AnyMani 已明确收敛到**官方 Allegro / LEAP URDF 同款语义**：
 
-- parent = palm.name
-- child = ``{finger.name}_mount_link``（虚拟 link，零质量）
-- first real joint 的 parent 改为 ``{finger_name}_mount_link``
+- 不再额外插入 ``*_mount_link`` 这类虚拟 link；
+- 不再额外插入 ``*_mount_joint`` 这类 fixed joint；
+- finger 相对 palm 的默认挂载位姿，统一写进该 finger 链第一个 joint 的
+  ``origin``。
 
-这样可以干净地把 mount 的位姿语义嵌入 URDF 拓扑，而不是把 mount 变换
-"消解"进第一个 joint 的 origin 里。
+也就是说，导出时执行的是：
 
-另一种做法（简化版）是直接把 ``mount.pos + joint.origin.pos`` 叠加到
-第一个 joint 的 origin，不引入虚拟 link。`cfg.use_mount_link` 控制选择哪种。
+$$
+{}^{palm}\mathbf{T}_{j_0}
+=
+{}^{palm}\mathbf{T}_{mount}
+\cdot
+{}^{mount}\mathbf{T}_{j_0}
+$$
+
+这里当前仍采用项目既有的近似实现：位置分量直接相加，RPY 角按分量叠加。
+这不是最一般的 SE(3) 严格复合，但与本项目当前 mount preset 和 finger root
+建模约定一致；更重要的是，它与用户要求对齐的官方 URDF 表达形式一致。
 
 ### 几何类型支持
 
@@ -99,11 +108,6 @@ class UrdfWriterCfg(AssetCfgBase):
 
     filename: str = "hand.urdf"
     """输出文件名；相对于传入的 output_dir。"""
-
-    use_mount_link: bool = True
-    """是否为每根 finger 的挂载位姿插入一个虚拟 fixed joint + mount link。
-    开启（默认）：拓扑更清晰，mount 位姿与第一个真实 joint 解耦。
-    关闭：把 mount 变换叠加进第一个 joint origin，不引入额外 link。"""
 
     include_inertial: bool = True
     """是否在 URDF link 里写入 ``<inertial>``；若 HandCfg 中 inertial 为
@@ -212,21 +216,23 @@ class UrdfWriter(ExporterBase):
 
 
 def _build_robot_elem(target: HandCfg, cfg: UrdfWriterCfg) -> ET.Element:
-    r"""Build the top-level ``robot`` XML element."""
+    r"""构建顶层 ``robot`` XML 元素。
+
+    # NOTE:
+    这里故意不再生成任何 `*_mount_link` / `*_mount_joint` 辅助拓扑。
+    对每根 finger，我们都把 hand-level `mount` 直接折叠进该 finger 链的第一个
+    joint `origin`，从而与官方 Allegro / LEAP URDF 的挂载语义保持一致。
+    """
 
     robot = ET.Element("robot", attrib={"name": target.name})
     robot.append(_build_link_elem(target.palm.name, target.palm.inertial, target.palm.collisions, target.palm.visuals, cfg))
 
     for finger in target.fingers:
-        parent_name = target.palm.name
-        joints = finger.joints
-        if cfg.use_mount_link:
-            mount_link_name = f"{finger.name}_mount_link"
-            robot.append(_build_fixed_joint(f"{finger.name}_mount_joint", parent_name, mount_link_name, finger.mount))
-            robot.append(_build_link_elem(mount_link_name, None, [], [], cfg))
-            parent_name = mount_link_name
-        else:
-            joints = [_copy_joint_with_mount(finger, joint) if index == 0 else joint for index, joint in enumerate(finger.joints)]
+        parent_name = target.palm.name  # finger 根的真实 parent 仍然是 palm；不再经由虚拟 mount link 中转
+        joints = [
+            _copy_joint_with_mount(finger, joint) if index == 0 else joint
+            for index, joint in enumerate(finger.joints)
+        ]  # 只把挂载位姿折叠进该 finger 链第一个 joint；后续 joint 保持原局部语义不变
 
         for joint in joints:
             robot.append(_build_joint_elem(joint, parent_name, cfg))
@@ -236,19 +242,33 @@ def _build_robot_elem(target: HandCfg, cfg: UrdfWriterCfg) -> ET.Element:
 
 
 def _copy_joint_with_mount(finger, joint):
-    r"""Return a shallow joint copy with the finger mount folded into the first joint."""
+    r"""返回一份把 hand-level mount 折叠进 joint origin 的浅拷贝。
 
-    mount = finger.mount or PoseCfg()
+    这里服务的不是“任意 joint”的一般变换，而是 finger 链**第一个** joint 的
+    导出语义。对 Allegro 非拇指，这通常是 `index_j0` / `middle_j0` 一类根关节；
+    对 LEAP non-thumb，则可能是那段真实存在的 `root_fixed` 根部段。
+
+    # NOTE:
+    项目当前的 pose 组合仍沿用既有近似：
+
+    - 平移：逐分量相加；
+    - 姿态：RPY 逐分量相加。
+
+    这与 builder / preset 侧当前的局部建模约定一致，也正是用户要求恢复的
+    “first joint origin 表达挂载位姿”语义。
+    """
+
+    mount = finger.mount or PoseCfg()  # finger 若未显式给 mount，则退化为零位姿，不改变原 joint origin
     origin = PoseCfg(
         pos=(
-            mount.pos[0] + joint.origin.pos[0],
-            mount.pos[1] + joint.origin.pos[1],
-            mount.pos[2] + joint.origin.pos[2],
+            mount.pos[0] + joint.origin.pos[0],  # ${}^{palm}x_{j_0} = x_{mount} + x_{local}$
+            mount.pos[1] + joint.origin.pos[1],  # ${}^{palm}y_{j_0} = y_{mount} + y_{local}$
+            mount.pos[2] + joint.origin.pos[2],  # ${}^{palm}z_{j_0} = z_{mount} + z_{local}$
         ),
         rpy=(
-            mount.rpy[0] + joint.origin.rpy[0],
-            mount.rpy[1] + joint.origin.rpy[1],
-            mount.rpy[2] + joint.origin.rpy[2],
+            mount.rpy[0] + joint.origin.rpy[0],  # roll 分量直接叠加
+            mount.rpy[1] + joint.origin.rpy[1],  # pitch 分量直接叠加
+            mount.rpy[2] + joint.origin.rpy[2],  # yaw 分量直接叠加
         ),
     )
     return joint.replace(origin=origin)
@@ -350,7 +370,7 @@ def _build_joint_elem(joint, parent_override: str, cfg: UrdfWriterCfg) -> ET.Ele
 
 
 def _build_fixed_joint(name: str, parent: str, child: str, origin: PoseCfg) -> ET.Element:
-    r"""构建一个 fixed joint XML 元素（用于 mount link 插入）。
+    r"""构建一个通用 fixed joint XML 元素。
 
     Returns:
         xml.etree.ElementTree.Element: 构建好的 fixed joint 元素。
