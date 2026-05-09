@@ -32,22 +32,15 @@ from ._base import HandPatch, MutatorBase, MutatorBaseCfg, _make_range_sampler
 class MountPerturbCfg(MutatorBaseCfg):
     r"""finger mount 小扰动配置。
 
-    该配置只保留用户笔记中认可的高层语义字段：`disturb_unit`、
-    `sample_space`、`self_mode`、`pos_range`、`rot_range`、`distrib`
-    与 `boundary_policy`。pipeline 不直接解释这些字段，而是由
+    该配置只保留用户笔记中认可的高层语义字段：`sample_space`、
+    `self_mode`、`pos_range`、`rot_range`、`distrib` 与 `boundary_policy`。
+    pipeline 不直接解释这些字段，而是由
     `MountPerturbMutator` lowering 成每个 finger 的
     $t_x,t_y,t_z,r_x,r_y,r_z$ 六个局部随机变量。
     """
 
     class_type: type["MountPerturbMutator"] | None = field(init=False, default=None, repr=False)
     r"""关联的运行时类；配置层只负责声明，运行时负责 lowering。"""
-
-    disturb_unit: Literal["deg", "rad"] = "deg"
-    r"""微调范围的单位，默认为度。
-
-    这个字段的存在不是为了工程 convenience，而是为了让科研笔记里
-    的“角度范围”与 `PoseCfg.rpy` 的实际写回单位明确对齐。
-    """
 
     sample_space: dict[Literal["pos", "rot"], Literal["cube", "ellipsoid"]] = field(
         default_factory=lambda: {"pos": "ellipsoid", "rot": "ellipsoid"}
@@ -148,7 +141,12 @@ class MountPerturbCfg(MutatorBaseCfg):
     r"""挂载点姿态扰动范围，采用绝对增量语义。
 
     该字段控制 `finger.mount.rpy` 或等价 $SO(3)$ 姿态的小范围旋转扰动，
-    单位由 `disturb_unit` 决定，可为 degree 或 radian。
+    运行时统一按 **radian** 解释。也就是说：
+
+    - 裸 `float` 默认就是 rad；
+    - 若研究者更习惯按 degree 记录，应在 authoring 侧显式写 `deg(...)`；
+    - mutator runtime 不再额外持有 `disturb_unit` 这种第二套单位开关。
+
     当 `sample_space="cube"` 时，该字段给出各旋转分量的独立采样区间；
     当 `sample_space="ellipsoid"` 时，该字段给出 $so(3)$ 切空间中旋转椭球的轴向半径 / 边界。
 
@@ -243,7 +241,7 @@ class MountPerturbMutator(MutatorBase):
                 )
             for axis_name, axis_range in _axis_ranges(self.cfg.rot_range, default_axis="z").items():
                 specs[f"{finger.name}::r{axis_name}"] = _make_range_sampler(
-                    _unit_adjusted_range(axis_range, self.cfg.disturb_unit),
+                    axis_range,
                     distrib=self.cfg.distrib,
                     boundary_policy=self.cfg.boundary_policy,
                 )
@@ -328,18 +326,4 @@ def _axis_ranges(value_range: Vector2 | Vector6 | None, *, default_axis: str) ->
         "y": (float(value_range[2]), float(value_range[3])),
         "z": (float(value_range[4]), float(value_range[5])),
     }
-
-
-def _unit_adjusted_range(value_range: Vector2, disturb_unit: Literal["deg", "rad"]) -> Vector2:
-    r"""把角度范围统一转为 rad，供 `PoseCfg.rpy` 写回。
-
-    `PoseCfg.rpy` 在运行时内部统一按弧度理解，因此这里若输入是角度，
-    必须先做单位换算。这个换算是严格的单位变换，不是经验近似。
-    """
-
-    if disturb_unit == "rad":
-        return value_range
-    return (math.radians(float(value_range[0])), math.radians(float(value_range[1])))
-
-
 __all__ = ["MountPerturbCfg", "MountPerturbMutator"]

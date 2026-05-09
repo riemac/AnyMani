@@ -16,6 +16,7 @@ from assets.generator.mutate import (
     MountPerturbMutator,
 )
 from assets.presets import make_human_like_builder_cfg
+from assets.units import deg
 
 
 def _make_allegro_builder_cfg() -> HumanLikeHandBuilderCfg:
@@ -72,14 +73,12 @@ class DemoParameterMutatorCfg(HandMutatorCfg):
     """用类属性声明 term，锁住新的 IsaacLab 风格 container 用法。"""
 
     limit = LimitTweakCfg(
-        disturb_unit="rad",
         disturb_object="shared",
         disturb_type="add",
         joint_range=(0.05, 0.05),
         clip={"abs": 0.1},
     )
     mount = MountPerturbCfg(
-        disturb_unit="rad",
         self_mode="general",
         pos_range=(0.001, 0.001),
         rot_range=(0.02, 0.02),
@@ -90,7 +89,6 @@ class DemoMountOnlyMutatorCfg(HandMutatorCfg):
     """只启用 mount perturb，供 generator full 模式 smoke test 使用。"""
 
     mount = MountPerturbCfg(
-        disturb_unit="rad",
         self_mode="general",
         pos_range=(0.001, 0.001),
     )
@@ -105,7 +103,6 @@ def test_limit_tweak_mutator_consumes_sampled_values_and_preserves_valid_interva
 
     mutated = LimitTweakMutator(
         LimitTweakCfg(
-            disturb_unit="rad",
             disturb_object="shared",
             disturb_type="add",
             joint_range=(0.05, 0.05),
@@ -132,7 +129,6 @@ def test_mount_perturb_mutator_changes_only_target_finger_mount():
 
     mutated = MountPerturbMutator(
         MountPerturbCfg(
-            disturb_unit="rad",
             self_mode="general",
             pos_range=(0.001, 0.001),
             rot_range=(0.02, 0.02),
@@ -156,6 +152,43 @@ def test_mount_perturb_mutator_changes_only_target_finger_mount():
     assert after_index.rpy != before_index.rpy
     assert after_middle.pos == before_middle.pos
     assert after_middle.rpy == before_middle.rpy
+
+
+def test_mount_perturb_cfg_accepts_explicit_degree_helpers_while_runtime_consumes_radians():
+    r"""角度显式 helper 应在 authoring 侧完成换算，runtime 不再持有 `disturb_unit`。
+
+    本测试锁住新的顶层 contract：
+
+    - 裸 `rot_range` 默认按 rad；
+    - 若研究者更习惯 degree，可在配置侧显式写 `deg(...)`；
+    - mutator runtime 看到的仍是已经归一化好的弧度 `float`。
+    """
+
+    cfg = MountPerturbCfg(
+        self_mode="general",
+        rot_range=(deg(-5.0), deg(5.0)),
+    )
+
+    assert math.isclose(cfg.rot_range[0], math.radians(-5.0), rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(cfg.rot_range[1], math.radians(5.0), rel_tol=0.0, abs_tol=1e-12)
+
+    specs = MountPerturbMutator(cfg).describe_sampling(_build_allegro_hand())
+    index_rz = specs["index::rz"]
+    assert callable(index_rz)
+
+
+def test_removed_disturb_unit_field_is_rejected_eagerly():
+    r"""旧 `disturb_unit` 已被一次性删除，不再保留双轨配置入口。
+
+    这条回归测试锁住的是“出清而非兼容”的决策：一旦研究者继续写旧字段，
+    应在 cfg 构造阶段立刻报错，而不是悄悄吞掉。
+    """
+
+    with pytest.raises(TypeError, match="disturb_unit"):
+        MountPerturbCfg(disturb_unit="rad")
+
+    with pytest.raises(TypeError, match="disturb_unit"):
+        LimitTweakCfg(disturb_unit="deg")
 
 
 def test_hand_mutator_pipeline_accepts_declared_terms_and_step_validation():

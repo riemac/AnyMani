@@ -207,7 +207,6 @@ def test_recipe_loader_builds_mutate_block_into_isaaclab_style_cfg(tmp_path):
             "Made": _made_recipe_dict(),
             "Mutate": {
                 "mount_perturb": {
-                    "disturb_unit": "rad",
                     "self_mode": "general",
                     "pos_range": [0.001, 0.001],
                 }
@@ -220,3 +219,24 @@ def test_recipe_loader_builds_mutate_block_into_isaaclab_style_cfg(tmp_path):
     assert [name for name, _ in cfg.Mutate.ordered_terms()] == ["mount_perturb"]
     assert isinstance(cfg.Mutate.mount_perturb, MountPerturbCfg)
     assert cfg.Mutate.mount_perturb.pos_range == (0.001, 0.001)
+
+
+def test_recipe_loader_rejects_removed_disturb_unit_field_in_mutate_block(tmp_path):
+    r"""recipe 层也不再兼容 `disturb_unit`，避免 YAML 与 Python cfg 语义分叉。"""
+
+    with pytest.raises(TypeError, match="disturb_unit"):
+        RecipeLoader.load_dict(
+            {
+                "mode": "made",
+                "artifact_level": "hand_cfg",
+                "output_dir": str(tmp_path / "generated"),
+                "Made": _made_recipe_dict(),
+                "Mutate": {
+                    "mount_perturb": {
+                        "disturb_unit": "rad",
+                        "self_mode": "general",
+                        "pos_range": [0.001, 0.001],
+                    }
+                },
+            }
+        )

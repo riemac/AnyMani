@@ -22,7 +22,7 @@ from __future__ import annotations
 import math
 
 from ..asset_schema_core import PoseCfg
-from .units import cm, deg, m, rad
+from ..units import cm, deg, m, rad
 
 
 ALLEGRO_MOUNT_PRESET: dict[str, PoseCfg] = {

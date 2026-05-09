@@ -15,7 +15,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
-from .units import cm
+from ..units import cm
 
 if TYPE_CHECKING:
     from ..builder.palm_builders import ComPalmBuilderCfg, SinglePalmBuilderCfg

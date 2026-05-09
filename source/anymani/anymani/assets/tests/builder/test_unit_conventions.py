@@ -1,10 +1,11 @@
 r"""单位语义回归测试。
 
-这组测试专门锁住当前资产生成系统的长度单位契约：
+这组测试专门锁住当前资产生成系统的顶层单位契约：
 
 1. builder 裸浮点数一律按 SI(m) 解释，不再做“像不像 cm”的隐式猜测；
 2. finger preset 为了贴合人工测量习惯，可以显式写 `cm(...)`；
-3. mount preset 默认保持 m 直写，但 single-box 这类人工测量锚点仍允许 `cm(...)`。
+3. mount preset 默认保持 m 直写，但 single-box 这类人工测量锚点仍允许 `cm(...)`；
+4. 质量与密度同样统一到顶层 helper，而不是各文件各自手写换算。
 
 # NOTE:
 这不是纯软件工程上的“风格统一”，而是科研调参可追溯性的要求。
@@ -17,6 +18,7 @@ import math
 
 from assets.builder._utils import _to_si
 from assets.presets import get_finger_builder_preset, get_mount_preset
+from assets.units import cm, deg, g, g_cm3, kg, kg_m3, m, mm, rad
 
 
 def test_builder_scalar_lengths_are_now_interpreted_as_si_meters():
@@ -31,6 +33,38 @@ def test_builder_scalar_lengths_are_now_interpreted_as_si_meters():
 
     assert math.isclose(_to_si(2.7), 2.7, rel_tol=0.0, abs_tol=1e-12)
     assert math.isclose(_to_si(0.027), 0.027, rel_tol=0.0, abs_tol=1e-12)
+
+
+def test_top_level_unit_helpers_convert_to_plain_si_scalars():
+    r"""顶层 `assets.units` helper 应把显式单位写法规约成 plain SI `float`。
+
+    这里锁住四类首批统一量：
+
+    - 长度：`m/cm/mm`
+    - 角度：`rad/deg`
+    - 质量：`kg/g`
+    - 密度：`kg_m3/g_cm3`
+    """
+
+    assert isinstance(m(1.2), float)
+    assert isinstance(cm(12.0), float)
+    assert isinstance(mm(12.0), float)
+    assert isinstance(rad(0.3), float)
+    assert isinstance(deg(30.0), float)
+    assert isinstance(kg(0.7), float)
+    assert isinstance(g(700.0), float)
+    assert isinstance(kg_m3(650.0), float)
+    assert isinstance(g_cm3(0.65), float)
+
+    assert math.isclose(m(1.2), 1.2, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(cm(12.0), 0.12, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(mm(12.0), 0.012, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(rad(0.3), 0.3, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(deg(180.0), math.pi, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(kg(0.7), 0.7, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(g(700.0), 0.7, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(kg_m3(650.0), 650.0, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(g_cm3(0.65), 650.0, rel_tol=0.0, abs_tol=1e-12)
 
 
 def test_finger_presets_store_measurement_anchors_via_explicit_cm_helpers():

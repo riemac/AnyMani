@@ -12,7 +12,6 @@ r"""关节限位微调算子：在已有 `HandCfg` 上对 joint limit 做小范�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import math
 from typing import Any, Literal
 
 from ...asset_base import HandCfg
@@ -32,13 +31,6 @@ class LimitTweakCfg(MutatorBaseCfg):
 
     class_type: type["LimitTweakMutator"] | None = field(init=False, default=None, repr=False)
     r"""关联的运行时类。"""
-
-    disturb_unit: Literal["deg", "rad"] = "deg"
-    r"""微调范围的单位，默认为度。
-
-    这里记录的是用户输入范围的解释单位，不是导出到 URDF 的单位；
-    真正写回时仍要映射到 `JointLimitCfg` 的弧度语义。
-    """
 
     disturb_object: Literal["independent", "shared"] = "independent"
     r"""扰动对象。适用于所有活动关节。
@@ -61,14 +53,15 @@ class LimitTweakCfg(MutatorBaseCfg):
     表示在原有 `HandCfg` 的 joint limit 基础上进行微调的范围；
     `None` 表示不进行操作。
 
-    - 当扰动类型为 `add` 时，可表示为 (-5, 5)。单位为 `deg` 表示原有基础上 ±5度 的范围内扰动
+    - 当扰动类型为 `add` 时，区间一律按 **radian** 解释；若研究者更习惯用 degree，
+      应在配置侧显式写 `deg(...)` 后再传入
     - 当扰动类型为 `scale` 时，可表示为 (0.9, 1.1)，表示在原有基础上 ±10% 的范围内扰动。
     """
 
     clip: dict[str, float] | None = None
     r"""裁剪范围。默认不裁剪。
 
-    - {"abs": 10}：表示微调后关节限位的绝对值不超过 10 度（disturb_unit 为 `deg` 时）。
+    - {"abs": 0.17}：表示微调后关节限位的绝对增量不超过约 $0.17\text{rad}$；
     - {"rel": 0.2}：表示微调后关节限位的相对值不超过 20%。
     """
 
@@ -136,9 +129,8 @@ class LimitTweakMutator(MutatorBase):
 
         if self.cfg.joint_range is None:
             return {}
-        sample_range = _unit_adjusted_range(self.cfg.joint_range, self.cfg.disturb_unit, self.cfg.disturb_type)
         sampler = _make_range_sampler(
-            sample_range,
+            self.cfg.joint_range,
             distrib=self.cfg.distrib,
             boundary_policy=self.cfg.boundary_policy,
         )
@@ -196,20 +188,6 @@ def _iter_target_joints(hand: HandCfg, target_joints: tuple[str, ...] | None):
             if target_set and joint.name not in target_set:
                 continue
             yield finger_index, joint_index, joint
-
-
-def _unit_adjusted_range(value_range: Vector2, disturb_unit: Literal["deg", "rad"], disturb_type: Literal["add", "scale"]) -> Vector2:
-    r"""把用户输入区间解释成运行时实际采样区间。
-
-    对 ``add`` 来说，区间代表绝对角度增量；对 ``scale`` 来说，区间
-    本身已经是比例语义，所以无需再做度到弧度的转换。
-    """
-
-    if disturb_type == "scale" or disturb_unit == "rad":
-        return value_range
-    return (math.radians(float(value_range[0])), math.radians(float(value_range[1])))
-
-
 def _clip_delta(delta: float, clip: dict[str, float] | None) -> float:
     if clip is None:
         return delta

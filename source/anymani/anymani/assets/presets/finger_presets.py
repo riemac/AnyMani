@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from .units import cm
+from ..units import cm
 from ..builder.finger_buiders import (
     AllegroFingerBuilderCfg,
     LeapFingerBuilderCfg,

@@ -71,7 +71,6 @@ class DemoMountMutatorCfg(HandMutatorCfg):
     r"""测试用 post-mutate cfg：只启用一个 mount perturb term。"""
 
     mount = MountPerturbCfg(
-        disturb_unit="rad",
         self_mode="general",
         pos_range=(0.001, 0.001),
     )
@@ -83,12 +82,7 @@ def test_post_mutate_config_is_direct_hand_generator_cfg():
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG, HandGeneratorCfg)
     assert asset_cfg_module.POST_MUTATE_CFG.mode == "mutate"
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG.Validate, HandValidatorCfg)
-    assert tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms()) == (
-        "link_scale",
-        "mount_perturb",
-        "limit_tweak",
-        "tip_replace",
-    )
+    assert tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms()) == ("mount_perturb",)
 
 
 def test_post_mutate_runner_resolves_topology_root_path(tmp_path):

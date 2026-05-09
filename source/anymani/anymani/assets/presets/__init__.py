@@ -75,9 +75,6 @@ from .physical_presets import (
     JointPhysicalPreset,
     get_finger_physical_profile,
 )
-from .units import cm, deg, m, mm, rad
-
-
 def resolve_palm_builder_cfg(raw: Any) -> Any:
     """延迟导入 resolver，避免 builder -> presets 子模块时触发循环导入。"""
 
@@ -180,11 +177,6 @@ __all__ = [
     "ALLEGRO_THUMB_PHYSICAL_PROFILE",
     "FINGER_PHYSICAL_PROFILE_REGISTRY",
     "get_finger_physical_profile",
-    "m",
-    "cm",
-    "mm",
-    "deg",
-    "rad",
     "resolve_palm_builder_cfg",
     "resolve_finger_builder_cfg",
     "resolve_finger_slot_builder_cfg",
