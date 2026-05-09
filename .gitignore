@@ -83,3 +83,6 @@ datasets
 **/source/leaphand/mytask/AnyRotate/tactile/tactile_analysis/**
 /docs
 /Research
+source/anymani/anymani/assets/doc/draft/
+source/anymani/anymani/assets/scripts/backup.sh
+source/anymani/anymani/assets/config/asset_gen_cfg.py

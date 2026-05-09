@@ -22,6 +22,7 @@ from ..asset_base import JointCfg
 from ..asset_builders import JointBuilder, JointBuilderCfg
 from ..asset_schema_core import (
     CollisionGeometryCfg,
+    EllipticCylinderGeometryCfg,
     InertialCfg,
     JointLimitCfg,
     JointPropertiesCfg,
@@ -107,6 +108,31 @@ def _cylinder_inertia(radius: float, length: float, mass: float) -> dict[str, fl
     }
 
 
+def _elliptic_cylinder_inertia(radius_x: float, radius_z: float, length: float, mass: float) -> dict[str, float]:
+    r"""计算均质椭圆柱的质心惯量对角项。
+
+    这里默认椭圆柱主轴沿 builder 统一采用的局部 $y$ 方向，横截面位于
+    $(x, z)$ 平面，对应半轴分别为 $r_x$ 与 $r_z$。理论主惯量为：
+
+    $$
+    I_{yy} = \frac{m}{4}(r_x^2 + r_z^2),
+    $$
+
+    $$
+    I_{xx} = \frac{m}{12}(3r_z^2 + l^2),\qquad
+    I_{zz} = \frac{m}{12}(3r_x^2 + l^2).
+    $$
+
+    当 $r_x=r_z$ 时，上式自然退化为标准圆柱惯量。
+    """
+
+    return {
+        "ixx": mass * (3.0 * radius_z * radius_z + length * length) / 12.0,  # 绕局部 $x$ 的横向惯量
+        "iyy": mass * (radius_x * radius_x + radius_z * radius_z) / 4.0,  # 绕主轴 $y$ 的极惯量
+        "izz": mass * (3.0 * radius_x * radius_x + length * length) / 12.0,  # 绕局部 $z$ 的横向惯量
+    }
+
+
 def _sphere_inertia(radius: float, mass: float) -> dict[str, float]:
     r"""计算均质球体的质心惯量对角项。"""
     moment = 2.0 * mass * radius * radius / 5.0  # 球体三个主轴惯量完全相同
@@ -145,6 +171,7 @@ class PrimJointBuilderCfg(JointBuilderCfg):
     当前支持的 ``type``：
     - ``box``：需要 ``length``/``width``/``height`` 或 ``size``
     - ``cylinder``：需要 ``length`` 和 ``radius``
+    - ``elliptic_cylinder``：需要 ``length``、``radius_x`` 和 ``radius_z``
     - ``sphere``：需要 ``radius``
     - ``cs``：cylinder + sphere 复合指尖
     - ``bs``：box + sphere 复合指尖
@@ -218,6 +245,8 @@ class PrimJointBuilder(JointBuilder):
             collisions, visuals, inertial = self._build_box()  # 长方体 link
         elif geom_kind == "cylinder":
             collisions, visuals, inertial = self._build_cylinder()  # 圆柱体 link
+        elif geom_kind == "elliptic_cylinder":
+            collisions, visuals, inertial = self._build_elliptic_cylinder()  # 椭圆柱 link
         elif geom_kind == "sphere":
             collisions, visuals, inertial = self._build_sphere()  # 球体 link
         else:
@@ -316,6 +345,56 @@ class PrimJointBuilder(JointBuilder):
         collision = CollisionGeometryCfg(name=f"{self.cfg.name}_col", geometry=geometry, origin=origin)  # collision 几何
         visual = VisualGeometryCfg(name=f"{self.cfg.name}_vis", geometry=geometry, origin=origin)  # visual 几何
         return [collision], [visual], inertial  # cylinder link 的完整局部描述
+
+    def _build_elliptic_cylinder(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
+        r"""构建 elliptic cylinder link。
+
+        科研语义上，这里表达的是“主轴仍沿 finger 生长方向，但横截面不再要求
+        是严格圆，而允许在局部 $(x,z)$ 平面上具有两条不同半轴”的 primitive。
+
+        由于 URDF 原生 primitive 不支持椭圆柱，这个几何在 schema / builder 层
+        先保留为显式类型，后续由 exporter 再 lower 成 mesh 路线。也就是说，
+        这里的职责是先把：
+
+        - 局部几何位姿；
+        - 解析体积；
+        - 解析惯量；
+
+        都稳定写进 `JointCfg`，而不是在 mutate 阶段把椭圆柱偷偷退化成 mesh 黑盒。
+        """
+
+        mesh = self.cfg.mesh  # 当前 joint child link 的 primitive recipe
+        radius_x = float(mesh["radius_x"])  # 局部 $x$ 方向半轴 $r_x$
+        radius_z = float(mesh["radius_z"])  # 局部 $z$ 方向半轴 $r_z$
+        length = float(mesh["length"])  # 沿主轴方向的长度 $l$
+        offset = _pose_from_value(mesh.get("offset", mesh.get("origin")))  # 局部增量位姿
+        center_on_joint = bool(mesh.get("center_on_joint", False))  # CMC1 等特例仍允许零偏移对齐
+
+        # 与标准圆柱保持相同的 finger-level 主轴约定：几何默认沿 +y 生长。
+        # 这里不额外引入 base_rpy，因为后续 exporter 走 mesh 路线时可以继续复用
+        # 同一局部位姿，而 mesh 文件自身采用 canonical y-axis cylinder。
+        origin = _make_geometry_pose(
+            offset=offset,
+            default_pos=(offset.pos[0], length / 2.0 + offset.pos[1], offset.pos[2]),  # 仍以底面贴 joint frame 的 $x-z$ 平面
+            center_on_joint=center_on_joint,
+        )
+
+        volume = math.pi * radius_x * radius_z * length  # 椭圆柱体积 $V=\pi r_x r_z l$
+        mass = _estimate_mass(volume=volume, cfg_mass=self.cfg.mass, density=self.cfg.density)  # 按解析体积估质量
+        inertial = InertialCfg(
+            mass=mass,
+            origin=origin,
+            inertia=_elliptic_cylinder_inertia(radius_x, radius_z, length, mass),  # 解析椭圆柱惯量
+        )
+        geometry = {
+            "type": "elliptic_cylinder",
+            "radius_x": radius_x,
+            "radius_z": radius_z,
+            "length": length,
+        }  # 先保留显式 schema 类型，导出时再 lower 成 mesh
+        collision = CollisionGeometryCfg(name=f"{self.cfg.name}_col", geometry=geometry, origin=origin)  # collision 几何实例
+        visual = VisualGeometryCfg(name=f"{self.cfg.name}_vis", geometry=geometry, origin=origin)  # visual 几何实例
+        return [collision], [visual], inertial  # 椭圆柱 link 的完整局部描述
 
     def _build_sphere(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
         r"""构建 sphere link。"""

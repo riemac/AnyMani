@@ -164,7 +164,7 @@ JointType = Literal["revolute", "fixed"]
 Handedness = Literal["left", "right", "unknown"]
 """左右手标签；`unknown` 预留给非典型或暂未决定 handedness 的结构。"""
 
-PrimitiveGeometryType = Literal["box", "cylinder", "sphere"]
+PrimitiveGeometryType = Literal["box", "cylinder", "elliptic_cylinder", "sphere"]
 """支持的基础几何 primitive 类型。"""
 
 _FLOAT_TOLERANCE = 1e-12
@@ -375,7 +375,7 @@ class GeometryCfg(AssetCfgBase):
     def is_primitive(self) -> bool:
         r"""判断当前几何是否属于 primitive 家族。"""
 
-        return self.geometry_type in {"box", "cylinder", "sphere"}
+        return self.geometry_type in {"box", "cylinder", "elliptic_cylinder", "sphere"}
 
 
 @dataclass
@@ -408,6 +408,58 @@ class CylinderGeometryCfg(GeometryCfg):
         self.length = float(self.length)
         if self.radius <= 0.0 or self.length <= 0.0:
             raise ValueError(f"cylinder radius/length must be positive, got {(self.radius, self.length)}")
+
+
+@dataclass
+class EllipticCylinderGeometryCfg(GeometryCfg):
+    r"""椭圆柱 primitive 几何。
+
+    这里的主轴仍约定为局部长度方向，横截面位于与主轴正交的平面内。
+    与 `CylinderGeometryCfg` 不同之处仅在于横截面由单半径 $r$ 变为
+    两个半轴：
+
+    $$
+    a = r_x,\qquad b = r_z.
+    $$
+
+    当 $r_x=r_z$ 时，它会退化回普通圆柱。保留这个显式类型的意义，是让
+    schema / mutate / exporter 都能忠实表达“圆柱与椭圆柱可互转”的科研语义，
+    而不是把非等径横截面偷偷塞回 mesh 黑盒。
+    """
+
+    geometry_type: ClassVar[str] = "elliptic_cylinder"
+    radius_x: float
+    """椭圆横截面在局部 $x$ 方向上的半轴 $a=r_x$。"""
+
+    radius_z: float
+    """椭圆横截面在局部 $z$ 方向上的半轴 $b=r_z$。"""
+
+    length: float
+    """椭圆柱沿主轴方向的长度 $l$。"""
+
+    def __post_init__(self):
+        self.radius_x = float(self.radius_x)  # 椭圆长/短半轴统一规约到浮点数
+        self.radius_z = float(self.radius_z)  # 椭圆长/短半轴统一规约到浮点数
+        self.length = float(self.length)  # 主轴长度统一规约到浮点数
+        if self.radius_x <= 0.0 or self.radius_z <= 0.0 or self.length <= 0.0:
+            raise ValueError(
+                f"elliptic_cylinder radii/length must be positive, got {(self.radius_x, self.radius_z, self.length)}"
+            )
+
+    @property
+    def equivalent_cylinder_radius(self) -> float:
+        r"""返回按面积等效的圆柱半径。
+
+        若要把当前椭圆柱降回等面积圆柱，其半径满足：
+
+        $$
+        \pi r_{\mathrm{eq}}^2 = \pi r_x r_z
+        \quad\Longrightarrow\quad
+        r_{\mathrm{eq}} = \sqrt{r_x r_z}.
+        $$
+        """
+
+        return math.sqrt(self.radius_x * self.radius_z)  # 横截面积守恒下的等效圆柱半径
 
 
 @dataclass
@@ -483,6 +535,12 @@ def make_geometry_cfg(value: GeometryValue) -> GeometryCfg:
         return BoxGeometryCfg(size=value["size"])
     if geometry_type == "cylinder":
         return CylinderGeometryCfg(radius=value["radius"], length=value["length"])
+    if geometry_type == "elliptic_cylinder":
+        return EllipticCylinderGeometryCfg(
+            radius_x=value["radius_x"],
+            radius_z=value["radius_z"],
+            length=value["length"],
+        )
     if geometry_type == "sphere":
         return SphereGeometryCfg(radius=value["radius"])
     if geometry_type == "mesh":
@@ -750,6 +808,77 @@ class InertialCfg(AssetCfgBase):
         )
 
     @classmethod
+    def from_elliptic_cylinder(
+        cls,
+        radius_x: float,
+        radius_z: float,
+        length: float,
+        density: float,
+        *,
+        origin: PoseCfg | Sequence[float] | Mapping[str, Any] | None = None,
+        principal_axis: Literal["x", "y", "z"] = "z",
+        min_mass: float = 1e-4,
+        inertia_padding: float = 1e-8,
+    ) -> InertialCfg:
+        r"""由均匀椭圆柱 primitive 构造惯性参数。
+
+        对主轴取为局部 `z` 的标准椭圆柱，其体积与主惯量可写为：
+
+        $$
+        V = \pi r_x r_z l,\qquad m = \rho V,
+        $$
+
+        $$
+        I_{\parallel} = \frac{m}{4}(r_x^2+r_z^2),\qquad
+        I_{x,\perp} = \frac{m}{12}(3r_z^2 + l^2),\qquad
+        I_{z,\perp} = \frac{m}{12}(3r_x^2 + l^2).
+        $$
+
+        这里的 “$x/z$” 命名沿用本项目 regular finger 的局部横截面语义：
+        横截面两半轴位于局部 $x$ 与 $z$，主轴位于剩余正交方向。
+        `principal_axis` 只负责把这组三主惯量重新排列到目标主轴方向。
+
+        当 $r_x=r_z$ 时，上式自然退化为普通圆柱的解析惯量。
+        """
+
+        radius_x = float(radius_x)  # 局部 $x$ 方向半轴
+        radius_z = float(radius_z)  # 局部 $z$ 方向半轴
+        length = float(length)  # 主轴长度
+        density = float(density)  # 材料密度
+        if radius_x <= 0.0 or radius_z <= 0.0 or length <= 0.0 or density <= 0.0:
+            raise ValueError("radius_x, radius_z, length and density must be positive")
+
+        volume = math.pi * radius_x * radius_z * length  # 椭圆柱体积 $V=\pi r_x r_z l$
+        mass = max(density * volume, min_mass)  # 仍保留最小质量下限，避免极小体积退化
+
+        # 以局部 `y` 为主轴时的三主惯量：
+        # - 绕主轴的惯量只与横截面二次矩相关；
+        # - 与主轴正交的两个惯量分别吃对向半轴。
+        i_parallel = 0.25 * mass * (radius_x * radius_x + radius_z * radius_z)  # 绕主轴转动的极惯量
+        i_perp_x = mass * (3.0 * radius_z * radius_z + length * length) / 12.0  # 绕局部 $x$ 的惯量
+        i_perp_z = mass * (3.0 * radius_x * radius_x + length * length) / 12.0  # 绕局部 $z$ 的惯量
+
+        if principal_axis == "x":
+            ixx = i_parallel  # 主轴被重排到局部 $x$
+            iyy = i_perp_x   # 原横截面法向之一被重排到局部 $y$
+            izz = i_perp_z   # 原横截面法向之一被重排到局部 $z$
+        elif principal_axis == "y":
+            ixx = i_perp_x   # 主轴保持在局部 $y$
+            iyy = i_parallel  # 绕主轴的极惯量落在 $I_{yy}$
+            izz = i_perp_z   # 另一个横截面法向惯量
+        else:
+            ixx = i_perp_x   # 主轴被重排到局部 $z$
+            iyy = i_perp_z   # 横截面另一方向惯量
+            izz = i_parallel  # 绕主轴的极惯量落在 $I_{zz}$
+
+        return cls(
+            mass=mass,
+            origin=origin,
+            inertia=InertiaTensorCfg(ixx=ixx, iyy=iyy, izz=izz),
+            inertia_padding=inertia_padding,
+        )
+
+    @classmethod
     def from_sphere(
         cls,
         radius: float,
@@ -970,6 +1099,7 @@ __all__ = [
     "GeometryCfg",
     "BoxGeometryCfg",
     "CylinderGeometryCfg",
+    "EllipticCylinderGeometryCfg",
     "SphereGeometryCfg",
     "MeshGeometryCfg",
     "GeometryValue",

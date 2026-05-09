@@ -107,6 +107,8 @@ class HandPatch:
         mutated = target.copy()
         for op in self.ops:
             op.apply(mutated)
+        if self.metadata:
+            mutated.metadata = {**mutated.metadata, **self.metadata}  # patch metadata 需要真正写回 HandCfg，供 sidecar / summary 导出消费
         return mutated.replace(fingers=mutated.fingers, palm=mutated.palm, metadata=dict(mutated.metadata))
 
 

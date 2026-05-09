@@ -86,11 +86,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from ..asset_base import AssetCfgBase, HandCfg
-from ..asset_schema_core import CollisionGeometryCfg, InertialCfg, MaterialCfg, MeshGeometryCfg, PoseCfg, VisualGeometryCfg
+from ..asset_schema_core import (
+    CollisionGeometryCfg,
+    EllipticCylinderGeometryCfg,
+    InertialCfg,
+    MaterialCfg,
+    MeshGeometryCfg,
+    PoseCfg,
+    VisualGeometryCfg,
+)
 from ._base import ExporterBase, ExportResult
 
 
@@ -122,6 +131,14 @@ class UrdfWriterCfg(AssetCfgBase):
     mesh_package_prefix: str | None = None
     """mesh 文件路径的 ROS package 前缀（如 ``"package://my_robot"``）。
     为 ``None`` 时使用相对路径或绝对路径（取决于 mesh 原路径）。"""
+
+    canonical_mesh_dirname: str = "meshes"
+    r"""自动生成 canonical mesh 时，相对样本目录的子目录名。
+
+    当前主要服务于 `elliptic_cylinder` 这类 URDF 原生 primitive 无法直接表达的
+    几何：内部仍保留解析 primitive，导出时再 lower 成当前样本目录下的一份
+    canonical cylinder mesh，加上三轴 `scale`。
+    """
 
     overwrite: bool = True
     """若目标文件已存在，是否覆盖。``False`` 时记入 skipped 并跳过。"""
@@ -187,11 +204,12 @@ class UrdfWriter(ExporterBase):
             return ExportResult(skipped=[out_path])
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        robot = _build_robot_elem(target, self.cfg)
+        mesh_state = _MeshExportState(output_dir=output_dir, mesh_dirname=self.cfg.canonical_mesh_dirname)
+        robot = _build_robot_elem(target, self.cfg, mesh_state=mesh_state)
         ET.indent(robot)
         tree = ET.ElementTree(robot)
         tree.write(out_path, encoding="unicode", xml_declaration=True)
-        return ExportResult(written=[out_path])
+        return ExportResult(written=[out_path, *mesh_state.written])
 
     def to_urdf_string(self, target: HandCfg) -> str:
         r"""把 `HandCfg` 渲染为 URDF XML 字符串（不落盘）。
@@ -205,7 +223,12 @@ class UrdfWriter(ExporterBase):
             str: 完整的 URDF XML 字符串。
         """
 
-        robot = _build_robot_elem(target, self.cfg)
+        mesh_state = _MeshExportState(
+            output_dir=Path("."),
+            mesh_dirname=self.cfg.canonical_mesh_dirname,
+            write_enabled=False,
+        )  # 预览字符串路径里只保留相对文件名，不真的向当前工作目录写 mesh
+        robot = _build_robot_elem(target, self.cfg, mesh_state=mesh_state)
         ET.indent(robot)
         return ET.tostring(robot, encoding="unicode", xml_declaration=True)
 
@@ -215,7 +238,26 @@ class UrdfWriter(ExporterBase):
 # ============================================================================
 
 
-def _build_robot_elem(target: HandCfg, cfg: UrdfWriterCfg) -> ET.Element:
+@dataclass
+class _MeshExportState:
+    r"""一次 URDF 导出调用内部共享的自动 mesh 生成状态。
+
+    之所以单独保留这层状态，而不是在 `_build_geometry_elem()` 里每次直接写文件，
+    是因为同一个 `HandCfg` 里可能有多处 `elliptic_cylinder`。我们希望：
+
+    1. 同一份 canonical cylinder mesh 只生成一次；
+    2. 导出结果能把附带写出的 mesh 文件路径也收进 `ExportResult.written`；
+    3. `to_urdf_string()` 路径里仍能构造一致的相对文件名，而不真的写文件。
+    """
+
+    output_dir: Path
+    mesh_dirname: str
+    write_enabled: bool = True
+    written: list[Path] = field(default_factory=list)
+    _unit_cylinder_relpath: str | None = None
+
+
+def _build_robot_elem(target: HandCfg, cfg: UrdfWriterCfg, *, mesh_state: _MeshExportState) -> ET.Element:
     r"""构建顶层 ``robot`` XML 元素。
 
     # NOTE:
@@ -225,7 +267,16 @@ def _build_robot_elem(target: HandCfg, cfg: UrdfWriterCfg) -> ET.Element:
     """
 
     robot = ET.Element("robot", attrib={"name": target.name})
-    robot.append(_build_link_elem(target.palm.name, target.palm.inertial, target.palm.collisions, target.palm.visuals, cfg))
+    robot.append(
+        _build_link_elem(
+            target.palm.name,
+            target.palm.inertial,
+            target.palm.collisions,
+            target.palm.visuals,
+            cfg,
+            mesh_state=mesh_state,
+        )
+    )
 
     for finger in target.fingers:
         parent_name = target.palm.name  # finger 根的真实 parent 仍然是 palm；不再经由虚拟 mount link 中转
@@ -236,7 +287,16 @@ def _build_robot_elem(target: HandCfg, cfg: UrdfWriterCfg) -> ET.Element:
 
         for joint in joints:
             robot.append(_build_joint_elem(joint, parent_name, cfg))
-            robot.append(_build_link_elem(joint.child, joint.inertial, joint.collisions, joint.visuals, cfg))
+            robot.append(
+                _build_link_elem(
+                    joint.child,
+                    joint.inertial,
+                    joint.collisions,
+                    joint.visuals,
+                    cfg,
+                    mesh_state=mesh_state,
+                )
+            )
             parent_name = joint.child
     return robot
 
@@ -280,6 +340,8 @@ def _build_link_elem(
     collisions: list[CollisionGeometryCfg],
     visuals: list[VisualGeometryCfg],
     cfg: UrdfWriterCfg,
+    *,
+    mesh_state: _MeshExportState,
 ) -> ET.Element:
     r"""构建 ``<link>`` XML 元素。
 
@@ -315,7 +377,7 @@ def _build_link_elem(
         if visual.name:
             visual_elem.attrib["name"] = visual.name
         ET.SubElement(visual_elem, "origin", attrib=_pose_attrib(visual.origin))
-        visual_elem.append(_build_geometry_elem(visual.geometry, cfg))
+        visual_elem.append(_build_geometry_elem(visual.geometry, cfg, mesh_state=mesh_state))
         material = cfg.recolored_materials.get(name) or visual.material
         if material is not None:
             visual_elem.append(_build_material_elem(material))
@@ -325,7 +387,7 @@ def _build_link_elem(
         if collision.name:
             collision_elem.attrib["name"] = collision.name
         ET.SubElement(collision_elem, "origin", attrib=_pose_attrib(collision.origin))
-        collision_elem.append(_build_geometry_elem(collision.geometry, cfg))
+        collision_elem.append(_build_geometry_elem(collision.geometry, cfg, mesh_state=mesh_state))
 
     return link
 
@@ -383,7 +445,7 @@ def _build_fixed_joint(name: str, parent: str, child: str, origin: PoseCfg) -> E
     return joint_elem
 
 
-def _build_geometry_elem(geom, cfg: UrdfWriterCfg) -> ET.Element:
+def _build_geometry_elem(geom, cfg: UrdfWriterCfg, *, mesh_state: _MeshExportState) -> ET.Element:
     r"""根据 collision/visual 几何类型构建对应的 ``<geometry>`` XML 元素。
 
     Returns:
@@ -400,6 +462,15 @@ def _build_geometry_elem(geom, cfg: UrdfWriterCfg) -> ET.Element:
             "cylinder",
             attrib={"radius": _fmt_scalar(geom.radius), "length": _fmt_scalar(geom.length)},
         )
+    elif kind == "elliptic_cylinder":
+        mesh_geom = _lower_elliptic_cylinder_to_mesh(geom, mesh_state=mesh_state)
+        filename = mesh_geom.file_path
+        if cfg.mesh_package_prefix and not filename.startswith(("package://", "/")):
+            filename = f"{cfg.mesh_package_prefix.rstrip('/')}/{filename.lstrip('./')}"
+        mesh_attrib = {"filename": filename}
+        if mesh_geom.scale != (1.0, 1.0, 1.0):
+            mesh_attrib["scale"] = _fmt_triplet(mesh_geom.scale)
+        ET.SubElement(geometry_elem, "mesh", attrib=mesh_attrib)
     elif kind == "sphere":
         ET.SubElement(geometry_elem, "sphere", attrib={"radius": _fmt_scalar(geom.radius)})
     elif kind == "mesh":
@@ -413,6 +484,110 @@ def _build_geometry_elem(geom, cfg: UrdfWriterCfg) -> ET.Element:
     else:
         raise ValueError(f"Unsupported URDF geometry kind: {kind}")
     return geometry_elem
+
+
+def _lower_elliptic_cylinder_to_mesh(
+    geom: EllipticCylinderGeometryCfg,
+    *,
+    mesh_state: _MeshExportState,
+) -> MeshGeometryCfg:
+    r"""把内部椭圆柱 primitive lower 成 canonical cylinder mesh。
+
+    这里的 lower 策略是：
+
+    1. 自动生成一份单位 canonical cylinder mesh，主轴沿局部 $+y$；
+    2. 用三轴缩放
+       $$
+       (2r_x,\ l,\ 2r_z)
+       $$
+       把它映射到目标椭圆柱。
+
+    之所以不直接在导出时生成“最终尺寸 mesh”，是为了让 URDF 里仍保留显式 scale，
+    便于人工巡检“椭圆柱到底被拉成了什么样子”。
+    """
+
+    rel_path = _ensure_unit_cylinder_mesh(mesh_state)  # 每个样本目录复用同一份 canonical cylinder mesh
+    return MeshGeometryCfg(
+        file_path=rel_path,
+        scale=(2.0 * geom.radius_x, geom.length, 2.0 * geom.radius_z),  # unit cylinder → 椭圆柱的三轴缩放
+    )
+
+
+def _ensure_unit_cylinder_mesh(mesh_state: _MeshExportState) -> str:
+    r"""确保当前导出上下文可见一份主轴沿局部 $+y$ 的单位圆柱 OBJ。"""
+
+    if mesh_state._unit_cylinder_relpath is not None:
+        return mesh_state._unit_cylinder_relpath  # 同一轮导出已生成过 canonical mesh 时直接复用
+
+    mesh_dir = mesh_state.output_dir / mesh_state.mesh_dirname  # 当前样本目录下的自动 mesh 子目录
+    mesh_path = mesh_dir / "unit_cylinder_y.obj"  # 当前统一采用一份 y-axis cylinder 基底网格
+    if mesh_state.write_enabled:
+        mesh_dir.mkdir(parents=True, exist_ok=True)  # 只有真实导出时才在样本目录里创建 mesh 子目录
+        if not mesh_path.exists():
+            mesh_path.write_text(_unit_cylinder_y_obj_text(), encoding="utf-8")  # 首次遇到椭圆柱时再真正写文件
+            mesh_state.written.append(mesh_path)
+    mesh_state._unit_cylinder_relpath = f"{mesh_state.mesh_dirname}/{mesh_path.name}"  # URDF 优先使用相对样本路径
+    return mesh_state._unit_cylinder_relpath
+
+
+def _unit_cylinder_y_obj_text(*, segments: int = 24) -> str:
+    r"""生成一份主轴沿局部 $+y$ 的单位圆柱 OBJ 文本。
+
+    canonical cylinder mesh 约定如下：
+
+    - 半径为 $1$；
+    - 长度为 $1$；
+    - 中心位于原点；
+    - 主轴沿局部 $+y$；
+    - 底面中心 $y=-0.5$，顶面中心 $y=+0.5$。
+
+    这样导出到 URDF 时，只需施加
+    $$
+    (2r_x,\ l,\ 2r_z)
+    $$
+    的三轴 scale，就能得到目标椭圆柱。
+    """
+
+    segments = max(int(segments), 3)  # OBJ 圆周最少需要 3 段，避免退化成非法 mesh
+    lines: list[str] = ["# canonical unit cylinder aligned with +y"]  # 头注释便于人工识别该文件由导出器自动生成
+    lines.append("v 0 -0.5 0")  # 底面圆心
+    lines.append("v 0 0.5 0")  # 顶面圆心
+
+    # 先写底/顶圆环顶点。未缩放横截面位于 $(x,z)$ 平面，非均匀 scale 后自然得到椭圆。
+    for ring_y in (-0.5, 0.5):
+        for index in range(segments):
+            theta = 2.0 * math.pi * index / segments  # 第 index 个圆周角
+            x = math.cos(theta)  # 单位圆横截面在局部 $x$ 上的坐标
+            z = math.sin(theta)  # 单位圆横截面在局部 $z$ 上的坐标
+            lines.append(f"v {_fmt_scalar(x)} {_fmt_scalar(ring_y)} {_fmt_scalar(z)}")
+
+    bottom_center_index = 1  # OBJ 使用 1-based 索引；第 1 个顶点是底面圆心
+    top_center_index = 2  # 第 2 个顶点是顶面圆心
+    bottom_start = 3  # 底面圆环顶点起始索引
+    top_start = 3 + segments  # 顶面圆环顶点起始索引
+
+    # 底面三角扇。为了让外法向朝 $-y$，底面索引顺序取反。
+    for index in range(segments):
+        current = bottom_start + index
+        nxt = bottom_start + ((index + 1) % segments)
+        lines.append(f"f {bottom_center_index} {nxt} {current}")
+
+    # 顶面三角扇。顶面外法向朝 $+y$。
+    for index in range(segments):
+        current = top_start + index
+        nxt = top_start + ((index + 1) % segments)
+        lines.append(f"f {top_center_index} {current} {nxt}")
+
+    # 侧面用两个三角形拼成一块矩形 patch。
+    for index in range(segments):
+        bottom_current = bottom_start + index
+        bottom_next = bottom_start + ((index + 1) % segments)
+        top_current = top_start + index
+        top_next = top_start + ((index + 1) % segments)
+        lines.append(f"f {bottom_current} {bottom_next} {top_next}")
+        lines.append(f"f {bottom_current} {top_next} {top_current}")
+
+    return "\n".join(lines) + "\n"
 
 
 def _build_material_elem(material: MaterialCfg) -> ET.Element:

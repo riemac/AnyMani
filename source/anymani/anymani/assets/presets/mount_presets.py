@@ -49,7 +49,7 @@ LEAP_MOUNT_PRESET: dict[str, PoseCfg] = {
 
 
 LEAP_SINGLE_BOX_MOUNT_PRESET: dict[str, PoseCfg] = {
-    "thumb": PoseCfg(pos=(cm(3.7), cm(3.1), cm(1.0)), rpy=(0.0, 0.0, rad(-math.pi / 2.0))),
+    "thumb": PoseCfg(pos=(cm(3.7), cm(3.1), cm(1.0)), rpy=(0.0, 0.0, rad(-math.pi / 2.0))), # 直接从图示理解中得到
     "index": PoseCfg(pos=(cm(4.6), cm(8.0), cm(0.8)), rpy=(0.0, 0.0, 0.0)),
     "middle": PoseCfg(pos=(0.0, cm(8.0), cm(0.8)), rpy=(0.0, 0.0, 0.0)),
     "ring": PoseCfg(pos=(cm(-4.6), cm(8.0), cm(0.8)), rpy=(0.0, 0.0, 0.0)),
@@ -62,7 +62,8 @@ LEAP_SINGLE_BOX_MOUNT_PRESET: dict[str, PoseCfg] = {
 
 
 ALLEGRO_SINGLE_BOX_MOUNT_PRESET: dict[str, PoseCfg] = {
-    "thumb": PoseCfg(pos=(cm(2.45), cm(3.05), cm(-1.45)), rpy=(0.0, 0.0, rad(-math.pi / 2.0))),
+    # "thumb": PoseCfg(pos=(cm(2.45), cm(3.05), cm(-1.45)), rpy=(0.0, 0.0, rad(-math.pi / 2.0))), # 原数据
+    "thumb": PoseCfg(pos=(cm(2.45), cm(3.05), cm(-1.45)), rpy=(0.0, 0.0, rad(-1.65806278845))), # 语义对齐后的挂载点，计算逻辑见 `AnyMani/source/anymani/anymani/assets/doc/draft/mounts.md`
     "index": PoseCfg(pos=(cm(4.4), cm(9.44), cm(0.9)), rpy=(0.0, 0.0, deg(-5.0))),
     "middle": PoseCfg(pos=(0.0, cm(9.44), cm(0.9)), rpy=(0.0, 0.0, 0.0)),
     "ring": PoseCfg(pos=(cm(-4.4), cm(9.44), cm(0.9)), rpy=(0.0, 0.0, deg(5.0))),

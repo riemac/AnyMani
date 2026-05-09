@@ -18,6 +18,7 @@ import math
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.builder.joint_builders_primitive import PrimJointBuilderCfg
 from assets.builder.palm_builders import ComPalmBuilder, ComPalmBuilderCfg, SinglePalmBuilder, SinglePalmBuilderCfg
+from assets.exporter.urdf_writer import UrdfWriter, UrdfWriterCfg
 from assets.presets import get_finger_builder_preset, make_human_like_builder_cfg
 
 
@@ -65,6 +66,55 @@ def test_primitive_joint_builder_builds_box_link():
     assert joint.collisions[0].geometry.kind == "box"
     assert joint.visuals[0].geometry.kind == "box"
     assert joint.inertial.mass > 0.0
+
+
+def test_primitive_joint_builder_builds_elliptic_cylinder_link():
+    r"""elliptic cylinder primitive 应能稳定 lower 成 joint-centric link 描述。"""
+
+    cfg = PrimJointBuilderCfg(
+        name="middle_j1",
+        parent="middle_mcp1",
+        child="middle_cyl_link",
+        joint_type="revolute",
+        axis=(1.0, 0.0, 0.0),
+        limit=(-1.0, 1.0),
+        mesh={"type": "elliptic_cylinder", "radius_x": 0.008, "radius_z": 0.005, "length": 0.03},
+    )
+
+    joint = cfg.class_type(cfg).build()
+
+    assert joint.name == "middle_j1"
+    assert joint.parent == "middle_mcp1"
+    assert joint.child == "middle_cyl_link"
+    assert joint.collisions[0].geometry.kind == "elliptic_cylinder"
+    assert joint.visuals[0].geometry.kind == "elliptic_cylinder"
+    assert joint.inertial.mass > 0.0
+
+
+def test_urdf_writer_lowers_elliptic_cylinder_to_mesh_geometry(tmp_path):
+    r"""椭圆柱 primitive 导出到 URDF 时应 lower 成 mesh + scale。"""
+
+    cfg = PrimJointBuilderCfg(
+        name="middle_j1",
+        parent="middle_mcp1",
+        child="middle_cyl_link",
+        joint_type="revolute",
+        axis=(1.0, 0.0, 0.0),
+        limit=(-1.0, 1.0),
+        mesh={"type": "elliptic_cylinder", "radius_x": 0.008, "radius_z": 0.005, "length": 0.03},
+    )
+    joint = cfg.class_type(cfg).build()
+    hand = HumanLikeHandBuilder(_make_allegro_hand_cfg()).build()
+    hand.fingers[0].joints[0] = joint.replace(parent=hand.palm.name)  # 用当前测试 hand 壳承载一个椭圆柱 link
+
+    result = UrdfWriter(UrdfWriterCfg()).export(hand, tmp_path)
+
+    assert result.ok
+    assert (tmp_path / "hand.urdf").is_file()
+    assert (tmp_path / "meshes" / "unit_cylinder_y.obj").is_file()
+    urdf_text = (tmp_path / "hand.urdf").read_text(encoding="utf-8")
+    assert "<mesh " in urdf_text
+    assert 'filename="meshes/unit_cylinder_y.obj"' in urdf_text
 
 
 def test_primitive_joint_builder_builds_composite_tip():
@@ -197,7 +247,9 @@ def test_single_box_allegro_uses_explicit_single_palm_mount_preset():
     assert math.isclose(index.mount.pos[2], 0.009, rel_tol=0.0, abs_tol=1e-6)
     assert math.isclose(index.mount.rpy[2], math.radians(-5.0), rel_tol=0.0, abs_tol=1e-6)
     assert math.isclose(thumb.mount.pos[0], 0.0245, rel_tol=0.0, abs_tol=1e-6)
-    assert math.isclose(thumb.mount.rpy[2], -math.pi / 2.0, rel_tol=0.0, abs_tol=1e-6)
+    # thumb 的 single-box Allegro 挂载 yaw 已不再沿用旧的 $-\pi/2$。
+    # 当前值来自 `doc/draft/mounts.md` 中按官方 Allegro 姿态映射到现建模约定后的解算结果。
+    assert math.isclose(thumb.mount.rpy[2], -1.65806278845, rel_tol=0.0, abs_tol=1e-6)
 
 
 def test_single_box_mount_preset_mirrors_left_thumb_only():
