@@ -613,6 +613,10 @@ class HandGenerator:
         metadata.update({key: value for key, value in premade_metadata.items() if value is not None})
         if sampled_terms:
             metadata["post_mutate_samples"] = sampled_terms
+        if isinstance(hand_cfg.metadata.get("post_mutate_samples"), dict):
+            merged_samples = dict(metadata.get("post_mutate_samples", {}))
+            merged_samples.update(hand_cfg.metadata["post_mutate_samples"])
+            metadata["post_mutate_samples"] = merged_samples
         recolor_metadata = describe_recolor_spec(self.cfg.recolored)
         if recolor_metadata is not None:
             metadata["recolored"] = recolor_metadata

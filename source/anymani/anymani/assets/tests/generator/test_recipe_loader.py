@@ -208,7 +208,7 @@ def test_recipe_loader_builds_mutate_block_into_isaaclab_style_cfg(tmp_path):
             "Mutate": {
                 "mount_perturb": {
                     "self_mode": "general",
-                    "pos_range": [0.001, 0.001],
+                    "pos_radius": [0.001, 0.001, 0.001],
                 }
             },
         }
@@ -218,7 +218,7 @@ def test_recipe_loader_builds_mutate_block_into_isaaclab_style_cfg(tmp_path):
     assert cfg.Mutate.has_terms() is True
     assert [name for name, _ in cfg.Mutate.ordered_terms()] == ["mount_perturb"]
     assert isinstance(cfg.Mutate.mount_perturb, MountPerturbCfg)
-    assert cfg.Mutate.mount_perturb.pos_range == (0.001, 0.001)
+    assert cfg.Mutate.mount_perturb.pos_radius == (0.001, 0.001, 0.001)
 
 
 def test_recipe_loader_rejects_removed_disturb_unit_field_in_mutate_block(tmp_path):
@@ -234,6 +234,43 @@ def test_recipe_loader_rejects_removed_disturb_unit_field_in_mutate_block(tmp_pa
                 "Mutate": {
                     "mount_perturb": {
                         "disturb_unit": "rad",
+                        "self_mode": "general",
+                        "pos_range": [0.001, 0.001],
+                    }
+                },
+            }
+        )
+
+
+def test_recipe_loader_rejects_removed_sample_space_and_legacy_range_fields(tmp_path):
+    r"""recipe 层也应一次性拒绝旧 `sample_space/pos_range` 写法。"""
+
+    with pytest.raises(TypeError, match="sample_space"):
+        RecipeLoader.load_dict(
+            {
+                "mode": "made",
+                "artifact_level": "hand_cfg",
+                "output_dir": str(tmp_path / "generated"),
+                "Made": _made_recipe_dict(),
+                "Mutate": {
+                    "mount_perturb": {
+                        "sample_space": {"pos": "ellipsoid", "rot": "ellipsoid"},
+                        "self_mode": "general",
+                        "pos_radius": [0.001, 0.001, 0.001],
+                    }
+                },
+            }
+        )
+
+    with pytest.raises(TypeError, match="pos_range"):
+        RecipeLoader.load_dict(
+            {
+                "mode": "made",
+                "artifact_level": "hand_cfg",
+                "output_dir": str(tmp_path / "generated"),
+                "Made": _made_recipe_dict(),
+                "Mutate": {
+                    "mount_perturb": {
                         "self_mode": "general",
                         "pos_range": [0.001, 0.001],
                     }

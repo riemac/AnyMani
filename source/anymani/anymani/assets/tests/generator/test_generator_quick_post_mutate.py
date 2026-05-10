@@ -72,7 +72,7 @@ class DemoMountMutatorCfg(HandMutatorCfg):
 
     mount = MountPerturbCfg(
         self_mode="general",
-        pos_range=(0.001, 0.001),
+        pos_radius=0.001,
     )
 
 
@@ -146,6 +146,10 @@ def test_independent_post_mutate_restores_from_topology_root_and_writes_timestam
     assert len(results) == 2
     assert all(result.metadata["source_origin_sample_id"] == original_sample_id for result in results)
     assert all(result.metadata["source_origin_topology_dir"] == str(topology_dir) for result in results)
+    assert all(
+        result.metadata["post_mutate_samples"]["mount_perturb"]["resolved_self_mode"] == "general"
+        for result in results
+    )
 
     mutate_run_dirs = [path for path in topology_dir.iterdir() if path.is_dir()]
     assert len(mutate_run_dirs) == 1

@@ -233,7 +233,14 @@ def _build_mutate_cfg(raw: dict[str, Any]) -> HandMutatorCfg:
         "link_scale": ("link_scale", "clip"),
         "tip_replace": ("target_fingers",),
         "limit_tweak": ("joint_range",),
-        "mount_perturb": ("pos_range", "rot_range"),
+        "mount_perturb": (
+            "pos_radius",
+            "rot_radius",
+            "thumb_pos_radius",
+            "thumb_rot_radius",
+            "mirror_yaw_range",
+            "mirror_x_range",
+        ),
     }
 
     mutate_cfg = HandMutatorCfg()
@@ -292,7 +299,14 @@ def _build_named_mutator_term_cfg(term_name: str, raw: dict[str, Any]) -> AssetC
         "LinkScaleCfg": ("target_joints",),
         "TipReplaceCfg": ("target_fingers",),
         "LimitTweakCfg": ("target_joints",),
-        "MountPerturbCfg": ("target_fingers",),
+        "MountPerturbCfg": (
+            "pos_radius",
+            "rot_radius",
+            "thumb_pos_radius",
+            "thumb_rot_radius",
+            "mirror_yaw_range",
+            "mirror_x_range",
+        ),
     }
     return _build_legacy_mutator_cfg(
         term_name,
