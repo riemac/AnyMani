@@ -13,8 +13,9 @@ r"""整手级验证规则集和验证流水线。
 3. **手指数量范围**：finger 数量是否在 ``[finger_count_min, finger_count_max]`` 内
 4. **所有旁链挂载一致性**：所有 finger 的 ``parent_link`` 均等于 ``palm.name``
    （schema 已做，但任何 post-mutate 挂载/结构改动后仍需重跑）
-5. **相邻手指挂载最小间距**：任意两根手指的 mount 位置之间的欧氏距离
-    不得低于 ``min_finger_spacing``（meter），防止手指在几何上重叠
+5. **手指间几何 clearance**：
+   - pre-made 阶段仍可使用 mount-origin 轻量近似；
+   - post-mutate 阶段默认升级为 collision geometry 的 sampled-surface SDF clearance。
 
 设计说明
 --------
@@ -39,24 +40,37 @@ r"""整手级验证规则集和验证流水线。
 
 这样调用方可以独立决定哪一阶段的 warnings 要升级成 errors。
 
-### 手指间距计算
+### 手指间距计算的阶段语义
 
-间距定义为任意两根手指 ``mount.pos`` 之间的欧氏距离，是最轻量的近似。
-更精确的碰撞检测需要几何层支持，当前阶段不纳入。
+pre-made 阶段的拓扑筛选仍可使用最轻量的 mount-origin 近似：
 
 $$
 d_{ij} = \|p_i - p_j\|_2 \geq d_{\min}
 $$
+
+post-mutate 阶段则使用真实 collision primitive 的 SDF surface clearance：
+
+$$
+c(F_i,F_j)=\min\left(
+  \min_{\mathbf{x}\in S_{F_i}}\operatorname{SDF}_{F_j}(\mathbf{x}),
+  \min_{\mathbf{y}\in S_{F_j}}\operatorname{SDF}_{F_i}(\mathbf{y})
+\right).
+$$
+
+这个证书只覆盖 `post_mutate_home_pose`，不声称 all-pose / mesh-exact /
+trajectory / runtime physics safety。
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import Literal
 
 from ..asset_base import AssetCfgBase, HandCfg
 from ._base import ValidatorBase, ValidationResult
 from .finger_rules import FingerValidatorCfg, FingerValidator
+from ._sdf_clearance import SdfClearanceConfig, evaluate_finger_sdf_clearance
 
 
 # ============================================================================
@@ -102,10 +116,21 @@ class _HandValidatorStageCfg(AssetCfgBase):
     """是否检查所有 finger 的 ``parent_link`` 均等于 ``palm.name``。"""
 
     check_finger_spacing: bool = True
-    """是否检查任意两根手指挂载点之间的欧氏距离不低于 ``min_finger_spacing``。"""
+    """是否检查任意两根手指之间的最小间距。
+
+    # NOTE:
+    字段名保持旧 contract，不改成 `check_clearance`，是为了不破坏已有 recipe。
+    但 post-mutate 阶段的真实语义已从 mount-origin distance 升级为 SDF clearance。
+    """
 
     min_finger_spacing: float = 0.015
-    """允许的最小手指间挂载间距（meter）；低于此值记 warning。"""
+    r"""允许的最小手指间距 / clearance（meter）。
+
+    pre-made 阶段解释为 mount-origin 距离下限；post-mutate SDF 阶段解释为：
+    $$
+    c(F_i,F_j)\geq\texttt{min\_finger\_spacing}.
+    $$
+    """
 
     finger: FingerValidatorCfg = field(default_factory=FingerValidatorCfg)
     """手指级验证配置；hand 验证器内部对每根 finger 跑此配置。"""
@@ -125,6 +150,31 @@ class HandValidatorPreMadeCfg(_HandValidatorStageCfg):
 @dataclass
 class HandValidatorPostMutateCfg(_HandValidatorStageCfg):
     r"""post-mutate 阶段的几何/参数后验规则。"""
+
+    sdf_surface_samples_per_axis: int = 5
+    """SDF surface sampling 密度。
+
+    对 box 是每个面上的规则网格密度；对 cylinder / sphere 会转换成经纬 /
+    角向采样。该字段不是“精确度证明”，只是 sampled approximation 的预算。
+    """
+
+    sdf_unsupported_geometry_policy: Literal["fail", "warn_skip"] = "fail"
+    """unsupported collision geometry 的处理策略。
+
+    默认 ``"fail"``，因为科研 validator 不能把“不知道”伪装成“安全”。
+    ``"warn_skip"`` 只用于 exploratory 调试，会写入 `skipped_bodies` 并把
+    certificate 标记为 incomplete。
+    """
+
+    sdf_threshold_tolerance: float = 1e-9
+    """clearance 阈值比较的数值容差，只用于抵消浮点误差。"""
+
+    sdf_device: Literal["auto", "cuda", "cpu"] = "auto"
+    """SDF 数值计算设备。
+
+    默认 ``"auto"``：优先尝试 CUDA，若当前环境或几何类型无法走 GPU，则由
+    SDF 后端回退 CPU。证书会记录实际使用的 device，避免性能路径变成隐式假设。
+    """
 
 
 @dataclass
@@ -279,22 +329,107 @@ class HandValidator(ValidatorBase):
                     )
 
         if stage_cfg.check_finger_spacing:
-            mounts = [(finger.name, finger.mount.pos) for finger in target.fingers]
-            for idx in range(len(mounts)):
-                for jdx in range(idx + 1, len(mounts)):
-                    name_i, pos_i = mounts[idx]
-                    name_j, pos_j = mounts[jdx]
-                    distance = math.sqrt(sum((lhs - rhs) ** 2 for lhs, rhs in zip(pos_i, pos_j)))
-                    if distance < stage_cfg.min_finger_spacing:
-                        result.warnings.append(
-                            f"finger spacing '{name_i}'-'{name_j}'[{stage}]: "
-                            f"{distance * 100.0:.2f} cm < min {stage_cfg.min_finger_spacing * 100.0:.2f} cm"
-                        )
+            if isinstance(stage_cfg, HandValidatorPostMutateCfg):
+                self._validate_post_mutate_sdf_clearance(target, stage_cfg=stage_cfg, result=result)
+            else:
+                self._validate_mount_origin_spacing(target, stage_cfg=stage_cfg, stage=stage, result=result)
 
         if stage_cfg.strict:
             result = result.as_strict()
         result.passed = len(result.errors) == 0
         return result
+
+    def _validate_mount_origin_spacing(
+        self,
+        target: HandCfg,
+        *,
+        stage_cfg: _HandValidatorStageCfg,
+        stage: str,
+        result: ValidationResult,
+    ) -> None:
+        r"""执行旧版 mount-origin 间距近似。
+
+        该规则只比较 finger root frame 的原点：
+        $$
+        d_{ij}=\|p_i-p_j\|_2.
+        $$
+
+        它不能发现“root 原点相距尚可，但 link mesh 因姿态/宽度发生穿膜”的反例，
+        因而 post-mutate 默认不再走这条路径。
+        """
+
+        mounts = [(finger.name, finger.mount.pos) for finger in target.fingers]
+        for idx in range(len(mounts)):
+            for jdx in range(idx + 1, len(mounts)):
+                name_i, pos_i = mounts[idx]
+                name_j, pos_j = mounts[jdx]
+                distance = math.sqrt(sum((lhs - rhs) ** 2 for lhs, rhs in zip(pos_i, pos_j)))
+                if distance < stage_cfg.min_finger_spacing:
+                    result.warnings.append(
+                        f"finger spacing '{name_i}'-'{name_j}'[{stage}, mount_origin_approx]: "
+                        f"{distance * 100.0:.2f} cm < min {stage_cfg.min_finger_spacing * 100.0:.2f} cm"
+                    )
+
+    def _validate_post_mutate_sdf_clearance(
+        self,
+        target: HandCfg,
+        *,
+        stage_cfg: HandValidatorPostMutateCfg,
+        result: ValidationResult,
+    ) -> None:
+        r"""执行 post-mutate home-pose sampled SDF clearance 检查。
+
+        该函数只负责规则编排：
+
+        - `_collision_geometry.py` 抽取 collision body；
+        - `_sdf_clearance.py` 计算 signed distance 与 certificate；
+        - 本函数把 certificate 接回 `ValidationResult`，并决定 error 文案。
+        """
+
+        try:
+            clearance = evaluate_finger_sdf_clearance(
+                target,
+                SdfClearanceConfig(
+                    min_clearance=stage_cfg.min_finger_spacing,
+                    surface_samples_per_axis=stage_cfg.sdf_surface_samples_per_axis,
+                    unsupported_policy=stage_cfg.sdf_unsupported_geometry_policy,
+                    tolerance=stage_cfg.sdf_threshold_tolerance,
+                    device=stage_cfg.sdf_device,
+                ),
+            )
+        except ValueError as exc:
+            result.errors.append(f"finger spacing sdf[post_mutate]: {exc}")
+            result.metadata["finger_spacing_certificate"] = {
+                "pose_scope": "post_mutate_home_pose",
+                "geometry_scope": "collision_geometry_only",
+                "sdf_kind": "sampled_surface_sdf_approx",
+                "complete": False,
+                "device": stage_cfg.sdf_device,
+                "skipped_bodies": [],
+                "not_certified": [
+                    "all_pose_collision_free",
+                    "mesh_exact_clearance",
+                    "trajectory_safety",
+                    "physics_runtime_safety",
+                ],
+            }
+            return
+
+        certificate = clearance.certificate.to_dict()
+        result.metadata["finger_spacing_certificate"] = certificate
+        if not clearance.certificate.complete:
+            result.errors.append(
+                "finger spacing sdf[post_mutate]: incomplete certificate; "
+                f"skipped_bodies={certificate.get('skipped_bodies', [])!r}"
+            )
+
+        for pair in clearance.violations:
+            result.errors.append(
+                f"finger spacing '{pair.finger_i}'-'{pair.finger_j}'[post_mutate, sdf_clearance]: "
+                f"{pair.clearance * 100.0:.2f} cm < min {stage_cfg.min_finger_spacing * 100.0:.2f} cm "
+                f"(i_to_j={pair.direction_i_to_j * 100.0:.2f} cm, "
+                f"j_to_i={pair.direction_j_to_i * 100.0:.2f} cm)"
+            )
 
     def _validate_palm_thumb_binding(self, target: HandCfg, *, result: ValidationResult) -> None:
         r"""检查 pre-made topology 是否满足 palm family 与 thumb family 绑定。"""

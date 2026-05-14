@@ -34,6 +34,7 @@ schema 层（`JointCfg.__post_init__` 等）已经捕获"明显非法"的输入�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -54,6 +55,21 @@ class ValidationResult:
     warnings: list[str] = field(default_factory=list)
     """潜在问题消息列表；默认放行，``strict`` 模式下升级为错误。"""
 
+    metadata: dict[str, Any] = field(default_factory=dict)
+    """验证器附加的结构化证据。
+
+    # NOTE:
+    原先 `ValidationResult` 只承载 human-readable errors / warnings。
+    SDF clearance 这类几何规则需要把“证书边界”也传给 generator / sidecar：
+
+    - 检测姿态是不是 post-mutate home pose；
+    - 是否只用了 collision geometry；
+    - 是否有 unsupported body 被跳过；
+    - 这个结果不证明哪些更强 claim。
+
+    因而这里加一个轻量 `metadata` 字段，而不把几何证书硬编码进基础协议。
+    """
+
     def merge(self, other: "ValidationResult") -> "ValidationResult":
         r"""把另一个验证结果并入自身（就地合并）。
 
@@ -66,6 +82,7 @@ class ValidationResult:
 
         self.errors.extend(other.errors)
         self.warnings.extend(other.warnings)
+        self.metadata.update(other.metadata)
         self.passed = len(self.errors) == 0
         return self
 
@@ -80,6 +97,7 @@ class ValidationResult:
             passed=len(self.errors) + len(self.warnings) == 0,
             errors=self.errors + self.warnings,
             warnings=[],
+            metadata=dict(self.metadata),
         )
 
     def __bool__(self) -> bool:

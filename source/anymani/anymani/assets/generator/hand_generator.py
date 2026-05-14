@@ -43,6 +43,13 @@ from ..asset_builders import HandBuilder, HandBuilderCfg
 from ..exporter import HandExporter, HandExporterCfg
 from ..validator import HandValidator, HandValidatorCfg
 from ._generation_result import HandGenerationResult
+from ._accepted_mode_quota import (
+    MOUNT_MODE_ORDER as _MOUNT_MODE_ORDER,
+    allocate_accepted_mode_quota,
+    force_mount_perturb_mode as _force_mount_perturb_mode,
+    mount_perturb_mode_probabilities as _mount_perturb_mode_probabilities,
+    resolved_mount_mode as _resolved_mount_mode,
+)
 from ._post_mutate_restore import PostMutateSource, load_post_mutate_source
 from ._premade_connectivity import (
     apply_connectivity_preset as _apply_premade_connectivity_preset,
@@ -360,6 +367,7 @@ class HandGenerator:
         self.cfg = cfg
         self._run_context: GenerationRunContext | None = None
         self._mutate_source: PostMutateSource | None = None
+        self._last_rejection_detail: dict[str, Any] | None = None
 
     def _ensure_run_context(self) -> GenerationRunContext:
         r"""懒创建当前 generator 对应的 run 生命周期对象。"""
@@ -549,6 +557,7 @@ class HandGenerator:
 
         validator = HandValidator(self.cfg.Validate) if self.cfg.Validate is not None else None
         validation_warnings: list[str] = []
+        validation_metadata: dict[str, Any] = {}
 
         if self.cfg.mode == "mutate":
             mutate_source = self._load_mutate_source()
@@ -572,9 +581,15 @@ class HandGenerator:
             if validator is not None:
                 pre_made_validation = validator.validate_pre_made(hand_cfg)
                 if not pre_made_validation:
+                    self._last_rejection_detail = {
+                        "stage": "pre_made_validate",
+                        "errors": list(pre_made_validation.errors),
+                        "metadata": dict(pre_made_validation.metadata),
+                    }
                     self._record_generation_rejection(stage="pre_made_validate", write_summary=record_summary)
                     return None  # pre-made 结构闸门拒绝后，不再允许继续进入 mutate / export
                 validation_warnings.extend(pre_made_validation.warnings)
+                validation_metadata["pre_made"] = dict(pre_made_validation.metadata)
         sampled_terms: dict[str, dict[str, float]] | None = None
 
         # 当前后序派生只保留 mutate-only 入口：
@@ -587,14 +602,21 @@ class HandGenerator:
             sampled_terms = sampled_mutation_terms or _sample_mutation_terms(mutator, hand_cfg)
             hand_cfg = mutator.mutate(hand_cfg, sampled_params=sampled_terms)
             if hand_cfg is None:
+                self._last_rejection_detail = {"stage": "mutate", "errors": ["mutator returned None"], "metadata": {}}
                 self._record_generation_rejection(stage="mutate", write_summary=record_summary)
                 return None  # 变异被拒绝；拒绝语义统一表现为“本次样本无结果”
             if validator is not None:
                 post_mutate_validation = validator.validate_post_mutate(hand_cfg)
                 if not post_mutate_validation:
+                    self._last_rejection_detail = {
+                        "stage": "post_mutate_validate",
+                        "errors": list(post_mutate_validation.errors),
+                        "metadata": dict(post_mutate_validation.metadata),
+                    }
                     self._record_generation_rejection(stage="post_mutate_validate", write_summary=record_summary)
                     return None
                 validation_warnings.extend(post_mutate_validation.warnings)
+                validation_metadata["post_mutate"] = dict(post_mutate_validation.metadata)
 
         sample_id = uuid4().hex[:8]  # mutate-only 变体目录仍以 8 位短哈希为样本根
         if self.cfg.mode != "mutate" and connectivity_preset_name is not None and enumerated:
@@ -613,6 +635,8 @@ class HandGenerator:
         metadata.update({key: value for key, value in premade_metadata.items() if value is not None})
         if sampled_terms:
             metadata["post_mutate_samples"] = sampled_terms
+        if validation_metadata:
+            metadata["validation"] = validation_metadata
         if isinstance(hand_cfg.metadata.get("post_mutate_samples"), dict):
             merged_samples = dict(metadata.get("post_mutate_samples", {}))
             merged_samples.update(hand_cfg.metadata["post_mutate_samples"])
@@ -644,6 +668,7 @@ class HandGenerator:
             )
 
         self._record_generation_success(result, write_summary=record_summary)
+        self._last_rejection_detail = None
         return result
 
     def generate(self) -> HandGenerationResult | None:
@@ -740,11 +765,23 @@ class HandGenerator:
 
         if self.cfg.mode == "mutate":
             target_count = max(int(self.cfg.n_samples), 0)
-            success_count = 0
-            attempt_count = 0
             max_attempts = max(target_count * int(self.cfg.post_mutate_max_attempt_factor), 10)
             mutator = HandMutator(self.cfg.Mutate)
             source_hand = self._load_mutate_source().hand_cfg
+            mode_probabilities = _mount_perturb_mode_probabilities(self.cfg.Mutate)
+
+            if mode_probabilities is not None:
+                yield from self._generate_mutate_batch_with_accepted_mode_quota(
+                    mutator=mutator,
+                    source_hand=source_hand,
+                    mode_probabilities=mode_probabilities,
+                    target_count=target_count,
+                    max_attempts=max_attempts,
+                )
+                return
+
+            success_count = 0
+            attempt_count = 0
 
             while success_count < target_count:
                 remaining = target_count - success_count
@@ -811,6 +848,124 @@ class HandGenerator:
                 continue
             yield result
             success_count += 1
+
+    def _generate_mutate_batch_with_accepted_mode_quota(
+        self,
+        *,
+        mutator: HandMutator,
+        source_hand: HandCfg,
+        mode_probabilities: dict[str, float],
+        target_count: int,
+        max_attempts: int,
+    ) -> Iterator[HandGenerationResult]:
+        r"""按 accepted/output mode quota 执行 mutate-only 批量生成。
+
+        这里兑现的是新的统计 contract：
+
+        - `MountPerturbCfg.self_mode` dict 不再是 proposal prior；
+        - 它描述最终 accepted 样本的 mode 分布；
+        - 某个 mode validator 拒绝率高时，只在该 mode 内补采；
+        - 任何 shortfall 都 fail-hard，不允许其他 mode 静默填坑。
+        """
+
+        quotas = allocate_accepted_mode_quota(mode_probabilities, target_count)
+        diagnostics = {
+            mode: {
+                "target_quota": quota,
+                "proposed": 0,
+                "accepted": 0,
+                "emitted": 0,
+                "shortfall": quota,
+                "rejected_by_validator": 0,
+                "rejected_by_unsupported_geometry": 0,
+                "rejected_by_incomplete_certificate": 0,
+                "rejected_by_budget": 0,
+                "representative_failures": [],
+            }
+            for mode, quota in quotas.items()
+        }
+        self._ensure_run_context().summary.setdefault("post_mutate_modes", diagnostics)
+        attempts_used = 0
+
+        for mode in _MOUNT_MODE_ORDER:
+            target_quota = quotas.get(mode, 0)
+            if target_quota <= 0:
+                continue
+            accepted = 0
+            while accepted < target_quota:
+                if attempts_used >= max_attempts:
+                    diagnostics[mode]["rejected_by_budget"] += 1
+                    diagnostics[mode]["shortfall"] = target_quota - accepted
+                    self._write_run_summary()
+                    raise RuntimeError(
+                        "post-mutate accepted self_mode quota shortfall; "
+                        f"mode={mode!r}, target_quota={target_quota}, accepted={accepted}, "
+                        f"attempted={attempts_used}, budget={max_attempts}, diagnostics={diagnostics[mode]!r}"
+                    )
+
+                try:
+                    sampled_terms = mutator.sample_batch(source_hand, batch_size=1)[0]
+                except Exception:
+                    sampled_terms = _sample_mutation_terms(mutator, source_hand)
+                sampled_terms = _force_mount_perturb_mode(
+                    sampled_terms,
+                    mutator=mutator,
+                    target=source_hand,
+                    mode=mode,
+                )
+                diagnostics[mode]["proposed"] += 1
+                attempts_used += 1
+
+                result = self._generate_once(
+                    hand_preset_name=None,
+                    connectivity_preset_name=None,
+                    sampled_mutation_terms=sampled_terms,
+                )
+                if result is None:
+                    reason = self._classify_last_rejection()
+                    diagnostics[mode][reason] += 1
+                    failures = diagnostics[mode]["representative_failures"]
+                    if len(failures) < 5:
+                        failures.append({"reason": reason, "sampled_terms": sampled_terms})
+                    diagnostics[mode]["shortfall"] = target_quota - accepted
+                    self._ensure_run_context().summary["post_mutate_modes"] = diagnostics
+                    continue
+
+                resolved_mode = _resolved_mount_mode(result, sampled_terms)
+                if resolved_mode != mode:
+                    raise RuntimeError(
+                        "mount_perturb accepted quota invariant broken; "
+                        f"expected mode={mode!r}, got {resolved_mode!r}"
+                    )
+
+                diagnostics[mode]["accepted"] += 1
+                diagnostics[mode]["emitted"] += 1
+                accepted += 1
+                diagnostics[mode]["shortfall"] = target_quota - accepted
+                self._ensure_run_context().summary["post_mutate_modes"] = diagnostics
+                self._write_run_summary()
+                yield result
+
+    def _classify_last_rejection(self) -> str:
+        r"""把最近一次 rejection stage 粗分到 per-mode diagnostics 字段。
+
+        当前 `GenerationRunContext` 只记录 stage，不记录 validator 细节。
+        因此这里先做保守分类：post_mutate_validate 统一计入 validator。
+        unsupported / incomplete 的细粒度统计已经在 validator certificate 中保留，
+        后续若 summary 需要逐项展开，可把 `ValidationResult.metadata` 接入这里。
+        """
+
+        context = self._ensure_run_context()
+        if context.last_rejection_stage == "post_mutate_validate" and self._last_rejection_detail:
+            metadata = self._last_rejection_detail.get("metadata")
+            certificate = metadata.get("finger_spacing_certificate") if isinstance(metadata, dict) else None
+            if isinstance(certificate, dict):
+                if certificate.get("complete") is False:
+                    if certificate.get("skipped_bodies"):
+                        return "rejected_by_unsupported_geometry"
+                    return "rejected_by_incomplete_certificate"
+            return "rejected_by_validator"
+        return "rejected_by_validator"
 
 __all__ = [
     "HandGenerationResult",

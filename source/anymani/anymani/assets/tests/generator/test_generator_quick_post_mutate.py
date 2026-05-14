@@ -5,6 +5,8 @@ from __future__ import annotations
 from importlib import import_module
 from pathlib import Path
 
+import yaml
+
 from anymani.assets.config import asset_gen_cfg as asset_cfg_module
 from anymani.assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from anymani.assets.generator.mutate import HandMutatorCfg, MountPerturbCfg
@@ -72,6 +74,15 @@ class DemoMountMutatorCfg(HandMutatorCfg):
 
     mount = MountPerturbCfg(
         self_mode="general",
+        pos_radius=0.001,
+    )
+
+
+class DemoQuotaMountMutatorCfg(HandMutatorCfg):
+    r"""测试 accepted/output quota 的 post-mutate cfg。"""
+
+    mount_perturb = MountPerturbCfg(
+        self_mode={"identity": 0.5, "general": 0.5},
         pos_radius=0.001,
     )
 
@@ -164,6 +175,37 @@ def test_independent_post_mutate_restores_from_topology_root_and_writes_timestam
     _assert_urdf_has_no_mount_helper_topology(topology_dir / "hand.urdf")  # pre-made topology 根导出也必须遵守同一语义
     for result in results:
         _assert_urdf_has_no_mount_helper_topology(result.urdf_path)  # mutate-only 派生样本不允许回退到旧 mount helper 拓扑
+
+
+def test_post_mutate_self_mode_probability_is_accepted_output_quota(tmp_path):
+    r"""self_mode dict 应控制 accepted/output 分布，而不是 proposal prior。"""
+
+    topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
+    mutate_cfg = HandGeneratorCfg(
+        mode="mutate",
+        artifact_level="bundle",
+        source_topology_dir=topology_dir,
+        output_dir=tmp_path,
+        n_samples=4,
+        Mutate=DemoQuotaMountMutatorCfg(),
+        Validate=None,
+    )
+
+    results = list(HandGenerator(mutate_cfg).generate_batch())
+
+    modes = [
+        result.metadata["post_mutate_samples"]["mount_perturb"]["resolved_self_mode"]
+        for result in results
+    ]
+    mutate_run_dir = next(path for path in topology_dir.iterdir() if path.is_dir())
+    summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
+
+    assert modes.count("identity") == 2
+    assert modes.count("general") == 2
+    assert summary["post_mutate_modes"]["identity"]["target_quota"] == 2
+    assert summary["post_mutate_modes"]["identity"]["accepted"] == 2
+    assert summary["post_mutate_modes"]["general"]["target_quota"] == 2
+    assert summary["post_mutate_modes"]["general"]["accepted"] == 2
 
 
 def test_unified_generate_runner_accepts_post_mutate_cli(monkeypatch, tmp_path):

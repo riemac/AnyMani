@@ -49,8 +49,8 @@ def _parse_triplet(text: str) -> tuple[float, float, float]:
     return tuple(float(value) for value in text.split())  # type: ignore[return-value]
 
 
-def test_hand_validator_reports_mount_spacing_warning_without_rejecting():
-    """validator 应允许 warning 放行，但把 spacing 问题记录下来。"""
+def test_post_mutate_hand_validator_rejects_sdf_clearance_violation():
+    """post-mutate spacing 现在是 SDF clearance 硬闸门，不再 warning 放行。"""
 
     hand = _build_allegro_hand()
     validator = HandValidator(
@@ -61,9 +61,9 @@ def test_hand_validator_reports_mount_spacing_warning_without_rejecting():
 
     result = validator.validate(hand)
 
-    assert result.passed is True
-    assert result.errors == []
-    assert any("finger spacing" in warning for warning in result.warnings)
+    assert result.passed is False
+    assert any("sdf_clearance" in error for error in result.errors)
+    assert result.metadata["finger_spacing_certificate"]["pose_scope"] == "post_mutate_home_pose"
 
 
 def test_urdf_writer_always_folds_mount_into_first_joint_origin():

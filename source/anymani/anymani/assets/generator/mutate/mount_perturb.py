@@ -247,6 +247,21 @@ class MountPerturbMutator(MutatorBase):
         r"""为当前 hand 样本生成一份已经解析好 mode 的结构化随机量。"""
 
         resolved_mode = _draw_resolved_mode(self.cfg)
+        return self.sample_one_for_mode(target, resolved_mode=resolved_mode)
+
+    def sample_one_for_mode(self, target: HandCfg, *, resolved_mode: str) -> dict[str, Any]:
+        r"""为 accepted-quota 路径生成指定 mode 的结构化随机量。
+
+        generator 层需要把 `self_mode` dict 解释成 accepted/output 分布。
+        若只是在 proposal 样本上事后改写 `resolved_self_mode`，就会出现
+        “forced general 但没有 `finger_deltas`”这类伪样本。因此指定 mode
+        的重新采样必须留在 mutator 内部完成，让每个 mode 拿到自己完整的
+        低层随机变量。
+        """
+
+        if resolved_mode not in _ALL_SELF_MODES:
+            raise ValueError(f"unsupported mount_perturb resolved mode: {resolved_mode!r}")
+
         if resolved_mode == _MODE_IDENTITY:
             return {"resolved_self_mode": _MODE_IDENTITY}
 

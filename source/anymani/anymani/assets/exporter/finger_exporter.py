@@ -23,7 +23,7 @@ import xml.etree.ElementTree as ET
 from ..asset_base import AssetCfgBase, FingerCfg
 from ..asset_schema_core import CollisionGeometryCfg, Vector3, VisualGeometryCfg
 from ._base import ExporterBase, ExportResult
-from .urdf_writer import UrdfWriterCfg, _build_joint_elem, _build_link_elem
+from .urdf_writer import UrdfWriterCfg, _MeshExportState, _build_joint_elem, _build_link_elem
 
 
 @dataclass
@@ -54,20 +54,33 @@ class FingerExporter(ExporterBase):
             return ExportResult(skipped=[out_path])
 
         output_dir.mkdir(parents=True, exist_ok=True)
+        mesh_state = _MeshExportState(
+            output_dir=output_dir,
+            mesh_dirname=self.cfg.Urdf.canonical_mesh_dirname,
+        )
         robot = ET.Element("robot", attrib={"name": target.name})
-        robot.append(self._build_base_link())
+        robot.append(self._build_base_link(mesh_state=mesh_state))
 
         parent_name = self.cfg.base_link_name
         for joint in target.joints:
             robot.append(_build_joint_elem(joint, parent_name, self.cfg.Urdf))
-            robot.append(_build_link_elem(joint.child, joint.inertial, joint.collisions, joint.visuals, self.cfg.Urdf))
+            robot.append(
+                _build_link_elem(
+                    joint.child,
+                    joint.inertial,
+                    joint.collisions,
+                    joint.visuals,
+                    self.cfg.Urdf,
+                    mesh_state=mesh_state,
+                )
+            )
             parent_name = joint.child
 
         ET.indent(robot)
         ET.ElementTree(robot).write(out_path, encoding="unicode", xml_declaration=True)
-        return ExportResult(written=[out_path])
+        return ExportResult(written=[out_path, *mesh_state.written])
 
-    def _build_base_link(self) -> ET.Element:
+    def _build_base_link(self, *, mesh_state: _MeshExportState) -> ET.Element:
         r"""构造 finger 局部预览用的中性基座。"""
 
         collisions = [
@@ -82,7 +95,14 @@ class FingerExporter(ExporterBase):
                 geometry={"type": "box", "size": self.cfg.base_box_size},
             )
         ]
-        return _build_link_elem(self.cfg.base_link_name, None, collisions, visuals, self.cfg.Urdf)
+        return _build_link_elem(
+            self.cfg.base_link_name,
+            None,
+            collisions,
+            visuals,
+            self.cfg.Urdf,
+            mesh_state=mesh_state,
+        )
 
 
 __all__ = ["FingerExporterCfg", "FingerExporter"]
