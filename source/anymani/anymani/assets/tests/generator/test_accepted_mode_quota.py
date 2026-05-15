@@ -6,7 +6,7 @@ r"""post-mutate accepted/output self_mode quota 测试。
 
 from __future__ import annotations
 
-from assets.generator._accepted_mode_quota import allocate_accepted_mode_quota
+from assets.generator._accepted_mode_quota import LIMIT_TWEAK_MODE_ORDER, allocate_accepted_mode_quota
 
 
 def test_allocate_accepted_mode_quota_exact_case():
@@ -48,3 +48,16 @@ def test_allocate_accepted_mode_quota_omits_zero_probability_modes():
     quota = allocate_accepted_mode_quota({"identity": 0.0, "general": 1.0}, 3)
 
     assert quota == {"general": 3}
+
+
+def test_allocate_accepted_mode_quota_supports_limit_tweak_mode_order():
+    r"""`limit_tweak` 的 accepted quota tie-break 也应使用自己的固定 mode 顺序。"""
+
+    quota = allocate_accepted_mode_quota(
+        {"disturb": 0.5, "identity": 0.5},
+        1,
+        mode_order=LIMIT_TWEAK_MODE_ORDER,
+        label="limit_tweak.self_mode",
+    )
+
+    assert quota == {"identity": 1}

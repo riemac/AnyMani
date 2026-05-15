@@ -9,7 +9,7 @@ import yaml
 
 from anymani.assets.config import asset_gen_cfg as asset_cfg_module
 from anymani.assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
-from anymani.assets.generator.mutate import HandMutatorCfg, MountPerturbCfg
+from anymani.assets.generator.mutate import HandMutatorCfg, LimitTweakCfg, MountPerturbCfg
 from anymani.assets.scripts import generate as generate_module
 from anymani.assets.scripts import _asset_generate_runner as runner_module
 from anymani.assets.validator.hand_rules import HandValidatorCfg
@@ -87,13 +87,39 @@ class DemoQuotaMountMutatorCfg(HandMutatorCfg):
     )
 
 
+class DemoQuotaLimitMutatorCfg(HandMutatorCfg):
+    r"""测试 `limit_tweak.self_mode` accepted/output quota 的 post-mutate cfg。"""
+
+    limit_tweak = LimitTweakCfg(
+        self_mode={"identity": 0.5, "homologous_non_thumb": 0.5},
+        disturb_object="independent",
+        disturb_type="add",
+        joint_range=(-0.02, 0.02),
+    )
+
+
+class DemoQuotaMountAndLimitMutatorCfg(HandMutatorCfg):
+    r"""测试多 mode-term 同时存在时的边缘 accepted/output 统计。"""
+
+    mount_perturb = MountPerturbCfg(
+        self_mode={"identity": 0.5, "general": 0.5},
+        pos_radius=0.001,
+    )
+    limit_tweak = LimitTweakCfg(
+        self_mode={"identity": 0.5, "homologous_non_thumb": 0.5},
+        disturb_object="independent",
+        disturb_type="add",
+        joint_range=(-0.02, 0.02),
+    )
+
+
 def test_post_mutate_config_is_direct_hand_generator_cfg():
     r"""配置模块中的 `POST_MUTATE_CFG` 应直接是 `HandGeneratorCfg`。"""
 
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG, HandGeneratorCfg)
     assert asset_cfg_module.POST_MUTATE_CFG.mode == "mutate"
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG.Validate, HandValidatorCfg)
-    assert tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms()) == ("mount_perturb",)
+    assert tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms()) == ("limit_tweak",)
 
 
 def test_post_mutate_runner_resolves_topology_root_path(tmp_path):
@@ -202,10 +228,77 @@ def test_post_mutate_self_mode_probability_is_accepted_output_quota(tmp_path):
 
     assert modes.count("identity") == 2
     assert modes.count("general") == 2
-    assert summary["post_mutate_modes"]["identity"]["target_quota"] == 2
-    assert summary["post_mutate_modes"]["identity"]["accepted"] == 2
-    assert summary["post_mutate_modes"]["general"]["target_quota"] == 2
-    assert summary["post_mutate_modes"]["general"]["accepted"] == 2
+    assert summary["post_mutate_mode_stats"]["mount_perturb"]["identity"]["target_quota"] == 2
+    assert summary["post_mutate_mode_stats"]["mount_perturb"]["identity"]["accepted"] == 2
+    assert summary["post_mutate_mode_stats"]["mount_perturb"]["general"]["target_quota"] == 2
+    assert summary["post_mutate_mode_stats"]["mount_perturb"]["general"]["accepted"] == 2
+
+
+def test_limit_tweak_self_mode_probability_is_accepted_output_quota(tmp_path):
+    r"""`limit_tweak.self_mode` dict 也应控制 accepted/output 分布。"""
+
+    topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
+    mutate_cfg = HandGeneratorCfg(
+        mode="mutate",
+        artifact_level="bundle",
+        source_topology_dir=topology_dir,
+        output_dir=tmp_path,
+        n_samples=4,
+        Mutate=DemoQuotaLimitMutatorCfg(),
+        Validate=None,
+    )
+
+    results = list(HandGenerator(mutate_cfg).generate_batch())
+
+    modes = [
+        result.metadata["post_mutate_samples"]["limit_tweak"]["resolved_self_mode"]
+        for result in results
+    ]
+    mutate_run_dir = next(path for path in topology_dir.iterdir() if path.is_dir())
+    summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
+
+    assert modes.count("identity") == 2
+    assert modes.count("homologous_non_thumb") == 2
+    assert summary["post_mutate_mode_stats"]["limit_tweak"]["identity"]["target_quota"] == 2
+    assert summary["post_mutate_mode_stats"]["limit_tweak"]["identity"]["accepted"] == 2
+    assert summary["post_mutate_mode_stats"]["limit_tweak"]["homologous_non_thumb"]["target_quota"] == 2
+    assert summary["post_mutate_mode_stats"]["limit_tweak"]["homologous_non_thumb"]["accepted"] == 2
+
+
+def test_multiple_mode_terms_track_marginal_accepted_output_quota(tmp_path):
+    r"""多个 mode-term 同时存在时，应各自满足自己的边缘 accepted/output 分布。"""
+
+    topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
+    mutate_cfg = HandGeneratorCfg(
+        mode="mutate",
+        artifact_level="bundle",
+        source_topology_dir=topology_dir,
+        output_dir=tmp_path,
+        n_samples=4,
+        Mutate=DemoQuotaMountAndLimitMutatorCfg(),
+        Validate=None,
+    )
+
+    results = list(HandGenerator(mutate_cfg).generate_batch())
+    mount_modes = [
+        result.metadata["post_mutate_samples"]["mount_perturb"]["resolved_self_mode"]
+        for result in results
+    ]
+    limit_modes = [
+        result.metadata["post_mutate_samples"]["limit_tweak"]["resolved_self_mode"]
+        for result in results
+    ]
+    mutate_run_dir = next(path for path in topology_dir.iterdir() if path.is_dir())
+    summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
+
+    assert mount_modes.count("identity") == 2
+    assert mount_modes.count("general") == 2
+    assert limit_modes.count("identity") == 2
+    assert limit_modes.count("homologous_non_thumb") == 2
+    assert summary["post_mutate_mode_stats"]["mount_perturb"]["identity"]["accepted"] == 2
+    assert summary["post_mutate_mode_stats"]["mount_perturb"]["general"]["accepted"] == 2
+    assert summary["post_mutate_mode_stats"]["limit_tweak"]["identity"]["accepted"] == 2
+    assert summary["post_mutate_mode_stats"]["limit_tweak"]["homologous_non_thumb"]["accepted"] == 2
 
 
 def test_unified_generate_runner_accepts_post_mutate_cli(monkeypatch, tmp_path):

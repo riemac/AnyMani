@@ -101,7 +101,13 @@ class HandPatch:
 
     def extend(self, other: "HandPatch") -> None:
         self.ops.extend(other.ops)
-        self.metadata.update(other.metadata)
+        for key, value in other.metadata.items():
+            if isinstance(self.metadata.get(key), dict) and isinstance(value, dict):
+                merged = dict(self.metadata[key])  # type: ignore[index]
+                merged.update(value)  # 当前只需要一层 term-name -> payload 的浅合并
+                self.metadata[key] = merged
+            else:
+                self.metadata[key] = value
 
     def apply(self, target: HandCfg) -> HandCfg:
         mutated = target.copy()

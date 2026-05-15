@@ -44,11 +44,12 @@ from ..exporter import HandExporter, HandExporterCfg
 from ..validator import HandValidator, HandValidatorCfg
 from ._generation_result import HandGenerationResult
 from ._accepted_mode_quota import (
-    MOUNT_MODE_ORDER as _MOUNT_MODE_ORDER,
+    AcceptedModeTermSpec,
     allocate_accepted_mode_quota,
-    force_mount_perturb_mode as _force_mount_perturb_mode,
-    mount_perturb_mode_probabilities as _mount_perturb_mode_probabilities,
-    resolved_mount_mode as _resolved_mount_mode,
+    expand_quota_schedule as _expand_quota_schedule,
+    force_mode_terms as _force_mode_terms,
+    mode_term_specs as _mode_term_specs,
+    resolved_term_mode as _resolved_term_mode,
 )
 from ._post_mutate_restore import PostMutateSource, load_post_mutate_source
 from ._premade_connectivity import (
@@ -768,13 +769,13 @@ class HandGenerator:
             max_attempts = max(target_count * int(self.cfg.post_mutate_max_attempt_factor), 10)
             mutator = HandMutator(self.cfg.Mutate)
             source_hand = self._load_mutate_source().hand_cfg
-            mode_probabilities = _mount_perturb_mode_probabilities(self.cfg.Mutate)
+            accepted_mode_terms = _mode_term_specs(self.cfg.Mutate)
 
-            if mode_probabilities is not None:
+            if accepted_mode_terms:
                 yield from self._generate_mutate_batch_with_accepted_mode_quota(
                     mutator=mutator,
                     source_hand=source_hand,
-                    mode_probabilities=mode_probabilities,
+                    accepted_mode_terms=accepted_mode_terms,
                     target_count=target_count,
                     max_attempts=max_attempts,
                 )
@@ -854,7 +855,7 @@ class HandGenerator:
         *,
         mutator: HandMutator,
         source_hand: HandCfg,
-        mode_probabilities: dict[str, float],
+        accepted_mode_terms: dict[str, AcceptedModeTermSpec],
         target_count: int,
         max_attempts: int,
     ) -> Iterator[HandGenerationResult]:
@@ -862,58 +863,79 @@ class HandGenerator:
 
         这里兑现的是新的统计 contract：
 
-        - `MountPerturbCfg.self_mode` dict 不再是 proposal prior；
-        - 它描述最终 accepted 样本的 mode 分布；
-        - 某个 mode validator 拒绝率高时，只在该 mode 内补采；
+        - 任一 `self_mode=dict` term 都不再是 proposal prior；
+        - 它描述最终 accepted 样本的该 term 边缘 mode 分布；
+        - 某个 slot 被指定为一组 forced modes 后，validator 拒绝时就在同组 forced modes 内补采；
         - 任何 shortfall 都 fail-hard，不允许其他 mode 静默填坑。
         """
 
-        quotas = allocate_accepted_mode_quota(mode_probabilities, target_count)
-        diagnostics = {
-            mode: {
-                "target_quota": quota,
-                "proposed": 0,
-                "accepted": 0,
-                "emitted": 0,
-                "shortfall": quota,
-                "rejected_by_validator": 0,
-                "rejected_by_unsupported_geometry": 0,
-                "rejected_by_incomplete_certificate": 0,
-                "rejected_by_budget": 0,
-                "representative_failures": [],
-            }
-            for mode, quota in quotas.items()
+        schedules = {
+            term_name: _expand_quota_schedule(
+                allocate_accepted_mode_quota(
+                    spec.probabilities,
+                    target_count,
+                    mode_order=spec.mode_order,
+                    label=f"{term_name}.self_mode",
+                ),
+                mode_order=spec.mode_order,
+            )
+            for term_name, spec in accepted_mode_terms.items()
         }
-        self._ensure_run_context().summary.setdefault("post_mutate_modes", diagnostics)
+        diagnostics = {
+            term_name: {
+                mode: {
+                    "target_quota": quota,
+                    "proposed": 0,
+                    "accepted": 0,
+                    "emitted": 0,
+                    "shortfall": quota,
+                    "rejected_by_validator": 0,
+                    "rejected_by_unsupported_geometry": 0,
+                    "rejected_by_incomplete_certificate": 0,
+                    "rejected_by_budget": 0,
+                    "representative_failures": [],
+                }
+                for mode, quota in allocate_accepted_mode_quota(
+                    spec.probabilities,
+                    target_count,
+                    mode_order=spec.mode_order,
+                    label=f"{term_name}.self_mode",
+                ).items()
+            }
+            for term_name, spec in accepted_mode_terms.items()
+        }
+        self._ensure_run_context().summary["post_mutate_mode_stats"] = diagnostics
         attempts_used = 0
 
-        for mode in _MOUNT_MODE_ORDER:
-            target_quota = quotas.get(mode, 0)
-            if target_quota <= 0:
-                continue
-            accepted = 0
-            while accepted < target_quota:
+        for sample_index in range(target_count):
+            forced_modes = {
+                term_name: schedule[sample_index]
+                for term_name, schedule in schedules.items()
+            }  # 每个 accepted 槽位都先固定一组 term-level mode；失败时只在该组合内补采
+            while True:
                 if attempts_used >= max_attempts:
-                    diagnostics[mode]["rejected_by_budget"] += 1
-                    diagnostics[mode]["shortfall"] = target_quota - accepted
+                    for term_name, mode in forced_modes.items():
+                        diagnostics[term_name][mode]["rejected_by_budget"] += 1
+                    self._update_mode_quota_shortfall(diagnostics)
                     self._write_run_summary()
                     raise RuntimeError(
                         "post-mutate accepted self_mode quota shortfall; "
-                        f"mode={mode!r}, target_quota={target_quota}, accepted={accepted}, "
-                        f"attempted={attempts_used}, budget={max_attempts}, diagnostics={diagnostics[mode]!r}"
+                        f"forced_modes={forced_modes!r}, accepted_slots={sample_index}, "
+                        f"attempted={attempts_used}, budget={max_attempts}, diagnostics={diagnostics!r}"
                     )
 
                 try:
                     sampled_terms = mutator.sample_batch(source_hand, batch_size=1)[0]
                 except Exception:
                     sampled_terms = _sample_mutation_terms(mutator, source_hand)
-                sampled_terms = _force_mount_perturb_mode(
+                sampled_terms = _force_mode_terms(
                     sampled_terms,
                     mutator=mutator,
                     target=source_hand,
-                    mode=mode,
+                    forced_modes=forced_modes,
                 )
-                diagnostics[mode]["proposed"] += 1
+                for term_name, mode in forced_modes.items():
+                    diagnostics[term_name][mode]["proposed"] += 1
                 attempts_used += 1
 
                 result = self._generate_once(
@@ -923,28 +945,38 @@ class HandGenerator:
                 )
                 if result is None:
                     reason = self._classify_last_rejection()
-                    diagnostics[mode][reason] += 1
-                    failures = diagnostics[mode]["representative_failures"]
-                    if len(failures) < 5:
-                        failures.append({"reason": reason, "sampled_terms": sampled_terms})
-                    diagnostics[mode]["shortfall"] = target_quota - accepted
-                    self._ensure_run_context().summary["post_mutate_modes"] = diagnostics
+                    for term_name, mode in forced_modes.items():
+                        diagnostics[term_name][mode][reason] += 1
+                        failures = diagnostics[term_name][mode]["representative_failures"]
+                        if len(failures) < 5:
+                            failures.append({"reason": reason, "sampled_terms": sampled_terms})
+                    self._update_mode_quota_shortfall(diagnostics)
+                    self._ensure_run_context().summary["post_mutate_mode_stats"] = diagnostics
                     continue
 
-                resolved_mode = _resolved_mount_mode(result, sampled_terms)
-                if resolved_mode != mode:
-                    raise RuntimeError(
-                        "mount_perturb accepted quota invariant broken; "
-                        f"expected mode={mode!r}, got {resolved_mode!r}"
-                    )
+                for term_name, expected_mode in forced_modes.items():
+                    resolved_mode = _resolved_term_mode(result, sampled_terms, term_name=term_name)
+                    if resolved_mode != expected_mode:
+                        raise RuntimeError(
+                            "accepted self_mode quota invariant broken; "
+                            f"term={term_name!r}, expected mode={expected_mode!r}, got {resolved_mode!r}"
+                        )
 
-                diagnostics[mode]["accepted"] += 1
-                diagnostics[mode]["emitted"] += 1
-                accepted += 1
-                diagnostics[mode]["shortfall"] = target_quota - accepted
-                self._ensure_run_context().summary["post_mutate_modes"] = diagnostics
+                for term_name, mode in forced_modes.items():
+                    diagnostics[term_name][mode]["accepted"] += 1
+                    diagnostics[term_name][mode]["emitted"] += 1
+                self._update_mode_quota_shortfall(diagnostics)
+                self._ensure_run_context().summary["post_mutate_mode_stats"] = diagnostics
                 self._write_run_summary()
                 yield result
+                break
+
+    def _update_mode_quota_shortfall(self, diagnostics: dict[str, dict[str, dict[str, Any]]]) -> None:
+        r"""基于当前 accepted 计数回写每个 term/mode 的剩余 shortfall。"""
+
+        for per_term in diagnostics.values():
+            for stats in per_term.values():
+                stats["shortfall"] = int(stats["target_quota"]) - int(stats["accepted"])
 
     def _classify_last_rejection(self) -> str:
         r"""把最近一次 rejection stage 粗分到 per-mode diagnostics 字段。
