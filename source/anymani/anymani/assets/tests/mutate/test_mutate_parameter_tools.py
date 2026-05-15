@@ -164,6 +164,44 @@ def test_limit_tweak_mutator_consumes_sampled_values_and_preserves_valid_interva
     assert after_middle.upper == before_middle.upper
 
 
+def test_limit_tweak_independent_upper_samples_do_not_share_last_joint_closure():
+    r"""independent 模式下，每个 joint 的 upper 必须消费自己的采样值。
+
+    这个测试锁住一个很隐蔽的 Python closure 反例：如果 delayed patch 在
+    apply 阶段仍读取循环变量 `joint.name`，所有 upper 都会误用最后一个
+    joint 的采样值，从而把联合采样退化成“最后一个 upper 广播到全手”。
+    """
+
+    hand = _build_allegro_hand()
+    before_index = _joint_by_name(hand, "index_j0").limit
+    before_middle = _joint_by_name(hand, "middle_j0").limit
+
+    mutated = LimitTweakMutator(
+        LimitTweakCfg(
+            disturb_object="independent",
+            disturb_type="add",
+            joint_range=(-0.1, 0.1),
+            clip={"abs": 0.1},
+        )
+    ).mutate(
+        hand,
+        sampled_params={
+            "index_j0::lower": 0.01,
+            "index_j0::upper": -0.02,
+            "middle_j0::lower": -0.03,
+            "middle_j0::upper": 0.04,
+        },
+    )
+
+    assert mutated is not None
+    after_index = _joint_by_name(mutated, "index_j0").limit
+    after_middle = _joint_by_name(mutated, "middle_j0").limit
+    assert math.isclose(after_index.lower - before_index.lower, 0.01, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(after_index.upper - before_index.upper, -0.02, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(after_middle.lower - before_middle.lower, -0.03, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(after_middle.upper - before_middle.upper, 0.04, rel_tol=0.0, abs_tol=1e-12)
+
+
 def test_mount_perturb_mutator_changes_only_target_finger_mount():
     """`mount_perturb` 应消费外部采样值；未给参数的 finger 保持不变。"""
 

@@ -150,21 +150,32 @@ class LimitTweakMutator(MutatorBase):
         # 这里的 patch 只负责写回 lower / upper，不碰 axis、link geometry
         # 或 joint parent-child 关系。
         for finger_index, joint_index, joint in _iter_target_joints(target, None):
-            delta = _clip_delta(float(sampled_params.get(f"{joint.name}::lower", sampled_params.get(joint.name, 0.0))), self.cfg.clip)
+            lower_delta = _clip_delta(
+                float(sampled_params.get(f"{joint.name}::lower", sampled_params.get(joint.name, 0.0))),
+                self.cfg.clip,
+            )
+            upper_delta = _clip_delta(float(sampled_params.get(f"{joint.name}::upper", 0.0)), self.cfg.clip)
 
-            def apply_limit(hand: HandCfg, *, fi=finger_index, ji=joint_index, d=delta) -> None:
+            def apply_limit(
+                hand: HandCfg,
+                *,
+                fi=finger_index,
+                ji=joint_index,
+                dl=lower_delta,
+                du=upper_delta,
+            ) -> None:
                 current = hand.fingers[fi].joints[ji].limit
                 if current is None:
                     return
                 if self.cfg.disturb_type == "scale":
-                    lower = current.lower * (1.0 + d)
-                    upper = current.upper * (1.0 + d)
+                    lower = current.lower * (1.0 + dl)
+                    upper = current.upper * (1.0 + dl)
                 elif self.cfg.disturb_object == "shared":
-                    lower = current.lower + d
-                    upper = current.upper + d
+                    lower = current.lower + dl
+                    upper = current.upper + dl
                 else:
-                    lower = current.lower + d
-                    upper = current.upper + _clip_delta(float(sampled_params.get(f"{joint.name}::upper", 0.0)), self.cfg.clip)
+                    lower = current.lower + dl
+                    upper = current.upper + du
                 if lower >= upper:
                     center = 0.5 * (lower + upper)
                     lower, upper = center - 1e-4, center + 1e-4
@@ -188,6 +199,8 @@ def _iter_target_joints(hand: HandCfg, target_joints: tuple[str, ...] | None):
             if target_set and joint.name not in target_set:
                 continue
             yield finger_index, joint_index, joint
+
+
 def _clip_delta(delta: float, clip: dict[str, float] | None) -> float:
     if clip is None:
         return delta
