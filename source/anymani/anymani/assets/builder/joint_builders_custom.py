@@ -6,10 +6,11 @@ r"""自定义指尖关节构建器：把 mesh tip recipe 落为 `JointCfg`。
 1. 当前 pre-made 主链已经用 primitive regular link 跑稳，真正需要提高表达力的
    首先是 tip，而不是整根 finger 的每一段；
 2. 指尖是主要接触部位，自定义 mesh 在这里最有物理意义；
-3. 你在草稿里已经给出了三个很具体的 mesh tip 锚点算法：
+3. 你在草稿里和后续可视化校准中已经收敛出具体的 mesh tip 锚点算法：
    - `leap_cube`
    - `wedge`
    - `round`
+   - `thinner`
 
 因此本文件的职责非常窄：
 
@@ -95,6 +96,14 @@ _CUSTOM_TIP_PRESETS: dict[str, dict[str, object]] = {
         "unit_scale": 0.001,
         "base_rpy": _DEFAULT_BASE_RPY,
         "approx_size": (0.019, 0.020, 0.017),
+        "approx_com": (0.0, 0.010, 0.0),
+    },
+    "thinner": {
+        "file_name": "thinner_finger_tip_soft.stl",
+        "anchor_point": (9.5, 0.0, -16.5),
+        "unit_scale": 0.001,
+        "base_rpy": _DEFAULT_BASE_RPY,
+        "approx_size": (0.019, 0.020, 0.019),
         "approx_com": (0.0, 0.010, 0.0),
     },
 }
@@ -262,11 +271,12 @@ class CustomJointBuilderCfg(JointBuilderCfg):
 class CustomTipBuilderCfg(CustomJointBuilderCfg):
     r"""指尖专用的自定义 mesh 构建配置。
 
-    当前首轮只实现三类显式锚点：
+    当前首轮只实现四类显式锚点：
 
     - `round`
     - `wedge`
     - `leap_cube`
+    - `thinner`
 
     它们共享同一个核心公式：
 
@@ -289,7 +299,7 @@ class CustomTipBuilderCfg(CustomJointBuilderCfg):
     """
 
     tip_type: str = "round"
-    """指尖类型；当前支持 `round` / `wedge` / `leap_cube`。"""
+    """指尖类型；当前支持 `round` / `wedge` / `leap_cube` / `thinner`。"""
 
     mesh_path: str | Path | None = None
     """可选显式 mesh 路径。

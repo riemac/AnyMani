@@ -50,6 +50,35 @@ def test_custom_tip_builder_builds_round_mesh_tip_with_anchor_alignment():
     assert joint.inertial.origin.pos != joint.collisions[0].origin.pos
 
 
+def test_custom_tip_builder_builds_thinner_mesh_tip_with_calibrated_anchor():
+    """thinner custom tip 应使用安装底面中心锚点，而不是整 mesh bbox 中心。"""
+
+    cfg = CustomTipBuilderCfg(
+        name="thinner_tip",
+        parent="finger_link_3",
+        child="thinner_tip_link",
+        origin=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        tip_type="thinner",
+        mesh_offset=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    )
+
+    joint = cfg.class_type(cfg).build()
+
+    assert joint.joint_type == "fixed"
+    assert joint.is_tip is True
+    assert len(joint.collisions) == 1
+    assert joint.collisions[0].geometry.kind == "mesh"
+    assert joint.collisions[0].geometry.file_path.endswith("thinner_finger_tip_soft.stl")
+    assert joint.collisions[0].geometry.scale == (0.001, 0.001, 0.001)
+    assert math.isclose(joint.collisions[0].origin.pos[0], -0.0165, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(joint.collisions[0].origin.pos[1], 0.0, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(joint.collisions[0].origin.pos[2], -0.0095, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(joint.collisions[0].origin.rpy[1], -math.pi / 2.0, rel_tol=0.0, abs_tol=1e-12)
+    assert joint.metadata["custom_tip_type"] == "thinner"
+    assert joint.inertial.mass > 0.0
+    assert joint.inertial.origin.pos == (0.0, 0.01, 0.0)
+
+
 def test_regular_finger_builder_supports_mesh_tip_recipe():
     """regular finger 的 tip recipe 现在应支持切到 custom mesh 路线。"""
 
@@ -66,6 +95,25 @@ def test_regular_finger_builder_supports_mesh_tip_recipe():
     assert tip_joint.joint_type == "fixed"
     assert tip_joint.collisions[0].geometry.kind == "mesh"
     assert tip_joint.collisions[0].geometry.file_path.endswith("round_finger_tip_soft.stl")
+
+
+def test_regular_finger_builder_supports_thinner_mesh_tip_recipe():
+    """regular finger 的 custom mesh 路线应能透传 thinner tip preset。"""
+
+    cfg = get_finger_builder_preset("leap_non_thumb_v1").replace(
+        name="index",
+        parent_link="palm",
+        tip={"type": "mesh", "tip_type": "thinner"},
+    )
+
+    finger = cfg.class_type(cfg).build()
+    tip_joint = finger.joints[-1]
+
+    assert tip_joint.is_tip is True
+    assert tip_joint.joint_type == "fixed"
+    assert tip_joint.collisions[0].geometry.kind == "mesh"
+    assert tip_joint.collisions[0].geometry.file_path.endswith("thinner_finger_tip_soft.stl")
+    assert tip_joint.metadata["custom_tip_type"] == "thinner"
 
 
 def test_urdf_writer_serializes_custom_tip_mesh_for_human_like_hand():

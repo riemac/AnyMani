@@ -78,7 +78,7 @@ def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
 
     - `cs`: cylinder + sphere
     - `bs`: box + sphere
-    - `mesh`: custom mesh tip（当前已接通 `round` / `wedge` / `leap_cube`）
+    - `mesh`: custom mesh tip（当前已接通 `round` / `wedge` / `leap_cube` / `thinner`）
 
     这对应的是一个非常保守的扩展策略：
 
@@ -89,7 +89,7 @@ def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
     # Question:
     `white_tip.obj` 在用户背景里是 LEAP 语义上很重要的对象，但当前草稿里并没有
     给出它的明确锚点 $p^\*$。因此本轮先实现已经有明确锚点算法说明的
-    `round` / `wedge` / `leap_cube` 三类，`white_tip` 继续留待你 review 后定夺。
+    `round` / `wedge` / `leap_cube` / `thinner` 四类，`white_tip` 继续留待你 review 后定夺。
     """
 
     tip = dict(tip or {"type": "cs", "radius": 0.012, "height": 0.01})  # 默认走最常见的圆柱+半球指尖

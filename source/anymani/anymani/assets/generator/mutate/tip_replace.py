@@ -122,7 +122,7 @@ class TipReplaceCfg(MutatorBaseCfg):
     该字段描述离散 tip 类型的候选集合，而不是 mesh 文件路径集合。合法名称包括：
     - primitive tip recipe：例如 `"cs"`；
     - `CustomTipBuilderCfg` 能通过 `tip_type` resolve 的 custom tip key：
-      例如 `"round"`、`"leap_cube"`、`"wedge"`。
+      例如 `"round"`、`"leap_cube"`、`"wedge"`、`"thinner"`。
 
     输入语义：
     - `None`：默认包含当前 pre-made 手型原本的 tip 类型，以及所有已注册合法 custom tip。
