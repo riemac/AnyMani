@@ -173,6 +173,40 @@ def test_unsupported_mesh_default_fail_hard_and_warn_skip_is_incomplete():
     assert warn_result.metadata["finger_spacing_certificate"]["skipped_bodies"]
 
 
+def test_custom_tip_mesh_with_explicit_sdf_proxy_is_complete():
+    r"""带显式 `sdf_proxy` 的 custom tip mesh 可用外包盒进入完整 SDF certificate。"""
+
+    hand = _two_box_hand(separation=0.04, second_kind="mesh")
+    middle_tip = hand.fingers[1].joints[0]
+    middle_tip.metadata["sdf_proxy"] = {
+        "type": "box",
+        "size": (0.02, 0.02, 0.02),
+        "origin": {"pos": (0.0, 0.0, 0.0), "rpy": (0.0, 0.0, 0.0)},
+        "source": "unit_test_box_proxy",
+    }
+
+    result = HandValidator(
+        HandValidatorCfg(
+            post_mutate=HandValidatorCfg.PostMutateCfg(
+                dof_min=None,
+                finger_count_min=None,
+                finger_count_max=None,
+                require_thumb=False,
+                require_non_thumb_with_min_revolute_dof=None,
+                min_finger_spacing=0.005,
+            )
+        )
+    ).validate_post_mutate(hand)
+
+    certificate = result.metadata["finger_spacing_certificate"]
+
+    assert result.passed is True
+    assert certificate["complete"] is True
+    assert certificate["skipped_bodies"] == []
+    extraction = extract_finger_collision_bodies(hand)
+    assert extraction.bodies_by_finger["middle"][0].body_path.endswith("#sdf_proxy")
+
+
 def test_extract_collision_observes_mutated_mount_transform():
     r"""collision 抽取必须使用 hand 当前 mount，而不是 pre-mutate 旧状态。"""
 

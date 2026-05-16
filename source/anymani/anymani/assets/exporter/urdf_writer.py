@@ -86,7 +86,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import os
 import math
+import hashlib
+import shutil
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -188,12 +191,20 @@ class UrdfWriter(ExporterBase):
     def __init__(self, cfg: UrdfWriterCfg):
         self.cfg = cfg
 
-    def export(self, target: HandCfg, output_dir: Path) -> ExportResult:  # type: ignore[override]
+    def export(
+        self,
+        target: HandCfg,
+        output_dir: Path,
+        *,
+        mesh_root_dir: Path | None = None,
+    ) -> ExportResult:  # type: ignore[override]
         r"""把 `HandCfg` 写出为 URDF 文件。
 
         Args:
             target (HandCfg): 待导出的整手配置。
             output_dir (Path): 产物落盘目录；不存在时自动创建。
+            mesh_root_dir (Path | None): 真实 mesh 落盘根目录。为 `None` 时退化为
+                当前 `output_dir` 下的 `canonical_mesh_dirname/`。
 
         Returns:
             ExportResult: 含写入路径或错误信息的结果包。
@@ -204,7 +215,11 @@ class UrdfWriter(ExporterBase):
             return ExportResult(skipped=[out_path])
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        mesh_state = _MeshExportState(output_dir=output_dir, mesh_dirname=self.cfg.canonical_mesh_dirname)
+        mesh_state = _MeshExportState(
+            output_dir=output_dir,
+            mesh_dirname=self.cfg.canonical_mesh_dirname,
+            mesh_root_dir=mesh_root_dir,
+        )
         robot = _build_robot_elem(target, self.cfg, mesh_state=mesh_state)
         ET.indent(robot)
         tree = ET.ElementTree(robot)
@@ -254,7 +269,10 @@ class _MeshExportState:
     mesh_dirname: str
     write_enabled: bool = True
     written: list[Path] = field(default_factory=list)
+    mesh_root_dir: Path | None = None
     _unit_cylinder_relpath: str | None = None
+    _materialized_mesh_relpaths: dict[Path, str] = field(default_factory=dict)
+    _materialized_mesh_names: dict[str, Path] = field(default_factory=dict)
 
 
 def _build_robot_elem(target: HandCfg, cfg: UrdfWriterCfg, *, mesh_state: _MeshExportState) -> ET.Element:
@@ -474,7 +492,7 @@ def _build_geometry_elem(geom, cfg: UrdfWriterCfg, *, mesh_state: _MeshExportSta
     elif kind == "sphere":
         ET.SubElement(geometry_elem, "sphere", attrib={"radius": _fmt_scalar(geom.radius)})
     elif kind == "mesh":
-        filename = geom.file_path
+        filename = _materialize_mesh_geometry(geom, mesh_state=mesh_state)
         if cfg.mesh_package_prefix and not filename.startswith(("package://", "/")):
             filename = f"{cfg.mesh_package_prefix.rstrip('/')}/{filename.lstrip('./')}"
         mesh_attrib = {"filename": filename}
@@ -513,20 +531,78 @@ def _lower_elliptic_cylinder_to_mesh(
     )
 
 
+def _materialize_mesh_geometry(geom: MeshGeometryCfg, *, mesh_state: _MeshExportState) -> str:
+    r"""把真实 mesh 几何 materialize 到当前导出边界，并返回 URDF 相对路径。
+
+    v1 的 contract 是：
+
+    - primitive 继续原样写 `<box>/<sphere>/<cylinder>`；
+    - 只有真实 `<mesh filename=...>` 会进入这里；
+    - 同一导出边界内，相同源 mesh 只复制一份，尺寸差异继续由 URDF `scale`
+      表达，而不是通过复制多份 STL 表达。
+    """
+
+    source_path = Path(geom.file_path).expanduser()
+    if not source_path.is_absolute():
+        return geom.file_path  # 相对路径或 package:// 暂不重写；当前项目真实 mesh 都来自本地绝对源路径
+
+    cached = mesh_state._materialized_mesh_relpaths.get(source_path)
+    if cached is not None:
+        return cached
+
+    mesh_root = mesh_state.mesh_root_dir or (mesh_state.output_dir / mesh_state.mesh_dirname)
+    target_name = _resolve_materialized_mesh_name(source_path, mesh_state=mesh_state)
+    target_path = mesh_root / target_name
+
+    if mesh_state.write_enabled:
+        mesh_root.mkdir(parents=True, exist_ok=True)
+        if not target_path.exists():
+            shutil.copy2(source_path, target_path)
+            mesh_state.written.append(target_path)
+
+    rel_path = os.path.relpath(target_path, start=mesh_state.output_dir)
+    mesh_state._materialized_mesh_relpaths[source_path] = rel_path
+    return rel_path
+
+
+def _resolve_materialized_mesh_name(source_path: Path, *, mesh_state: _MeshExportState) -> str:
+    r"""为 materialized mesh 分配稳定文件名。
+
+    同一导出边界内：
+
+    - 同源文件固定复用同一文件名；
+    - basename 不冲突时直接保留；
+    - basename 冲突但源文件不同，则追加稳定短 hash。
+    """
+
+    basename = source_path.name
+    occupied = mesh_state._materialized_mesh_names.get(basename)
+    if occupied is None or occupied == source_path:
+        mesh_state._materialized_mesh_names[basename] = source_path
+        return basename
+
+    stem = source_path.stem
+    suffix = source_path.suffix
+    digest = hashlib.md5(str(source_path).encode("utf-8")).hexdigest()[:8]
+    candidate = f"{stem}_{digest}{suffix}"
+    mesh_state._materialized_mesh_names[candidate] = source_path
+    return candidate
+
+
 def _ensure_unit_cylinder_mesh(mesh_state: _MeshExportState) -> str:
     r"""确保当前导出上下文可见一份主轴沿局部 $+y$ 的单位圆柱 OBJ。"""
 
     if mesh_state._unit_cylinder_relpath is not None:
         return mesh_state._unit_cylinder_relpath  # 同一轮导出已生成过 canonical mesh 时直接复用
 
-    mesh_dir = mesh_state.output_dir / mesh_state.mesh_dirname  # 当前样本目录下的自动 mesh 子目录
+    mesh_dir = mesh_state.mesh_root_dir or (mesh_state.output_dir / mesh_state.mesh_dirname)  # 当前导出边界下的共享 mesh 目录
     mesh_path = mesh_dir / "unit_cylinder_y.obj"  # 当前统一采用一份 y-axis cylinder 基底网格
     if mesh_state.write_enabled:
         mesh_dir.mkdir(parents=True, exist_ok=True)  # 只有真实导出时才在样本目录里创建 mesh 子目录
         if not mesh_path.exists():
             mesh_path.write_text(_unit_cylinder_y_obj_text(), encoding="utf-8")  # 首次遇到椭圆柱时再真正写文件
             mesh_state.written.append(mesh_path)
-    mesh_state._unit_cylinder_relpath = f"{mesh_state.mesh_dirname}/{mesh_path.name}"  # URDF 优先使用相对样本路径
+    mesh_state._unit_cylinder_relpath = os.path.relpath(mesh_path, start=mesh_state.output_dir)  # URDF 使用相对当前 hand.urdf 的路径
     return mesh_state._unit_cylinder_relpath
 
 

@@ -130,6 +130,7 @@ class HandExporter(ExporterBase):
         sample_id: str | None = None,
         *,
         nest_sample_dir: bool = True,
+        mesh_root_dir: Path | None = None,
     ) -> ExportResult:
         r"""把 `HandGenerationResult` 中的产物按 artifact_level 写出到磁盘。
 
@@ -138,6 +139,8 @@ class HandExporter(ExporterBase):
             output_dir (Path): 根落盘目录。
             sample_id (str | None): 当前样本 ID；为 ``None`` 时从 result.metadata 或 uuid4 获取。
             nest_sample_dir (bool): 是否在 `output_dir` 下再补一层 `sample_id/`。
+            mesh_root_dir (Path | None): 当前导出边界共享的 mesh 根目录。为 `None` 时，
+                退化为每个样本目录下自带 `meshes/`。
 
         Returns:
             ExportResult: 含所有写入/跳过/错误路径的合并结果。
@@ -155,7 +158,11 @@ class HandExporter(ExporterBase):
         out_dir = output_dir / resolved_id if nest_sample_dir else output_dir
         combined = ExportResult()
 
-        urdf_result = UrdfWriter(self.cfg.Urdf).export(result.hand_cfg, out_dir)
+        urdf_result = UrdfWriter(self.cfg.Urdf).export(
+            result.hand_cfg,
+            out_dir,
+            mesh_root_dir=mesh_root_dir,
+        )
         combined.merge(urdf_result)
         if urdf_result.written:
             result.urdf_path = urdf_result.written[0]

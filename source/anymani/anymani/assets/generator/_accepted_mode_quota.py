@@ -20,12 +20,15 @@ from ..asset_base import HandCfg
 from ._generation_result import HandGenerationResult
 
 try:
-    from .mutate import HandMutator, HandMutatorCfg, LimitTweakCfg, MountPerturbCfg
+    from .mutate import HandMutator, HandMutatorCfg, LimitTweakCfg, MountPerturbCfg, TipReplaceCfg
 except Exception:
     class MountPerturbCfg:  # type: ignore[no-redef]
         r"""mutate package 不可用时的占位类型，保持 generator fallback 可导入。"""
 
     class LimitTweakCfg:  # type: ignore[no-redef]
+        r"""mutate package 不可用时的占位类型，保持 generator fallback 可导入。"""
+
+    class TipReplaceCfg:  # type: ignore[no-redef]
         r"""mutate package 不可用时的占位类型，保持 generator fallback 可导入。"""
 
     HandMutator = Any  # type: ignore[misc, assignment]
@@ -47,6 +50,13 @@ LIMIT_TWEAK_MODE_ORDER = (
     "homologous_non_thumb",
 )
 """`LimitTweakCfg.self_mode` 的固定 tie-break 顺序。"""
+
+TIP_REPLACE_MODE_ORDER = (
+    "identity",
+    "same",
+    "general",
+)
+"""`TipReplaceCfg.self_mode` 的固定 tie-break 顺序。"""
 
 
 @dataclass(frozen=True)
@@ -131,6 +141,13 @@ def mode_term_specs(cfg: HandMutatorCfg) -> dict[str, AcceptedModeTermSpec]:
                 mode_order=LIMIT_TWEAK_MODE_ORDER,
                 probabilities={str(mode): float(probability) for mode, probability in term_cfg.self_mode.items()},
             )
+            continue
+        if isinstance(term_cfg, TipReplaceCfg) and isinstance(term_cfg.self_mode, dict):
+            specs[term_name] = AcceptedModeTermSpec(
+                term_name=term_name,
+                mode_order=TIP_REPLACE_MODE_ORDER,
+                probabilities={str(mode): float(probability) for mode, probability in term_cfg.self_mode.items()},
+            )
     return specs
 
 
@@ -201,6 +218,7 @@ __all__ = [
     "AcceptedModeTermSpec",
     "LIMIT_TWEAK_MODE_ORDER",
     "MOUNT_MODE_ORDER",
+    "TIP_REPLACE_MODE_ORDER",
     "allocate_accepted_mode_quota",
     "expand_quota_schedule",
     "force_mode_terms",

@@ -73,6 +73,19 @@ $$
 """
 
 
+THUMB_FUNCTIONAL_TIP_PHASE_RPY = (0.0, -math.pi / 2.0, 0.0)
+r"""thumb custom tip 的功能相位补偿。
+
+custom tip mesh 不是轴对称几何，除了“底面锚点贴到 tip joint”之外，还必须
+保留掌侧/背侧相位。non-thumb 的 canonical 相位直接采用 `_DEFAULT_BASE_RPY`；
+thumb 的 MCP/DIP 弯曲平面要在 CMC2 绕局部 $y$ 约 $-\pi/2$ 后才进入
+“朝掌心弯”的功能姿态，因此 thumb custom tip 在静态安装时额外叠加这个相位。
+
+这个补偿只应作用于 custom mesh tip。`cs` 这类轴对称 primitive tip 不需要，
+也不应该因此改变圆柱主轴。
+"""
+
+
 _CUSTOM_TIP_PRESETS: dict[str, dict[str, object]] = {
     "leap_cube": {
         "file_name": "finger_tip_soft.stl",
@@ -130,6 +143,20 @@ def _pose_from_value(value: PoseCfg | Sequence[float] | Mapping[str, Any] | None
     r"""把宽松位姿输入统一规范为 `PoseCfg`。"""
 
     return PoseCfg.from_value(value)  # 兼容 tuple / dict / PoseCfg，和 primitive builder 保持一致
+
+
+def apply_thumb_functional_tip_phase(offset: PoseCfg | Sequence[float] | Mapping[str, Any] | None) -> PoseCfg:
+    r"""给 thumb custom tip 的局部 mesh offset 叠加功能相位。
+
+    Args:
+        offset: 原始 tip mesh offset。它描述的是 anchor 在 tip joint frame 下的目标位姿。
+
+    Returns:
+        PoseCfg: 位置不变、`rpy` 额外叠加 `THUMB_FUNCTIONAL_TIP_PHASE_RPY` 的位姿。
+    """
+
+    pose = _pose_from_value(offset)
+    return PoseCfg(pos=pose.pos, rpy=_add_rpy(pose.rpy, THUMB_FUNCTIONAL_TIP_PHASE_RPY))
 
 
 def _scale_to_vector(value: float | Sequence[float]) -> Vector3:
@@ -464,6 +491,13 @@ class CustomJointBuilder(JointBuilder):
             "approximation": "box_inertia_envelope",
             "anchor_point": self.cfg.anchor_point,
             "mesh_scale": self.cfg._mesh_scale_xyz,
+            "mesh_origin_rpy": mesh_origin.rpy,
+            "sdf_proxy": {
+                "type": "box",
+                "size": self.cfg._approx_size_xyz,
+                "origin": {"pos": self.cfg._approx_com_xyz, "rpy": (0.0, 0.0, 0.0)},
+                "source": "custom_tip_box_inertia_envelope",
+            },
         }
         return JointCfg(
             name=self.cfg.name,
@@ -518,4 +552,10 @@ class CustomJointBuilder(JointBuilder):
         )
 
 
-__all__ = ["CustomJointBuilderCfg", "CustomTipBuilderCfg", "CustomJointBuilder"]
+__all__ = [
+    "THUMB_FUNCTIONAL_TIP_PHASE_RPY",
+    "CustomJointBuilderCfg",
+    "CustomTipBuilderCfg",
+    "CustomJointBuilder",
+    "apply_thumb_functional_tip_phase",
+]

@@ -56,6 +56,7 @@ from ..asset_schema_core import (
     PoseCfg,
     SphereGeometryCfg,
     Vector3,
+    make_geometry_cfg,
 )
 
 
@@ -173,6 +174,23 @@ def extract_finger_collision_bodies(
                 body_path = f"{finger.name}/{joint.name}/{joint.child}/{body_name}"
                 geometry = collision.geometry
                 if not isinstance(geometry, (BoxGeometryCfg, CylinderGeometryCfg, EllipticCylinderGeometryCfg, SphereGeometryCfg)):
+                    proxy = _mesh_sdf_proxy_from_joint_metadata(joint.metadata)
+                    if proxy is not None:
+                        proxy_geometry, proxy_origin = proxy
+                        world_pose = _compose_pose(link_pose, proxy_origin)
+                        bodies_by_finger[finger.name].append(
+                            CollisionBodyRecord(
+                                finger_name=finger.name,
+                                joint_name=joint.name,
+                                link_name=str(joint.child),
+                                body_name=f"{body_name}_sdf_proxy",
+                                body_path=f"{body_path}#sdf_proxy",
+                                geometry_kind=proxy_geometry.kind,
+                                geometry=proxy_geometry,
+                                world_pose=world_pose,
+                            )
+                        )
+                        continue
                     skipped = _make_skipped_body(
                         finger_name=finger.name,
                         joint_name=joint.name,
@@ -207,6 +225,26 @@ def extract_finger_collision_bodies(
             parent_link_pose = link_pose
 
     return CollisionExtractionResult(bodies_by_finger=bodies_by_finger, skipped_bodies=skipped_bodies)
+
+
+def _mesh_sdf_proxy_from_joint_metadata(
+    metadata: dict[str, Any],
+) -> tuple[BoxGeometryCfg | CylinderGeometryCfg | EllipticCylinderGeometryCfg | SphereGeometryCfg, PoseCfg] | None:
+    r"""从 custom tip metadata 中读取显式 SDF proxy。
+
+    只有 builder 明确标注的 `sdf_proxy` 才能让 mesh 进入 SDF validator。
+    这不是 mesh-exact clearance，而是把 custom tip 的惯量外包盒作为保守近似体。
+    未带 proxy 的普通 mesh 继续走 unsupported fail-hard，避免验证证书冒领。
+    """
+
+    proxy = metadata.get("sdf_proxy")
+    if not isinstance(proxy, dict):
+        return None
+    geometry = make_geometry_cfg(proxy)
+    if not isinstance(geometry, (BoxGeometryCfg, CylinderGeometryCfg, EllipticCylinderGeometryCfg, SphereGeometryCfg)):
+        return None
+    origin_value = proxy.get("origin", proxy.get("pose"))
+    return geometry, PoseCfg.from_value(origin_value)
 
 
 def _make_skipped_body(

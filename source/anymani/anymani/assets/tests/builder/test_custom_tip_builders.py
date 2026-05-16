@@ -95,6 +95,7 @@ def test_regular_finger_builder_supports_mesh_tip_recipe():
     assert tip_joint.joint_type == "fixed"
     assert tip_joint.collisions[0].geometry.kind == "mesh"
     assert tip_joint.collisions[0].geometry.file_path.endswith("round_finger_tip_soft.stl")
+    assert math.isclose(tip_joint.collisions[0].origin.rpy[1], -math.pi / 2.0, rel_tol=0.0, abs_tol=1e-12)
 
 
 def test_regular_finger_builder_supports_thinner_mesh_tip_recipe():
@@ -116,8 +117,30 @@ def test_regular_finger_builder_supports_thinner_mesh_tip_recipe():
     assert tip_joint.metadata["custom_tip_type"] == "thinner"
 
 
-def test_urdf_writer_serializes_custom_tip_mesh_for_human_like_hand():
-    """整手导出时，custom mesh tip 应通过 URDF `<mesh>` 正常写出。"""
+def test_regular_thumb_builder_applies_functional_phase_to_mesh_tip_recipe():
+    r"""thumb custom tip 应额外叠加 CMC2 功能相位，而不是复用 non-thumb 相位。"""
+
+    cfg = get_finger_builder_preset("leap_thumb_v1").replace(
+        name="thumb",
+        parent_link="palm",
+        tip={"type": "mesh", "tip_type": "leap_cube"},
+    )
+
+    finger = cfg.class_type(cfg).build()
+    tip_joint = finger.joints[-1]
+
+    assert tip_joint.is_tip is True
+    assert tip_joint.joint_type == "fixed"
+    assert tip_joint.collisions[0].geometry.kind == "mesh"
+    assert tip_joint.collisions[0].geometry.file_path.endswith("finger_tip_soft.stl")
+    assert math.isclose(tip_joint.collisions[0].origin.rpy[1], -math.pi, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(tip_joint.collisions[0].origin.pos[0], 0.00948570692492, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(tip_joint.collisions[0].origin.pos[2], -0.0164999999586, rel_tol=0.0, abs_tol=1e-12)
+    assert tip_joint.metadata["mesh_origin_rpy"] == tip_joint.collisions[0].origin.rpy
+
+
+def test_urdf_writer_serializes_custom_tip_mesh_for_human_like_hand(tmp_path):
+    """整手导出时，custom mesh tip 应复制到本地 `meshes/` 并写相对路径。"""
 
     finger_cfg = get_finger_builder_preset("leap_non_thumb_v1").replace(
         tip={"type": "mesh", "tip_type": "leap_cube"},
@@ -133,7 +156,15 @@ def test_urdf_writer_serializes_custom_tip_mesh_for_human_like_hand():
         )
     ).build()
 
-    urdf = UrdfWriter(UrdfWriterCfg()).to_urdf_string(hand)
+    writer = UrdfWriter(UrdfWriterCfg())
+    urdf = writer.to_urdf_string(hand)
 
     assert "<mesh " in urdf
     assert "finger_tip_soft.stl" in urdf
+
+    result = writer.export(hand, tmp_path)
+    assert result.ok
+    assert (tmp_path / "meshes" / "finger_tip_soft.stl").is_file()
+    urdf_text = (tmp_path / "hand.urdf").read_text(encoding="utf-8")
+    assert 'filename="meshes/finger_tip_soft.stl"' in urdf_text
+    assert "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/custom/tips/" not in urdf_text

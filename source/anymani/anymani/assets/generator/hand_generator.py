@@ -73,6 +73,7 @@ from ._run_context import GenerationRunContext
 
 try:
     from .mutate import HandMutator, HandMutatorCfg
+    from .mutate.tip_replace import iter_tip_types_from_sample as _iter_tip_types_from_sample
 except Exception:
     @dataclass
     class HandMutatorCfg(AssetCfgBase):
@@ -87,6 +88,11 @@ except Exception:
 
     class HandMutator:
         r"""Fallback mutator used when the mutate package is unavailable."""
+
+    def _iter_tip_types_from_sample(sample: dict[str, Any] | None) -> list[str]:
+        r"""Fallback tip-type reader used when the mutate package is unavailable."""
+
+        return []
 
         def __init__(self, cfg: HandMutatorCfg):
             self.cfg = cfg
@@ -534,6 +540,20 @@ class HandGenerator:
             return run_root
         return _resolve_premade_export_root(self.cfg, result=result, run_root=run_root)
 
+    def _resolve_mesh_root(self, *, result: HandGenerationResult) -> Path:
+        r"""解析当前样本所属导出边界共享的 mesh 根目录。
+
+        contract:
+
+        - pre-made：以 topology 根目录作为自包含边界，共享 `topology_root/meshes/`
+        - mutate-only：以 mutate run 根目录作为自包含边界，共享 `run_root/meshes/`
+        """
+
+        export_root = self._resolve_export_root(result=result)
+        if self.cfg.mode == "mutate":
+            return export_root / self.cfg.Export.Urdf.canonical_mesh_dirname
+        return export_root / self.cfg.Export.Urdf.canonical_mesh_dirname
+
     def _generate_once(
         self,
         *,
@@ -666,6 +686,7 @@ class HandGenerator:
                 result,
                 output_dir=self._resolve_export_root(result=result),  # pre-made 直写 topology 根；mutate-only 写到 mutate run 根
                 nest_sample_dir=self.cfg.mode == "mutate",  # 只有 mutate-only 仍需要 `<hash>/` 这一层
+                mesh_root_dir=self._resolve_mesh_root(result=result),
             )
 
         self._record_generation_success(result, write_summary=record_summary)
@@ -905,6 +926,10 @@ class HandGenerator:
             for term_name, spec in accepted_mode_terms.items()
         }
         self._ensure_run_context().summary["post_mutate_mode_stats"] = diagnostics
+        tip_type_stats = self._ensure_run_context().summary.setdefault(
+            "post_mutate_tip_type_stats",
+            {"proposed": {}, "accepted": {}},
+        )
         attempts_used = 0
 
         for sample_index in range(target_count):
@@ -936,6 +961,7 @@ class HandGenerator:
                 )
                 for term_name, mode in forced_modes.items():
                     diagnostics[term_name][mode]["proposed"] += 1
+                _record_tip_type_counts(tip_type_stats, sampled_terms, bucket="proposed")
                 attempts_used += 1
 
                 result = self._generate_once(
@@ -965,8 +991,10 @@ class HandGenerator:
                 for term_name, mode in forced_modes.items():
                     diagnostics[term_name][mode]["accepted"] += 1
                     diagnostics[term_name][mode]["emitted"] += 1
+                _record_tip_type_counts(tip_type_stats, result.metadata.get("post_mutate_samples"), bucket="accepted")
                 self._update_mode_quota_shortfall(diagnostics)
                 self._ensure_run_context().summary["post_mutate_mode_stats"] = diagnostics
+                self._ensure_run_context().summary["post_mutate_tip_type_stats"] = tip_type_stats
                 self._write_run_summary()
                 yield result
                 break
@@ -998,6 +1026,26 @@ class HandGenerator:
                     return "rejected_by_incomplete_certificate"
             return "rejected_by_validator"
         return "rejected_by_validator"
+
+
+def _record_tip_type_counts(stats: dict[str, dict[str, int]], samples: Any, *, bucket: str) -> None:
+    r"""把 `tip_replace` 的 per-finger tip_type 计数写入 summary。
+
+    `tip_range` 在 v1 中是 proposal 分布，而不是 accepted quota。因此这里同时
+    记录 proposed 与 accepted，让研究者能直接观察 validator 是否对某些 tip_type
+    产生偏置。
+    """
+
+    if not isinstance(samples, dict):
+        return
+    tip_replace_sample = samples.get("tip_replace")
+    tip_types = _iter_tip_types_from_sample(tip_replace_sample)
+    if not tip_types:
+        return
+    bucket_stats = stats.setdefault(bucket, {})
+    for tip_type in tip_types:
+        bucket_stats[tip_type] = int(bucket_stats.get(tip_type, 0)) + 1
+
 
 __all__ = [
     "HandGenerationResult",

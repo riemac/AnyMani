@@ -9,7 +9,7 @@ import yaml
 
 from anymani.assets.config import asset_gen_cfg as asset_cfg_module
 from anymani.assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
-from anymani.assets.generator.mutate import HandMutatorCfg, LimitTweakCfg, MountPerturbCfg
+from anymani.assets.generator.mutate import HandMutatorCfg, LimitTweakCfg, MountPerturbCfg, TipReplaceCfg
 from anymani.assets.scripts import generate as generate_module
 from anymani.assets.scripts import _asset_generate_runner as runner_module
 from anymani.assets.validator.hand_rules import HandValidatorCfg
@@ -113,13 +113,33 @@ class DemoQuotaMountAndLimitMutatorCfg(HandMutatorCfg):
     )
 
 
+class DemoQuotaTipReplaceMutatorCfg(HandMutatorCfg):
+    r"""测试 `tip_replace.self_mode` accepted/output quota 与 tip_type proposal 统计。"""
+
+    tip_replace = TipReplaceCfg(
+        self_mode={"identity": 0.5, "same": 0.5},
+        tip_range={"cs": 0.5, "round": 0.5},
+        scale=(1.0, 1.0),
+    )
+
+
+class DemoMeshOnlyTipReplaceMutatorCfg(HandMutatorCfg):
+    r"""测试导出路径时使用的确定性 custom-mesh tip_replace cfg。"""
+
+    tip_replace = TipReplaceCfg(
+        self_mode="same",
+        tip_range=["round"],
+        scale=(1.0, 1.0),
+    )
+
+
 def test_post_mutate_config_is_direct_hand_generator_cfg():
     r"""配置模块中的 `POST_MUTATE_CFG` 应直接是 `HandGeneratorCfg`。"""
 
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG, HandGeneratorCfg)
     assert asset_cfg_module.POST_MUTATE_CFG.mode == "mutate"
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG.Validate, HandValidatorCfg)
-    assert tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms()) == ("limit_tweak",)
+    assert tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms()) == ("tip_replace",)
 
 
 def test_post_mutate_runner_resolves_topology_root_path(tmp_path):
@@ -201,6 +221,35 @@ def test_independent_post_mutate_restores_from_topology_root_and_writes_timestam
     _assert_urdf_has_no_mount_helper_topology(topology_dir / "hand.urdf")  # pre-made topology 根导出也必须遵守同一语义
     for result in results:
         _assert_urdf_has_no_mount_helper_topology(result.urdf_path)  # mutate-only 派生样本不允许回退到旧 mount helper 拓扑
+
+
+def test_post_mutate_run_reuses_shared_mesh_directory_for_custom_tip_outputs(tmp_path):
+    r"""mutate-only run 应在 run 根目录共享 `meshes/`，而不是每个样本各拷一份。"""
+
+    topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
+    mutate_cfg = HandGeneratorCfg(
+        mode="mutate",
+        artifact_level="bundle",
+        source_topology_dir=topology_dir,
+        output_dir=tmp_path,
+        n_samples=2,
+        Mutate=DemoMeshOnlyTipReplaceMutatorCfg(),
+        Validate=None,
+    )
+
+    results = list(HandGenerator(mutate_cfg).generate_batch())
+    mutate_run_dir = next(path for path in topology_dir.iterdir() if path.is_dir())
+    meshes_dir = mutate_run_dir / "meshes"
+
+    assert meshes_dir.is_dir()
+    assert any(meshes_dir.iterdir())
+    assert all(not (result.urdf_path.parent / "meshes").exists() for result in results if result.urdf_path is not None)
+    assert all(result.urdf_path is not None for result in results)
+    for result in results:
+        urdf_text = result.urdf_path.read_text(encoding="utf-8")
+        assert "<mesh " in urdf_text
+        assert "../meshes/" in urdf_text or "meshes/" in urdf_text
+        assert "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/custom/tips/" not in urdf_text
 
 
 def test_post_mutate_self_mode_probability_is_accepted_output_quota(tmp_path):
@@ -299,6 +348,39 @@ def test_multiple_mode_terms_track_marginal_accepted_output_quota(tmp_path):
     assert summary["post_mutate_mode_stats"]["mount_perturb"]["general"]["accepted"] == 2
     assert summary["post_mutate_mode_stats"]["limit_tweak"]["identity"]["accepted"] == 2
     assert summary["post_mutate_mode_stats"]["limit_tweak"]["homologous_non_thumb"]["accepted"] == 2
+
+
+def test_tip_replace_self_mode_probability_is_accepted_output_quota(tmp_path):
+    r"""`tip_replace.self_mode` dict 应控制 accepted/output mode 分布。"""
+
+    topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
+    mutate_cfg = HandGeneratorCfg(
+        mode="mutate",
+        artifact_level="bundle",
+        source_topology_dir=topology_dir,
+        output_dir=tmp_path,
+        n_samples=4,
+        Mutate=DemoQuotaTipReplaceMutatorCfg(),
+        Validate=None,
+    )
+
+    results = list(HandGenerator(mutate_cfg).generate_batch())
+
+    modes = [
+        result.metadata["post_mutate_samples"]["tip_replace"]["resolved_self_mode"]
+        for result in results
+    ]
+    mutate_run_dir = next(path for path in topology_dir.iterdir() if path.is_dir())
+    summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
+
+    assert modes.count("identity") == 2
+    assert modes.count("same") == 2
+    assert summary["post_mutate_mode_stats"]["tip_replace"]["identity"]["target_quota"] == 2
+    assert summary["post_mutate_mode_stats"]["tip_replace"]["identity"]["accepted"] == 2
+    assert summary["post_mutate_mode_stats"]["tip_replace"]["same"]["target_quota"] == 2
+    assert summary["post_mutate_mode_stats"]["tip_replace"]["same"]["accepted"] == 2
+    assert sum(summary["post_mutate_tip_type_stats"]["proposed"].values()) == 8
+    assert sum(summary["post_mutate_tip_type_stats"]["accepted"].values()) == 8
 
 
 def test_unified_generate_runner_accepts_post_mutate_cli(monkeypatch, tmp_path):

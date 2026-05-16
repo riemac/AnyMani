@@ -55,7 +55,7 @@ from ._utils import (
     _normalize_pose_value,
     _to_si,
 )
-from .joint_builders_custom import CustomTipBuilderCfg
+from .joint_builders_custom import CustomTipBuilderCfg, apply_thumb_functional_tip_phase
 from .joint_builders_primitive import PrimJointBuilderCfg
 
 
@@ -783,6 +783,7 @@ class RegularFingerBuilder(FingerBuilder):
         """
         tip_recipe = dict(self.cfg.tip)  # 指尖 recipe 先复制，避免污染 cfg
         tip_recipe["offset"] = self.cfg._tip_offset_6d  # 指尖 mesh 相对 tip joint frame 的位姿
+        is_thumb = isinstance(self.cfg, RegularThumbBuilderCfg)
         common_kwargs = {
             "name": f"{self.cfg.name}_tip",  # tip joint 命名稳定，便于 exporter / validator 识别
             "parent": parent_link,  # tip 接在最后一个运动关节之后
@@ -798,10 +799,17 @@ class RegularFingerBuilder(FingerBuilder):
         if tip_recipe["type"] == "mesh":
             # custom mesh tip 不改变 finger 级串联算法，只在 tip joint 这一层
             # 把“primitive 几何 lowering”替换为“锚点驱动的 mesh lowering”。
+            # thumb 额外补一个 CMC2 功能相位：custom tip 非轴对称，不能像 cs 那样
+            # 只靠沿 +y 生长就忽略掌侧/背侧相位。
+            mesh_offset = (
+                apply_thumb_functional_tip_phase(tip_recipe["offset"])
+                if is_thumb
+                else tip_recipe["offset"]
+            )
             builder_cfg = CustomTipBuilderCfg(
                 tip_type=str(tip_recipe.get("tip_type", "round")),
                 mesh_path=tip_recipe.get("path"),
-                mesh_offset=tip_recipe["offset"],
+                mesh_offset=mesh_offset,
                 scale=tip_recipe.get("scale", 1.0),
                 unit_scale=tip_recipe.get("unit_scale"),
                 anchor_point=tip_recipe.get("anchor_point"),

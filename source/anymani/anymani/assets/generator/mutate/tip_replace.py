@@ -1,4 +1,4 @@
-r"""指尖替换变异算子设计草稿。
+r"""指尖替换变异算子：在 post-mutate 阶段重采末端 tip embodiment。
 
 该算子位于 post-mutate 阶段，替换每根 finger 末端 `tip_joint`
 所连接的整个 tip child link embodiment：collision、visual、inertial
@@ -9,40 +9,60 @@ r"""指尖替换变异算子设计草稿。
 从科研上看，这个算子处理的是末端接触材料与局部刚体近似，而不是整根
 finger 的运动学重建。因此 collision、visual、inertial、metadata 应当被
 视为同一个 tip spec 的不同投影，不能只改其中一项就当作完成了 tip replacement。
+
+本轮 contract 明确区分两层概率：
+
+1. `self_mode` 是样本级 accepted/output 分布，和 `mount_perturb` /
+   `limit_tweak` 一样由 generator quota 保障；
+2. `tip_range` 是 tip_type proposal 分布。若 validator 因 tip 几何偏置拒绝
+   某些 proposal，最终 accepted tip_type 分布可能轻微漂移，因此必须在 summary
+   中显式记录 proposed / accepted 计数，而不是把它伪装成后验 quota。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
+import random
 from typing import Any, Literal
 
-from ...asset_base import HandCfg
-from ...asset_schema_core import (
-    BoxGeometryCfg,
-    CollisionGeometryCfg,
-    CylinderGeometryCfg,
-    InertialCfg,
-    PoseCfg,
-    SphereGeometryCfg,
-    Vector2,
-    VisualGeometryCfg,
-)
-from ...builder.joint_builders_primitive import _box_inertia, _cylinder_inertia, _estimate_mass
+from ...asset_base import HandCfg, JointCfg
+from ...asset_schema_core import PoseCfg, Vector2
+from ...builder.joint_builders_custom import CustomTipBuilderCfg, apply_thumb_functional_tip_phase
+from ...builder.joint_builders_primitive import PrimJointBuilderCfg
 from ._base import HandPatch, MutatorBase, MutatorBaseCfg, _make_range_sampler
 
 
-_TIP_DEFAULT_DENSITY = 650.0
-r"""tip replacement 后重算 inertial 时使用的默认密度 $\rho$ [kg/m^3]。
+_MODE_IDENTITY = "identity"
+_MODE_SAME = "same"
+_MODE_GENERAL = "general"
 
-这里沿用 primitive/custom builders 的默认密度，保证 pre-made tip 与 post-mutate
-tip 在质量量级上连续，而不是因为变异算子切换了一套隐藏密度假设。
-"""
+_ALL_SELF_MODES = (
+    _MODE_IDENTITY,
+    _MODE_SAME,
+    _MODE_GENERAL,
+)
+r"""`tip_replace.self_mode` 当前支持的全部高层 mode。"""
 
+_CUSTOM_TIP_TYPES = (
+    "leap_cube",
+    "round",
+    "wedge",
+    "thinner",
+)
+r"""由 `CustomTipBuilderCfg` preset 表支持的 custom mesh tip 类型。"""
 
-# ============================================================================
-#  配置类
-# ============================================================================
+_PRIMITIVE_TIP_TYPES = ("cs",)
+r"""本轮 tip replacement 支持的 primitive tip 类型；`bs` 暂不纳入。"""
+
+_DEFAULT_TIP_TYPES = _PRIMITIVE_TIP_TYPES + _CUSTOM_TIP_TYPES
+r"""`tip_range=None` 时使用的默认 proposal 候选集合。"""
+
+_MODE_TOLERANCE = 1e-9
+r"""mode / tip_type 概率求和与正概率判定的数值容差。"""
+
+_MIN_POSITIVE = 1e-6
+r"""几何长度、半径和 scale 的最小正值，防止导出退化刚体。"""
 
 
 @dataclass
@@ -67,15 +87,9 @@ class TipReplaceCfg(MutatorBaseCfg):
     r"""关联的运行时类。"""
 
     target_fingers: tuple[str, ...] | None = None
-    r"""目标 finger 名称；`None` 表示所有存在 finger 都参与 tip 变异。"""
+    r"""目标 finger 名称；`None` 表示当前 hand 中所有 finger 都参与 tip replacement。"""
 
-    mode: Literal["geometry_swap", "mesh_perturb"] = "geometry_swap"
-    r"""首版运行时模式：primitive 几何互换，或 mesh tip 局部 offset 微扰。"""
-
-    target_geometry: Literal["box", "cylinder"] | None = None
-    r"""`geometry_swap` 的目标主体类型；`None` 时在 box/cylinder 间切换。"""
-
-    self_mode: Literal["general", "same"] | dict[str, float] | None = "same"
+    self_mode: Literal["identity", "same", "general"] | dict[str, float] | None = _MODE_SAME
     r"""指尖替换的高层形态模式配置。
 
     该字段描述一次 post-mutate 中“全手的指尖皮肤是否共享同一种宏观假设”。
@@ -83,56 +97,41 @@ class TipReplaceCfg(MutatorBaseCfg):
     在 finger 之间如何耦合采样。
 
     支持三种输入语义：
-    - `None`：不显式指定高层模式，由运行时使用默认模式，通常等价于 `"same"`。
-    - `str`：固定使用某一种模式，例如始终使用 `"general"`。
-    - `dict[str, float]`：混合模式采样。键为模式名，值为模式采样概率；
-      概率应非负，且概率和应为 1。
 
-    预设模式：
+    - `None`：未显式指定时默认落到 `"same"`；
+    - `str`：固定使用某一个 mode；
+    - `dict[str, float]`：按概率混合采样 mode，且该概率由 generator 解释为
+      accepted/output quota，而不是 proposal prior。
+
+    预设 mode：
+
+    - `"identity"`：显式 no-op，不改任何 tip，只记录 provenance；
+    - `"same"`：全体目标 finger 共享同一个完整 tip spec；
     - `"general"`：每根目标 finger 独立采样完整 tip spec。
-      也就是说，thumb / index / middle / ring 的指尖类型可以不同，
-      连续参数也可以不同：
-      $$
-      s_f \sim p(s),\quad \theta_f \sim p(\theta \mid s_f),\quad f\in\mathcal{F}.
-      $$
-      这里 $s_f$ 表示离散 tip 类型，$\theta_f$ 表示该类型下由 preset 与 `scale`
-      共同确定的完整 tip spec。该模式最大化接触皮肤与局部物理属性 diversity，
-      适合做 domain randomization，但会采到“不像真实同一只手”的组合。
-    - `"same"`：全体目标 finger 共享同一个完整 tip spec。
-      运行时应只采样一次
-      $$
-      s \sim p(s),\quad \theta \sim p(\theta \mid s),
-      $$
-      然后广播到所有目标 finger。这里的“一致”包括 tip 类型、缩放值，以及由
-      preset/lowering 推导出的局部几何、质量、密度、惯量近似策略等参数；
-      唯一不共享的是每根 finger 已有的运动链位置，例如
-      `finger.tip_joint.origin` 和 parent / child link 名。
-      该模式更像一种 hand-family coherent morphology：同一只手的所有指尖皮肤
-      来自同一设计族。
-
-    # NOTE:
-    `same` 不意味着把所有 finger 的 tip joint 移到同一个空间位置；它同步的是
-    tip child link 的完整物理 spec。finger chain 的长度和 tip joint frame 仍由
-    pre-made / `link_scale` 决定。
     """
 
     tip_range: list[str] | dict[str, float] | None = None
-    r"""指尖候选范围。
+    r"""指尖候选类型 proposal 分布。
 
-    该字段描述离散 tip 类型的候选集合，而不是 mesh 文件路径集合。合法名称包括：
-    - primitive tip recipe：例如 `"cs"`；
-    - `CustomTipBuilderCfg` 能通过 `tip_type` resolve 的 custom tip key：
-      例如 `"round"`、`"leap_cube"`、`"wedge"`、`"thinner"`。
+    该字段描述离散 `tip_type` 的候选集合，而不是 hand family，也不是 mesh 文件路径集合。
+    合法名称包括：
+
+    - primitive tip recipe：`"cs"`；
+    - `CustomTipBuilderCfg` preset：`"leap_cube"`、`"round"`、`"wedge"`、`"thinner"`。
 
     输入语义：
-    - `None`：默认包含当前 pre-made 手型原本的 tip 类型，以及所有已注册合法 custom tip。
-    - `list[str]`：离散列出合法 tip 类型，默认每个 tip 被采样的概率相等。
-    - `dict[str, float]`：显式给出不同 tip 类型的采样概率；概率应非负，且概率和为 1。
+
+    - `None`：默认使用 `("cs", "leap_cube", "round", "wedge", "thinner")`；
+    - `list[str]`：离散列出合法 tip_type，默认每个 tip_type 等概率 proposal；
+    - `dict[str, float]`：显式 proposal 概率，概率应非负且和为 1。
 
     # NOTE:
-    custom tip 是否“合法”，不取决于它是否只是出现在 `assets/custom/tips` 文件夹中，
-    而取决于它是否能由 `CustomTipBuilderCfg` 自动补齐 mesh_path、anchor_point、
-    unit_scale、base_rpy、approx_size 等 lowering 所需语义。
+    这里刻意叫 `tip_type`，不叫 `tip_family`。`hand family` 保留给 `leap/allegro`
+    这类 pre-made 家族；指尖候选只是同一只 hand 上的末端接触几何变体。
+
+    # NOTE:
+    `tip_range` 是 proposal 分布。若某类 tip_type 更容易被 validator 拒绝，最终
+    accepted 分布可能偏离 proposal，因此运行时会记录 proposed / accepted 计数。
     """
 
     scale: Vector2 | dict[str, Vector2] = (1.0, 1.0)
@@ -143,148 +142,166 @@ class TipReplaceCfg(MutatorBaseCfg):
     `AnyMani/source/anymani/anymani/assets/doc/指尖scale示意.png`。
 
     输入语义：
-    - `Vector2`：所有 tip 类型共享同一个缩放范围。
-    - `dict[str, Vector2]`：不同 tip 类型使用各自的缩放范围；没有显式列出的 tip
-      可回退到 `(1.0, 1.0)` 或运行时默认策略。
+
+    - `Vector2`：所有 tip_type 共享同一个缩放范围；
+    - `dict[str, Vector2]`：不同 tip_type 使用各自的缩放范围；没有显式列出的
+      tip_type 回退到 `shared`，再回退到 `(1.0, 1.0)`。
 
     几何语义：
-    - scale 不移动 `tip_joint`，也不改变上一段 link 的末端位置；
-    - 对 custom mesh tip，缩放应围绕 preset 中的语义锚点 `anchor_point` 重新 lowering。
-      换句话说，指尖 mesh 底部锚点仍与上一 link 顶部 / tip joint frame 对齐，
-      而不是简单地把 mesh origin 乘以 scale；
-    - 对 primitive tip，运行时应同步缩放半径、宽度、深度、高度等几何参数，并重建
-      collision、visual 与 inertial，保持底部接合处和上一 link 中心线在局部
-      $z$-$x$ 平面内重合。
 
-    默认 `(1.0, 1.0)` 表示只替换 tip 类型，不额外引入尺寸缩放。
+    - scale 不移动 `tip_joint`，也不改变上一段 link 的末端位置；
+    - 对 custom mesh tip，缩放围绕 preset 中的 `anchor_point` 重新 lowering；
+    - 对 `cs`，scale 同时缩放半径 $r$ 和高度 $h$，再由 `cs_ratio` 可选改写
+      $h/r$。
     """
 
-    _resolved_self_mode: str | None = field(init=False, default=None, repr=False)
-    r"""内部字段：运行时解析后的单一 self mode。"""
+    cs_ratio: Vector2 | dict[Literal["add", "abs"], Vector2] | None = None
+    r"""`cs` 类型指尖的高度与半径比 $\lambda=h/r$ 变异范围。
 
-    def __post_init__(self):
-        r"""补齐运行时类并缓存归一化后的模式信息。
+    `cs` 的建模约定是 cylinder + sphere：
 
-        这里允许少量内部解析缓存，但不把复杂分布对象重新引入成公开字段；
-        研究者只需要看 `tip_range`、`scale`、`self_mode` 这些公开语义就够了。
-        """
+    - 圆柱半径为 $r$；
+    - 圆柱高度为 $h=\lambda r$；
+    - 球帽半径仍为 $r$；
+    - 球心落在圆柱顶面中心，使球最大截面和圆柱顶面重合，形成平滑过渡。
 
-        if self.class_type is None:
-            self.class_type = TipReplaceMutator
+    输入语义：
+
+    - `None`：保持当前 tip 或默认 `cs` 的原始 $\lambda$；
+    - `Vector2`：等价于 `{"abs": Vector2}`，直接采绝对比例；
+    - `{"abs": (a,b)}`：从绝对比例区间采样 $\lambda$；
+    - `{"add": (a,b)}`：在当前 tip 的 $\lambda_0$ 基础上叠加增量；若当前 tip
+      不是 `cs`，则 $\lambda_0=1$。
+    """
+
+    distrib: Literal["uniform", "normal"] | dict[str, Any] = "uniform"
+    r"""连续变量采样分布，当前作用于 `scale` 与 `cs_ratio`。
+
+    - `uniform`：在配置区间中均匀采样；
+    - `normal`：先采中心正态，再交给 `boundary_policy` 处理越界。
+    """
+
+    boundary_policy: Literal["none", "clip", "truncate", "resample"] | None = None
+    r"""连续变量边界处理策略。
+
+    该字段只规定采样结果超出 `scale` / `cs_ratio` 区间时如何处理，不改变
+    `self_mode` 和 `tip_range` 的概率语义。
+    """
+
+    _active_modes: tuple[str, ...] = field(init=False, default=(), repr=False)
+    r"""当前 cfg 真正会被采样到的 mode 集合；dict 输入时只保留正概率项。"""
+
+    def __post_init__(self) -> None:
+        r"""校验 mode / tip_type 契约，并补齐运行时类。"""
+
+        self.class_type = TipReplaceMutator
         if isinstance(self.target_fingers, list):
-            self.target_fingers = tuple(self.target_fingers)
-        self._resolved_self_mode = "same" if self.self_mode is None else str(self.self_mode)
+            self.target_fingers = tuple(str(name) for name in self.target_fingers)
+        self._active_modes = _resolve_active_modes(self.self_mode)
+        _resolve_tip_distribution(self.tip_range)  # fail-fast 校验 tip_type 概率和合法性
+        _validate_scale_ranges(self.scale)
+        _validate_cs_ratio(self.cs_ratio)
 
 
 class TipReplaceMutator(MutatorBase):
-    r"""指尖替换运行时壳。
+    r"""把高层 tip replacement contract lowering 成 tip child link patch。
 
-    按当前 post-mutator 的 Declare / Sample / Apply 设计实现 tip replacement。
-    输入：
-    - `HandCfg`：已经由 pre-made builder 或前序 post-mutator 生成的手资产；
-    - `TipReplaceCfg`：描述目标 finger、tip 候选集合、连续参数范围与 self mode；
-    - 可选 `sampled_params`：用于测试 / 可复现生成的外部采样结果，内容应是聚合
-      `TipSpec` 或可 lowering 成 `TipSpec` 的最小参数，而不是零散物理字段。
-
-    输出：
-    - 新的 `HandCfg` 或原地可接受的 mutated cfg，具体跟随 pipeline 约定；
-    - 每个目标 finger 的 `tip_joint.collisions` / `tip_joint.visuals` /
-      `tip_joint.inertial` / `tip_joint.metadata` 被替换或更新为同一套 tip spec
-      lowering 后的结果；
-    - 不修改 `finger.joints[:-1]`、`finger.mount`、`tip_joint.origin`、`tip_joint.parent`
-      和 `tip_joint.child`。
-
-    Sample 层伪算法：
-    1. 解析目标 finger 集合 `F`；默认取 `hand.fingers` 全部存在项。
-    2. 解析 `self_mode`：
-       - `general`：对每个 `f in F` 调用一次 `_sample_tip_spec()`；
-       - `same`：调用一次 `_sample_tip_spec()`，并复制给所有 `f in F`。
-    3. `_sample_tip_spec()` 先从 `tip_range` 采样离散候选 `s`，再从 `scale`
-       采样缩放值，并结合 primitive recipe 或 custom tip preset 形成完整 `TipSpec`。
-    4. 返回一组 planned edits，而不是立即随意改 `HandCfg`：
-       `finger_name -> TipSpec`，或更底层的
-       `attribute_path -> sampled_value`，具体跟随 `HandMutator` 最终 Apply 协议。
-
-    Apply / lowering 层伪算法：
-    1. 将 `TipSpec` lowering 为完整的 tip child link spec：
-       - primitive `cs/bs` 可复用 `ComPrimJointBuilder` 的几何公式；
-       - mesh preset 可复用 `CustomTipBuilderCfg` 的 anchor formula；
-       - `InertialCfg` 必须随 tip spec 重建，包含质量、质心和惯量张量；
-       - collision 与 visual 默认保持几何一致，避免训练时接触皮肤和可视皮肤语义分裂；
-       - metadata 记录 `tip_type`、采样参数、inertia approximation 和 mesh anchor 信息，
-         方便后续按资产 family 做 ablation。
-    2. 写回每个 finger 的 `tip_joint`，同时保留 joint/link 命名和原有必要 metadata。
-
-    验收条件：
-    - `same` 下所有目标 finger 的 tip 类型和连续参数完全一致；
-    - `general` 下每个目标 finger 可独立拥有不同 tip 类型与参数；
-    - 替换后 `tip_joint.is_tip is True`，且 finger chain parent/child 关系不断裂；
-    - primitive / mesh tip 都能导出 URDF，并通过 hand validator。
+    该 runtime 使用结构化 sample payload，而不是把每根 finger 的 tip_type / scale
+    平铺成一堆局部 sampler。原因和 `mount_perturb` / `limit_tweak` 相同：
+    mode 一旦进入 accepted quota，generator 必须能强制某个 mode 并重新生成
+    该 mode 所需的完整低层随机量，避免“只改 mode 名但缺少 tip specs”的伪样本。
     """
 
     cfg: TipReplaceCfg
 
     def __init__(self, cfg: TipReplaceCfg):
+        r"""绑定一份 `TipReplaceCfg`。"""
+
         self.cfg = cfg
 
     def describe_sampling(self, target: HandCfg) -> dict[str, Any]:
-        r"""把 tip 高层模式 lowering 成 pipeline 可批量采样的局部变量。
+        r"""返回一个结构化样本生成器。
 
-        `tip_replace` 不再暴露 `size_distribution` 或 `mesh_offset_distribution`。
-        连续随机性统一来自用户笔记中的 `scale` 字段；离散 tip 类型选择留给
-        `tip_range/self_mode` 的后续完整 lowering。
+        Returns:
+            dict[str, Any]: 单键 `"sample"`，其 value 是生成完整 tip replacement
+            payload 的 callable。
         """
 
-        # 先按 finger 粒度分发，再按 mode 决定是共享还是独立采样。
-        # 这样能保持 same/general 两类语义都能从同一个 lowering 路径落地。
-        specs: dict[str, Any] = {}
-        target_fingers = list(_iter_target_fingers(target, self.cfg.target_fingers))
-        if _resolved_self_mode(self.cfg) == "same" and target_fingers:
-            specs["shared::scale"] = _make_range_sampler(
-                _scale_range_for_tip(self.cfg.scale, "shared"),
-                distrib="uniform",
-                boundary_policy="none",
-            )
-            return specs
-        for _, finger in target_fingers:
-            specs[f"{finger.name}::scale"] = _make_range_sampler(
-                _scale_range_for_tip(self.cfg.scale, _current_tip_type(finger.tip_joint)),
-                distrib="uniform",
-                boundary_policy="none",
-            )
-        return specs
+        return {"sample": lambda: self._sample_one(target)}
 
     def plan_patch(self, target: HandCfg, sampled_params: dict[str, Any] | None = None) -> HandPatch:
-        r"""生成 tip child-link 的延迟 patch。
+        r"""基于结构化 sample payload 生成 tip child-link 的延迟 patch。
 
-        该函数严格不修改 `tip_joint.origin`、`parent`、`child` 和 finger 链关系；
-        只替换 tip child link 内部的 collision/visual/inertial 局部物理描述。
+        该函数严格不修改 `finger.joints[:-1]`、`finger.mount`、`tip_joint.origin`、
+        `tip_joint.parent` 和 `tip_joint.child`；它只替换末端 child link 的
+        collision / visual / inertial / metadata。
         """
 
-        sampled_params = sampled_params or {}
+        sample = _normalize_sample_payload(sampled_params, self.cfg, target=target)
+        resolved_mode = str(sample["resolved_self_mode"])
+
         patch = HandPatch()
-        shared_scale = float(sampled_params.get("shared::scale", 1.0))
+        patch.metadata.setdefault("post_mutate_samples", {})
+        patch.metadata["post_mutate_samples"]["tip_replace"] = sample
+        patch.metadata["post_mutate_tip_replace"] = sample
+
+        if resolved_mode == _MODE_IDENTITY:
+            return patch  # `identity` 是显式 no-op，只保留 provenance
+
+        finger_specs = dict(sample.get("finger_specs", {}))
         for finger_index, finger in _iter_target_fingers(target, self.cfg.target_fingers):
-            if self.cfg.mode == "geometry_swap":
-                scale_factor = shared_scale if "shared::scale" in sampled_params else float(sampled_params.get(f"{finger.name}::scale", 1.0))
-
-                def apply_swap(hand: HandCfg, *, fi=finger_index, scale=scale_factor) -> None:
-                    tip_joint = hand.fingers[fi].tip_joint
-                    _swap_primitive_tip_body(tip_joint, target_geometry=self.cfg.target_geometry, scale_factor=scale)
-
-                patch.add(("finger", finger_index, "tip", "geometry_swap"), apply_swap)
-            elif self.cfg.mode == "mesh_perturb":
-                scale_factor = shared_scale if "shared::scale" in sampled_params else float(sampled_params.get(f"{finger.name}::scale", 1.0))
-
-                def apply_mesh_perturb(hand: HandCfg, *, fi=finger_index, scale=scale_factor) -> None:
-                    _scale_mesh_tip_offsets(hand.fingers[fi].tip_joint, scale)
-
-                patch.add(("finger", finger_index, "tip", "mesh_perturb"), apply_mesh_perturb)
+            spec = dict(finger_specs.get(finger.name, {}))
+            if not spec:
+                continue
+            replacement = _build_replacement_tip_joint(finger.tip_joint, spec)
+            patch.add(
+                ("finger", finger_index, "tip"),
+                _tip_joint_replacer(finger_index=finger_index, replacement=replacement),
+            )
         return patch
+
+    def _sample_one(self, target: HandCfg) -> dict[str, Any]:
+        r"""为当前 hand 样本生成一份已经解析好 mode 的结构化随机量。"""
+
+        resolved_mode = _draw_resolved_mode(self.cfg)
+        return self.sample_one_for_mode(target, resolved_mode=resolved_mode)
+
+    def sample_one_for_mode(self, target: HandCfg, *, resolved_mode: str) -> dict[str, Any]:
+        r"""为 accepted-quota 路径生成指定 mode 的结构化随机量。
+
+        Args:
+            target (HandCfg): 当前原始 hand schema。
+            resolved_mode (str): generator 强制或本算子自行采样得到的 mode。
+
+        Returns:
+            dict[str, Any]: 包含 `resolved_self_mode` 与 per-finger tip spec 的结构化
+            payload。
+        """
+
+        if resolved_mode not in _ALL_SELF_MODES:
+            raise ValueError(f"unsupported tip_replace resolved mode: {resolved_mode!r}")
+        if resolved_mode == _MODE_IDENTITY:
+            return {"resolved_self_mode": _MODE_IDENTITY, "finger_specs": {}}
+
+        target_fingers = list(_iter_target_fingers(target, self.cfg.target_fingers))
+        if resolved_mode == _MODE_SAME:
+            shared_spec = _sample_tip_spec(self.cfg, target_fingers[0][1].tip_joint if target_fingers else None)
+            return {
+                "resolved_self_mode": _MODE_SAME,
+                "finger_specs": {finger.name: dict(shared_spec) for _, finger in target_fingers},
+            }
+
+        return {
+            "resolved_self_mode": _MODE_GENERAL,
+            "finger_specs": {
+                finger.name: _sample_tip_spec(self.cfg, finger.tip_joint)
+                for _, finger in target_fingers
+            },
+        }
 
 
 def _iter_target_fingers(hand: HandCfg, target_fingers: tuple[str, ...] | None):
-    """按配置解析目标 finger 集合。"""
+    r"""按配置解析目标 finger 集合。"""
 
     target_set = set(target_fingers or ())
     for finger_index, finger in enumerate(hand.fingers):
@@ -293,157 +310,404 @@ def _iter_target_fingers(hand: HandCfg, target_fingers: tuple[str, ...] | None):
         yield finger_index, finger
 
 
-def _swap_primitive_tip_body(tip_joint, *, target_geometry: str | None, scale_factor: float) -> None:
-    r"""替换 primitive tip 主体，保留 sphere cap 与 tip joint 位姿。
+def _tip_joint_replacer(*, finger_index: int, replacement: JointCfg):
+    r"""构造一个只替换 finger 末端 `JointCfg` 的 patch callable。"""
 
-    首版只处理当前 builder 产生的 `cs/bs` 风格：主体是 collision/visual
-    列表第 0 个，cap 是第 1 个球体。这样能满足 quick 验收，同时不把完整
-    tip preset lowering 过早做死。
+    def _apply(hand: HandCfg) -> None:
+        joints = list(hand.fingers[finger_index].joints)
+        joints[-1] = replacement.copy()
+        hand.fingers[finger_index] = hand.fingers[finger_index].replace(joints=joints)
+
+    return _apply
+
+
+def _build_replacement_tip_joint(original: JointCfg, spec: dict[str, Any]) -> JointCfg:
+    r"""把一份 tip spec lowering 成完整 `JointCfg`。
+
+    这里复用 builder 层的 primitive / custom tip 公式，避免在 mutate 层复制
+    anchor 对齐、圆柱球帽、惯量估计等几何细节。mutate 层只负责决定“采样到了
+    哪个 tip spec”，具体 child link embodiment 仍交给 builder。
     """
 
-    # 如果 tip 还没有完整的 collision / visual 结构，就不要强行替换，
-    # 否则会把一个不完整输入伪装成已完成的 tip spec。
-    if not tip_joint.collisions or not tip_joint.visuals:
-        return
-    body = tip_joint.collisions[0].geometry
-    if body.kind not in {"box", "cylinder"}:
-        return
-    new_kind = target_geometry or ("box" if body.kind == "cylinder" else "cylinder")
-    radius, length, width, depth, cap_radius = _tip_body_dimensions(tip_joint, scale_factor=scale_factor)
-    if new_kind == "box":
-        geometry = BoxGeometryCfg(size=(width, length, depth))
-        origin = PoseCfg(pos=(0.0, length / 2.0, 0.0))
-    else:
-        geometry = CylinderGeometryCfg(radius=radius, length=length)
-        origin = PoseCfg(pos=(0.0, length / 2.0, 0.0), rpy=(-1.5707963267948966, 0.0, 0.0))
-    tip_joint.collisions[0] = CollisionGeometryCfg(name=tip_joint.collisions[0].name, geometry=geometry, origin=origin)
-    tip_joint.visuals[0] = VisualGeometryCfg(name=tip_joint.visuals[0].name, geometry=geometry, origin=origin)
-    # 几何改变以后，惯性必须一起重建，否则质量和接触皮肤语义会拆开。
-    tip_joint.inertial = _estimate_swapped_tip_inertial(
-        new_kind=new_kind,
-        radius=radius,
-        length=length,
-        width=width,
-        depth=depth,
-        cap_radius=cap_radius,
-    )
-    tip_joint.metadata = {**tip_joint.metadata, "post_mutate_tip_mode": "geometry_swap", "post_mutate_tip_body": new_kind}
+    tip_type = str(spec["tip_type"])
+    common_kwargs = {
+        "name": original.name,
+        "parent": original.parent,
+        "child": original.child,
+        "joint_type": original.joint_type,
+        "origin": original.origin,
+        "axis": (0.0, 0.0, 0.0) if original.joint_type == "fixed" else original.axis,
+        "limit": original.limit,
+        "is_tip": True,
+        "metadata": _replacement_metadata(original, spec),
+    }
 
-
-def _tip_body_dimensions(tip_joint, *, scale_factor: float) -> tuple[float, float, float, float, float]:
-    r"""从现有 tip 主体和 cap 估计互换后的保守尺寸。"""
-
-    body = tip_joint.collisions[0].geometry
-    cap_radius = 0.006
-    if len(tip_joint.collisions) > 1 and tip_joint.collisions[1].geometry.kind == "sphere":
-        cap_radius = float(tip_joint.collisions[1].geometry.radius)
-    if body.kind == "box":
-        width, length, depth = body.size
-        radius = max(width, depth) / 2.0
-    else:
-        radius = float(body.radius)
-        length = float(body.length)
-        width = depth = 2.0 * radius
-    scale = max(1e-4, float(scale_factor))
-    length = max(1e-4, float(length) * scale)
-    width = max(1e-4, float(width) * scale)
-    depth = max(1e-4, float(depth) * scale)
-    radius = max(1e-4, float(radius) * scale, cap_radius * 0.5)
-    return radius, length, width, depth, cap_radius
-
-
-def _estimate_swapped_tip_inertial(
-    *,
-    new_kind: str,
-    radius: float,
-    length: float,
-    width: float,
-    depth: float,
-    cap_radius: float,
-) -> InertialCfg:
-    r"""为 geometry-swapped primitive tip 重算质量、质心与惯量。
-
-    `tip_replace` 改变的是 tip child link 的几何皮肤，因此 inertial 也必须随
-    geometry 一起更新。这里采用和 primitive builder 一致的首版近似：
-
-    - 主体为 cylinder 时，用圆柱体积估质量；
-    - 主体为 box 时，用长方体体积估质量；
-    - cap 仍近似为完整 sphere，和 pre-made `cs/bs` tip 规则保持一致；
-    - 整体惯量用等效 cylinder / box 表达，保证正定且量级合理。
-    """
-
-    # 球帽仍按完整 sphere 估体积，因为当前 primitive tip 的语义就是
-    # “主体 + cap” 的二段式近似。
-    cap_mass = _estimate_mass(
-        volume=4.0 * math.pi * cap_radius**3 / 3.0,
-        cfg_mass=None,
-        density=_TIP_DEFAULT_DENSITY,
-    )  # 球帽仍按完整球估体积，保持和 pre-made primitive tip 一致
-    cap_com_y = length  # 球帽中心落在主体末端中心
-
-    if new_kind == "box":
-        body_mass = _estimate_mass(
-            volume=width * length * depth,
-            cfg_mass=None,
-            density=_TIP_DEFAULT_DENSITY,
-        )  # box 主体体积 $V=wld$
-        total_mass = body_mass + cap_mass
-        com_y = (body_mass * (length / 2.0) + cap_mass * cap_com_y) / total_mass
-        return InertialCfg(
-            mass=total_mass,
-            origin=PoseCfg(pos=(0.0, com_y, 0.0)),
-            inertia=_box_inertia((width, length + 2.0 * cap_radius, depth), total_mass),
+    if tip_type == "cs":
+        radius = max(_MIN_POSITIVE, float(spec["radius"]))
+        height = max(_MIN_POSITIVE, float(spec["height"]))
+        builder_cfg = PrimJointBuilderCfg(
+            mesh={"type": "cs", "radius": radius, "height": height, "offset": _tip_offset_from_original(original)},
+            **common_kwargs,
         )
+    else:
+        mesh_offset = _tip_offset_from_original(original)
+        if _is_thumb_tip_joint(original):
+            mesh_offset = apply_thumb_functional_tip_phase(mesh_offset)
+        builder_cfg = CustomTipBuilderCfg(
+            tip_type=tip_type,
+            mesh_offset=mesh_offset,
+            scale=float(spec.get("scale", 1.0)),
+            **common_kwargs,
+        )
+    builder = builder_cfg.class_type(builder_cfg)
+    return builder.build()
 
-    body_mass = _estimate_mass(
-        volume=math.pi * radius * radius * length,
-        cfg_mass=None,
-        density=_TIP_DEFAULT_DENSITY,
-    )  # cylinder 主体体积 $V=\pi r^2l$
-    total_mass = body_mass + cap_mass
-    com_y = (body_mass * (length / 2.0) + cap_mass * cap_com_y) / total_mass
-    return InertialCfg(
-        mass=total_mass,
-        origin=PoseCfg(pos=(0.0, com_y, 0.0)),
-        inertia=_cylinder_inertia(radius, length + 2.0 * cap_radius, total_mass),
+
+def _replacement_metadata(original: JointCfg, spec: dict[str, Any]) -> dict[str, Any]:
+    r"""生成替换后 tip joint 的 metadata。"""
+
+    metadata = {
+        **dict(original.metadata),
+        "post_mutate_tip_mode": "tip_replace",
+        "tip_type": str(spec["tip_type"]),
+        "post_mutate_tip_type": str(spec["tip_type"]),
+        "post_mutate_tip_scale": float(spec.get("scale", 1.0)),
+        "post_mutate_tip_spec": dict(spec),
+    }
+    if str(spec["tip_type"]) != "cs" and _is_thumb_tip_joint(original):
+        metadata["thumb_functional_tip_phase_rpy"] = apply_thumb_functional_tip_phase(PoseCfg()).rpy
+    return metadata
+
+
+def _is_thumb_tip_joint(joint: JointCfg) -> bool:
+    r"""判断当前末端 joint 是否属于 thumb。
+
+    这里优先读 builder 写入的 `finger_name`，再回退到 child/parent/joint 名。
+    post-mutate 可能来自历史 YAML 或不同 builder 版本，因此不能只押一个字段。
+    """
+
+    finger_name = str(joint.metadata.get("finger_name", "")).lower()
+    if finger_name == "thumb":
+        return True
+    name_fields = (joint.name, joint.parent, joint.child)
+    return any(str(value).lower().startswith("thumb_") or str(value).lower() == "thumb" for value in name_fields)
+
+
+def _tip_offset_from_original(original: JointCfg) -> PoseCfg:
+    r"""从原 tip joint 读取局部 tip geometry 的锚点 offset。
+
+    对 primitive `cs`，builder 写入的是几何中心：
+
+    $$
+    y_{\mathrm{cyl}} = d_y + h/2,\qquad
+    y_{\mathrm{sph}} = d_y + h.
+    $$
+
+    因此这里不能把 `collision.origin` 直接当成 offset，否则会在重新 lowering 时
+    把 $h/2$ 或 $h$ 重复加一次。对于 custom mesh，当前 metadata 尚未显式记录
+    原始 `mesh_offset`，首版保守回退到零位姿，让 preset anchor 贴回 tip joint。
+    """
+
+    if original.collisions:
+        first = original.collisions[0]
+        if first.geometry.kind == "cylinder":
+            length = float(first.geometry.length)
+            cap_rpy = original.collisions[1].origin.rpy if len(original.collisions) > 1 else (0.0, 0.0, 0.0)
+            return PoseCfg(
+                pos=(first.origin.pos[0], first.origin.pos[1] - length / 2.0, first.origin.pos[2]),
+                rpy=cap_rpy,
+            )
+        if first.geometry.kind == "box":
+            size_y = float(first.geometry.size[1])
+            cap_rpy = original.collisions[1].origin.rpy if len(original.collisions) > 1 else first.origin.rpy
+            return PoseCfg(
+                pos=(first.origin.pos[0], first.origin.pos[1] - size_y / 2.0, first.origin.pos[2]),
+                rpy=cap_rpy,
+            )
+    return PoseCfg()
+
+
+def _sample_tip_spec(cfg: TipReplaceCfg, current_tip: JointCfg | None) -> dict[str, Any]:
+    r"""采样一个完整 tip spec。
+
+    离散变量 `tip_type` 来自 `tip_range` proposal 分布；连续变量来自 `scale` 与
+    可选 `cs_ratio`。该函数只输出最小语义参数，真正的 collision / visual /
+    inertial 在 `_build_replacement_tip_joint()` 中由 builder lowering。
+    """
+
+    tip_type = _draw_tip_type(cfg.tip_range)
+    scale = _sample_scale(cfg, tip_type=tip_type)
+    spec: dict[str, Any] = {"tip_type": tip_type, "scale": scale}
+    if tip_type == "cs":
+        radius, base_ratio = _current_cs_radius_and_ratio(current_tip)
+        scaled_radius = max(_MIN_POSITIVE, radius * scale)
+        ratio = _sample_cs_ratio(cfg, current_ratio=base_ratio)
+        spec.update(
+            {
+                "radius": scaled_radius,
+                "height": max(_MIN_POSITIVE, scaled_radius * ratio),
+                "cs_ratio": ratio,
+            }
+        )
+    return spec
+
+
+def _current_cs_radius_and_ratio(current_tip: JointCfg | None) -> tuple[float, float]:
+    r"""从当前 tip 中估计 `cs` 的半径 $r$ 与高半比 $\lambda=h/r$。"""
+
+    if current_tip is None:
+        return 0.012, 1.0
+
+    radius: float | None = None
+    height: float | None = None
+    for element in current_tip.collisions:
+        geometry = element.geometry
+        if geometry.kind == "cylinder":
+            radius = float(geometry.radius)
+            height = float(geometry.length)
+            break
+    if radius is None:
+        for element in current_tip.collisions:
+            geometry = element.geometry
+            if geometry.kind == "sphere":
+                radius = float(geometry.radius)
+                break
+    radius = max(_MIN_POSITIVE, float(radius if radius is not None else 0.012))
+    ratio = max(_MIN_POSITIVE, float(height) / radius) if height is not None else 1.0
+    return radius, ratio
+
+
+def _sample_scale(cfg: TipReplaceCfg, *, tip_type: str) -> float:
+    r"""按 tip_type 解析并采样无量纲 scale。"""
+
+    low, high = _scale_range_for_tip(cfg.scale, tip_type)
+    sampler = _make_range_sampler(
+        (low, high),
+        distrib=cfg.distrib,
+        boundary_policy=cfg.boundary_policy,
     )
+    return max(_MIN_POSITIVE, float(sampler()))
 
 
-def _scale_mesh_tip_offsets(tip_joint, scale_factor: float) -> None:
-    r"""对 mesh tip 的局部 x/z origin 做比例缩放，保持 y 轴贴合语义不动。"""
+def _sample_cs_ratio(cfg: TipReplaceCfg, *, current_ratio: float) -> float:
+    r"""采样 `cs` 高半比 $\lambda=h/r$。"""
 
-    # mesh tip 的 y 轴一般是贴合 / 延伸方向，因此这里只缩放横向展开轴，
-    # 避免把接合方向也一并扯大。
-    for collection_name in ("collisions", "visuals"):
-        collection = getattr(tip_joint, collection_name)
-        for geom_index, element in enumerate(collection):
-            pos = list(element.origin.pos)
-            for axis_index in (0, 2):
-                pos[axis_index] = pos[axis_index] * float(scale_factor)
-            collection[geom_index] = element.replace(origin=PoseCfg(pos=tuple(pos), rpy=element.origin.rpy))
-    tip_joint.metadata = {**tip_joint.metadata, "post_mutate_tip_mode": "mesh_perturb"}
+    if cfg.cs_ratio is None:
+        return max(_MIN_POSITIVE, float(current_ratio))
+
+    mode, ratio_range = _resolve_cs_ratio_range(cfg.cs_ratio)
+    sampler = _make_range_sampler(
+        ratio_range,
+        distrib=cfg.distrib,
+        boundary_policy=cfg.boundary_policy,
+    )
+    sampled = float(sampler())
+    if mode == "add":
+        return max(_MIN_POSITIVE, float(current_ratio) + sampled)
+    return max(_MIN_POSITIVE, sampled)
 
 
-def _resolved_self_mode(cfg: TipReplaceCfg) -> str:
-    r"""解析 `self_mode`，首版 dict 混合模式默认落到 `"same"`。"""
+def _resolve_active_modes(self_mode: Any) -> tuple[str, ...]:
+    r"""把 `self_mode` lowering 成当前 cfg 可能采样到的 mode 集合。"""
 
+    if self_mode is None:
+        return (_MODE_SAME,)
+    if isinstance(self_mode, str):
+        if self_mode not in _ALL_SELF_MODES:
+            raise ValueError(f"unsupported tip_replace self_mode: {self_mode!r}")
+        return (self_mode,)
+    if not isinstance(self_mode, dict):
+        raise TypeError(f"tip_replace.self_mode must be str | dict[str, float] | None, got {type(self_mode).__name__}")
+
+    positive_modes: list[str] = []
+    total = 0.0
+    for mode_name, probability in self_mode.items():
+        if mode_name not in _ALL_SELF_MODES:
+            raise ValueError(f"unsupported tip_replace self_mode key: {mode_name!r}")
+        prob = float(probability)
+        if prob < 0.0:
+            raise ValueError(f"tip_replace.self_mode probability must be non-negative, got {mode_name!r}={prob!r}")
+        total += prob
+        if prob > _MODE_TOLERANCE:
+            positive_modes.append(mode_name)
+
+    if not positive_modes:
+        raise ValueError("tip_replace.self_mode dict must contain at least one positive-probability mode")
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=_MODE_TOLERANCE):
+        raise ValueError(f"tip_replace.self_mode probabilities must sum to 1, got {total!r}")
+    return tuple(positive_modes)
+
+
+def _draw_resolved_mode(cfg: TipReplaceCfg) -> str:
+    r"""按 `self_mode` 为当前样本解析最终 mode。"""
+
+    if cfg.self_mode is None:
+        return _MODE_SAME
     if isinstance(cfg.self_mode, str):
         return cfg.self_mode
-    return "same"
+
+    threshold = random.random()
+    cumulative = 0.0
+    last_mode = _MODE_SAME
+    for mode_name, probability in cfg.self_mode.items():
+        prob = float(probability)
+        if prob <= _MODE_TOLERANCE:
+            continue
+        cumulative += prob
+        last_mode = mode_name
+        if threshold <= cumulative + _MODE_TOLERANCE:
+            return mode_name
+    return last_mode
+
+
+def _resolve_tip_distribution(tip_range: list[str] | dict[str, float] | None) -> dict[str, float]:
+    r"""把 `tip_range` 解析为 tip_type proposal 概率表。"""
+
+    if tip_range is None:
+        probability = 1.0 / len(_DEFAULT_TIP_TYPES)
+        return {tip_type: probability for tip_type in _DEFAULT_TIP_TYPES}
+    if isinstance(tip_range, list):
+        if not tip_range:
+            raise ValueError("tip_replace.tip_range list must not be empty")
+        normalized = tuple(_normalize_tip_type(tip_type) for tip_type in tip_range)
+        probability = 1.0 / len(normalized)
+        return {tip_type: probability for tip_type in normalized}
+    if not isinstance(tip_range, dict):
+        raise TypeError(f"tip_replace.tip_range must be list[str] | dict[str, float] | None, got {type(tip_range).__name__}")
+
+    distribution: dict[str, float] = {}
+    total = 0.0
+    for tip_type, probability in tip_range.items():
+        normalized = _normalize_tip_type(tip_type)
+        prob = float(probability)
+        if prob < 0.0:
+            raise ValueError(f"tip_replace.tip_range probability must be non-negative, got {tip_type!r}={prob!r}")
+        total += prob
+        if prob > _MODE_TOLERANCE:
+            distribution[normalized] = prob
+    if not distribution:
+        raise ValueError("tip_replace.tip_range dict must contain at least one positive-probability tip_type")
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=_MODE_TOLERANCE):
+        raise ValueError(f"tip_replace.tip_range probabilities must sum to 1, got {total!r}")
+    return distribution
+
+
+def _draw_tip_type(tip_range: list[str] | dict[str, float] | None) -> str:
+    r"""按 proposal 分布采样一个 tip_type。"""
+
+    distribution = _resolve_tip_distribution(tip_range)
+    threshold = random.random()
+    cumulative = 0.0
+    last_tip_type = next(iter(distribution))
+    for tip_type, probability in distribution.items():
+        cumulative += float(probability)
+        last_tip_type = tip_type
+        if threshold <= cumulative + _MODE_TOLERANCE:
+            return tip_type
+    return last_tip_type
+
+
+def _normalize_tip_type(tip_type: Any) -> str:
+    r"""规范化并校验 tip_type。"""
+
+    normalized = str(tip_type).lower()
+    if normalized not in set(_DEFAULT_TIP_TYPES):
+        raise ValueError(f"unsupported tip_replace tip_type: {tip_type!r}")
+    return normalized
 
 
 def _scale_range_for_tip(scale: Vector2 | dict[str, Vector2], tip_type: str) -> Vector2:
-    r"""按 tip 类型解析无量纲 scale 采样范围。"""
+    r"""按 tip_type 解析无量纲 scale 采样范围。"""
 
     if isinstance(scale, dict):
         return scale.get(tip_type, scale.get("shared", (1.0, 1.0)))
     return scale
 
 
-def _current_tip_type(tip_joint) -> str:
-    r"""从 metadata 中取当前 tip 类型，缺失时回退到 `shared`。"""
+def _validate_scale_ranges(scale: Vector2 | dict[str, Vector2]) -> None:
+    r"""校验所有 scale 区间都为正数。"""
 
-    return str(tip_joint.metadata.get("tip_type", tip_joint.metadata.get("post_mutate_tip_body", "shared")))
+    ranges = scale.values() if isinstance(scale, dict) else (scale,)
+    for value_range in ranges:
+        low, high = float(value_range[0]), float(value_range[1])
+        if low <= 0.0 or high <= 0.0:
+            raise ValueError(f"tip_replace.scale range must be positive, got {value_range!r}")
 
 
-__all__ = ["TipReplaceCfg", "TipReplaceMutator"]
+def _validate_cs_ratio(cs_ratio: Vector2 | dict[Literal["add", "abs"], Vector2] | None) -> None:
+    r"""校验 `cs_ratio` 输入结构。"""
+
+    if cs_ratio is None:
+        return
+    _resolve_cs_ratio_range(cs_ratio)
+
+
+def _resolve_cs_ratio_range(cs_ratio: Vector2 | dict[Literal["add", "abs"], Vector2]) -> tuple[str, Vector2]:
+    r"""解析 `cs_ratio` 为 `(mode, range)`。"""
+
+    if isinstance(cs_ratio, dict):
+        if set(cs_ratio) == {"add"}:
+            return "add", _checked_ratio_range(cs_ratio["add"], allow_negative=True)
+        if set(cs_ratio) == {"abs"}:
+            return "abs", _checked_ratio_range(cs_ratio["abs"], allow_negative=False)
+        raise ValueError("tip_replace.cs_ratio dict must contain exactly one key: 'add' or 'abs'")
+    return "abs", _checked_ratio_range(cs_ratio, allow_negative=False)
+
+
+def _checked_ratio_range(value_range: Vector2, *, allow_negative: bool) -> Vector2:
+    r"""校验并返回高半比区间。"""
+
+    low, high = float(value_range[0]), float(value_range[1])
+    if not allow_negative and (low <= 0.0 or high <= 0.0):
+        raise ValueError(f"tip_replace.cs_ratio abs range must be positive, got {value_range!r}")
+    return (low, high)
+
+
+def _normalize_sample_payload(
+    sampled_params: dict[str, Any] | None,
+    cfg: TipReplaceCfg,
+    *,
+    target: HandCfg,
+) -> dict[str, Any]:
+    r"""把外部传入的 sampled params 统一规约成结构化 `sample`。
+
+    支持两种入口：
+
+    1. 新 contract：`{"sample": {...}}`；
+    2. 少量测试便捷入口：直接传入 `{"resolved_self_mode": ..., "finger_specs": ...}`。
+    """
+
+    sampled = dict(sampled_params or {})
+    sample = sampled.get("sample")
+    if isinstance(sample, dict):
+        return dict(sample)
+    if "resolved_self_mode" in sampled:
+        return sampled
+    if cfg.self_mode == _MODE_IDENTITY:
+        return {"resolved_self_mode": _MODE_IDENTITY, "finger_specs": {}}
+    return TipReplaceMutator(cfg).sample_one_for_mode(target, resolved_mode=_draw_resolved_mode(cfg))
+
+
+def iter_tip_types_from_sample(sample: dict[str, Any] | None) -> list[str]:
+    r"""从 `tip_replace` sample payload 中取出所有 per-finger tip_type。
+
+    这个函数供 generator summary 统计复用。`tip_range` 是 proposal 分布，因此
+    summary 需要在 result 之外也能从 sampled_terms 中读取 proposal tip_type。
+    """
+
+    if not isinstance(sample, dict):
+        return []
+    payload = sample.get("sample") if "sample" in sample else sample
+    if not isinstance(payload, dict):
+        return []
+    finger_specs = payload.get("finger_specs")
+    if not isinstance(finger_specs, dict):
+        return []
+    tip_types: list[str] = []
+    for spec in finger_specs.values():
+        if isinstance(spec, dict) and "tip_type" in spec:
+            tip_types.append(str(spec["tip_type"]))
+    return tip_types
+
+
+__all__ = ["TipReplaceCfg", "TipReplaceMutator", "iter_tip_types_from_sample"]

@@ -3,7 +3,7 @@
 这组测试覆盖当前已经实现的两类“非拓扑”工具：
 
 1. `link_scale`：改 joint origin 的有效长度
-2. `tip_replace`：改末端 tip 的主体几何或 mesh 局部位姿
+2. `tip_replace`：把末端 tip child link 重采为完整 tip spec
 
 它们都不改 finger 链的 parent/child 关系，因此适合作为 mutate 第二阶段里
 风险较低的实现切片。
@@ -303,55 +303,148 @@ def test_link_scale_mutator_preserves_cylinder_when_cross_section_stays_isotropi
     assert geom.kind == "cylinder"
 
 
-def test_tip_replace_mutator_swaps_primitive_tip_body_geometry():
-    """`geometry_swap` 模式应把 `cs` tip 的主体从 cylinder 换成 box。"""
+def test_tip_replace_identity_records_sample_without_changing_tip_geometry():
+    r"""`identity` mode 应显式记录 provenance，但不改变 tip embodiment。"""
 
     hand = _build_allegro_hand()
     before_tip_joint = _finger_by_name(hand, "index").tip_joint
-    before_inertial = before_tip_joint.inertial
     mutated = TipReplaceMutator(
         TipReplaceCfg(
-            mode="geometry_swap",
-            target_geometry="box",
-            self_mode="general",
-            scale=(1.0, 1.0),
+            self_mode="identity",
         )
-    ).mutate(hand, sampled_params={"index::scale": 1.0})
+    ).mutate(hand)
 
     assert mutated is not None
     tip_joint = _finger_by_name(mutated, "index").tip_joint
-    assert {collision.geometry.kind for collision in tip_joint.collisions} == {"box", "sphere"}
-    assert {visual.geometry.kind for visual in tip_joint.visuals} == {"box", "sphere"}
-    assert tip_joint.inertial is not None
-    assert tip_joint.inertial.mass > 0.0
-    assert tip_joint.inertial.origin.pos[1] > tip_joint.collisions[0].origin.pos[1]
-    assert tip_joint.inertial.inertia.ixx > 0.0
-    assert tip_joint.inertial.inertia.iyy > 0.0
-    assert tip_joint.inertial.inertia.izz > 0.0
-    assert not math.isclose(tip_joint.inertial.mass, before_inertial.mass, rel_tol=0.0, abs_tol=1e-12)
-    assert not math.isclose(tip_joint.inertial.inertia.ixx, 1e-7, rel_tol=0.0, abs_tol=1e-12)
+    assert tip_joint.collisions[0].geometry.kind == before_tip_joint.collisions[0].geometry.kind
+    assert tip_joint.visuals[0].geometry.kind == before_tip_joint.visuals[0].geometry.kind
+    assert mutated.metadata["post_mutate_samples"]["tip_replace"]["resolved_self_mode"] == "identity"
 
 
-def test_tip_replace_mutator_perturbs_custom_mesh_tip_origin():
-    """`mesh_perturb` 模式应对 custom mesh tip 的局部原点做比例扰动。"""
+def test_tip_replace_same_broadcasts_one_custom_tip_spec_to_all_fingers():
+    r"""`same` mode 应把同一个 tip_type 和连续参数广播到所有目标 finger。"""
 
-    hand = _build_custom_tip_hand()
-    before_origin = _finger_by_name(hand, "index").tip_joint.collisions[0].origin.pos
+    hand = _build_allegro_hand()
+    sample = {
+        "resolved_self_mode": "same",
+        "finger_specs": {
+            finger.name: {"tip_type": "round", "scale": 1.05}
+            for finger in hand.fingers
+        },
+    }
 
     mutated = TipReplaceMutator(
         TipReplaceCfg(
-            mode="mesh_perturb",
-            self_mode="general",
-            scale=(1.1, 1.1),
+            self_mode="same",
+            tip_range=["round"],
+            scale=(1.05, 1.05),
         )
-    ).mutate(
-        hand,
-        sampled_params={
-            "index::scale": 1.1,
-        },
-    )
+    ).mutate(hand, sampled_params={"sample": sample})
 
     assert mutated is not None
-    after_origin = _finger_by_name(mutated, "index").tip_joint.collisions[0].origin.pos
-    assert after_origin != before_origin
-    assert math.isclose(after_origin[1], before_origin[1], rel_tol=0.0, abs_tol=1e-12)  # 当前 y=0，规则应保持它贴在轴上
+    tip_samples = mutated.metadata["post_mutate_samples"]["tip_replace"]["finger_specs"]
+    assert {payload["tip_type"] for payload in tip_samples.values()} == {"round"}
+    assert {collision.geometry.kind for collision in _finger_by_name(mutated, "index").tip_joint.collisions} == {"mesh"}
+    assert _finger_by_name(mutated, "index").tip_joint.metadata["post_mutate_tip_type"] == "round"
+    assert _finger_by_name(mutated, "middle").tip_joint.metadata["post_mutate_tip_scale"] == 1.05
+
+
+def test_tip_replace_general_allows_per_finger_tip_types():
+    r"""`general` mode 下每根 finger 可拥有不同 tip_type。"""
+
+    hand = _build_allegro_hand()
+    sample = {
+        "resolved_self_mode": "general",
+        "finger_specs": {
+            "thumb": {"tip_type": "cs", "scale": 1.0, "radius": 0.012, "height": 0.012, "cs_ratio": 1.0},
+            "index": {"tip_type": "round", "scale": 1.0},
+            "middle": {"tip_type": "wedge", "scale": 1.0},
+            "ring": {"tip_type": "thinner", "scale": 1.0},
+        },
+    }
+
+    mutated = TipReplaceMutator(
+        TipReplaceCfg(
+            self_mode="general",
+            tip_range=["cs", "round", "wedge", "thinner"],
+            scale=(1.0, 1.0),
+        )
+    ).mutate(hand, sampled_params={"sample": sample})
+
+    assert mutated is not None
+    assert _finger_by_name(mutated, "thumb").tip_joint.collisions[0].geometry.kind == "cylinder"
+    assert _finger_by_name(mutated, "index").tip_joint.collisions[0].geometry.kind == "mesh"
+    assert _finger_by_name(mutated, "middle").tip_joint.metadata["post_mutate_tip_type"] == "wedge"
+    assert _finger_by_name(mutated, "ring").tip_joint.metadata["post_mutate_tip_type"] == "thinner"
+
+
+def test_tip_replace_applies_thumb_functional_phase_for_custom_mesh_tip():
+    r"""post-mutate 把 thumb 从 `cs` 换到 custom mesh 时，也必须保留 thumb 功能相位。"""
+
+    hand = _build_allegro_hand()
+    sample = {
+        "resolved_self_mode": "general",
+        "finger_specs": {
+            "thumb": {"tip_type": "leap_cube", "scale": 1.0},
+            "index": {"tip_type": "leap_cube", "scale": 1.0},
+            "middle": {"tip_type": "cs", "scale": 1.0, "radius": 0.012, "height": 0.012, "cs_ratio": 1.0},
+            "ring": {"tip_type": "cs", "scale": 1.0, "radius": 0.012, "height": 0.012, "cs_ratio": 1.0},
+        },
+    }
+
+    mutated = TipReplaceMutator(
+        TipReplaceCfg(
+            self_mode="general",
+            tip_range=["cs", "leap_cube"],
+            scale=(1.0, 1.0),
+        )
+    ).mutate(hand, sampled_params={"sample": sample})
+
+    assert mutated is not None
+    thumb_tip = _finger_by_name(mutated, "thumb").tip_joint
+    index_tip = _finger_by_name(mutated, "index").tip_joint
+    assert thumb_tip.collisions[0].geometry.kind == "mesh"
+    assert index_tip.collisions[0].geometry.kind == "mesh"
+    assert math.isclose(thumb_tip.collisions[0].origin.rpy[1], -math.pi, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(index_tip.collisions[0].origin.rpy[1], -math.pi / 2.0, rel_tol=0.0, abs_tol=1e-12)
+    assert thumb_tip.metadata["thumb_functional_tip_phase_rpy"] == (0.0, -math.pi / 2.0, 0.0)
+    assert thumb_tip.metadata["mesh_origin_rpy"] == thumb_tip.collisions[0].origin.rpy
+
+
+def test_tip_replace_cs_ratio_keeps_radius_and_changes_height():
+    r"""`cs_ratio` 应固定半径 $r$，按 $\lambda=h/r$ 改写圆柱高度。"""
+
+    hand = _build_allegro_hand()
+    before_tip = _finger_by_name(hand, "index").tip_joint
+    before_radius = before_tip.collisions[0].geometry.radius
+    sample = {
+        "resolved_self_mode": "same",
+        "finger_specs": {
+            finger.name: {
+                "tip_type": "cs",
+                "scale": 1.0,
+                "radius": before_radius,
+                "height": before_radius * 1.5,
+                "cs_ratio": 1.5,
+            }
+            for finger in hand.fingers
+        },
+    }
+
+    mutated = TipReplaceMutator(
+        TipReplaceCfg(
+            self_mode="same",
+            tip_range=["cs"],
+            scale=(1.0, 1.0),
+            cs_ratio={"abs": (1.5, 1.5)},
+        )
+    ).mutate(hand, sampled_params={"sample": sample})
+
+    assert mutated is not None
+    tip_joint = _finger_by_name(mutated, "index").tip_joint
+    assert math.isclose(tip_joint.collisions[0].geometry.radius, before_radius, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(tip_joint.collisions[0].geometry.length, before_radius * 1.5, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(tip_joint.collisions[1].origin.pos[1], before_radius * 1.5, rel_tol=0.0, abs_tol=1e-12)
+    assert tip_joint.inertial is not None
+    assert tip_joint.inertial.mass > 0.0
+    assert tip_joint.inertial.inertia.ixx > 0.0
