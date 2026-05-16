@@ -18,10 +18,10 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ._generation_result import HandGenerationResult
+from ..result import HandGenerationResult
 
 if TYPE_CHECKING:
-    from .hand_generator import HandGenerator, HandGeneratorCfg
+    from ..hand_generator import HandGenerator, HandGeneratorCfg
 
 
 @dataclass(frozen=True)
@@ -157,7 +157,7 @@ def _generate_premade_worker(
 ) -> PremadeWorkerResult:
     r"""在独立 worker 中执行一个 pre-made 样本任务。"""
 
-    from .hand_generator import HandGenerator  # 局部导入，避免主模块导入时形成更长依赖链
+    from ..hand_generator import HandGenerator  # 局部导入，避免主模块导入时形成更长依赖链
 
     worker_generator = HandGenerator(cfg)  # worker 内部独立持有 runtime façade，避免共享可变状态
     worker_context = worker_generator._make_worker_run_context(Path(run_root))

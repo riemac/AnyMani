@@ -33,7 +33,7 @@ from assets.exporter.hand_exporter import HandExporterCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from assets.generator.mutate import HandMutatorCfg, MountPerturbCfg
 from assets.presets import make_human_like_builder_cfg
-from assets.generator._recipe_loader import RecipeLoader
+from assets.generator.runtime.recipe_loader import RecipeLoader
 from assets.validator.hand_rules import HandValidatorCfg
 
 

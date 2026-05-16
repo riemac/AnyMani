@@ -72,7 +72,7 @@ class HandGenerationResult:
         if self.hand_cfg is not None:
             # 延迟导入展示层工具，避免把结果包定义再次和 `hand_generator.py`
             # 的主调度逻辑缠回一个文件。
-            from ._tree_render import render_hand_tree_txt
+            from .presentation.tree_render import render_hand_tree_txt
 
             self.tree_txt = render_hand_tree_txt(self.hand_cfg)  # 终端友好的 ASCII 树
         return self

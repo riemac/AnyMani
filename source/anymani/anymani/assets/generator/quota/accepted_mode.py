@@ -16,11 +16,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..asset_base import HandCfg
-from ._generation_result import HandGenerationResult
+from ...asset_base import HandCfg
+from ..result import HandGenerationResult
 
 try:
-    from .mutate import HandMutator, HandMutatorCfg, LimitTweakCfg, MountPerturbCfg, TipReplaceCfg
+    from ..mutate import HandMutator, HandMutatorCfg, LimitTweakCfg, MountPerturbCfg, TipReplaceCfg
 except Exception:
     class MountPerturbCfg:  # type: ignore[no-redef]
         r"""mutate package 不可用时的占位类型，保持 generator fallback 可导入。"""

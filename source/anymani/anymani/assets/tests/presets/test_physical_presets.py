@@ -13,7 +13,7 @@ import math
 from pathlib import Path
 
 from assets.builder.hand_builders import HumanLikeHandBuilder
-from assets.generator._connectivity_lowering import JointDeleteCfg, JointDeleteMutator
+from assets.generator.premade.connectivity_lowering import JointDeleteCfg, JointDeleteMutator
 from assets.presets._physical_profile_extractor import extract_profile
 from assets.presets import get_finger_builder_preset, get_finger_physical_profile, make_human_like_builder_cfg
 

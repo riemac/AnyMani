@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from ..asset_base import HandCfg
+from ...asset_base import HandCfg
 
 
 def _axis_label(axis: tuple[float, float, float]) -> str:

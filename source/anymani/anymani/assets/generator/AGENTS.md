@@ -8,4 +8,18 @@
 
 ## hand_generator.py 的瘦身原则
 
-`hand_generator.py` 是核心文件，只保留 `HandGeneratorCfg` 和 `HandGenerator` 这两个核心配置类/运行时类。helper 函数、工具函数、辅助数据结构不要写进 `hand_generator.py`，而是放到本目录下的其他文件（如 `_premade.py`、`_recolor.py`）或新建文件里。
+`hand_generator.py` 是核心文件，只保留 `HandGeneratorCfg`、`HandGenerator`、对外主入口方法，以及少量必须和 façade 状态绑定的运行时方法。helper 函数、工具函数、辅助数据结构不要写进 `hand_generator.py`。
+
+当前目录路由固定为：
+
+- `premade/`：pre-made topology / connectivity / identity / batch orchestration
+- `runtime/`：run 生命周期、recipe I/O、mutate-only restore、quota batch helper
+- `quota/`：accepted/output mode quota 的分配与 forced-mode lowering
+- `presentation/`：recolor lowering、ASCII tree 等展示层工具
+- `mutate/`：post-mutate term 与 pipeline
+
+新增模块优先进入上述语义子包；不要再在 `generator/` 根目录新增 `_xxx.py`。
+
+## 工程优化
+
+#TODO:包括GPU并行（pre-made也好，post-mutate也好，采样也好，apply也好，都尽可能的并行），Patch / Delta Merge / Deferred Execution 等规则和约定

@@ -6,14 +6,14 @@ import random
 from itertools import product
 from typing import Any, Literal
 
-from ..asset_base import HandCfg
-from ..presets.connectivity_presets import (
+from ...asset_base import HandCfg
+from ...presets.connectivity_presets import (
     get_finger_connectivity_preset_data,
     get_hand_connectivity_preset_data,
     list_finger_connectivity_preset_names,
 )
-from ._premade_identity import resolve_topology_output_identity
-from ._premade_topology import (
+from .identity import resolve_topology_output_identity
+from .topology import (
     PremadeTopologySpec,
     candidate_hand_preset_names,
     extract_premade_topology_metadata,
@@ -220,7 +220,7 @@ def apply_connectivity_preset(
 ) -> tuple[HandCfg, dict[str, Any]]:
     r"""把 connectivity 选择 lower 成显式的 joint delete + regroup 结果。"""
 
-    from ._connectivity_lowering import JointDeleteCfg, JointDeleteMutator
+    from .connectivity_lowering import JointDeleteCfg, JointDeleteMutator
 
     mutated = hand_cfg.copy()
     topology_metadata = extract_premade_topology_metadata(mutated, hand_preset_name=hand_preset_name)

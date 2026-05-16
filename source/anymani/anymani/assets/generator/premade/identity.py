@@ -6,11 +6,11 @@ import hashlib
 from pathlib import Path
 from typing import Any, Literal
 
-from ..asset_base import HandCfg
-from ..presets.connectivity_presets import _remaining_revolute_count as _connectivity_remaining_revolute_count
-from ..presets.connectivity_presets import get_finger_connectivity_preset_data
-from ._generation_result import HandGenerationResult
-from ._premade_topology import PremadeTopologySpec
+from ...asset_base import HandCfg
+from ...presets.connectivity_presets import _remaining_revolute_count as _connectivity_remaining_revolute_count
+from ...presets.connectivity_presets import get_finger_connectivity_preset_data
+from ..result import HandGenerationResult
+from .topology import PremadeTopologySpec
 
 
 _PREMADE_SLOT_ORDER: tuple[str, ...] = ("thumb", "index", "middle", "ring", "little")

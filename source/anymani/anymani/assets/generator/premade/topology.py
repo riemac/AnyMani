@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from itertools import product
 from typing import Any, Literal
 
-from ..asset_base import HandCfg
-from ..asset_builders import HandBuilder
-from ..presets.hand_presets import get_hand_builder_preset_data, make_human_like_builder_cfg_from_preset
-from ..presets.resolver import resolve_finger_builder_cfg
+from ...asset_base import HandCfg
+from ...asset_builders import HandBuilder
+from ...presets.hand_presets import get_hand_builder_preset_data, make_human_like_builder_cfg_from_preset
+from ...presets.resolver import resolve_finger_builder_cfg
 
 
 _PREMADE_SLOT_ORDER: tuple[str, ...] = ("thumb", "index", "middle", "ring", "little")

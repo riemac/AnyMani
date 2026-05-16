@@ -1,7 +1,7 @@
 r"""recolored 调色盘数据表。
 
 本文件只保存**稳定的颜色数据**，不承担运行时“怎么把颜色分配到哪条 link”
-这类逻辑。真正的 lowering / 推断 / 覆盖规则统一放在 `generator/_recolor.py`，
+这类逻辑。真正的 lowering / 推断 / 覆盖规则统一放在 `generator/presentation/recolor.py`，
 这样可以把：
 
 - `presets/`：稳定数据

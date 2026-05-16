@@ -17,7 +17,7 @@ r"""pre-made connectivity lowering 回归测试。
 from __future__ import annotations
 
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
-from assets.generator._connectivity_lowering import JointDeleteCfg, JointDeleteMutator
+from assets.generator.premade.connectivity_lowering import JointDeleteCfg, JointDeleteMutator
 from assets.presets import make_human_like_builder_cfg
 
 

@@ -6,7 +6,7 @@ r"""post-mutate accepted/output self_mode quota 测试。
 
 from __future__ import annotations
 
-from assets.generator._accepted_mode_quota import LIMIT_TWEAK_MODE_ORDER, allocate_accepted_mode_quota
+from assets.generator.quota.accepted_mode import LIMIT_TWEAK_MODE_ORDER, allocate_accepted_mode_quota
 
 
 def test_allocate_accepted_mode_quota_exact_case():

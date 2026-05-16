@@ -16,9 +16,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, TypeAlias, cast
 
-from ..asset_base import HandCfg
-from ..asset_schema_core import MaterialCfg, _ensure_tuple
-from ..presets.color_presets import COLOR_PRESETS, DEFAULT_COLOR_PRESET_NAME
+from ...asset_base import HandCfg
+from ...asset_schema_core import MaterialCfg, _ensure_tuple
+from ...presets.color_presets import COLOR_PRESETS, DEFAULT_COLOR_PRESET_NAME
 
 
 RgbaTuple: TypeAlias = tuple[float, float, float, float]

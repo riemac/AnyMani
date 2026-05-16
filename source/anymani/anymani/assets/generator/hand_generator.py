@@ -42,38 +42,37 @@ from ..asset_base import AssetCfgBase, HandCfg
 from ..asset_builders import HandBuilder, HandBuilderCfg
 from ..exporter import HandExporter, HandExporterCfg
 from ..validator import HandValidator, HandValidatorCfg
-from ._generation_result import HandGenerationResult
-from ._accepted_mode_quota import (
+from .result import HandGenerationResult
+from .quota.accepted_mode import (
     AcceptedModeTermSpec,
-    allocate_accepted_mode_quota,
     expand_quota_schedule as _expand_quota_schedule,
     force_mode_terms as _force_mode_terms,
     mode_term_specs as _mode_term_specs,
     resolved_term_mode as _resolved_term_mode,
 )
-from ._post_mutate_restore import PostMutateSource, load_post_mutate_source
-from ._premade_connectivity import (
+from .runtime.restore import PostMutateSource, load_post_mutate_source
+from .premade.connectivity import (
     apply_connectivity_preset as _apply_premade_connectivity_preset,
     connectivity_names_for_hand_preset as _connectivity_names_for_premade_hand_preset,
     resolve_single_premade_selection as _resolve_single_premade_selection,
 )
-from ._premade_identity import resolve_export_root as _resolve_premade_export_root, stable_premade_id
-from ._premade_normalize import normalize_connectivity_mapping, normalize_name_list
-from ._premade_topology import (
+from .premade.identity import resolve_export_root as _resolve_premade_export_root, stable_premade_id
+from .premade.normalize import normalize_connectivity_mapping, normalize_name_list
+from .premade.topology import (
     build_base_hand as _build_premade_base_hand,
     candidate_hand_preset_names as _candidate_premade_hand_preset_names,
 )
-from ._premade_batch import (
+from .premade.batch import (
     build_premade_tasks,
     run_premade_parallel,
     run_premade_serial,
 )
-from ._recolor import RecolorSpec, describe_recolor_spec, normalize_recolor_spec, resolve_visual_recolor_materials
-from ._run_context import GenerationRunContext
+from .presentation.recolor import RecolorSpec, describe_recolor_spec, normalize_recolor_spec, resolve_visual_recolor_materials
+from .runtime.mutate_quota import run_mutate_batch_with_accepted_mode_quota
+from .runtime.run_context import GenerationRunContext
 
 try:
     from .mutate import HandMutator, HandMutatorCfg
-    from .mutate.tip_replace import iter_tip_types_from_sample as _iter_tip_types_from_sample
 except Exception:
     @dataclass
     class HandMutatorCfg(AssetCfgBase):
@@ -88,11 +87,6 @@ except Exception:
 
     class HandMutator:
         r"""Fallback mutator used when the mutate package is unavailable."""
-
-    def _iter_tip_types_from_sample(sample: dict[str, Any] | None) -> list[str]:
-        r"""Fallback tip-type reader used when the mutate package is unavailable."""
-
-        return []
 
         def __init__(self, cfg: HandMutatorCfg):
             self.cfg = cfg
@@ -381,7 +375,7 @@ class HandGenerator:
 
         if self._run_context is not None:
             return self._run_context
-        from ._recipe_loader import RecipeLoader
+        from .runtime.recipe_loader import RecipeLoader
 
         self._run_context = GenerationRunContext.create(
             self.cfg,
@@ -507,7 +501,7 @@ class HandGenerator:
         这里刻意采用“两层语义分离”：
 
         - 合法 recipe 在 `assets/presets/connectivity_presets.py`
-        - 真正执行删除/重连的 runtime 在 `generator/_connectivity_lowering.py`
+        - 真正执行删除/重连的 runtime 在 `generator/premade/connectivity_lowering.py`
 
         也就是说，本函数本质上做的是：
 
@@ -793,12 +787,14 @@ class HandGenerator:
             accepted_mode_terms = _mode_term_specs(self.cfg.Mutate)
 
             if accepted_mode_terms:
-                yield from self._generate_mutate_batch_with_accepted_mode_quota(
+                yield from run_mutate_batch_with_accepted_mode_quota(
+                    generator=self,
                     mutator=mutator,
                     source_hand=source_hand,
                     accepted_mode_terms=accepted_mode_terms,
                     target_count=target_count,
                     max_attempts=max_attempts,
+                    sample_mutation_terms_fn=_sample_mutation_terms,
                 )
                 return
 
@@ -871,134 +867,6 @@ class HandGenerator:
             yield result
             success_count += 1
 
-    def _generate_mutate_batch_with_accepted_mode_quota(
-        self,
-        *,
-        mutator: HandMutator,
-        source_hand: HandCfg,
-        accepted_mode_terms: dict[str, AcceptedModeTermSpec],
-        target_count: int,
-        max_attempts: int,
-    ) -> Iterator[HandGenerationResult]:
-        r"""按 accepted/output mode quota 执行 mutate-only 批量生成。
-
-        这里兑现的是新的统计 contract：
-
-        - 任一 `self_mode=dict` term 都不再是 proposal prior；
-        - 它描述最终 accepted 样本的该 term 边缘 mode 分布；
-        - 某个 slot 被指定为一组 forced modes 后，validator 拒绝时就在同组 forced modes 内补采；
-        - 任何 shortfall 都 fail-hard，不允许其他 mode 静默填坑。
-        """
-
-        schedules = {
-            term_name: _expand_quota_schedule(
-                allocate_accepted_mode_quota(
-                    spec.probabilities,
-                    target_count,
-                    mode_order=spec.mode_order,
-                    label=f"{term_name}.self_mode",
-                ),
-                mode_order=spec.mode_order,
-            )
-            for term_name, spec in accepted_mode_terms.items()
-        }
-        diagnostics = {
-            term_name: {
-                mode: {
-                    "target_quota": quota,
-                    "proposed": 0,
-                    "accepted": 0,
-                    "emitted": 0,
-                    "shortfall": quota,
-                    "rejected_by_validator": 0,
-                    "rejected_by_unsupported_geometry": 0,
-                    "rejected_by_incomplete_certificate": 0,
-                    "rejected_by_budget": 0,
-                    "representative_failures": [],
-                }
-                for mode, quota in allocate_accepted_mode_quota(
-                    spec.probabilities,
-                    target_count,
-                    mode_order=spec.mode_order,
-                    label=f"{term_name}.self_mode",
-                ).items()
-            }
-            for term_name, spec in accepted_mode_terms.items()
-        }
-        self._ensure_run_context().summary["post_mutate_mode_stats"] = diagnostics
-        tip_type_stats = self._ensure_run_context().summary.setdefault(
-            "post_mutate_tip_type_stats",
-            {"proposed": {}, "accepted": {}},
-        )
-        attempts_used = 0
-
-        for sample_index in range(target_count):
-            forced_modes = {
-                term_name: schedule[sample_index]
-                for term_name, schedule in schedules.items()
-            }  # 每个 accepted 槽位都先固定一组 term-level mode；失败时只在该组合内补采
-            while True:
-                if attempts_used >= max_attempts:
-                    for term_name, mode in forced_modes.items():
-                        diagnostics[term_name][mode]["rejected_by_budget"] += 1
-                    self._update_mode_quota_shortfall(diagnostics)
-                    self._write_run_summary()
-                    raise RuntimeError(
-                        "post-mutate accepted self_mode quota shortfall; "
-                        f"forced_modes={forced_modes!r}, accepted_slots={sample_index}, "
-                        f"attempted={attempts_used}, budget={max_attempts}, diagnostics={diagnostics!r}"
-                    )
-
-                try:
-                    sampled_terms = mutator.sample_batch(source_hand, batch_size=1)[0]
-                except Exception:
-                    sampled_terms = _sample_mutation_terms(mutator, source_hand)
-                sampled_terms = _force_mode_terms(
-                    sampled_terms,
-                    mutator=mutator,
-                    target=source_hand,
-                    forced_modes=forced_modes,
-                )
-                for term_name, mode in forced_modes.items():
-                    diagnostics[term_name][mode]["proposed"] += 1
-                _record_tip_type_counts(tip_type_stats, sampled_terms, bucket="proposed")
-                attempts_used += 1
-
-                result = self._generate_once(
-                    hand_preset_name=None,
-                    connectivity_preset_name=None,
-                    sampled_mutation_terms=sampled_terms,
-                )
-                if result is None:
-                    reason = self._classify_last_rejection()
-                    for term_name, mode in forced_modes.items():
-                        diagnostics[term_name][mode][reason] += 1
-                        failures = diagnostics[term_name][mode]["representative_failures"]
-                        if len(failures) < 5:
-                            failures.append({"reason": reason, "sampled_terms": sampled_terms})
-                    self._update_mode_quota_shortfall(diagnostics)
-                    self._ensure_run_context().summary["post_mutate_mode_stats"] = diagnostics
-                    continue
-
-                for term_name, expected_mode in forced_modes.items():
-                    resolved_mode = _resolved_term_mode(result, sampled_terms, term_name=term_name)
-                    if resolved_mode != expected_mode:
-                        raise RuntimeError(
-                            "accepted self_mode quota invariant broken; "
-                            f"term={term_name!r}, expected mode={expected_mode!r}, got {resolved_mode!r}"
-                        )
-
-                for term_name, mode in forced_modes.items():
-                    diagnostics[term_name][mode]["accepted"] += 1
-                    diagnostics[term_name][mode]["emitted"] += 1
-                _record_tip_type_counts(tip_type_stats, result.metadata.get("post_mutate_samples"), bucket="accepted")
-                self._update_mode_quota_shortfall(diagnostics)
-                self._ensure_run_context().summary["post_mutate_mode_stats"] = diagnostics
-                self._ensure_run_context().summary["post_mutate_tip_type_stats"] = tip_type_stats
-                self._write_run_summary()
-                yield result
-                break
-
     def _update_mode_quota_shortfall(self, diagnostics: dict[str, dict[str, dict[str, Any]]]) -> None:
         r"""基于当前 accepted 计数回写每个 term/mode 的剩余 shortfall。"""
 
@@ -1026,27 +894,6 @@ class HandGenerator:
                     return "rejected_by_incomplete_certificate"
             return "rejected_by_validator"
         return "rejected_by_validator"
-
-
-def _record_tip_type_counts(stats: dict[str, dict[str, int]], samples: Any, *, bucket: str) -> None:
-    r"""把 `tip_replace` 的 per-finger tip_type 计数写入 summary。
-
-    `tip_range` 在 v1 中是 proposal 分布，而不是 accepted quota。因此这里同时
-    记录 proposed 与 accepted，让研究者能直接观察 validator 是否对某些 tip_type
-    产生偏置。
-    """
-
-    if not isinstance(samples, dict):
-        return
-    tip_replace_sample = samples.get("tip_replace")
-    tip_types = _iter_tip_types_from_sample(tip_replace_sample)
-    if not tip_types:
-        return
-    bucket_stats = stats.setdefault(bucket, {})
-    for tip_type in tip_types:
-        bucket_stats[tip_type] = int(bucket_stats.get(tip_type, 0)) + 1
-
-
 __all__ = [
     "HandGenerationResult",
     "HandGeneratorCfg",

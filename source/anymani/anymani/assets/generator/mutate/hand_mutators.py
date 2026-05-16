@@ -11,7 +11,7 @@ r"""向后兼容的 re-export 桩（已拆分到各独立模块）。
 此文件保留仅为不破坏已有代码的 import 路径。
 """
 
-from ._base import MutatorBaseCfg
+from .base import MutatorBaseCfg
 from .limit_tweak import LimitTweakCfg, LimitTweakMutator
 from .link_scale import LinkScaleCfg, LinkScaleMutator
 from .mount_perturb import MountPerturbCfg, MountPerturbMutator

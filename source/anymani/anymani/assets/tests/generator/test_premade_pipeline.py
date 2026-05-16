@@ -16,7 +16,7 @@ import pytest
 import yaml
 
 import assets.generator.hand_generator as hand_generator_module
-import assets.generator._premade_batch as premade_batch_module
+import assets.generator.premade.batch as premade_batch_module
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.exporter.urdf_writer import UrdfWriter, UrdfWriterCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg

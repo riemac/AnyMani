@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 from ...asset_base import HandCfg
 from ...asset_schema_core import JointLimitCfg, Vector2
-from ._base import HandPatch, MutatorBase, MutatorBaseCfg, _make_range_sampler
+from .base import HandPatch, MutatorBase, MutatorBaseCfg, _make_range_sampler
 
 
 _MODE_IDENTITY = "identity"

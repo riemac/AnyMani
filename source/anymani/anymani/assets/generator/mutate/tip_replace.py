@@ -30,7 +30,7 @@ from ...asset_base import HandCfg, JointCfg
 from ...asset_schema_core import PoseCfg, Vector2
 from ...builder.joint_builders_custom import CustomTipBuilderCfg, apply_thumb_functional_tip_phase
 from ...builder.joint_builders_primitive import PrimJointBuilderCfg
-from ._base import HandPatch, MutatorBase, MutatorBaseCfg, _make_range_sampler
+from .base import HandPatch, MutatorBase, MutatorBaseCfg, _make_range_sampler
 
 
 _MODE_IDENTITY = "identity"

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...asset_base import AssetCfgBase, HandCfg
-from ._base import HandPatch, MutatorBase, MutatorBaseCfg, _sample_value
+from .base import HandPatch, MutatorBase, MutatorBaseCfg, _sample_value
 
 
 @dataclass

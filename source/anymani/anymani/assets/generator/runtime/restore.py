@@ -22,7 +22,7 @@ from typing import Any
 
 import yaml
 
-from ..asset_base import HandCfg
+from ...asset_base import HandCfg
 
 
 _SIDECAR_FILENAME = "hand.yaml"

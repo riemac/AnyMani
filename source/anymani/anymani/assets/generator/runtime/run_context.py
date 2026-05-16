@@ -26,7 +26,7 @@ from typing import Any
 
 import yaml
 
-from ._generation_result import HandGenerationResult
+from ..result import HandGenerationResult
 
 
 @dataclass

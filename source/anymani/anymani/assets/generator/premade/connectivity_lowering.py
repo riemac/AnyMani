@@ -53,8 +53,8 @@ from dataclasses import dataclass
 import random
 from typing import Any, Literal
 
-from ..asset_base import AssetCfgBase, HandCfg
-from ..asset_schema_core import CollisionGeometryCfg, InertialCfg, PoseCfg, VisualGeometryCfg
+from ...asset_base import AssetCfgBase, HandCfg
+from ...asset_schema_core import CollisionGeometryCfg, InertialCfg, PoseCfg, VisualGeometryCfg
 
 
 # ============================================================================
