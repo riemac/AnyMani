@@ -176,6 +176,20 @@ class HandValidatorPostMutateCfg(_HandValidatorStageCfg):
     SDF 后端回退 CPU。证书会记录实际使用的 device，避免性能路径变成隐式假设。
     """
 
+    sdf_mesh_backend: Literal["auto", "warp", "trimesh"] = "auto"
+    """mesh signed-distance 后端策略。
+
+    默认 ``"auto"``：custom STL/OBJ collision 先走 Warp GPU mesh query；若 Warp
+    不可用或运行失败，则回退到 trimesh CPU。显式 ``"warp"`` 用于强制 GPU 路线。
+    """
+
+    sdf_mesh_surface_samples: int = 4096
+    """每个 mesh collision body 的 surface 采样点数。
+
+    4096 是当前首版的保守科研预算：优先降低 custom fingertip 漏检风险，而不是把
+    validator 调成过轻量的 exploratory 检查。
+    """
+
 
 @dataclass
 class HandValidatorCfg(AssetCfgBase):
@@ -395,9 +409,11 @@ class HandValidator(ValidatorBase):
                     unsupported_policy=stage_cfg.sdf_unsupported_geometry_policy,
                     tolerance=stage_cfg.sdf_threshold_tolerance,
                     device=stage_cfg.sdf_device,
+                    mesh_backend=stage_cfg.sdf_mesh_backend,
+                    mesh_surface_samples=stage_cfg.sdf_mesh_surface_samples,
                 ),
             )
-        except ValueError as exc:
+        except (RuntimeError, ValueError) as exc:
             result.errors.append(f"finger spacing sdf[post_mutate]: {exc}")
             result.metadata["finger_spacing_certificate"] = {
                 "pose_scope": "post_mutate_home_pose",
@@ -405,6 +421,13 @@ class HandValidator(ValidatorBase):
                 "sdf_kind": "sampled_surface_sdf_approx",
                 "complete": False,
                 "device": stage_cfg.sdf_device,
+                "mesh_sdf": {
+                    "requested_backend": stage_cfg.sdf_mesh_backend,
+                    "actual_backend": "none",
+                    "mesh_query_count": 0,
+                    "mesh_sample_count": 0,
+                    "fallback_events": [],
+                },
                 "skipped_bodies": [],
                 "not_certified": [
                     "all_pose_collision_free",

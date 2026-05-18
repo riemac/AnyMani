@@ -50,7 +50,7 @@ import math
 from typing import Any, Literal
 
 from ..asset_base import HandCfg
-from ..asset_schema_core import BoxGeometryCfg, CylinderGeometryCfg, EllipticCylinderGeometryCfg, SphereGeometryCfg, Vector3
+from ..asset_schema_core import BoxGeometryCfg, CylinderGeometryCfg, EllipticCylinderGeometryCfg, MeshGeometryCfg, SphereGeometryCfg, Vector3
 from ._collision_geometry import (
     CollisionBodyRecord,
     SkippedCollisionBody,
@@ -58,6 +58,13 @@ from ._collision_geometry import (
     apply_inverse_pose,
     apply_pose,
     extract_finger_collision_bodies,
+)
+from ._mesh_sdf import (
+    MeshSdfBackend,
+    MeshSdfQueryStats,
+    sample_mesh_surface,
+    signed_distance_to_mesh_body,
+    signed_distance_to_mesh_body_batch,
 )
 
 
@@ -91,6 +98,20 @@ class SdfClearanceConfig:
     v1 的几何抽取仍是 Python object 层；真正适合 GPU 的部分是 surface samples
     对 target body 的批量 SDF 查询。默认 ``"auto"`` 会优先尝试 CUDA，若当前
     环境无 PyTorch/CUDA 或遇到不支持路径，则自动回退 CPU，并把实际设备写入证书。
+    """
+
+    mesh_backend: MeshSdfBackend = "auto"
+    """mesh signed-distance 后端策略。
+
+    ``"auto"`` 是默认科研生产路线：优先 Warp/CUDA，若 Warp 不可用或运行失败则回退
+    CPU/trimesh。``"warp"`` 用于强制 GPU 路线；``"trimesh"`` 用于显式 CPU 路线。
+    """
+
+    mesh_surface_samples: int = 4096
+    """每个 mesh collision body 的 surface 采样点数。
+
+    该数值是用户确认的首版保守预算。4096 对 custom fingertip 这类小 mesh 来说
+    足够细，同时对 RTX 5070 Ti 16GB 的显存压力很小。
     """
 
 
@@ -128,6 +149,7 @@ class SdfClearanceCertificate:
     not_certified: list[str] = field(default_factory=lambda: list(NOT_CERTIFIED))
     min_clearance: float = 0.0
     device: str = "cpu"
+    mesh_sdf: dict[str, object] = field(default_factory=dict)
     pair_clearances: list[dict[str, float | str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -142,6 +164,7 @@ class SdfClearanceCertificate:
             "not_certified": list(self.not_certified),
             "min_clearance": self.min_clearance,
             "device": self.device,
+            "mesh_sdf": dict(self.mesh_sdf),
             "pair_clearances": list(self.pair_clearances),
         }
 
@@ -168,6 +191,7 @@ def evaluate_finger_sdf_clearance(hand: HandCfg, cfg: SdfClearanceConfig) -> Sdf
 
     extraction = extract_finger_collision_bodies(hand, unsupported_policy=cfg.unsupported_policy)
     device = _resolve_sdf_device(cfg.device)
+    mesh_stats = MeshSdfQueryStats(requested_backend=cfg.mesh_backend)
     pair_clearances: list[FingerPairClearance] = []
     violations: list[FingerPairClearance] = []
     finger_names = [finger.name for finger in hand.fingers]
@@ -184,29 +208,41 @@ def evaluate_finger_sdf_clearance(hand: HandCfg, cfg: SdfClearanceConfig) -> Sdf
                     source_bodies=bodies_i,
                     target_bodies=bodies_j,
                     samples_per_axis=cfg.surface_samples_per_axis,
+                    mesh_surface_samples=cfg.mesh_surface_samples,
                     device=device,
+                    mesh_backend=cfg.mesh_backend,
+                    mesh_stats=mesh_stats,
                 )
                 clearance_j_to_i = _surface_to_union_sdf_min(
                     source_bodies=bodies_j,
                     target_bodies=bodies_i,
                     samples_per_axis=cfg.surface_samples_per_axis,
+                    mesh_surface_samples=cfg.mesh_surface_samples,
                     device=device,
+                    mesh_backend=cfg.mesh_backend,
+                    mesh_stats=mesh_stats,
                 )
             except RuntimeError:
-                if cfg.device == "cuda":
+                if cfg.device == "cuda" or cfg.mesh_backend == "warp":
                     raise
                 device = "cpu"
                 clearance_i_to_j = _surface_to_union_sdf_min(
                     source_bodies=bodies_i,
                     target_bodies=bodies_j,
                     samples_per_axis=cfg.surface_samples_per_axis,
+                    mesh_surface_samples=cfg.mesh_surface_samples,
                     device=device,
+                    mesh_backend="trimesh",
+                    mesh_stats=mesh_stats,
                 )
                 clearance_j_to_i = _surface_to_union_sdf_min(
                     source_bodies=bodies_j,
                     target_bodies=bodies_i,
                     samples_per_axis=cfg.surface_samples_per_axis,
+                    mesh_surface_samples=cfg.mesh_surface_samples,
                     device=device,
+                    mesh_backend="trimesh",
+                    mesh_stats=mesh_stats,
                 )
             clearance = min(clearance_i_to_j, clearance_j_to_i)
             pair = FingerPairClearance(
@@ -226,6 +262,7 @@ def evaluate_finger_sdf_clearance(hand: HandCfg, cfg: SdfClearanceConfig) -> Sdf
         skipped_bodies=skipped,
         min_clearance=cfg.min_clearance,
         device=device,
+        mesh_sdf=mesh_stats.to_dict(),
         pair_clearances=[pair.to_dict() for pair in pair_clearances],
     )
     return SdfClearanceResult(
@@ -235,8 +272,15 @@ def evaluate_finger_sdf_clearance(hand: HandCfg, cfg: SdfClearanceConfig) -> Sdf
     )
 
 
-def signed_distance_to_body(point_world: Vector3, body: CollisionBodyRecord) -> float:
-    r"""计算 world 点到单个 primitive body 的 signed distance。
+def signed_distance_to_body(
+    point_world: Vector3,
+    body: CollisionBodyRecord,
+    *,
+    mesh_backend: MeshSdfBackend = "trimesh",
+    device: str = "cpu",
+    mesh_stats: MeshSdfQueryStats | None = None,
+) -> float:
+    r"""计算 world 点到单个 collision body 的 signed distance。
 
     sign convention:
 
@@ -261,19 +305,48 @@ def signed_distance_to_body(point_world: Vector3, body: CollisionBodyRecord) -> 
         )
     if isinstance(geometry, SphereGeometryCfg):
         return _norm(point) - geometry.radius
+    if isinstance(geometry, MeshGeometryCfg):
+        return signed_distance_to_mesh_body(
+            point_world,
+            body,
+            backend=mesh_backend,
+            device=device,
+            stats=mesh_stats,
+        )
     raise TypeError(f"unsupported SDF body geometry: {type(geometry).__name__}")
 
 
-def union_signed_distance(point_world: Vector3, bodies: list[CollisionBodyRecord]) -> float:
+def union_signed_distance(
+    point_world: Vector3,
+    bodies: list[CollisionBodyRecord],
+    *,
+    mesh_backend: MeshSdfBackend = "trimesh",
+    device: str = "cpu",
+    mesh_stats: MeshSdfQueryStats | None = None,
+) -> float:
     r"""计算一个 finger union body 的 signed distance。"""
 
     if not bodies:
         return math.inf
-    return min(signed_distance_to_body(point_world, body) for body in bodies)
+    return min(
+        signed_distance_to_body(
+            point_world,
+            body,
+            mesh_backend=mesh_backend,
+            device=device,
+            mesh_stats=mesh_stats,
+        )
+        for body in bodies
+    )
 
 
-def sample_body_surface(body: CollisionBodyRecord, *, samples_per_axis: int) -> list[Vector3]:
-    r"""为一个 primitive body 生成 world-space surface samples。"""
+def sample_body_surface(
+    body: CollisionBodyRecord,
+    *,
+    samples_per_axis: int,
+    mesh_surface_samples: int = 4096,
+) -> list[Vector3]:
+    r"""为一个 collision body 生成 world-space surface samples。"""
 
     geometry = body.geometry
     density = max(int(samples_per_axis), 2)
@@ -290,6 +363,8 @@ def sample_body_surface(body: CollisionBodyRecord, *, samples_per_axis: int) -> 
         )
     elif isinstance(geometry, SphereGeometryCfg):
         local_points = _sample_sphere_surface(geometry.radius, density=density)
+    elif isinstance(geometry, MeshGeometryCfg):
+        return sample_mesh_surface(body, sample_count=max(int(mesh_surface_samples), 4))
     else:
         raise TypeError(f"unsupported surface sampling geometry: {type(geometry).__name__}")
     return [apply_pose(body.world_pose, point) for point in local_points]
@@ -300,7 +375,10 @@ def _surface_to_union_sdf_min(
     source_bodies: list[CollisionBodyRecord],
     target_bodies: list[CollisionBodyRecord],
     samples_per_axis: int,
+    mesh_surface_samples: int,
     device: str,
+    mesh_backend: MeshSdfBackend,
+    mesh_stats: MeshSdfQueryStats,
 ) -> float:
     r"""计算 $\min_{x\in S_{source}}\operatorname{SDF}_{target}(x)$ 的采样近似。
 
@@ -318,20 +396,83 @@ def _surface_to_union_sdf_min(
     才把该采样点视作 source union 的外表面近似点。
     """
 
-    points: list[Vector3] = []
+    candidate_points: list[Vector3] = []
     for body in source_bodies:
-        for point in sample_body_surface(body, samples_per_axis=samples_per_axis):
-            if union_signed_distance(point, source_bodies) < -1e-7:
-                continue
-            points.append(point)
+        if isinstance(body.geometry, MeshGeometryCfg):
+            mesh_stats.mesh_sample_count += 1
+        for point in sample_body_surface(
+            body,
+            samples_per_axis=samples_per_axis,
+            mesh_surface_samples=mesh_surface_samples,
+        ):
+            candidate_points.append(point)
+    points = _filter_union_surface_points(
+        candidate_points,
+        source_bodies,
+        mesh_backend=mesh_backend,
+        device=device,
+        mesh_stats=mesh_stats,
+    )
     if not points:
         return math.inf
     if device == "cuda":
         try:
-            return _surface_to_union_sdf_min_torch(points, target_bodies)
+            return _surface_to_union_sdf_min_torch(
+                points,
+                target_bodies,
+                mesh_backend=mesh_backend,
+                mesh_stats=mesh_stats,
+            )
         except Exception as exc:
+            if isinstance(exc, ValueError):
+                raise
             raise RuntimeError("CUDA SDF evaluation failed") from exc
-    return min(union_signed_distance(point, target_bodies) for point in points)
+    return min(
+        union_signed_distance(
+            point,
+            target_bodies,
+            mesh_backend="trimesh",
+            device="cpu",
+            mesh_stats=mesh_stats,
+        )
+        for point in points
+    )
+
+
+def _filter_union_surface_points(
+    points: list[Vector3],
+    source_bodies: list[CollisionBodyRecord],
+    *,
+    mesh_backend: MeshSdfBackend,
+    device: str,
+    mesh_stats: MeshSdfQueryStats,
+) -> list[Vector3]:
+    r"""过滤掉埋在同一 finger union 内部的 source samples。
+
+    这一步服务于复合 collision 的科研语义：同一 finger 内部的 cylinder/sphere 或
+    mesh/primitive 允许有构造性重叠，但这些内部面不能被误当成 inter-finger clearance。
+    """
+
+    if not points:
+        return []
+
+    union_distances = [math.inf for _ in points]
+    for body in source_bodies:
+        geometry = body.geometry
+        if isinstance(geometry, MeshGeometryCfg):
+            distances = signed_distance_to_mesh_body_batch(
+                points,
+                body,
+                backend=mesh_backend,
+                device=device,
+                stats=mesh_stats,
+            )
+            for index, distance in enumerate(distances):
+                union_distances[index] = min(union_distances[index], float(distance))
+        else:
+            for index, point in enumerate(points):
+                union_distances[index] = min(union_distances[index], signed_distance_to_body(point, body))
+    return [point for point, distance in zip(points, union_distances) if distance >= -1e-7]
 
 
 def _resolve_sdf_device(device: str) -> str:
@@ -353,11 +494,17 @@ def _resolve_sdf_device(device: str) -> str:
     return "cpu"
 
 
-def _surface_to_union_sdf_min_torch(points: list[Vector3], target_bodies: list[CollisionBodyRecord]) -> float:
-    r"""用 PyTorch/CUDA 批量查询 surface points 到 target union SDF。
+def _surface_to_union_sdf_min_torch(
+    points: list[Vector3],
+    target_bodies: list[CollisionBodyRecord],
+    *,
+    mesh_backend: MeshSdfBackend,
+    mesh_stats: MeshSdfQueryStats,
+) -> float:
+    r"""用 PyTorch/CUDA + Warp 批量查询 surface points 到 target union SDF。
 
     当前覆盖 v1 validator 支持的四类 primitive：box / sphere / cylinder /
-    elliptic_cylinder。公式与 CPU path 保持同一近似边界。
+    elliptic_cylinder；mesh 则交给 Warp/trimesh 后端。公式与 CPU path 保持同一近似边界。
     """
 
     import torch
@@ -406,6 +553,15 @@ def _surface_to_union_sdf_min_torch(points: list[Vector3], target_bodies: list[C
             outside = torch.sqrt(torch.clamp(radial, min=0.0) ** 2 + torch.clamp(axial, min=0.0) ** 2)
             inside = torch.minimum(torch.maximum(radial, axial), torch.zeros_like(outside))
             distances.append(outside + inside)
+        elif isinstance(geometry, MeshGeometryCfg):
+            mesh_distances = signed_distance_to_mesh_body_batch(
+                points,
+                body,
+                backend=mesh_backend,
+                device="cuda",
+                stats=mesh_stats,
+            )
+            distances.append(torch.tensor(mesh_distances, dtype=torch.float32, device="cuda"))
         else:
             raise TypeError(f"CUDA SDF path does not yet support {geometry.kind!r}")
     union = torch.stack(distances, dim=0).amin(dim=0)

@@ -492,12 +492,6 @@ class CustomJointBuilder(JointBuilder):
             "anchor_point": self.cfg.anchor_point,
             "mesh_scale": self.cfg._mesh_scale_xyz,
             "mesh_origin_rpy": mesh_origin.rpy,
-            "sdf_proxy": {
-                "type": "box",
-                "size": self.cfg._approx_size_xyz,
-                "origin": {"pos": self.cfg._approx_com_xyz, "rpy": (0.0, 0.0, 0.0)},
-                "source": "custom_tip_box_inertia_envelope",
-            },
         }
         return JointCfg(
             name=self.cfg.name,

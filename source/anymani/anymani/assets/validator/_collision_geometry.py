@@ -56,7 +56,6 @@ from ..asset_schema_core import (
     PoseCfg,
     SphereGeometryCfg,
     Vector3,
-    make_geometry_cfg,
 )
 
 
@@ -78,7 +77,7 @@ class CollisionBodyRecord:
         link_name: child link 名称。
         body_name: collision 元素名；缺省时使用稳定 fallback。
         body_path: 面向错误消息和 certificate 的稳定路径。
-        geometry_kind: primitive 类型。
+        geometry_kind: primitive / mesh 类型。
         geometry: 原始几何 cfg，保留解析参数。
         world_pose: collision frame 在 palm/world frame 下的姿态。
     """
@@ -89,7 +88,7 @@ class CollisionBodyRecord:
     body_name: str
     body_path: str
     geometry_kind: str
-    geometry: BoxGeometryCfg | CylinderGeometryCfg | EllipticCylinderGeometryCfg | SphereGeometryCfg
+    geometry: BoxGeometryCfg | CylinderGeometryCfg | EllipticCylinderGeometryCfg | SphereGeometryCfg | MeshGeometryCfg
     world_pose: PoseCfg
 
 
@@ -138,11 +137,11 @@ def extract_finger_collision_bodies(
     *,
     unsupported_policy: UnsupportedGeometryPolicy = "fail",
 ) -> CollisionExtractionResult:
-    r"""抽取 post-mutate home pose 下所有 finger collision primitive。
+    r"""抽取 post-mutate home pose 下所有 finger collision body。
 
     Args:
         hand: 已经完成 post-mutate 的整手 schema。
-        unsupported_policy: 遇到 mesh / 未知几何时是硬失败，还是记录 skip。
+        unsupported_policy: 遇到未知几何时是硬失败，还是记录 skip。
 
     Returns:
         CollisionExtractionResult: 按 finger 分组的 world-space body records。
@@ -173,24 +172,10 @@ def extract_finger_collision_bodies(
                 body_name = collision.name or f"{joint.child}_collision_{collision_index}"
                 body_path = f"{finger.name}/{joint.name}/{joint.child}/{body_name}"
                 geometry = collision.geometry
-                if not isinstance(geometry, (BoxGeometryCfg, CylinderGeometryCfg, EllipticCylinderGeometryCfg, SphereGeometryCfg)):
-                    proxy = _mesh_sdf_proxy_from_joint_metadata(joint.metadata)
-                    if proxy is not None:
-                        proxy_geometry, proxy_origin = proxy
-                        world_pose = _compose_pose(link_pose, proxy_origin)
-                        bodies_by_finger[finger.name].append(
-                            CollisionBodyRecord(
-                                finger_name=finger.name,
-                                joint_name=joint.name,
-                                link_name=str(joint.child),
-                                body_name=f"{body_name}_sdf_proxy",
-                                body_path=f"{body_path}#sdf_proxy",
-                                geometry_kind=proxy_geometry.kind,
-                                geometry=proxy_geometry,
-                                world_pose=world_pose,
-                            )
-                        )
-                        continue
+                if not isinstance(
+                    geometry,
+                    (BoxGeometryCfg, CylinderGeometryCfg, EllipticCylinderGeometryCfg, SphereGeometryCfg, MeshGeometryCfg),
+                ):
                     skipped = _make_skipped_body(
                         finger_name=finger.name,
                         joint_name=joint.name,
@@ -225,28 +210,6 @@ def extract_finger_collision_bodies(
             parent_link_pose = link_pose
 
     return CollisionExtractionResult(bodies_by_finger=bodies_by_finger, skipped_bodies=skipped_bodies)
-
-
-def _mesh_sdf_proxy_from_joint_metadata(
-    metadata: dict[str, Any],
-) -> tuple[BoxGeometryCfg | CylinderGeometryCfg | EllipticCylinderGeometryCfg | SphereGeometryCfg, PoseCfg] | None:
-    r"""从 custom tip metadata 中读取显式 SDF proxy。
-
-    只有 builder 明确标注的 `sdf_proxy` 才能让 mesh 进入 SDF validator。
-    这不是 mesh-exact clearance，而是把 custom tip 的惯量外包盒作为保守近似体。
-    未带 proxy 的普通 mesh 继续走 unsupported fail-hard，避免验证证书冒领。
-    """
-
-    proxy = metadata.get("sdf_proxy")
-    if not isinstance(proxy, dict):
-        return None
-    geometry = make_geometry_cfg(proxy)
-    if not isinstance(geometry, (BoxGeometryCfg, CylinderGeometryCfg, EllipticCylinderGeometryCfg, SphereGeometryCfg)):
-        return None
-    origin_value = proxy.get("origin", proxy.get("pose"))
-    return geometry, PoseCfg.from_value(origin_value)
-
-
 def _make_skipped_body(
     *,
     finger_name: str,

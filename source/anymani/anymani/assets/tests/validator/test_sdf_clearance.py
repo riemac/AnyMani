@@ -11,6 +11,7 @@ r"""post-mutate SDF clearance validator 回归测试。
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 from assets.asset_schema_core import CollisionGeometryCfg, PoseCfg
 from assets.asset_schema_embodiment import FingerCfg, HandCfg, JointCfg, PalmCfg
@@ -35,7 +36,29 @@ def _body(kind: str = "box") -> CollisionBodyRecord:
     )
 
 
-def _two_box_hand(*, separation: float, second_kind: str = "box") -> HandCfg:
+def _write_box_mesh(path: Path, *, size: tuple[float, float, float] = (0.02, 0.02, 0.02)) -> Path:
+    r"""把一个 watertight box mesh 写到临时目录，供 mesh-SDF 测试使用。"""
+
+    import trimesh
+
+    mesh = trimesh.creation.box(extents=size)
+    mesh.export(path)
+    return path
+
+
+def _write_non_watertight_mesh(path: Path) -> Path:
+    r"""写出一个带洞 mesh，用于锁住 non-watertight fail-hard 语义。"""
+
+    import trimesh
+
+    mesh = trimesh.creation.box(extents=(0.02, 0.02, 0.02))
+    broken = mesh.copy()
+    broken.update_faces([index != 0 for index in range(len(broken.faces))])
+    broken.export(path)
+    return path
+
+
+def _two_box_hand(*, separation: float, second_kind: str = "box", second_mesh_path: str | None = None) -> HandCfg:
     r"""构造两根单 link finger，collision box 中心间距由 separation 控制。"""
 
     first = FingerCfg(
@@ -55,7 +78,10 @@ def _two_box_hand(*, separation: float, second_kind: str = "box") -> HandCfg:
         ],
     )
     if second_kind == "mesh":
-        second_collision = CollisionGeometryCfg(name="middle_col", geometry={"type": "mesh", "file_path": "dummy.obj"})
+        second_collision = CollisionGeometryCfg(
+            name="middle_col",
+            geometry={"type": "mesh", "file_path": second_mesh_path or "dummy.obj"},
+        )
     else:
         second_collision = CollisionGeometryCfg(name="middle_col", geometry={"type": second_kind, "size": (0.02, 0.02, 0.02)})
     second = FingerCfg(
@@ -134,10 +160,15 @@ def test_hand_validator_attaches_complete_sdf_certificate_for_post_mutate():
     assert "mesh_exact_clearance" in certificate["not_certified"]
 
 
-def test_unsupported_mesh_default_fail_hard_and_warn_skip_is_incomplete():
-    r"""mesh collision 默认硬失败；warn_skip 只允许产生 incomplete certificate。"""
+def test_missing_mesh_path_fails_hard_without_proxy_fallback():
+    r"""缺失 mesh 文件必须硬失败，不能退回旧 `sdf_proxy` 近似。"""
 
     hand = _two_box_hand(separation=0.04, second_kind="mesh")
+    hand.fingers[1].joints[0].metadata["sdf_proxy"] = {
+        "type": "box",
+        "size": (0.02, 0.02, 0.02),
+        "origin": {"pos": (0.0, 0.0, 0.0), "rpy": (0.0, 0.0, 0.0)},
+    }
 
     default_result = HandValidator(
         HandValidatorCfg(
@@ -152,38 +183,54 @@ def test_unsupported_mesh_default_fail_hard_and_warn_skip_is_incomplete():
         )
     ).validate_post_mutate(hand)
 
-    warn_result = HandValidator(
-        HandValidatorCfg(
-            post_mutate=HandValidatorCfg.PostMutateCfg(
-                dof_min=None,
-                finger_count_min=None,
-                finger_count_max=None,
-                require_thumb=False,
-                require_non_thumb_with_min_revolute_dof=None,
-                min_finger_spacing=0.005,
-                sdf_unsupported_geometry_policy="warn_skip",
-            )
-        )
-    ).validate_post_mutate(hand)
-
     assert default_result.passed is False
-    assert any("unsupported collision geometry" in error for error in default_result.errors)
-    assert warn_result.passed is False
-    assert warn_result.metadata["finger_spacing_certificate"]["complete"] is False
-    assert warn_result.metadata["finger_spacing_certificate"]["skipped_bodies"]
+    assert any("mesh file does not exist" in error for error in default_result.errors)
+    assert default_result.metadata["finger_spacing_certificate"]["complete"] is False
 
 
-def test_custom_tip_mesh_with_explicit_sdf_proxy_is_complete():
-    r"""带显式 `sdf_proxy` 的 custom tip mesh 可用外包盒进入完整 SDF certificate。"""
+def test_custom_tip_mesh_signed_distance_accepts_and_rejects(tmp_path):
+    r"""custom mesh 进入真实 signed-distance clearance，而不是 primitive proxy。"""
 
-    hand = _two_box_hand(separation=0.04, second_kind="mesh")
-    middle_tip = hand.fingers[1].joints[0]
-    middle_tip.metadata["sdf_proxy"] = {
-        "type": "box",
-        "size": (0.02, 0.02, 0.02),
-        "origin": {"pos": (0.0, 0.0, 0.0), "rpy": (0.0, 0.0, 0.0)},
-        "source": "unit_test_box_proxy",
-    }
+    mesh_path = _write_box_mesh(tmp_path / "tip_box.stl")
+    overlap = _two_box_hand(separation=0.015, second_kind="mesh", second_mesh_path=str(mesh_path))
+    separated = _two_box_hand(separation=0.04, second_kind="mesh", second_mesh_path=str(mesh_path))
+
+    overlap_result = evaluate_finger_sdf_clearance(
+        overlap,
+        SdfClearanceConfig(min_clearance=0.005, device="cpu", mesh_backend="trimesh", mesh_surface_samples=512),
+    )
+    separated_result = evaluate_finger_sdf_clearance(
+        separated,
+        SdfClearanceConfig(min_clearance=0.005, device="cpu", mesh_backend="trimesh", mesh_surface_samples=512),
+    )
+
+    assert overlap_result.passed is False
+    assert overlap_result.violations[0].clearance < 0.0
+    assert separated_result.passed is True
+    assert separated_result.certificate.mesh_sdf["actual_backend"] == "trimesh"
+
+
+def test_custom_tip_mesh_uses_warp_when_available(tmp_path):
+    r"""auto 配置下，当前 CUDA/Warp 环境应优先使用 Warp mesh query。"""
+
+    mesh_path = _write_box_mesh(tmp_path / "tip_box.stl")
+    hand = _two_box_hand(separation=0.04, second_kind="mesh", second_mesh_path=str(mesh_path))
+
+    result = evaluate_finger_sdf_clearance(
+        hand,
+        SdfClearanceConfig(min_clearance=0.005, device="auto", mesh_backend="auto", mesh_surface_samples=512),
+    )
+
+    assert result.passed is True
+    assert result.certificate.mesh_sdf["requested_backend"] == "auto"
+    assert result.certificate.mesh_sdf["actual_backend"] in {"warp", "trimesh", "mixed"}
+
+
+def test_non_watertight_mesh_fails_hard(tmp_path):
+    r"""mesh 非闭合时 signed distance inside/outside 不可信，validator 必须拒绝证书。"""
+
+    mesh_path = _write_non_watertight_mesh(tmp_path / "broken_tip.stl")
+    hand = _two_box_hand(separation=0.04, second_kind="mesh", second_mesh_path=str(mesh_path))
 
     result = HandValidator(
         HandValidatorCfg(
@@ -194,17 +241,14 @@ def test_custom_tip_mesh_with_explicit_sdf_proxy_is_complete():
                 require_thumb=False,
                 require_non_thumb_with_min_revolute_dof=None,
                 min_finger_spacing=0.005,
+                sdf_device="cpu",
+                sdf_mesh_backend="trimesh",
             )
         )
     ).validate_post_mutate(hand)
 
-    certificate = result.metadata["finger_spacing_certificate"]
-
-    assert result.passed is True
-    assert certificate["complete"] is True
-    assert certificate["skipped_bodies"] == []
-    extraction = extract_finger_collision_bodies(hand)
-    assert extraction.bodies_by_finger["middle"][0].body_path.endswith("#sdf_proxy")
+    assert result.passed is False
+    assert any("watertight" in error for error in result.errors)
 
 
 def test_extract_collision_observes_mutated_mount_transform():
