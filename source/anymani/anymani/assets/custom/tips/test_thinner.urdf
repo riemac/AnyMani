@@ -13,7 +13,7 @@
   <link name="tip">
     <visual>
       <!-- thinner tip 标定探针：使用安装底面正方形中心作为锚点。
-           整体 STL bbox 的 x 范围约为 0..20.997mm，但这会把上半部分 tip 轮廓也算入
+           整体 STL 外接盒的 x 范围约为 0..20.997mm，但这会把上半部分 tip 轮廓也算入
            安装底面高度。直接抽取 STL 中 y=0 的安装面点集，得到 x=0..19mm、
            z=-33..0mm，因此锚点取 p*=(9.5,0,-16.5)。沿用 custom tip canonical 约定：
            scale=0.001，

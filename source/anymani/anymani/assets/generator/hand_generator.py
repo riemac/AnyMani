@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Iterator, Literal
 from uuid import uuid4
 
+from ..asset_physics import AssetPhysicsCfg, close_hand_physics
 from ..asset_base import AssetCfgBase, HandCfg
 from ..asset_builders import HandBuilder, HandBuilderCfg
 from ..exporter import HandExporter, HandExporterCfg
@@ -226,6 +227,16 @@ class HandGeneratorCfg(AssetCfgBase):
     Export: HandExporterCfg = field(default_factory=HandExporterCfg)
     """手级导出器配置入口；用于把 HandCfg 导出为 URDF / sidecar / tree 文件等产物。"""
 
+    Physics: AssetPhysicsCfg | None = field(default_factory=AssetPhysicsCfg)
+    r"""物理闭包配置入口。
+
+    这层与 builder / mutator 的职责不同：它不负责生成几何，而是负责在
+    最终 collision 几何确定之后，统一闭合整手的 `mass / inertial`。
+
+    - `None`：显式关闭 physics closure；
+    - `AssetPhysicsCfg(...)`：按声明式密度与 mesh backend 设置执行闭包。
+    """
+
     output_dir: Path | str = field(default_factory=lambda: Path(__file__).resolve().parents[1] / "generated")
     """产物落盘根目录。
 
@@ -318,6 +329,8 @@ class HandGeneratorCfg(AssetCfgBase):
     def __post_init__(self):
         if self.class_type is None:
             self.class_type = HandGenerator
+        if self.Physics is not None and not isinstance(self.Physics, AssetPhysicsCfg):
+            self.Physics = AssetPhysicsCfg(**dict(self.Physics))
         self.output_dir = Path(self.output_dir)  # 统一在 cfg 边界内把路径收口为 `Path`
         if self.source_topology_dir is not None:
             self.source_topology_dir = Path(self.source_topology_dir)
@@ -422,6 +435,17 @@ class HandGenerator:
         r"""把一次成功样本写入 run summary。"""
 
         self._ensure_run_context().record_success(result, write_summary=write_summary)
+
+    def _close_physics_if_enabled(self, hand_cfg: HandCfg, *, stage: str) -> HandCfg:
+        r"""在 generator 主链中执行一次可选的物理闭包。
+
+        这层 helper 故意保持很薄：
+
+        - `hand_generator.py` 只知道“什么时候应该闭包”；
+        - `asset_physics.py` 负责“如何从 collision 几何算出 inertial”。
+        """
+
+        return close_hand_physics(hand_cfg, self.cfg.Physics, stage=stage)
 
     def _candidate_hand_preset_names(self) -> tuple[str, ...]:
         r"""返回当前 generator 可见的 premade topology registry key 集合。
@@ -589,6 +613,7 @@ class HandGenerator:
                     connectivity_preset_name=connectivity_preset_name,
                     hand_preset_name=hand_preset_name,
                 )
+            hand_cfg = self._close_physics_if_enabled(hand_cfg, stage="pre_made")
 
             # pre-made 结构闸门是“可选的显式闸门”：
             # - `Validate is None`：完全跳过 hand-level validator；
@@ -620,6 +645,7 @@ class HandGenerator:
                 self._last_rejection_detail = {"stage": "mutate", "errors": ["mutator returned None"], "metadata": {}}
                 self._record_generation_rejection(stage="mutate", write_summary=record_summary)
                 return None  # 变异被拒绝；拒绝语义统一表现为“本次样本无结果”
+            hand_cfg = self._close_physics_if_enabled(hand_cfg, stage="post_mutate")
             if validator is not None:
                 post_mutate_validation = validator.validate_post_mutate(hand_cfg)
                 if not post_mutate_validation:

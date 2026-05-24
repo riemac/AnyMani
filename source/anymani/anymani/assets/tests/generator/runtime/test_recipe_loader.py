@@ -29,6 +29,7 @@ import yaml
 
 from assets.builder.hand_builders import HumanLikeHandBuilderCfg
 from assets.builder.palm_builders import ComPalmBuilderCfg
+from assets.asset_physics import AssetPhysicsCfg
 from assets.exporter.hand_exporter import HandExporterCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from assets.generator.mutate import HandMutatorCfg, MountPerturbCfg
@@ -97,6 +98,29 @@ def test_recipe_loader_builds_typed_cfg_and_bridges_legacy_export_dir(tmp_path):
     assert cfg.Validate.post_mutate.finger.joint.min_link_length == 1e-5
     assert isinstance(cfg.Export, HandExporterCfg)
     assert cfg.Export.Sidecar.experiment_tag == "tooling_regression"
+
+
+def test_recipe_loader_builds_physics_cfg_block(tmp_path):
+    r"""`Physics: {...}` 应被解析为 typed `AssetPhysicsCfg`。"""
+
+    cfg = RecipeLoader.load_dict(
+        {
+            "mode": "made",
+            "artifact_level": "hand_cfg",
+            "output_dir": str(tmp_path / "generated"),
+            "Made": _made_recipe_dict(),
+            "Physics": {
+                "density": {
+                    "default": 700.0,
+                    "custom_tip": 500.0,
+                }
+            },
+        }
+    )
+
+    assert isinstance(cfg.Physics, AssetPhysicsCfg)
+    assert cfg.Physics.density.default == 700.0
+    assert cfg.Physics.density.custom_tip == 500.0
 
 
 def test_recipe_loader_save_and_load_round_trip_keeps_current_contract(tmp_path):

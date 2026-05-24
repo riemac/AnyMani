@@ -123,12 +123,6 @@ def _normalize_tip_dict(tip: dict[str, Any] | None) -> dict[str, Any]:
             normalized["anchor_point"] = _ensure_tuple(tip["anchor_point"], length=3, field_name="tip.anchor_point")
         if "base_rpy" in tip:
             normalized["base_rpy"] = _ensure_tuple(tip["base_rpy"], length=3, field_name="tip.base_rpy")
-        if "approx_size" in tip:
-            approx_size = _ensure_tuple(tip["approx_size"], length=3, field_name="tip.approx_size")
-            normalized["approx_size"] = tuple(_to_si(value) for value in approx_size)  # 外包盒尺寸仍统一压到米制
-        if "approx_com" in tip:
-            approx_com = _ensure_tuple(tip["approx_com"], length=3, field_name="tip.approx_com")
-            normalized["approx_com"] = tuple(_to_si(value) for value in approx_com)  # 质心近似位置同样使用米制
     else:
         raise ValueError(f"Only cs/bs/mesh tip recipes are supported in v1, got {tip_type!r}")
     return normalized
@@ -814,8 +808,6 @@ class RegularFingerBuilder(FingerBuilder):
                 unit_scale=tip_recipe.get("unit_scale"),
                 anchor_point=tip_recipe.get("anchor_point"),
                 base_rpy=tip_recipe.get("base_rpy"),
-                approx_size=tip_recipe.get("approx_size"),
-                approx_com=tip_recipe.get("approx_com"),
                 **common_kwargs,
             )
         else:

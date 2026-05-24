@@ -16,11 +16,17 @@ r"""自定义指尖关节构建器：把 mesh tip recipe 落为 `JointCfg`。
 
 - 读取一个“tip 类型 + mesh 锚点 + scale + offset”的声明式配置；
 - 把 visual / collision 都写成 `mesh` 几何；
-- 用一个**显式标注的近似外包盒**来补 inertial，避免依赖 importer 的兜底逻辑。
+- 只表达几何、锚点与安装相位；最终动力学由 `asset_physics.py` 统一闭包。
 
-这最后一点尤其重要。你在测试 URDF 注释里已经明确提醒：
+动力学闭包尤其重要。你在测试 URDF 注释里已经明确提醒：
 “不写 inertial 不代表就没事，只是把问题交给 importer/PhysX 兜底。”
 对于接触敏感的 tip，我们不应把这个语义空着。
+
+# NOTE:
+custom mesh builder 的 contract 是几何 lowering。真正写入最终 sidecar / URDF 的
+`mass / inertial`，应由 generator 主链中的 physics closure 根据最终 collision
+几何统一闭包；若有人绕过 generator 直接导出，`UrdfWriter` 只能写入默认占位
+inertial，因此科研主链不要绕过 closure。
 """
 
 from __future__ import annotations
@@ -34,22 +40,13 @@ from ..asset_base import JointCfg
 from ..asset_builders import JointBuilder, JointBuilderCfg
 from ..asset_schema_core import (
     CollisionGeometryCfg,
-    InertialCfg,
     JointLimitCfg,
     PoseCfg,
     Vector3,
     VisualGeometryCfg,
     _ensure_tuple,
 )
-from .joint_builders_primitive import _add_rpy, _box_inertia, _estimate_mass
-
-
-_DEFAULT_DENSITY = 650.0
-"""默认密度 $\rho$ [kg/m^3]。
-
-这里继续沿用 primitive joint builder 的量级，避免 custom tip 因为密度体系切换
-而突然出现不连续的质量尺度。
-"""
+from .joint_builders_primitive import _add_rpy
 
 
 _CUSTOM_TIP_DIR = Path(__file__).resolve().parents[1] / "custom" / "tips"
@@ -92,32 +89,24 @@ _CUSTOM_TIP_PRESETS: dict[str, dict[str, object]] = {
         "anchor_point": (9.48570692492, 0.0, -16.4999999586),
         "unit_scale": 0.001,
         "base_rpy": _DEFAULT_BASE_RPY,
-        "approx_size": (0.019, 0.020, 0.019),
-        "approx_com": (0.0, 0.010, 0.0),
     },
     "round": {
         "file_name": "round_finger_tip_soft.stl",
         "anchor_point": (9.50986387389, 0.0, -16.4913187022),
         "unit_scale": 0.001,
         "base_rpy": _DEFAULT_BASE_RPY,
-        "approx_size": (0.019, 0.020, 0.019),
-        "approx_com": (0.0, 0.010, 0.0),
     },
     "wedge": {
         "file_name": "wedge_finger_tip_soft.stl",
         "anchor_point": (9.5, 0.0, -16.5),
         "unit_scale": 0.001,
         "base_rpy": _DEFAULT_BASE_RPY,
-        "approx_size": (0.019, 0.020, 0.017),
-        "approx_com": (0.0, 0.010, 0.0),
     },
     "thinner": {
         "file_name": "thinner_finger_tip_soft.stl",
         "anchor_point": (9.5, 0.0, -16.5),
         "unit_scale": 0.001,
         "base_rpy": _DEFAULT_BASE_RPY,
-        "approx_size": (0.019, 0.020, 0.019),
-        "approx_com": (0.0, 0.010, 0.0),
     },
 }
 r"""custom tip 预定义锚点库。
@@ -128,8 +117,6 @@ r"""custom tip 预定义锚点库。
 - `anchor_point`：mesh 局部坐标系中的语义锚点 $p^\*$
 - `unit_scale`：从 mesh 文件单位到米制世界的基准换算
 - `base_rpy`：canonical 朝向
-- `approx_size`：用于 inertial 的近似外包盒尺寸（米）
-- `approx_com`：用于 inertial 的近似质心位置（米，tip joint frame 下）
 
 # Question:
 `wedge` 的测试 URDF 里出现过一个“按孔径 2mm 反推”的特殊统一缩放
@@ -264,12 +251,6 @@ class CustomJointBuilderCfg(JointBuilderCfg):
     limit: JointLimitCfg | Sequence[float] | Mapping[str, Any] | None = None
     """fixed joint 默认没有限位。"""
 
-    density: float = _DEFAULT_DENSITY
-    """未显式给出质量时，用于近似外包盒估质量的默认密度。"""
-
-    mass: float | None = None
-    """可选显式质量覆盖。"""
-
     is_tip: bool = True
     """该 joint/link 是否应被标记为指尖相关。"""
 
@@ -283,13 +264,6 @@ class CustomJointBuilderCfg(JointBuilderCfg):
         super().__post_init__()
         self.origin = _pose_from_value(self.origin)  # joint frame 先规约到标准 `PoseCfg`
         self.axis = _ensure_tuple(self.axis, length=3, field_name="custom_joint.axis")  # fixed joint 允许零轴
-        self.density = float(self.density)
-        if self.density <= 0.0:
-            raise ValueError("density must be positive")
-        if self.mass is not None:
-            self.mass = float(self.mass)
-            if self.mass <= 0.0:
-                raise ValueError("mass must be positive")
         if self.class_type in {None, JointBuilder}:
             self.class_type = CustomJointBuilder  # custom mesh 路线统一走 `CustomJointBuilder`
 
@@ -362,25 +336,8 @@ class CustomTipBuilderCfg(CustomJointBuilderCfg):
     base_rpy: Vector3 | Sequence[float] | None = None
     """canonical 朝向；默认由 tip preset 给出。"""
 
-    approx_size: Vector3 | Sequence[float] | None = None
-    """用于近似 inertial 的外包盒尺寸（米，canonical scale 下）。"""
-
-    approx_com: Vector3 | Sequence[float] | None = None
-    r"""用于近似 inertial 的质心位置（米，canonical scale 下）。
-
-    `anchor_point` 解决的是 mesh 如何贴到 tip joint；`approx_com` 解决的是
-    刚体质量中心应落在哪里。二者是不同物理量，不能再把 `mesh_origin`
-    当作 inertial origin。
-    """
-
     _mesh_scale_xyz: Vector3 = field(init=False, default=(1.0, 1.0, 1.0))
     """最终写入 URDF `<mesh scale>` 的三轴缩放。"""
-
-    _approx_size_xyz: Vector3 = field(init=False, default=(0.01, 0.01, 0.01))
-    """应用用户缩放之后的近似外包盒尺寸（米）。"""
-
-    _approx_com_xyz: Vector3 = field(init=False, default=(0.0, 0.005, 0.0))
-    """应用用户缩放之后的近似质心位置（米，tip joint frame 下）。"""
 
     def __post_init__(self):
         super().__post_init__()
@@ -406,26 +363,9 @@ class CustomTipBuilderCfg(CustomJointBuilderCfg):
             length=3,
             field_name="custom_tip.base_rpy",
         )
-        canonical_size = _ensure_tuple(
-            self.approx_size if self.approx_size is not None else preset["approx_size"],
-            length=3,
-            field_name="custom_tip.approx_size",
-        )
-        if any(edge <= 0.0 for edge in canonical_size):
-            raise ValueError(f"approx_size must be positive, got {canonical_size}")
-        canonical_com = _ensure_tuple(
-            self.approx_com if self.approx_com is not None else preset.get("approx_com", (0.0, canonical_size[1] / 2.0, 0.0)),
-            length=3,
-            field_name="custom_tip.approx_com",
-        )
 
         # 真正进 URDF 的 mesh scale = 单位换算 × 用户级缩放。
         self._mesh_scale_xyz = tuple(self.unit_scale * component for component in user_scale)
-        # 惯量外包盒只需要吃“相对 canonical 形状”的用户级缩放；`canonical_size`
-        # 已经在米制下，因此这里不再重复乘 `unit_scale`。
-        self._approx_size_xyz = tuple(canonical_size[index] * user_scale[index] for index in range(3))
-        # 质心同样是 canonical joint frame 下的米制位置，因此只乘用户级无量纲缩放。
-        self._approx_com_xyz = tuple(canonical_com[index] * user_scale[index] for index in range(3))
 
 
 class CustomJointBuilder(JointBuilder):
@@ -458,17 +398,6 @@ class CustomJointBuilder(JointBuilder):
 
         mesh_origin = self._build_mesh_origin()  # 先解出真正写入 visual/collision 的 mesh frame
         geometry = {"type": "mesh", "file_path": str(self.cfg.mesh_path), "scale": self.cfg._mesh_scale_xyz}
-        mass = _estimate_mass(
-            volume=self.cfg._approx_size_xyz[0] * self.cfg._approx_size_xyz[1] * self.cfg._approx_size_xyz[2],
-            cfg_mass=self.cfg.mass,
-            density=self.cfg.density,
-        )
-        inertial = InertialCfg(
-            mass=mass,
-            origin=PoseCfg(pos=self.cfg._approx_com_xyz),
-            inertia=_box_inertia(self.cfg._approx_size_xyz, mass),  # 当前用外包盒近似 inertial
-        )
-
         collisions = [
             CollisionGeometryCfg(
                 name=f"{self.cfg.name}_mesh_col",
@@ -488,7 +417,6 @@ class CustomJointBuilder(JointBuilder):
             **self.cfg.metadata,
             "custom_tip_type": self.cfg.tip_type,
             "mesh_path": str(self.cfg.mesh_path),
-            "approximation": "box_inertia_envelope",
             "anchor_point": self.cfg.anchor_point,
             "mesh_scale": self.cfg._mesh_scale_xyz,
             "mesh_origin_rpy": mesh_origin.rpy,
@@ -501,7 +429,7 @@ class CustomJointBuilder(JointBuilder):
             axis=self.cfg.axis,
             limit=self.cfg.limit,
             origin=self.cfg.origin,
-            inertial=inertial,
+            inertial=None,  # custom mesh 的最终 `mass / inertial` 统一交给 physics closure
             collisions=collisions,
             visuals=visuals,
             is_tip=self.cfg.is_tip,

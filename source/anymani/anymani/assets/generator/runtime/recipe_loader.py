@@ -61,6 +61,7 @@ from typing import Any
 import yaml
 
 from ...asset_base import AssetCfgBase
+from ...asset_physics import AssetPhysicsCfg
 from ...builder.hand_builders import GripperLikeHandBuilderCfg
 from ...exporter.hand_exporter import HandExporterCfg
 from ...exporter.sidecar import SidecarCfg
@@ -170,6 +171,8 @@ class RecipeLoader:
             data["Validate"] = _build_validate_cfg(data["Validate"])
         if "Export" in data and isinstance(data["Export"], dict):
             data["Export"] = _build_export_cfg(data["Export"])
+        if "Physics" in data and isinstance(data["Physics"], dict):
+            data["Physics"] = _build_physics_cfg(data["Physics"])
 
         return HandGeneratorCfg(**data)
 
@@ -405,6 +408,13 @@ def _build_export_cfg(raw: dict[str, Any]) -> HandExporterCfg:
     if "Sidecar" in data and isinstance(data["Sidecar"], dict):
         data["Sidecar"] = SidecarCfg(**data["Sidecar"])
     return HandExporterCfg(**data)
+
+
+def _build_physics_cfg(raw: dict[str, Any]) -> AssetPhysicsCfg:
+    r"""递归实例化 Physics 块。"""
+
+    data = deepcopy(raw)
+    return AssetPhysicsCfg(**data)
 
 
 def _build_made_cfg(raw: dict[str, Any]) -> Any:

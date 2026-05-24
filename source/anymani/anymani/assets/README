@@ -1,0 +1,41 @@
+AnyMani Assets
+==============
+
+`source/anymani/anymani/assets/` 是 AnyMani 的手资产生成子项目。
+
+当前版本：`0.1`
+
+它负责的不是单一 URDF 导出，而是一整条可追溯的资产生产链：
+
+- `builder/`：构造 canonical `HandCfg`
+- `generator/`：组织 pre-made 与 post-mutate 工作流
+- `validator/`：显式拒绝机械上不合理的资产
+- `exporter/`：写出 URDF / sidecar / tree / materialized meshes
+- `asset_physics.py`：根据最终 collision 几何闭合 `mass / inertial`
+
+当前稳定 contract
+-------------------
+
+1. `HandGeneratorCfg` 是最高 façade。
+2. pre-made 与 post-mutate 都以 `HandCfg` 作为统一中间表示。
+3. sidecar `hand.yaml` 会保存完整 `hand_cfg` 快照，供 mutate-only 恢复。
+4. physics closure 在 generator 主链中、validator 之前执行。
+5. custom tip mesh 当前默认使用 `trimesh` 真实体积分；non-uniform mesh scale 显式 fail-hard。
+
+常看入口
+--------
+
+- 配置入口：`config/asset_gen_cfg.py`
+- 最高生成入口：`generator/hand_generator.py`
+- 物理闭包：`asset_physics.py`
+- 版本记录：`VERSION`
+- 变更记录：`CHANGELOG`
+- 面向 agent 的约定：`AGENTS.md`
+
+开发提示
+--------
+
+- 若改动生成主链，同时检查 `assets/AGENTS.md` 与 `assets/generator/AGENTS.md`。
+- 若改动影响生成 contract、validator、physics closure 或导出语义，请同步更新 `CHANGELOG`。
+- 若改动引入新的阶段级能力，优先判断它应属于 `Made / Mutate / Validate / Export / Physics` 中哪一层。
+- 默认密度与 physics closure 参数统一从 `config/asset_gen_cfg.py::ASSET_PHYSICS_CFG` 修改。

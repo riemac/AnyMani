@@ -629,42 +629,11 @@ def _set_joint_primary_geometry(
                     rpy=origin.rpy,
                 )
             collection[index] = element.replace(geometry=geometry, origin=new_origin)
-            # 如果 joint 带 inertial，就把惯性参考原点也一起跟着移动，
-            # 这样长度变化不会把质心锚点留在旧的位置。
+            # 若当前 joint 已携带 inertial，则只把惯性参考原点同步到新的主体几何中心。
+            # 真正的质量 / 惯量重建已统一上收至 `asset_physics.py` 的 physics closure，
+            # 避免同一套几何语义在 mutator 内部和 generator 主链里重复实现。
             if joint.inertial is not None and index == 0:
                 joint.inertial = joint.inertial.replace(origin=new_origin)
-                if geometry.kind == "box":
-                    joint.inertial = joint.inertial.from_box(
-                        (geometry.size[0], geometry.size[1], geometry.size[2]),
-                        density=max(joint.inertial.mass / max(old_length * (old_cross_section[0] if old_cross_section else geometry.size[0]) * (old_cross_section[1] if old_cross_section else geometry.size[2]), 1e-12), 1e-12),
-                        origin=new_origin,
-                        min_mass=joint.inertial.mass,
-                        inertia_padding=joint.inertial.inertia_padding,
-                    )  # 用旧几何反推等效密度，再对新 box 几何重建惯量
-                elif geometry.kind == "cylinder":
-                    joint.inertial = joint.inertial.from_cylinder(
-                        geometry.radius,
-                        geometry.length,
-                        density=max(joint.inertial.mass / max(math.pi * float(geometry.radius) * float(geometry.radius) * old_length, 1e-12), 1e-12),
-                        origin=new_origin,
-                        principal_axis="y",
-                        min_mass=joint.inertial.mass,
-                        inertia_padding=joint.inertial.inertia_padding,
-                    )  # 标准圆柱继续沿解析公式重建惯量
-                elif geometry.kind == "elliptic_cylinder":
-                    old_rx = 0.5 * (old_cross_section[0] if old_cross_section is not None else 2.0 * float(geometry.radius_x))
-                    old_rz = 0.5 * (old_cross_section[1] if old_cross_section is not None else 2.0 * float(geometry.radius_z))
-                    old_volume = math.pi * old_rx * old_rz * old_length  # 旧椭圆柱体积，用于反推等效密度
-                    joint.inertial = joint.inertial.from_elliptic_cylinder(
-                        geometry.radius_x,
-                        geometry.radius_z,
-                        geometry.length,
-                        density=max(joint.inertial.mass / max(old_volume, 1e-12), 1e-12),
-                        origin=new_origin,
-                        principal_axis="y",
-                        min_mass=joint.inertial.mass,
-                        inertia_padding=joint.inertial.inertia_padding,
-                    )  # 椭圆柱用解析体积与解析惯量重建 inertial
 
 
 def _next_origin_from_link_scale(

@@ -1,14 +1,18 @@
 r"""指尖替换变异算子：在 post-mutate 阶段重采末端 tip embodiment。
 
 该算子位于 post-mutate 阶段，替换每根 finger 末端 `tip_joint`
-所连接的整个 tip child link embodiment：collision、visual、inertial
+所连接的整个 tip child link embodiment：collision、visual
 以及必要的 metadata / 材质语义应作为同一个 tip spec 一起更新。
 它不改变 finger 拓扑、关节数量、关节轴、挂载点或 tip joint 本身在
 运动链上的位置。
 
 从科研上看，这个算子处理的是末端接触材料与局部刚体近似，而不是整根
-finger 的运动学重建。因此 collision、visual、inertial、metadata 应当被
-视为同一个 tip spec 的不同投影，不能只改其中一项就当作完成了 tip replacement。
+finger 的运动学重建。因此 collision、visual、metadata 应当被视为同一个
+tip spec 的不同投影，不能只改其中一项就当作完成了 tip replacement。
+
+# NOTE:
+custom mesh tip 的最终 `mass / inertial` 属于 generator 主链里的 physics closure。
+本算子只改 tip spec 的几何与接触语义，不在局部 mutator 内写最终动力学属性。
 
 本轮 contract 明确区分两层概率：
 
@@ -75,8 +79,8 @@ class TipReplaceCfg(MutatorBaseCfg):
 
     - `link_scale`：改变运动链中 link 的有效长度 / 尺度；
     - `mount_perturb`：改变 finger root 相对 palm 的刚体位姿；
-    - `tip_replace`：替换末端 tip child link 的完整物理描述，包括
-      collision、visual、inertial、近似质量 / 惯量来源和相关 metadata。
+    - `tip_replace`：替换末端 tip child link 的几何与接触皮肤描述，包括
+      collision、visual 与相关 metadata；最终 inertial 由 physics closure 闭包。
 
     对手内操作来说，指尖几何、质量分布和接触皮肤近似是接触动力学中
     最敏感的局部变量之一。因此这里的 `self_mode` 不应被理解为普通工程
@@ -234,7 +238,7 @@ class TipReplaceMutator(MutatorBase):
 
         该函数严格不修改 `finger.joints[:-1]`、`finger.mount`、`tip_joint.origin`、
         `tip_joint.parent` 和 `tip_joint.child`；它只替换末端 child link 的
-        collision / visual / inertial / metadata。
+        collision / visual / metadata，以及必要时的过渡性 inertial 占位。
         """
 
         sample = _normalize_sample_payload(sampled_params, self.cfg, target=target)
@@ -325,8 +329,11 @@ def _build_replacement_tip_joint(original: JointCfg, spec: dict[str, Any]) -> Jo
     r"""把一份 tip spec lowering 成完整 `JointCfg`。
 
     这里复用 builder 层的 primitive / custom tip 公式，避免在 mutate 层复制
-    anchor 对齐、圆柱球帽、惯量估计等几何细节。mutate 层只负责决定“采样到了
+    anchor 对齐、圆柱球帽等几何细节。mutate 层只负责决定“采样到了
     哪个 tip spec”，具体 child link embodiment 仍交给 builder。
+
+    对 custom mesh 路线，builder 现在只负责几何 lowering；真正的最终 inertial
+    会在 generator 主链中由 physics closure 根据最终 collision 几何统一补齐。
     """
 
     tip_type = str(spec["tip_type"])
@@ -431,8 +438,8 @@ def _sample_tip_spec(cfg: TipReplaceCfg, current_tip: JointCfg | None) -> dict[s
     r"""采样一个完整 tip spec。
 
     离散变量 `tip_type` 来自 `tip_range` proposal 分布；连续变量来自 `scale` 与
-    可选 `cs_ratio`。该函数只输出最小语义参数，真正的 collision / visual /
-    inertial 在 `_build_replacement_tip_joint()` 中由 builder lowering。
+    可选 `cs_ratio`。该函数只输出最小语义参数，collision / visual / metadata
+    会在 `_build_replacement_tip_joint()` 中由 builder lowering。
     """
 
     tip_type = _draw_tip_type(cfg.tip_range)

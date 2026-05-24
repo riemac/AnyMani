@@ -38,6 +38,26 @@ EditablePath = str | Path
 """允许 helper 接收绝对路径、相对路径或 `Path` 对象。"""
 
 
+def _print_physics_summary(run_cfg: HandGeneratorCfg) -> None:
+    r"""打印当前生效的 physics closure 与密度配置。
+
+    Args:
+        run_cfg (HandGeneratorCfg): 已经完成 dataclass 规范化的正式运行配置。
+    """
+
+    physics_cfg = run_cfg.Physics  # generator 最高 façade 中的物理闭包配置
+    print(f"physics_on         = {physics_cfg is not None and physics_cfg.enabled}")
+    if physics_cfg is None:
+        return
+
+    density = physics_cfg.density  # `DensityProfileCfg`，按部位表达均匀密度假设
+    print(f"physics.density.default     = {density.default}")
+    print(f"physics.density.palm        = {density.palm}")
+    print(f"physics.density.finger_link = {density.finger_link}")
+    print(f"physics.density.fingertip   = {density.fingertip}")
+    print(f"physics.density.custom_tip  = {density.custom_tip}")
+
+
 def print_premade_registry_summary(run_cfg: HandGeneratorCfg) -> None:
     r"""打印 pre-made registry 与当前有效运行参数。
 
@@ -67,6 +87,7 @@ def print_premade_registry_summary(run_cfg: HandGeneratorCfg) -> None:
     print(f"parallel_workers   = {run_cfg.premade_parallel_workers}")
     print(f"parallel_fallback  = {run_cfg.premade_parallel_fallback}")
     print(f"connectivity_cfg   = {run_cfg.connectivity_presets}")
+    _print_physics_summary(run_cfg)
     print(f"validator_on       = {run_cfg.Validate is not None}")
     if run_cfg.Validate is not None:
         print(f"pre_made.finger_count_min = {run_cfg.Validate.pre_made.finger_count_min}")
@@ -256,6 +277,7 @@ def print_post_mutate_summary(
     print(f"n_samples            = {run_cfg.n_samples}")
     print(f"artifact_level       = {run_cfg.artifact_level}")
     print(f"recolored            = {run_cfg.recolored}")
+    _print_physics_summary(run_cfg)
     print(f"validator_on         = {run_cfg.Validate is not None}")
     print(f"mutator_terms        = {[name for name, _ in run_cfg.Mutate.ordered_terms()]}")
     if run_cfg.Validate is not None:

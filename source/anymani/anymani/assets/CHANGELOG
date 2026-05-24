@@ -1,0 +1,11 @@
+0.1 - 2026-05-24
+================
+
+- 新增 `asset_physics.py`，将最终 collision 几何的 `mass / inertial` 闭包从 builder / mutator 中独立出来。
+- `HandGeneratorCfg` 新增 `Physics` 入口，pre-made 与 post-mutate 主链都会在 validator 之前执行 physics closure。
+- custom tip mesh 默认改为使用 `trimesh` 真实体积分计算质量、质心与惯量；non-uniform mesh scale 当前显式 fail-hard。
+- custom mesh tip builder 只负责几何 lowering；custom tip 的最终 `mass / inertial` 全部统一交给 physics closure。
+- `link_scale` 不再在 mutator 内部重建质量与惯量，相关动力学闭包统一收口到 `asset_physics.py`。
+- `asset_gen_cfg.py` 新增统一的 `ASSET_PHYSICS_CFG`，pre-made 与 post-mutate 默认共享同一套密度与 physics closure 配置。
+- `RecipeLoader` 支持 `Physics` 配置块的 YAML ↔ typed cfg 解析。
+- 补充 assets 子项目 `README`，并刷新 `assets/AGENTS.md` / `assets/generator/AGENTS.md` 以反映新的 physics closure 与版本维护约定。
