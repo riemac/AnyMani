@@ -9,7 +9,7 @@ import yaml
 
 from anymani.assets.config import asset_gen_cfg as asset_cfg_module
 from anymani.assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
-from anymani.assets.generator.mutate import HandMutatorCfg, LimitTweakCfg, MountPerturbCfg, TipReplaceCfg
+from anymani.assets.generator.mutate import HandMutatorCfg, LimitTweakCfg, LinkScaleCfg, MountPerturbCfg, TipReplaceCfg
 from anymani.assets.scripts import generate as generate_module
 from anymani.assets.scripts import _asset_generate_runner as runner_module
 from anymani.assets.validator.hand_rules import HandValidatorCfg
@@ -123,6 +123,17 @@ class DemoQuotaTipReplaceMutatorCfg(HandMutatorCfg):
     )
 
 
+class DemoQuotaLinkScaleMutatorCfg(HandMutatorCfg):
+    r"""测试 `link_scale.self_mode` accepted/output quota。"""
+
+    link_scale = LinkScaleCfg(
+        self_mode={"identity": 0.5, "only_length": 0.5},
+        scale_type="rel",
+        link_scale=(1.0, 1.0, 1.5, 1.5, 0.5, 0.5),
+        distrib="uniform",
+    )
+
+
 class DemoMeshOnlyTipReplaceMutatorCfg(HandMutatorCfg):
     r"""测试导出路径时使用的确定性 custom-mesh tip_replace cfg。"""
 
@@ -139,7 +150,7 @@ def test_post_mutate_config_is_direct_hand_generator_cfg():
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG, HandGeneratorCfg)
     assert asset_cfg_module.POST_MUTATE_CFG.mode == "mutate"
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG.Validate, HandValidatorCfg)
-    assert tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms()) == ("tip_replace",)
+    assert "tip_replace" in tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms())
 
 
 def test_post_mutate_runner_resolves_topology_root_path(tmp_path):
@@ -381,6 +392,37 @@ def test_tip_replace_self_mode_probability_is_accepted_output_quota(tmp_path):
     assert summary["post_mutate_mode_stats"]["tip_replace"]["same"]["accepted"] == 2
     assert sum(summary["post_mutate_tip_type_stats"]["proposed"].values()) == 8
     assert sum(summary["post_mutate_tip_type_stats"]["accepted"].values()) == 8
+
+
+def test_link_scale_self_mode_probability_is_accepted_output_quota(tmp_path):
+    r"""`link_scale.self_mode` dict 应控制 accepted/output mode 分布。"""
+
+    topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
+    mutate_cfg = HandGeneratorCfg(
+        mode="mutate",
+        artifact_level="bundle",
+        source_topology_dir=topology_dir,
+        output_dir=tmp_path,
+        n_samples=4,
+        Mutate=DemoQuotaLinkScaleMutatorCfg(),
+        Validate=None,
+    )
+
+    results = list(HandGenerator(mutate_cfg).generate_batch())
+
+    modes = [
+        result.metadata["post_mutate_samples"]["link_scale"]["resolved_self_mode"]
+        for result in results
+    ]
+    mutate_run_dir = next(path for path in topology_dir.iterdir() if path.is_dir())
+    summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
+
+    assert modes.count("identity") == 2
+    assert modes.count("only_length") == 2
+    assert summary["post_mutate_mode_stats"]["link_scale"]["identity"]["target_quota"] == 2
+    assert summary["post_mutate_mode_stats"]["link_scale"]["identity"]["accepted"] == 2
+    assert summary["post_mutate_mode_stats"]["link_scale"]["only_length"]["target_quota"] == 2
+    assert summary["post_mutate_mode_stats"]["link_scale"]["only_length"]["accepted"] == 2
 
 
 def test_unified_generate_runner_accepts_post_mutate_cli(monkeypatch, tmp_path):

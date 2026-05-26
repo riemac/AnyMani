@@ -20,8 +20,11 @@ from ...asset_base import HandCfg
 from ..result import HandGenerationResult
 
 try:
-    from ..mutate import HandMutator, HandMutatorCfg, LimitTweakCfg, MountPerturbCfg, TipReplaceCfg
+    from ..mutate import HandMutator, HandMutatorCfg, LimitTweakCfg, LinkScaleCfg, MountPerturbCfg, TipReplaceCfg
 except Exception:
+    class LinkScaleCfg:  # type: ignore[no-redef]
+        r"""mutate package 不可用时的占位类型，保持 generator fallback 可导入。"""
+
     class MountPerturbCfg:  # type: ignore[no-redef]
         r"""mutate package 不可用时的占位类型，保持 generator fallback 可导入。"""
 
@@ -57,6 +60,13 @@ TIP_REPLACE_MODE_ORDER = (
     "general",
 )
 """`TipReplaceCfg.self_mode` 的固定 tie-break 顺序。"""
+
+LINK_SCALE_MODE_ORDER = (
+    "identity",
+    "general",
+    "only_length",
+)
+"""`LinkScaleCfg.self_mode` 的固定 tie-break 顺序。"""
 
 
 @dataclass(frozen=True)
@@ -148,6 +158,13 @@ def mode_term_specs(cfg: HandMutatorCfg) -> dict[str, AcceptedModeTermSpec]:
                 mode_order=TIP_REPLACE_MODE_ORDER,
                 probabilities={str(mode): float(probability) for mode, probability in term_cfg.self_mode.items()},
             )
+            continue
+        if isinstance(term_cfg, LinkScaleCfg) and isinstance(term_cfg.self_mode, dict):
+            specs[term_name] = AcceptedModeTermSpec(
+                term_name=term_name,
+                mode_order=LINK_SCALE_MODE_ORDER,
+                probabilities={str(mode): float(probability) for mode, probability in term_cfg.self_mode.items()},
+            )
     return specs
 
 
@@ -216,6 +233,7 @@ def resolved_term_mode(
 
 __all__ = [
     "AcceptedModeTermSpec",
+    "LINK_SCALE_MODE_ORDER",
     "LIMIT_TWEAK_MODE_ORDER",
     "MOUNT_MODE_ORDER",
     "TIP_REPLACE_MODE_ORDER",

@@ -16,11 +16,27 @@ from __future__ import annotations
 
 from dataclasses import MISSING, dataclass, field
 import math
+import random
 from typing import Any, Literal
 
 from ...asset_base import HandCfg
 from ...asset_schema_core import EllipticCylinderGeometryCfg, PoseCfg, Vector2, Vector6
 from .base import HandPatch, MutatorBase, MutatorBaseCfg, _make_range_sampler
+
+
+_MODE_IDENTITY = "identity"
+_MODE_GENERAL = "general"
+_MODE_ONLY_LENGTH = "only_length"
+
+_ALL_SELF_MODES = (
+    _MODE_IDENTITY,
+    _MODE_GENERAL,
+    _MODE_ONLY_LENGTH,
+)
+r"""`link_scale.self_mode` 当前支持的全部高层 mode。"""
+
+_MODE_TOLERANCE = 1e-9
+r"""mode 概率求和与正概率判定的数值容差。"""
 
 
 @dataclass
@@ -86,25 +102,44 @@ class LinkScaleCfg(MutatorBaseCfg):
       CMC2 的 $x$ 对齐，高度变异会影响 CMC2 的 $z$ 对齐；
     - CMC2/MCP/DIP 之后的串联关系可以继续近似使用 non-thumb 的规则。
 
-    # TODO(link-scale-vector6): 实现 ``Vector6`` 的 sampler lowering。
+    # DONE(link-scale-vector6): 实现 ``Vector6`` 的 sampler lowering。
     # 输入：`link_scale` / `clip` 中的 l/w/h 三组范围。
     # 输出：per-link 的 length samples，加上 shared::width/shared::height。
     # 约束：长度独立采样；宽度和高度每个 batch sample 只采一次并全局共享。
     # 验收：metadata 中能看出每个 link 的 length scale 不同，但所有 link 的
     # width scale / height scale 相同。
 
-    # TODO(link-scale-nonthumb-width-height): 实现 non-thumb 横截面缩放。
+    # DONE(link-scale-nonthumb-width-height): 实现 non-thumb 横截面缩放。
     # 输入：某 joint 的 collision/visual 主体几何与 shared w/h scale。
     # 输出：box.size.x / box.size.z 或 cylinder.radius 的对称缩放 patch。
     # 约束：不改 joint.origin，不改 element.origin，不改 mesh offset d_i。
     # 验收：URDF 中 link 横截面尺寸变化，但各 joint origin 与 visual/collision
     # origin 的 xyz/rpy 不因 w/h scale 漂移。
 
-    # TODO(link-scale-thumb-cmc1): 实现 CMC1 的专用下游 origin 重解算。
+    # DONE(link-scale-thumb-cmc1): 实现 CMC1 的专用下游 origin 重解算。
     # 输入：CMC1 新长度/宽度/高度、CMC1 mesh offset、CMC2 当前横截面尺寸。
     # 输出：CMC2 origin = ((W_cmc1-W_cmc2)/2, d_y+L_cmc1/2, d_z-(H_cmc1-H_cmc2)/2)。
     # 约束：CMC1 自身 mesh origin 保持 center_on_joint 语义；CMC2 之后按普通链推进。
     # 验收：对照 `拇指连杆尺寸变异示意图.png`，CMC1 放大后 CMC2 仍贴在图示边界上。
+    """
+
+    self_mode: Literal["identity", "general", "only_length"] | dict[str, float] | None = _MODE_GENERAL
+    r"""连杆尺寸缩放的高层 mode 选择器。
+
+    支持三种输入语义：
+
+    - `None`：未显式指定，默认落到 `"general"`；
+    - `str`：固定使用某一个 mode；
+    - `dict[str, float]`：按概率混合采样 mode，且该概率由 generator 解释为
+      accepted/output quota，而不是 proposal prior。
+
+    预设 mode：
+
+    - `"identity"`：显式 no-op，不改任何 link，只记录 provenance；
+    - `"general"`：当前完整实现。长度 per-link 独立采样；若 `link_scale`
+      是 `Vector6`，宽度和高度作为全手共享随机变量参与采样与 patch；
+    - `"only_length"`：只做长度变异。即使 `link_scale` 是 `Vector6`，也只消费
+      前两个数 `(l_min, l_max)`，宽度和高度不参与采样、不参与 patch。
     """
 
     link_type: str = "box"
@@ -169,6 +204,7 @@ class LinkScaleCfg(MutatorBaseCfg):
         """
 
         self.class_type = LinkScaleMutator
+        _resolve_active_modes(self.self_mode)
         if self.link_scale is MISSING:
             raise ValueError("LinkScaleCfg.link_scale must be set explicitly")
         if isinstance(self.link_scale, dict):
@@ -199,44 +235,16 @@ class LinkScaleMutator(MutatorBase):
         self.cfg = cfg
 
     def describe_sampling(self, target: HandCfg) -> dict[str, Any]:
-        r"""为每个目标 joint 声明长度扰动随机变量。
+        r"""返回一个结构化样本生成器。
 
-        返回的 key 使用 joint name 作为语义锚点，因为在 post-delete /
-        regroup 之后，数字 index 可能会变，但 child link / joint name 仍然
-        是我们跨版本追踪几何语义的稳定标识。
-
-        # TODO(link-scale-vector6): 当 `link_scale` 为 Vector6 时，这里应声明：
-        # - `{joint.name}::length`：每个 link 独立 draw；
-        # - `shared::width`：整次 sample 共享 draw；
-        # - `shared::height`：整次 sample 共享 draw。
-        # 当前实现仍然只声明 `{joint.name}` 并只消费 Vector6 前两个元素。
+        `link_scale` 现在和 `mount_perturb` / `limit_tweak` / `tip_replace`
+        一样由高层 mode 决定实际随机量集合。因此采样层不再把所有潜在
+        随机变量平铺出来，而是生成一份带 `resolved_self_mode` 的 payload。
+        这能保证 accepted quota 强制某个 mode 时，term 内部重新生成与该
+        mode 匹配的完整随机量。
         """
 
-        # 先把所有可扰动 joint 的局部采样语义一次性声明出来。
-        # 这样 pipeline 看到的是“联合参数表”，而不是互相串联的逐步修改。
-        specs: dict[str, Any] = {}
-        shared_ranges = _shared_cross_section_ranges(self.cfg.link_scale, self.cfg.clip, target=target)
-        if shared_ranges is not None:
-            width_range, height_range = shared_ranges
-            specs["shared::width"] = _make_range_sampler(
-                width_range,
-                distrib=self.cfg.distrib,
-                boundary_policy=self.cfg.boundary_policy,
-            )  # 全手共享的宽度缩放随机变量
-            specs["shared::height"] = _make_range_sampler(
-                height_range,
-                distrib=self.cfg.distrib,
-                boundary_policy=self.cfg.boundary_policy,
-            )  # 全手共享的高度缩放随机变量
-        for _, _, joint in _iter_target_joints(target):
-            value_range = _range_for_joint(self.cfg.link_scale, joint.child)
-            clip_range = _range_for_joint(self.cfg.clip, joint.child) if self.cfg.clip is not None else None
-            specs[f"{joint.name}::length"] = _make_range_sampler(
-                _length_range(value_range, clip_range),
-                distrib=self.cfg.distrib,
-                boundary_policy=self.cfg.boundary_policy,
-            )
-        return specs
+        return {"sample": lambda: self._sample_one(target)}
 
     def plan_patch(self, target: HandCfg, sampled_params: dict[str, Any] | None = None) -> HandPatch:
         r"""生成 link length 与下游 joint origin 的 deferred patch。
@@ -252,27 +260,33 @@ class LinkScaleMutator(MutatorBase):
         # 宽高 patch 先污染长度 patch 的几何读取。
         """
 
-        sampled_params = sampled_params or {}
+        sample = self._sample_one(target) if sampled_params is None else _normalize_sample_payload(sampled_params, self.cfg, target=target)
+        resolved_mode = str(sample["resolved_self_mode"])
+
         patch = HandPatch()
-        shared_width = float(sampled_params["shared::width"]) if "shared::width" in sampled_params else None
-        shared_height = float(sampled_params["shared::height"]) if "shared::height" in sampled_params else None
-        patch.metadata.setdefault("post_mutate_link_scale", {})
-        patch.metadata["post_mutate_link_scale"]["width_scale"] = shared_width  # sidecar 中记录当前全手共享的 semantic 宽度缩放
-        patch.metadata["post_mutate_link_scale"]["height_scale"] = shared_height  # sidecar 中记录当前全手共享的 semantic 高度缩放
-        patch.metadata["post_mutate_link_scale"]["length_scale"] = {}  # 每个 link 的长度缩放单独记录
+        patch.metadata.setdefault("post_mutate_samples", {})
+        patch.metadata["post_mutate_samples"]["link_scale"] = sample
+        patch.metadata["post_mutate_link_scale"] = sample
+
+        if resolved_mode == _MODE_IDENTITY:
+            return patch  # `identity` 是显式 no-op，只保留 provenance
+
+        shared_width = sample.get("width_scale")
+        shared_height = sample.get("height_scale")
+        child_length_scales = dict(sample.get("length_scale", {}))
 
         # 先遍历每个目标 joint，再为当前 joint 自己和下游 joint 生成
         # 一组最小 patch。这里的核心原则是：同一个源长度变动，只产生
         # 一次语义上闭合的几何更新，而不是让后续算子再去猜测这个变化。
         for finger_index, joint_index, joint in _iter_target_joints(target):
-            delta_or_ratio = float(sampled_params.get(f"{joint.name}::length", sampled_params.get(joint.name, 0.0)))
+            delta_or_ratio = _length_sample_for_joint(sample, joint, default=0.0)
             old_length = _joint_primary_length(joint)
             if old_length is None:
                 continue
             new_length = _mutated_length(old_length, delta_or_ratio, self.cfg)
             if new_length <= 1e-6:
                 continue
-            patch.metadata["post_mutate_link_scale"]["length_scale"][joint.child] = delta_or_ratio  # 每个 child link 记录自身长度缩放
+            child_length_scales[joint.child] = delta_or_ratio  # 每个 child link 记录自身长度缩放
 
             old_cross_section = _joint_cross_section(joint)  # 读取当前 link 的 local $(x,z)$ 横截面，用于后续 geometry patch
             new_cross_section = _mutated_cross_section(
@@ -342,7 +356,56 @@ class LinkScaleMutator(MutatorBase):
 
                 patch.add(("finger", finger_index, "joint", next_index, "origin_from_link_scale", joint.name), apply_next_origin)
 
+        sample["length_scale"] = child_length_scales
+        patch.metadata["post_mutate_samples"]["link_scale"] = sample
+        patch.metadata["post_mutate_link_scale"] = sample
         return patch
+
+    def _sample_one(self, target: HandCfg) -> dict[str, Any]:
+        r"""为当前 hand 样本生成一份已经解析好 mode 的结构化随机量。"""
+
+        resolved_mode = _draw_resolved_mode(self.cfg)
+        return self.sample_one_for_mode(target, resolved_mode=resolved_mode)
+
+    def sample_one_for_mode(self, target: HandCfg, *, resolved_mode: str) -> dict[str, Any]:
+        r"""为 accepted-quota 路径生成指定 mode 的结构化随机量。"""
+
+        if resolved_mode not in _ALL_SELF_MODES:
+            raise ValueError(f"unsupported link_scale resolved mode: {resolved_mode!r}")
+        if resolved_mode == _MODE_IDENTITY:
+            return {
+                "resolved_self_mode": _MODE_IDENTITY,
+                "joint_length_scale": {},
+                "length_scale": {},
+                "width_scale": None,
+                "height_scale": None,
+            }
+
+        joint_length_scale = _sample_joint_length_scales(self.cfg, target)
+        width_scale = None
+        height_scale = None
+        if resolved_mode == _MODE_GENERAL:
+            shared_ranges = _shared_cross_section_ranges(self.cfg.link_scale, self.cfg.clip, target=target)
+            if shared_ranges is not None:
+                width_range, height_range = shared_ranges
+                width_scale = _make_range_sampler(
+                    width_range,
+                    distrib=self.cfg.distrib,
+                    boundary_policy=self.cfg.boundary_policy,
+                )()
+                height_scale = _make_range_sampler(
+                    height_range,
+                    distrib=self.cfg.distrib,
+                    boundary_policy=self.cfg.boundary_policy,
+                )()
+
+        return {
+            "resolved_self_mode": resolved_mode,
+            "joint_length_scale": joint_length_scale,
+            "length_scale": {},
+            "width_scale": width_scale,
+            "height_scale": height_scale,
+        }
 
 
 def _iter_target_joints(hand: HandCfg):
@@ -357,6 +420,139 @@ def _iter_target_joints(hand: HandCfg):
             if _joint_primary_length(joint) is None:
                 continue
             yield finger_index, joint_index, joint
+
+
+def _resolve_active_modes(self_mode: Any) -> tuple[str, ...]:
+    r"""把 `self_mode` lowering 成当前 cfg 可能采样到的 mode 集合。"""
+
+    if self_mode is None:
+        return (_MODE_GENERAL,)
+    if isinstance(self_mode, str):
+        if self_mode not in _ALL_SELF_MODES:
+            raise ValueError(f"unsupported link_scale self_mode: {self_mode!r}")
+        return (self_mode,)
+    if not isinstance(self_mode, dict):
+        raise TypeError(f"link_scale.self_mode must be str | dict[str, float] | None, got {type(self_mode).__name__}")
+
+    active: list[str] = []
+    total = 0.0
+    for mode_name, probability in self_mode.items():
+        if mode_name not in _ALL_SELF_MODES:
+            raise ValueError(f"unsupported link_scale self_mode key: {mode_name!r}")
+        prob = float(probability)
+        if prob < 0.0:
+            raise ValueError(f"link_scale.self_mode probability must be non-negative, got {mode_name!r}={prob!r}")
+        total += prob
+        if prob > _MODE_TOLERANCE:
+            active.append(str(mode_name))
+    if not active:
+        raise ValueError("link_scale.self_mode dict must contain at least one positive-probability mode")
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=_MODE_TOLERANCE):
+        raise ValueError(f"link_scale.self_mode probabilities must sum to 1.0, got {total!r}")
+    return tuple(active)
+
+
+def _draw_resolved_mode(cfg: LinkScaleCfg) -> str:
+    r"""从 cfg 的高层 `self_mode` 中采样一个 resolved mode。"""
+
+    self_mode = cfg.self_mode
+    if self_mode is None:
+        return _MODE_GENERAL
+    if isinstance(self_mode, str):
+        return self_mode
+
+    threshold = random.random()
+    cumulative = 0.0
+    last_positive = _MODE_GENERAL
+    for mode in _ALL_SELF_MODES:
+        probability = float(self_mode.get(mode, 0.0))
+        if probability <= _MODE_TOLERANCE:
+            continue
+        cumulative += probability
+        last_positive = mode
+        if threshold <= cumulative:
+            return mode
+    return last_positive  # 浮点尾差兜底；概率合法性已在 cfg 层校验
+
+
+def _sample_joint_length_scales(cfg: LinkScaleCfg, target: HandCfg) -> dict[str, float]:
+    r"""为每个可变 joint 独立采样主长度方向扰动。"""
+
+    joint_length_scale: dict[str, float] = {}
+    for _, _, joint in _iter_target_joints(target):
+        value_range = _range_for_joint(cfg.link_scale, joint.child)
+        clip_range = _range_for_joint(cfg.clip, joint.child) if cfg.clip is not None else None
+        joint_length_scale[joint.name] = _make_range_sampler(
+            _length_range(value_range, clip_range),
+            distrib=cfg.distrib,
+            boundary_policy=cfg.boundary_policy,
+        )()
+    return joint_length_scale
+
+
+def _normalize_sample_payload(
+    sampled_params: dict[str, Any] | None,
+    cfg: LinkScaleCfg,
+    *,
+    target: HandCfg,
+) -> dict[str, Any]:
+    r"""把新结构化 sample 或旧 flat sampled params 统一成 link-scale payload。"""
+
+    params = dict(sampled_params or {})
+    raw_sample = params.get("sample")
+    if isinstance(raw_sample, dict):
+        sample = dict(raw_sample)
+    elif "resolved_self_mode" in params:
+        sample = dict(params)
+    else:
+        # 兼容旧测试/脚本直接传 `{joint::length, shared::width, shared::height}` 的形状。
+        joint_length_scale = {
+            key.removesuffix("::length"): float(value)
+            for key, value in params.items()
+            if isinstance(key, str) and key.endswith("::length")
+        }
+        for _, _, joint in _iter_target_joints(target):
+            if joint.name in params:
+                joint_length_scale[joint.name] = float(params[joint.name])
+        sample = {
+            "resolved_self_mode": _MODE_GENERAL,
+            "joint_length_scale": joint_length_scale,
+            "length_scale": {},
+            "width_scale": float(params["shared::width"]) if "shared::width" in params else None,
+            "height_scale": float(params["shared::height"]) if "shared::height" in params else None,
+        }
+
+    default_mode = cfg.self_mode if isinstance(cfg.self_mode, str) else _MODE_GENERAL
+    resolved_mode = str(sample.get("resolved_self_mode", default_mode))
+    if resolved_mode not in _ALL_SELF_MODES:
+        raise ValueError(f"unsupported link_scale resolved mode: {resolved_mode!r}")
+    sample["resolved_self_mode"] = resolved_mode
+    sample.setdefault("joint_length_scale", {})
+    sample.setdefault("length_scale", {})
+    if resolved_mode == _MODE_IDENTITY:
+        sample["joint_length_scale"] = {}
+        sample["length_scale"] = {}
+        sample["width_scale"] = None
+        sample["height_scale"] = None
+    elif resolved_mode == _MODE_ONLY_LENGTH:
+        sample["width_scale"] = None
+        sample["height_scale"] = None
+    else:
+        sample.setdefault("width_scale", None)
+        sample.setdefault("height_scale", None)
+    return sample
+
+
+def _length_sample_for_joint(sample: dict[str, Any], joint, *, default: float) -> float:
+    r"""从结构化 sample 中读取某个 joint 的长度扰动。"""
+
+    joint_length_scale = sample.get("joint_length_scale")
+    if isinstance(joint_length_scale, dict):
+        if joint.name in joint_length_scale:
+            return float(joint_length_scale[joint.name])
+        if joint.child in joint_length_scale:
+            return float(joint_length_scale[joint.child])
+    return float(default)
 
 
 def _range_for_joint(config: Vector2 | Vector6 | None, child_name: str) -> Vector2 | Vector6 | None:

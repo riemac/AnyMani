@@ -6,7 +6,7 @@ r"""post-mutate accepted/output self_mode quota 测试。
 
 from __future__ import annotations
 
-from assets.generator.quota.accepted_mode import LIMIT_TWEAK_MODE_ORDER, allocate_accepted_mode_quota
+from assets.generator.quota.accepted_mode import LINK_SCALE_MODE_ORDER, LIMIT_TWEAK_MODE_ORDER, allocate_accepted_mode_quota
 
 
 def test_allocate_accepted_mode_quota_exact_case():
@@ -61,3 +61,16 @@ def test_allocate_accepted_mode_quota_supports_limit_tweak_mode_order():
     )
 
     assert quota == {"identity": 1}
+
+
+def test_allocate_accepted_mode_quota_supports_link_scale_mode_order():
+    r"""`link_scale` 的 accepted quota tie-break 应包含 `only_length`。"""
+
+    quota = allocate_accepted_mode_quota(
+        {"general": 0.34, "only_length": 0.33, "identity": 0.33},
+        2,
+        mode_order=LINK_SCALE_MODE_ORDER,
+        label="link_scale.self_mode",
+    )
+
+    assert quota == {"identity": 1, "general": 1}

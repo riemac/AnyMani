@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from assets.builder._utils import _build_cylinder_mesh
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.generator.mutate import LinkScaleCfg, LinkScaleMutator
@@ -66,6 +68,28 @@ def test_link_scale_mutator_rescales_link_length_and_advances_next_joint_origin(
     assert after_middle == before_middle
 
 
+def test_link_scale_identity_records_mode_without_changing_geometry():
+    r"""`identity` 是显式 no-op，但仍要把 mode provenance 写入 metadata。"""
+
+    hand = _build_allegro_hand()
+    before_index_size = _joint_by_name(hand, "index_j1").collisions[0].geometry.size
+    before_next_origin = _joint_by_name(hand, "index_j2").origin.pos
+
+    mutated = LinkScaleMutator(
+        LinkScaleCfg(
+            self_mode="identity",
+            scale_type="rel",
+            link_scale=(0.8, 1.2, 0.9, 1.1, 0.9, 1.1),
+            distrib="uniform",
+        )
+    ).mutate(hand, sampled_params={"sample": {"resolved_self_mode": "identity"}})
+
+    assert mutated is not None
+    assert _joint_by_name(mutated, "index_j1").collisions[0].geometry.size == before_index_size
+    assert _joint_by_name(mutated, "index_j2").origin.pos == before_next_origin
+    assert mutated.metadata["post_mutate_samples"]["link_scale"]["resolved_self_mode"] == "identity"
+
+
 def test_link_scale_mutator_uses_shared_width_and_height_scale_for_box_links():
     r"""`Vector6` 模式下，宽度/高度应是全手共享随机变量，而不是 per-link 独立采样。"""
 
@@ -96,6 +120,77 @@ def test_link_scale_mutator_uses_shared_width_and_height_scale_for_box_links():
     assert math.isclose(after_middle[0], before_middle[0] * 1.2, rel_tol=0.0, abs_tol=1e-12)
     assert math.isclose(after_index[2], before_index[2] * 0.8, rel_tol=0.0, abs_tol=1e-12)
     assert math.isclose(after_middle[2], before_middle[2] * 0.8, rel_tol=0.0, abs_tol=1e-12)
+
+
+def test_link_scale_only_length_ignores_vector6_width_and_height():
+    r"""`only_length` 使用 Vector6 的前两个数，只变长度，不采样/应用宽高。"""
+
+    hand = _build_allegro_hand()
+    before_index = _joint_by_name(hand, "index_j1").collisions[0].geometry.size
+    before_next_origin = _joint_by_name(hand, "index_j2").origin.pos
+
+    mutated = LinkScaleMutator(
+        LinkScaleCfg(
+            self_mode="only_length",
+            scale_type="rel",
+            link_scale=(1.1, 1.1, 1.5, 1.5, 0.5, 0.5),
+            distrib="uniform",
+        )
+    ).mutate(
+        hand,
+        sampled_params={
+            "sample": {
+                "resolved_self_mode": "only_length",
+                "joint_length_scale": {"index_j1": 1.1},
+                "width_scale": 1.5,
+                "height_scale": 0.5,
+            }
+        },
+    )
+
+    assert mutated is not None
+    after_index = _joint_by_name(mutated, "index_j1").collisions[0].geometry.size
+    after_next_origin = _joint_by_name(mutated, "index_j2").origin.pos
+    assert math.isclose(after_index[1], before_index[1] * 1.1, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(after_index[0], before_index[0], rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(after_index[2], before_index[2], rel_tol=0.0, abs_tol=1e-12)
+    assert after_next_origin[1] > before_next_origin[1]
+    sample = mutated.metadata["post_mutate_samples"]["link_scale"]
+    assert sample["resolved_self_mode"] == "only_length"
+    assert sample["width_scale"] is None
+    assert sample["height_scale"] is None
+
+
+def test_link_scale_sample_one_for_only_length_does_not_emit_shared_width_height():
+    r"""forced `only_length` payload 不应包含有效 shared width / height 随机量。"""
+
+    hand = _build_allegro_hand()
+    runtime = LinkScaleMutator(
+        LinkScaleCfg(
+            self_mode={"identity": 0.2, "general": 0.5, "only_length": 0.3},
+            scale_type="rel",
+            link_scale=(0.8, 1.2, 0.9, 1.1, 0.9, 1.1),
+            distrib="uniform",
+        )
+    )
+
+    sample = runtime.sample_one_for_mode(hand, resolved_mode="only_length")
+
+    assert sample["resolved_self_mode"] == "only_length"
+    assert sample["width_scale"] is None
+    assert sample["height_scale"] is None
+    assert sample["joint_length_scale"]
+
+
+def test_link_scale_self_mode_probability_must_sum_to_one():
+    r"""dict `self_mode` 的概率和必须严格为 1。"""
+
+    with pytest.raises(ValueError, match="probabilities must sum"):
+        LinkScaleCfg(
+            self_mode={"identity": 0.2, "general": 0.2},
+            scale_type="rel",
+            link_scale=(0.8, 1.2),
+        )
 
 
 def test_link_scale_mutator_maps_thumb_semantic_width_height_to_swapped_local_axes():
