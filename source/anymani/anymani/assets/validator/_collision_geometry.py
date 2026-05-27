@@ -156,17 +156,14 @@ def extract_finger_collision_bodies(
     bodies_by_finger: dict[str, list[CollisionBodyRecord]] = {}
     skipped_bodies: list[SkippedCollisionBody] = []
 
+    link_poses_by_finger = extract_finger_link_poses(hand)  # 先统一恢复每根 finger 在 home pose 下的 link frame 轨迹
+
     for finger in hand.fingers:
         bodies_by_finger.setdefault(finger.name, [])
-        parent_link_pose = PoseCfg()  # 当前 joint.parent 这根 link 在 palm/world 下的位姿
+        finger_link_poses = link_poses_by_finger.get(finger.name, ())  # 与 `finger.joints` 一一对齐的 child-link world pose
 
         for joint_index, joint in enumerate(finger.joints):
-            if joint_index == 0:
-                # 第一段必须镜像 exporter 的 mount folding 近似。
-                link_pose = _pose_add(finger.mount, joint.origin)
-            else:
-                # 进入关节树后，joint.origin 是相对 parent link frame 的刚体变换。
-                link_pose = _compose_pose(parent_link_pose, joint.origin)
+            link_pose = finger_link_poses[joint_index]  # 当前 joint.child 这根 link 在 palm/world 下的位姿
 
             for collision_index, collision in enumerate(joint.collisions):
                 body_name = collision.name or f"{joint.child}_collision_{collision_index}"
@@ -206,10 +203,52 @@ def extract_finger_collision_bodies(
                         world_pose=world_pose,
                     )
                 )
-
-            parent_link_pose = link_pose
-
     return CollisionExtractionResult(bodies_by_finger=bodies_by_finger, skipped_bodies=skipped_bodies)
+
+
+def extract_finger_link_poses(hand: HandCfg) -> dict[str, list[PoseCfg]]:
+    r"""恢复每根 finger 在 home pose 下每一节 child-link 的 world pose。
+
+    这层 helper 把 `_collision_geometry.py` 里最核心的 home-pose 运动学事实单独抽出来：
+
+    1. 第一段沿用 exporter 当前的 mount-folding 近似：
+       $$
+       {}^{palm}T_{j_0} \approx \operatorname{pose\_add}(T_{mount}, T_{j_0}).
+       $$
+    2. 第二段及以后使用真实刚体复合：
+       $$
+       {}^{world}T_{child} = {}^{world}T_{parent}\,{}^{parent}T_{child}.
+       $$
+
+    这样后续的 SDF clearance、finger axial length、乃至别的 home-pose 几何证书，
+    都能共用同一条坐标语义，而不是各自复制一套近似。
+
+    Args:
+        hand (HandCfg): 已经完成 pre-made 或 post-mutate 的整手 schema。
+
+    Returns:
+        dict[str, list[PoseCfg]]: `finger.name -> [PoseCfg, ...]`，列表顺序与
+        `finger.joints` 完全一致；第 `i` 项就是 `finger.joints[i].child`
+        这根 link 在 palm/world frame 下的位姿。
+    """
+
+    link_poses_by_finger: dict[str, list[PoseCfg]] = {}  # 每根 finger 的 child-link home-pose 轨迹
+
+    for finger in hand.fingers:
+        finger_link_poses: list[PoseCfg] = []  # 当前 finger 内各 child-link 的 world pose，按 joint 顺序收集
+        parent_link_pose = PoseCfg()  # 当前 joint.parent 这根 link 在 palm/world 下的位姿；root 时等于 palm 原点
+
+        for joint_index, joint in enumerate(finger.joints):
+            if joint_index == 0:
+                link_pose = _pose_add(finger.mount, joint.origin)  # 第一段必须与 exporter 的 mount folding 近似保持一致
+            else:
+                link_pose = _compose_pose(parent_link_pose, joint.origin)  # 进入 joint tree 后使用真实刚体复合
+            finger_link_poses.append(link_pose)  # 当前 joint.child 的 world pose
+            parent_link_pose = link_pose  # 下游 joint 会把这根 child-link 作为新的 parent
+
+        link_poses_by_finger[finger.name] = finger_link_poses
+
+    return link_poses_by_finger
 def _make_skipped_body(
     *,
     finger_name: str,
@@ -383,6 +422,7 @@ __all__ = [
     "SkippedCollisionBody",
     "UnsupportedGeometryPolicy",
     "extract_finger_collision_bodies",
+    "extract_finger_link_poses",
     "apply_inverse_pose",
     "apply_pose",
 ]

@@ -9,3 +9,6 @@
 - `asset_gen_cfg.py` 新增统一的 `ASSET_PHYSICS_CFG`，pre-made 与 post-mutate 默认共享同一套密度与 physics closure 配置。
 - `RecipeLoader` 支持 `Physics` 配置块的 YAML ↔ typed cfg 解析。
 - 补充 assets 子项目 `README`，并刷新 `assets/AGENTS.md` / `assets/generator/AGENTS.md` 以反映新的 physics closure 与版本维护约定。
+- post-mutate validator 新增 finger axial length hard gate：使用 home pose 下 collision geometry union 沿 nominal distal axis 的投影宽度约束过长手指。
+- custom tip mesh 的 finger length 现在直接用 `trimesh` 顶点投影测量，不再复用旧的 joint-origin 链长近似。
+- sidecar `hand.yaml.fingers[].total_length_cm` 改为记录真实轴向几何长度，与 validator 共享同一套长度定义。

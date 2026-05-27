@@ -21,6 +21,7 @@ AnyMani Assets
 3. sidecar `hand.yaml` 会保存完整 `hand_cfg` 快照，供 mutate-only 恢复。
 4. physics closure 在 generator 主链中、validator 之前执行。
 5. custom tip mesh 当前默认使用 `trimesh` 真实体积分；non-uniform mesh scale 显式 fail-hard。
+6. post-mutate finger length 使用 home pose 下 collision geometry 沿 nominal distal axis 的真实轴向长度，而不是旧式 joint-origin 链长近似。
 
 常看入口
 --------

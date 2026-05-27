@@ -4,7 +4,7 @@ Sidecar 是每个导出产物目录里与 URDF 同级的一个 YAML 文件，记
 
 - 整手结构摘要（family / handedness / dof / finger_count）
 - 生成溯源（generation config hash / timestamp / random seed）
-- 关键参数统计（每根 finger 的总链长、关节限位范围）
+- 关键参数统计（每根 finger 的真实轴向长度、关节限位范围）
 - 可追踪字段（id / experiment tag）
 - 以及一个可直接恢复的完整 `hand_cfg` 快照
 
@@ -51,12 +51,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import datetime as dt
-import math
 from pathlib import Path
 from typing import Any
 import yaml
 
 from ..asset_base import AssetCfgBase, HandCfg
+from ..validator._finger_length import measure_finger_axial_lengths
 from ._base import ExporterBase, ExportResult
 
 
@@ -79,7 +79,7 @@ class SidecarCfg(AssetCfgBase):
     """是否在 sidecar 里写入溯源字段（recipe_hash / seed / experiment_tag）。"""
 
     include_finger_stats: bool = True
-    """是否在 sidecar 里写入每根 finger 的统计信息（链长 / DOF 等）。"""
+    """是否在 sidecar 里写入每根 finger 的统计信息（真实轴向长度 / DOF 等）。"""
 
     experiment_tag: str | None = None
     """可选的实验标签；若不为 None 则写入 provenance.experiment_tag。"""
@@ -141,17 +141,18 @@ class SidecarExporter(ExporterBase):
 
         if self.cfg.include_finger_stats:
             fingers: list[dict[str, Any]] = []
+            axial_lengths = {
+                measurement.finger_name: measurement
+                for measurement in measure_finger_axial_lengths(target)
+            }  # sidecar 与 validator 共用同一套长度定义，避免“摘要一套、闸门一套”
             for finger in target.fingers:
-                total_length = sum(
-                    math.sqrt(joint.origin.pos[0] ** 2 + joint.origin.pos[1] ** 2 + joint.origin.pos[2] ** 2)
-                    for joint in finger.joints
-                )
+                measurement = axial_lengths.get(finger.name)  # 当前 finger 的真实轴向长度测量；缺失时显式写空值，而不是偷偷退回旧近似
                 fingers.append(
                     {
                         "name": finger.name,
                         "joint_count": len(finger.joints),
                         "revolute_dof": finger.dof_count,
-                        "total_length_cm": round(total_length * 100.0, 3),
+                        "total_length_cm": None if measurement is None else round(measurement.axial_length * 100.0, 3),
                     }
                 )
             doc["fingers"] = fingers

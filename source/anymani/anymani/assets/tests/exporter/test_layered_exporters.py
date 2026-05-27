@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 
+import yaml
+
+from assets.asset_schema_core import CollisionGeometryCfg, PoseCfg
+from assets.asset_schema_embodiment import FingerCfg, HandCfg, JointCfg, PalmCfg
 from assets.builder.palm_builders import ComPalmBuilder, ComPalmBuilderCfg
 from assets.exporter import (
     FingerExporter,
@@ -25,6 +29,8 @@ from assets.exporter import (
     JointExporterCfg,
     PalmExporter,
     PalmExporterCfg,
+    SidecarCfg,
+    SidecarExporter,
 )
 from assets.presets import get_finger_builder_preset
 
@@ -34,6 +40,73 @@ def _build_allegro_finger():
 
     cfg = get_finger_builder_preset("allegro_non_thumb_v1").replace(name="index", parent_link="palm")
     return cfg.class_type(cfg).build()
+
+
+def _build_simple_hand_for_sidecar() -> HandCfg:
+    r"""构造一只长度可解析的简化整手，用于 sidecar 统计回归。
+
+    这只手只保留一根 index finger，长度构造与 validator 单测一致：
+
+    - 第一段 box：区间 $[-2, 2]$cm；
+    - 第二段 box：区间 $[2, 6]$cm；
+    - 指尖 sphere：区间 $[7, 9]$cm。
+
+    因此 `total_length_cm` 的新语义应稳定为 $11$cm，而不是旧的 joint-origin 求和近似。
+    """
+
+    return HandCfg(
+        name="sidecar_demo",
+        palm=PalmCfg(name="palm"),
+        fingers=[
+            FingerCfg(
+                name="index",
+                parent_link="palm",
+                mount=PoseCfg(),
+                joints=[
+                    JointCfg(
+                        name="index_j0",
+                        parent="palm",
+                        child="index_link_0",
+                        origin=PoseCfg(),
+                        collisions=[
+                            CollisionGeometryCfg(
+                                name="index_link_0_col",
+                                geometry={"type": "box", "size": (0.02, 0.04, 0.02)},
+                            )
+                        ],
+                    ),
+                    JointCfg(
+                        name="index_j1",
+                        parent="index_link_0",
+                        child="index_link_1",
+                        origin=PoseCfg(pos=(0.0, 0.04, 0.0)),
+                        collisions=[
+                            CollisionGeometryCfg(
+                                name="index_link_1_col",
+                                geometry={"type": "box", "size": (0.02, 0.04, 0.02)},
+                            )
+                        ],
+                    ),
+                    JointCfg(
+                        name="index_tip_fixed",
+                        parent="index_link_1",
+                        child="index_tip",
+                        joint_type="fixed",
+                        origin=PoseCfg(pos=(0.0, 0.04, 0.0)),
+                        collisions=[
+                            CollisionGeometryCfg(
+                                name="index_tip_col",
+                                geometry={"type": "sphere", "radius": 0.01},
+                            )
+                        ],
+                        is_tip=True,
+                    ),
+                ],
+            )
+        ],
+        family="unit_test",
+        handedness="right",
+    )
 
 
 def test_joint_exporter_writes_standalone_joint_preview(tmp_path):
@@ -95,3 +168,16 @@ def test_palm_exporter_draws_mount_markers_and_stub_roots(tmp_path):
         for child in (*index_preview_link.findall("visual/geometry"), *index_preview_link.findall("collision/geometry"))
     }
     assert preview_geometry_kinds == {"sphere", "box"}
+
+
+def test_sidecar_uses_real_axial_geometry_length_for_total_length_cm(tmp_path):
+    r"""sidecar `total_length_cm` 应与新轴向几何长度语义保持一致。"""
+
+    hand = _build_simple_hand_for_sidecar()
+    result = SidecarExporter(SidecarCfg()).export(hand, tmp_path)
+
+    assert result.ok is True
+    doc = yaml.safe_load(result.written[0].read_text(encoding="utf-8"))
+
+    assert doc["fingers"][0]["name"] == "index"
+    assert doc["fingers"][0]["total_length_cm"] == 11.0

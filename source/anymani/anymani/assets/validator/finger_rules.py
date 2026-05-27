@@ -29,7 +29,6 @@ schema 层已经保证：
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 from ..asset_base import AssetCfgBase, FingerCfg
@@ -54,12 +53,6 @@ class FingerValidatorCfg(AssetCfgBase):
 
     max_joint_depth: int | None = None
     """允许的最大链深度（joint 数量）；为 ``None`` 时不限制；超过记 warning。"""
-
-    max_total_length: float | None = None
-    """允许的手指最大总链长（meter）；为 ``None`` 时不检查。
-    总链长定义为有效距离之和（从指根到指尖）：
-    $L = \\sum_i \\|p_i\\|_2$。
-    典型参考值：人手中指约 0.11 m，小型机器人手 0.05~0.09 m。"""
 
     check_tip_uniqueness: bool = True
     """是否检查每根手指恰好只有一个 ``is_tip=True`` 的末端关节。"""
@@ -118,17 +111,6 @@ class FingerValidator(ValidatorBase):
             result.warnings.append(
                 f"finger '{target.name}': depth {len(target.joints)} > max {self.cfg.max_joint_depth}"
             )
-
-        if self.cfg.max_total_length is not None:
-            total_length = sum(
-                math.sqrt(joint.origin.pos[0] ** 2 + joint.origin.pos[1] ** 2 + joint.origin.pos[2] ** 2)
-                for joint in target.joints
-            )
-            if total_length > self.cfg.max_total_length:
-                result.warnings.append(
-                    f"finger '{target.name}': total length {total_length * 100.0:.2f} cm > max "
-                    f"{self.cfg.max_total_length * 100.0:.2f} cm"
-                )
 
         if self.cfg.check_tip_uniqueness:
             tip_count = sum(1 for joint in target.joints if joint.is_tip)

@@ -16,6 +16,10 @@ r"""整手级验证规则集和验证流水线。
 5. **手指间几何 clearance**：
    - pre-made 阶段仍可使用 mount-origin 轻量近似；
    - post-mutate 阶段默认升级为 collision geometry 的 sampled-surface SDF clearance。
+6. **手指轴向真实长度**：
+   - 只在 post-mutate 阶段启用；
+   - 使用 collision geometry union 沿 nominal distal axis 的投影宽度；
+   - 主要约束 `link_scale` / `tip_replace` 把手指拉得过长的后验反例。
 
 设计说明
 --------
@@ -70,6 +74,7 @@ from typing import Literal
 from ..asset_base import AssetCfgBase, HandCfg
 from ._base import ValidatorBase, ValidationResult
 from .finger_rules import FingerValidatorCfg, FingerValidator
+from ._finger_length import FingerLengthConfig, evaluate_finger_axial_length
 from ._sdf_clearance import SdfClearanceConfig, evaluate_finger_sdf_clearance
 
 
@@ -150,6 +155,19 @@ class HandValidatorPreMadeCfg(_HandValidatorStageCfg):
 @dataclass
 class HandValidatorPostMutateCfg(_HandValidatorStageCfg):
     r"""post-mutate 阶段的几何/参数后验规则。"""
+
+    check_finger_length: bool = False
+    r"""是否检查每根 finger 的轴向真实长度。
+
+    这里的“长度”不是旧式 `joint.origin.pos` 范数求和，而是 home pose 下
+    collision geometry union 沿 nominal distal axis 的真实投影宽度。
+    """
+
+    max_thumb_length: float | None = None
+    r"""thumb 允许的最大轴向真实长度（meter）；`None` 表示不对 thumb 设 hard gate。"""
+
+    max_non_thumb_length: float | None = None
+    r"""non-thumb 允许的最大轴向真实长度（meter）；`None` 表示不对 non-thumb 设 hard gate。"""
 
     sdf_surface_samples_per_axis: int = 5
     """SDF surface sampling 密度。
@@ -348,6 +366,9 @@ class HandValidator(ValidatorBase):
             else:
                 self._validate_mount_origin_spacing(target, stage_cfg=stage_cfg, stage=stage, result=result)
 
+        if isinstance(stage_cfg, HandValidatorPostMutateCfg) and stage_cfg.check_finger_length:
+            self._validate_post_mutate_finger_length(target, stage_cfg=stage_cfg, result=result)
+
         if stage_cfg.strict:
             result = result.as_strict()
         result.passed = len(result.errors) == 0
@@ -452,6 +473,69 @@ class HandValidator(ValidatorBase):
                 f"{pair.clearance * 100.0:.2f} cm < min {stage_cfg.min_finger_spacing * 100.0:.2f} cm "
                 f"(i_to_j={pair.direction_i_to_j * 100.0:.2f} cm, "
                 f"j_to_i={pair.direction_j_to_i * 100.0:.2f} cm)"
+            )
+
+    def _validate_post_mutate_finger_length(
+        self,
+        target: HandCfg,
+        *,
+        stage_cfg: HandValidatorPostMutateCfg,
+        result: ValidationResult,
+    ) -> None:
+        r"""执行 post-mutate home-pose finger axial length 检查。
+
+        这条规则的科研语义非常克制：
+
+        - 只看 home pose；
+        - 只看 collision geometry；
+        - 只看沿 nominal distal axis 的投影宽度；
+        - 不冒领成 all-pose 或弯曲链测地线长度证书。
+        """
+
+        try:
+            finger_length = evaluate_finger_axial_length(
+                target,
+                FingerLengthConfig(
+                    max_thumb_length=stage_cfg.max_thumb_length,
+                    max_non_thumb_length=stage_cfg.max_non_thumb_length,
+                ),
+            )
+        except (RuntimeError, ValueError) as exc:
+            result.errors.append(f"finger length[post_mutate]: {exc}")
+            result.metadata["finger_length_certificate"] = {
+                "pose_scope": "post_mutate_home_pose",
+                "geometry_scope": "collision_geometry_only",
+                "length_kind": "axial_projection_extent",
+                "complete": False,
+                "skipped_bodies": [],
+                "not_certified": [
+                    "all_pose_length",
+                    "bent_chain_geodesic_length",
+                    "physics_runtime_safety",
+                ],
+                "thresholds": {
+                    "thumb": stage_cfg.max_thumb_length,
+                    "non_thumb": stage_cfg.max_non_thumb_length,
+                },
+                "measurements": [],
+                "violations": [],
+            }
+            return
+
+        certificate = finger_length.certificate.to_dict()
+        result.metadata["finger_length_certificate"] = certificate
+        if not finger_length.certificate.complete:
+            result.errors.append(
+                "finger length[post_mutate]: incomplete certificate; "
+                f"skipped_bodies={certificate.get('skipped_bodies', [])!r}"
+            )
+
+        for measurement in finger_length.violations:
+            threshold = measurement.threshold if measurement.threshold is not None else float("nan")
+            result.errors.append(
+                f"finger '{measurement.finger_name}'[post_mutate, axial_length]: "
+                f"{measurement.axial_length * 100.0:.2f} cm > max {threshold * 100.0:.2f} cm "
+                f"(role={measurement.role}, axis_source={measurement.axis_source})"
             )
 
     def _validate_palm_thumb_binding(self, target: HandCfg, *, result: ValidationResult) -> None:
