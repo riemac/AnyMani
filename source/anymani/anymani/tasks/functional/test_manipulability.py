@@ -7,13 +7,13 @@ r"""启动 Isaac Sim 中的 LeapHand 场景，并提供实时位姿监控和可�
 NOTE：坐标系统一约定：{w}-World坐标系，{e}-Env坐标系， {s}-Base/Root坐标系，{b}-End Effector坐标系（USD关节链中的最后一层刚体的坐标），{b'}-虚拟Xform坐标系（人为设置的指尖坐标系）
 旋量、雅可比等均遵循 Modern Robotics 的约定
 
-主要数学工具调用 `source/leaphand/leaphand/tasks/manager_based/leaphand/mdp/utils/math.py`
+主要数学工具调用 `source/anymani/anymani/tasks/inhand/mdp/utils/math.py`
 
 可操作度应是指尖末端 {b'} 相对于控制关节的可操作度，因此雅可比矩阵应为 Jb'，参考点在{b'}，参考系在{b'}
 FIXME：操作度、雅可比条件数等检测都应为Jb'的，但现在都为Jb
 
 使用方法:
-    ./isaaclab.sh -p source/leaphand/leaphand/tasks/functional/test_manipulability.py
+    ./isaaclab.sh -p source/anymani/anymani/tasks/functional/test_manipulability.py
 不要启动headless模式！
 """
 

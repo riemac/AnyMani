@@ -51,7 +51,7 @@
           ├── dt: float
           └── ...
 
-参考文档：`AnyRotate/source/leaphand/leaphand/ideas/learning.ipynb`
+参考文档：`source/anymani/ideas/learning.ipynb`
 """
 
 from __future__ import annotations

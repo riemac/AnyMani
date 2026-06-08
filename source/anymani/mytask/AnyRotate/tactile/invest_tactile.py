@@ -13,7 +13,7 @@ Notes:
 	  In this repo, `LEAP_HAND_CFG` already enables it.
 	- Contact point tracking is optional and more expensive. Enable with `--track_contact_points`.
 使用示例:
-python source/leaphand/leaphand/mytask/AnyRotate/invest_tactile.py --task Template-Leaphand-Rot-Manager-v0 \
+python source/anymani/mytask/AnyRotate/tactile/invest_tactile.py --task Template-Leaphand-Rot-Manager-v0 \
 --checkpoint /home/hac/isaac/AnyRotate/logs/rl_games/leaphand_object_rot/2026-01-10_17-12-54/nn/leaphand_object_rot.pth \
 --num_envs 4 --episodes_per_env 1 --headless --fingers index,thumb --force_threshold 1.0 \
 --track_contact_points --max_contact_data_count_per_prim 4

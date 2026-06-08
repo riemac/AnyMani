@@ -4,7 +4,7 @@
 启动 Isaac Sim 中的 LeapHand 场景，并提供实时位姿监控UI面板。
 
 使用方法:
-    ./isaaclab.sh -p source/leaphand/leaphand/tasks/manager_based/launch_with_leaphand.py
+    ./isaaclab.sh -p source/anymani/anymani/tasks/functional/launch_with_leaphand.py
 """
 
 import argparse

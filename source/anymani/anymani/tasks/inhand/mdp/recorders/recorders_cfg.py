@@ -1,6 +1,6 @@
 """LeapHand 录制配置（与 IsaacLab 官方目录风格一致）。
 
-参考 `AnyRotate/source/leaphand/leaphand/ideas/learning.ipynb`.
+参考 `source/anymani/ideas/learning.ipynb`.
 
 该模块提供专门用于行为克隆(BC)数据采集的录制器配置，支持：
 1. 时序数据记录：关节动作、SE(3)旋量、雅可比矩阵等

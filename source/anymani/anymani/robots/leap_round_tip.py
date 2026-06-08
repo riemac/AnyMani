@@ -59,7 +59,7 @@ LEAP_HAND_CFG = ArticulationCfg(
 )
 
 # Note: LeapHand各Body名称
-# 读取USD文件: /home/hac/isaac/leaphand/source/leaphand/assets/leap_hand_v1_right/leap_hand_right.usd
+# 读取USD文件: source/anymani/assets/leap_hand_v1_right/leap_hand_right.usd
 # LeapHand机器人的主要组成部分:
 # - 手掌: palm_lower
 # - 食指: mcp_joint -> pip -> dip -> fingertip -> index_tip_head 

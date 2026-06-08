@@ -10,6 +10,7 @@ matplotlib.use('Agg')  # 使用非交互式后端,不显示窗口
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import cm
+from pathlib import Path
 
 # 设置中文字体支持
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans']  # 用来正常显示中文标签
@@ -170,7 +171,7 @@ ax3.text(10, 20, f'Data: {depth_image.size} values\nShape: {depth_image.shape}',
         bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
 
 plt.tight_layout()
-output_path = '/home/hac/isaac/AnyRotate/source/leaphand/mytask/cv/pointcloud_vs_rgb_comparison.png'
+output_path = str(Path(__file__).parent / 'pointcloud_vs_rgb_comparison.png')
 plt.savefig(output_path, dpi=150, bbox_inches='tight')
 print(f"\n图像已保存到: {output_path}")
 plt.close()  # 关闭图形,不显示

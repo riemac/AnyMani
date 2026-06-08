@@ -1,0 +1,36 @@
+# 本文件仅承载 agent 自查工具 (ruff / pyright) 的配置。
+# 不含 [build-system]，不参与打包；anymani 包的构建仍由 source/anymani/ 负责。
+# 规则对齐项目既有 pre-commit 工具链 (black 行宽 120 + flake8 + isort + pyupgrade)。
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/W=pycodestyle, F=pyflakes, I=isort, UP=pyupgrade,
+# SIM=flake8-simplify, RET=flake8-return —— 映射项目 flake8 插件集
+select = ["E", "F", "W", "I", "UP", "SIM", "RET"]
+# 对齐 .flake8 的 ignore 列表 (W503 在 ruff 无对应，由 formatter 处理)
+ignore = ["E402", "E501", "E203", "RET504", "RET505", "SIM102", "SIM117", "SIM118"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]
+
+[tool.pyright]
+# 指向与 IsaacLab 共用的 uv 环境
+venvPath = "/home/hac/isaac"
+venv = "env_isaaclab"
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+# 源码挂载路径：本包 + IsaacLab 各 source 子包
+extraPaths = [
+    "source/anymani",
+    "/home/hac/isaac/IsaacLab/source/isaaclab",
+    "/home/hac/isaac/IsaacLab/source/isaaclab_assets",
+    "/home/hac/isaac/IsaacLab/source/isaaclab_mimic",
+    "/home/hac/isaac/IsaacLab/source/isaaclab_rl",
+    "/home/hac/isaac/IsaacLab/source/isaaclab_tasks",
+]
+# 压制 pxr/USD 等 C 扩展无 stub 导致的导入噪音
+reportMissingImports = "none"
+reportMissingModuleSource = "none"
