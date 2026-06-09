@@ -25,9 +25,9 @@ custom mesh tip 的最终 `mass / inertial` 属于 generator 主链里的 physic
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import math
 import random
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from ...asset_base import HandCfg, JointCfg
@@ -35,7 +35,6 @@ from ...asset_schema_core import PoseCfg, Vector2
 from ...builder.joint_builders_custom import CustomTipBuilderCfg, apply_thumb_functional_tip_phase
 from ...builder.joint_builders_primitive import PrimJointBuilderCfg
 from .base import HandPatch, MutatorBase, MutatorBaseCfg, _make_range_sampler
-
 
 _MODE_IDENTITY = "identity"
 _MODE_SAME = "same"
@@ -87,7 +86,7 @@ class TipReplaceCfg(MutatorBaseCfg):
     开关，而是一次资产采样中全手层面的 morphology / physics coherence 假设。
     """
 
-    class_type: type["TipReplaceMutator"] | None = field(init=False, default=None, repr=False)
+    class_type: type[TipReplaceMutator] | None = field(init=False, default=None, repr=False)
     r"""关联的运行时类。"""
 
     target_fingers: tuple[str, ...] | None = None
@@ -236,9 +235,16 @@ class TipReplaceMutator(MutatorBase):
     def plan_patch(self, target: HandCfg, sampled_params: dict[str, Any] | None = None) -> HandPatch:
         r"""基于结构化 sample payload 生成 tip child-link 的延迟 patch。
 
-        该函数严格不修改 `finger.joints[:-1]`、`finger.mount`、`tip_joint.origin`、
-        `tip_joint.parent` 和 `tip_joint.child`；它只替换末端 child link 的
-        collision / visual / metadata，以及必要时的过渡性 inertial 占位。
+        该函数严格不修改 `finger.joints[:-1]`、`finger.mount` 以及 tip joint 的
+        运动学壳体：`origin`、`parent`、`child`、`axis` 和 `limit`。它只替换
+        末端 child link 的 collision / visual / metadata，以及必要时的过渡性
+        inertial 占位。
+
+        # NOTE:
+        patch 规划仍然基于同一份原始 `HandCfg`，但真正 apply 时可能已有
+        `link_scale` 等前序 patch 把 `tip_joint.origin` 推到新的远端边界。这里
+        必须把 apply-time 的当前 tip joint 视为 kinematic shell，而不是把
+        `_build_replacement_tip_joint(...)` 生成的原始 origin 整体写回。
         """
 
         sample = _normalize_sample_payload(sampled_params, self.cfg, target=target)
@@ -315,11 +321,32 @@ def _iter_target_fingers(hand: HandCfg, target_fingers: tuple[str, ...] | None):
 
 
 def _tip_joint_replacer(*, finger_index: int, replacement: JointCfg):
-    r"""构造一个只替换 finger 末端 `JointCfg` 的 patch callable。"""
+    r"""构造一个只替换 finger 末端 contact embodiment 的 patch callable。
+
+    `replacement` 来自原始 tip joint 与新 tip spec 的 builder lowering，它携带了
+    新的 collision / visual / inertial / metadata；但 apply 阶段的当前 tip joint
+    可能已经被 `link_scale` 更新了运动链边界。科研语义上：
+
+    $$
+    \text{tip\_replace}:\quad \mathcal{G}_{tip}\mapsto\mathcal{G}_{tip}',
+    \qquad
+    \text{link\_scale}:\quad y_{tip}\mapsto y_{tip}'.
+    $$
+
+    两个算子作用在不同变量上，因此这里保留当前 `JointCfg` 的 kinematic fields，
+    只写入 replacement 的末端接触几何与 provenance。
+    """
 
     def _apply(hand: HandCfg) -> None:
         joints = list(hand.fingers[finger_index].joints)
-        joints[-1] = replacement.copy()
+        current_tip = joints[-1]  # apply-time 运动学壳体，可能已经包含 `link_scale` 更新后的 $y_{tip}'$
+        joints[-1] = current_tip.replace(
+            inertial=replacement.inertial.copy() if replacement.inertial is not None else None,  # tip child link 的惯性占位
+            collisions=[collision.copy() for collision in replacement.collisions],  # 新 tip 接触几何，定义局部接触边界
+            visuals=[visual.copy() for visual in replacement.visuals],  # 新 tip 可视几何，与 collision 同属 tip spec 投影
+            is_tip=replacement.is_tip,  # 继续显式标记 fixed tip child link
+            metadata=dict(replacement.metadata),  # 记录 tip_type / scale / provenance，供 summary 与 sidecar 消费
+        )
         hand.fingers[finger_index] = hand.fingers[finger_index].replace(joints=joints)
 
     return _apply

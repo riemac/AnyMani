@@ -1,3 +1,9 @@
+0.1.1 - 2026-06-09
+==================
+
+- 修复 `link_scale -> tip_replace` 组合 post-mutate 中 fixed tip joint origin 被回滚的问题：`tip_replace` 现在保留 apply-time kinematic shell，只替换末端 contact embodiment。
+- 新增组合回归测试，锁住末节 link 长度缩放后 $y_{tip}' = y_{tip} + (L_i' - L_i)$ 不会被 custom mesh tip replacement 覆盖。
+
 0.1 - 2026-05-24
 ================
 
