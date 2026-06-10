@@ -1,94 +1,41 @@
 # AGENTS.md
 
-本文件为 AnyMani 项目的架构说明，面向 AI Agent 提供项目背景、结构和约定。
+本文件为 AnyMani 项目说明。它是基于 Isaac Lab 的灵巧操作研究框架，目前处于 embodiment branch，用于研究和开发 "手型泛化的手内操作" 科研任务。具体背景可见 `AnyMani/Research/总体/科研背景说明.md`。
 
----
 
-## 项目简介
+## 项目架构
 
-**AnyMani** 是基于 Isaac Lab 的灵巧操作研究框架，专注于手内物体操作（in-hand manipulation）任务。
+当前按 “资产生产-训练管线-网络架构” 功能职责和边界划分：
 
----
+| 目录 | 职责 | 边界 |
+|------|------|------|
+| `source/anymani/anymani/assets/` | 手资产生成：pre-made、post-mutate、validator、exporter、physics closure | 不写任务 reward / policy / 训练逻辑 |
+| `source/anymani/anymani/tasks/` | Isaac Lab 任务环境：scene、obs、action、reward、reset、termination、Gym 注册 | 不处理资产生成细节，不承载训练算法 |
+| `source/anymani/anymani/distill/` | 网络架构与训练管线：models、IL / distillation、RL、训练入口 | 消费 `assets` 和 `tasks`，不接管 env 内部实现 |
 
-## 项目架构（重构后）
+核心依赖方向：
 
-### 目录结构
-
-```
-AnyMani/source/anymani/
-├── anymani/                    # 主包
-│   ├── tasks/                  # 任务定义
-│   │   ├── inhand/             # 手内操作任务
-│   │   │   ├── __init__.py
-│   │   │   ├── inhand_env_cfg.py          # ⭐ MDP 组件库
-│   │   │   ├── mdp/                       # MDP 函数实现
-│   │   │   │   ├── observations.py        # 观测函数
-│   │   │   │   ├── actions/               # 动作类实现
-│   │   │   │   ├── rewards_task.py        # 任务奖励
-│   │   │   │   ├── rewards_action.py      # 动作惩罚
-│   │   │   │   ├── rewards_tactile.py     # 触觉奖励
-│   │   │   │   ├── commands/              # 命令生成器
-│   │   │   │   ├── recorders/             # 数据记录器
-│   │   │   │   ├── events.py              # 随机化事件
-│   │   │   │   └── terminations.py        # 终止条件
-│   │   │   └── config/                    # 按手型分组
-│   │   │       ├── leaphand/              # LeapHand 配置
-│   │   │       │   ├── __init__.py        # Gym 注册
-│   │   │       │   ├── leaphand_env_cfg.py         # ⭐ 环境变体
-│   │   │       │   ├── leaphand_stable_env_cfg.py  # 稳定版本快照
-│   │   │       │   └── agents/            # RL 算法配置
-│   │   │       └── leaphand_round/        # 半球指尖变体
-│   │   ├── direct/             # Direct workflow 任务，用于科研idea的快速原型设计
-│   │   └── functional/         # 机制检验
-│   └── robots/                 # 机器人资产定义
-│       └── leap/               # LeapHand URDF/USD
-├── assets/                     # USD 资产文件
-├── config/                     # 全局配置
-└── docs/                       # 文档
+```text
+assets -> tasks -> distill
 ```
 
----
+`tasks` 定义“手在什么任务里交互”，`distill` 定义“如何训练跨手型策略”; `distill` 依赖于 `tasks` 定义的环境接口，`distill` 和 `tasks` 都消费 `assets` 导出的 asset bank。
 
-## 关键约定
+## 开发约定
 
-### 1. 分支管理
+### 1. 及时出清，避免臃肿
 
-- **main**：稳定版本，只接受经过验证的合并
-- 其他分支, agent应用git自行判断
+本项目允许研究过程中的阶段性实现，但一旦新的抽象、接口或实验 contract 稳定，应及时删除已废弃的旧实现、旧字段、旧测试和旧注释。
 
-### 2. 代码风格
+不用的东西不应作为“历史说明”继续留在代码里；它会污染科研语义，让后续读者误以为旧路线仍是可选建模方案。除非用户明确要求保留迁移期兼容，否则出清优先于 deprecated 壳、兼容包装和长篇历史注释。
 
-- 主要基于 `ManagerBasedRLEnv` 环境架构开发
-- 目前基于 `DirectRLEnv` 环境架构开发，用于科研idea的快速原型设计
-- 部分功能测试验证基于 `standalone app launcher` 开发
-- 继承 Isaac Lab 的声明式配置驱动的设计风格：`@configclass` / `@dataclass` + `__post_init__`等
-> 这种风格很适合科研任务,用声明式配置把结构先立起来,用清晰的层次把“对象是什么”和“系统怎么运行”分开，做到配置分层与职责分离，让人可以边想边搭，而不是一开始就陷进一大堆过程式细节
+### 2. 注释服务科研语义
 
-### 3. 模块依赖（ManagerBasedRLEnv）
+开发时遵守 `annotation` skill。
 
-```
-inhand_env_cfg.py (组件库)
-    ↑
-    │ 导入
-    │
-leaphand_env_cfg.py (环境配置)
-    ↑
-    │ 导入
-    │
-__init__.py (Gym 注册)
-```
+### 3. 代码自查工具
 
-**原则**：
-- 组件库不依赖手型配置
-- 环境配置只组合组件，不定义新组件
-- 禁止循环依赖
-
-### 4. 任务命名规范
-
-- **任务**：`inhand`、`grasp`（未来）
-- **Gym ID**：`AnyMani-<Hand>-<Feature>-v0`
-
----
+根目录 `pyproject.toml` 配有 `ruff`(lint/format)与 `pyright`(类型检查,basic 模式,已指向 `env_isaaclab` 环境),规则对齐项目既有 pre-commit 工具链(black 行宽 120 + flake8 + isort + pyupgrade)。供 agent 改完代码后做快速自查,非强制流程;正式提交仍以 pre-commit 为准。
 
 ## 常用操作
 
@@ -112,12 +59,7 @@ python scripts/list_envs.py
 ```bash
 # 随机 agent 测试,验证环境可用性
 python scripts/random_agent.py --task AnyMani-LeapHand-Joint-v0 --num_envs 1 --headless
-
-# RL 训练
-python scripts/rl_games/train.py --task AnyMani-LeapHand-Joint-v0 --num_envs 4096 --headless
 ```
-
----
 
 ## 参考项目
 
@@ -125,3 +67,5 @@ python scripts/rl_games/train.py --task AnyMani-LeapHand-Joint-v0 --num_envs 409
 |------|------|------|
 | **Isaac Lab** | 上游框架 | `/home/hac/isaac/IsaacLab` |
 | **rl_games** | RL 算法库 | `/home/hac/isaac/rl_games` |
+| **get-zero** | get-zero 论文项目代码 | `/home/hac/isaac/get_zero` |
+| **tro-grasp** | tro-grasp 论文项目代码 | `/home/hac/isaac/TRO-Grasp` |
