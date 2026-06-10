@@ -14,25 +14,24 @@ r"""基础几何关节构建器：把 primitive recipe 落为 `JointCfg`。
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import math
-from typing import Any, Literal, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 from ..asset_base import JointCfg
 from ..asset_builders import JointBuilder, JointBuilderCfg
 from ..asset_schema_core import (
     CollisionGeometryCfg,
-    EllipticCylinderGeometryCfg,
     InertialCfg,
     JointLimitCfg,
     JointPropertiesCfg,
     PoseCfg,
     Vector3,
-    Vector6,
     VisualGeometryCfg,
     _ensure_tuple,
 )
-
+from ..procedural_meshes import make_procedural_cs_tip_uri
 
 _DEFAULT_DENSITY = 650.0
 """默认密度 $\\rho$ [kg/m^3]。
@@ -77,10 +76,8 @@ def _make_geometry_pose(
     mesh frame 与 joint frame 完全重合”。
     """
 
-    if center_on_joint:
-        base = offset.pos  # CMC1 特例：零偏移时 mesh frame 与 joint frame 重合
-    else:
-        base = default_pos  # regular joint：零偏移时 primitive 从 joint frame 的 $x-z$ 平面向 $+y$ 长出
+    # CMC1 特例把 mesh frame 放在 joint frame；regular joint 则让 primitive 从 $x-z$ 平面沿 $+y$ 长出。
+    base = offset.pos if center_on_joint else default_pos
     return PoseCfg(pos=base, rpy=_add_rpy(default_rpy, offset.rpy))  # 平移采用新约，姿态采用增量叠加
 
 
@@ -153,7 +150,7 @@ class PrimJointBuilderCfg(JointBuilderCfg):
     的几何构造”委托给这一层，而不用在 finger 层反复重写 primitive 逻辑。
     """
 
-    class_type: type["PrimJointBuilder"] | type["ComPrimJointBuilder"] | None = None  # 单体 primitive / 复合 tip 两类运行时 builder
+    class_type: type[PrimJointBuilder] | type[ComPrimJointBuilder] | None = None  # 单体 primitive / 复合 tip 两类运行时 builder
     """关联的 primitive joint 运行时构建器。"""
 
     name: str = "joint"  # joint 逻辑名
@@ -434,9 +431,10 @@ class ComPrimJointBuilder(JointBuilder):
 
         mesh_kind = str(self.cfg.mesh.get("type", self.cfg.mesh.get("kind"))).lower()  # 指尖复合类型分发键
         if mesh_kind == "cs":
-            collisions, visuals, inertial = self._build_cylinder_sphere_tip()
+            collisions, visuals, inertial, metadata = self._build_cylinder_sphere_tip()
         elif mesh_kind == "bs":
             collisions, visuals, inertial = self._build_box_sphere_tip()
+            metadata = self.cfg.metadata.copy()
         else:
             raise ValueError(f"Unsupported composite primitive mesh type: {mesh_kind}")
 
@@ -452,75 +450,65 @@ class ComPrimJointBuilder(JointBuilder):
             collisions=collisions,  # 复合 collision 列表
             visuals=visuals,  # 复合 visual 列表
             is_tip=self.cfg.is_tip,  # 显式标记 tip
-            metadata=self.cfg.metadata.copy(),  # 附加元数据
+            metadata=metadata,  # 附加元数据；`cs` 会额外记录 procedural mesh 参数
         )
 
-    def _build_cylinder_sphere_tip(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
-        r"""构建 `cylinder + sphere` 指尖。
+    def _build_cylinder_sphere_tip(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], None, dict[str, Any]]:
+        r"""构建单 mesh schema 的 `cs` 指尖。
 
-        这里保持你原始算法说明的语义：球心落在圆柱顶面中心，使球的最大截面与
-        圆柱顶面重合，从而形成自然的 fingertip 过渡。
+        科研接口仍保持原始 `cylinder + sphere` 参数：半径 $r$、圆柱高度 $h$、
+        以及 tip 局部锚点偏移 $d$。变化只发生在 schema lowering 层：旧实现把
+        `cs` 展开成两个 collision / visual body slot，新实现先写成一个
+        `procedural://anymani/cs_tip?...` URI，随后由 generator 在 physics closure
+        前物化为真实 OBJ。
+
+        外表面定义为：
+
+        $$
+        \mathcal{G}_{cs}(r,h)=
+        \{(x,y,z):x^2+z^2\le r^2,\ 0\le y\le h\}
+        \cup
+        \{(x,y,z):x^2+(y-h)^2+z^2\le r^2,\ y\ge h\}.
+        $$
+
+        这样同一 batched articulation 中，procedural `cs` 与 custom mesh tip 都是
+        单个 collision body，避免 IsaacLab 按 body slot 对齐时看到 schema 分裂。
         """
-        # --- 算法之一 ---：cylinder + sphere 构造指尖的复合 mesh（最常用）
-        # 输入：半径 $r$，高度 $h$，偏移 $d$。
-        # 输出：
-        # - 圆柱中心：$(d_x,\ d_y+h/2,\ d_z)$
-        # - 球心：$(d_x,\ d_y+h,\ d_z)$
+        # `cs` 的研究参数仍是 $(r,h,d)$，其中 $d$ 是 mesh flat base 相对 tip joint frame 的锚点。
         mesh = self.cfg.mesh
-        radius = float(mesh["radius"])  # 半球帽半径
-        length = float(mesh["height"])  # 圆柱体部分长度
-        offset = _pose_from_value(mesh.get("offset", mesh.get("origin")))  # 复合 tip 整体的增量位姿
+        radius = float(mesh["radius"])  # 半球帽与圆柱共享半径 $r$ [m]
+        length = float(mesh["height"])  # 圆柱主体高度 $h$ [m]
+        offset = _pose_from_value(mesh.get("offset", mesh.get("origin")))  # flat base 锚点位姿 $d$
+        mesh_uri = make_procedural_cs_tip_uri(radius=radius, height=length)  # 物化前的稳定参数化 mesh URI
+        geometry = {"type": "mesh", "file_path": mesh_uri, "scale": (1.0, 1.0, 1.0)}  # OBJ 自身已是米制最终尺寸
 
-        cyl_origin = PoseCfg(
-            pos=(offset.pos[0], length / 2.0 + offset.pos[1], offset.pos[2]),  # 圆柱中心落在主体中点
-            rpy=_add_rpy((-math.pi / 2.0, 0.0, 0.0), offset.rpy),  # 把 URDF 默认沿 $z$ 的圆柱旋到沿 $y$
-        )
-        sph_origin = PoseCfg(pos=(offset.pos[0], length + offset.pos[1], offset.pos[2]), rpy=offset.rpy)  # 球心落在圆柱顶面中心
-
-        cyl_mass = _estimate_mass(
-            volume=math.pi * radius * radius * length,  # 圆柱主体体积
-            cfg_mass=None if self.cfg.mass is None else self.cfg.mass * 0.55,  # 若显式给总质量，则按经验比例分配
-            density=self.cfg.density,  # 否则按密度估质量
-        )
-        sph_mass = _estimate_mass(
-            volume=4.0 * math.pi * radius**3 / 3.0,  # 球帽体积近似成整球
-            cfg_mass=None if self.cfg.mass is None else self.cfg.mass * 0.45,  # 给球帽分配剩余质量份额
-            density=self.cfg.density,
-        )
-        total_mass = cyl_mass + sph_mass  # 复合 tip 总质量
-        com_y = (cyl_mass * cyl_origin.pos[1] + sph_mass * sph_origin.pos[1]) / total_mass  # 沿 $y$ 方向求加权质心
-
-        equivalent_length = length + 2.0 * radius  # 用“圆柱主体 + 球帽直径”近似整体轴向长度
-        inertial = InertialCfg(
-            mass=total_mass,  # 复合 tip 总质量
-            origin=PoseCfg(pos=(offset.pos[0], com_y, offset.pos[2])),  # 整体质心
-            inertia=_cylinder_inertia(radius, equivalent_length, total_mass),  # 首轮用等效圆柱近似整体惯量
-        )
+        # collision / visual 都只写一个 mesh slot，使 body cardinality 与 custom mesh tip 完全一致。
         collisions = [
             CollisionGeometryCfg(
-                name=f"{self.cfg.name}_body_col",  # 圆柱主体 collision
-                geometry={"type": "cylinder", "radius": radius, "length": length},
-                origin=cyl_origin,  # 圆柱主体位姿
-            ),
-            CollisionGeometryCfg(
-                name=f"{self.cfg.name}_cap_col",  # 半球帽 collision
-                geometry={"type": "sphere", "radius": radius},
-                origin=sph_origin,  # 球帽位姿
-            ),
+                name=f"{self.cfg.name}_mesh_col",  # 单 collision slot：IsaacLab batched schema 对齐锚点
+                geometry=geometry,
+                origin=offset,  # mesh 在局部坐标中从 $y=d_y$ 的 flat base 向 $+y$ 生长
+            )
         ]
         visuals = [
             VisualGeometryCfg(
-                name=f"{self.cfg.name}_body_vis",  # 圆柱主体 visual
-                geometry={"type": "cylinder", "radius": radius, "length": length},
-                origin=cyl_origin,
-            ),
-            VisualGeometryCfg(
-                name=f"{self.cfg.name}_cap_vis",  # 半球帽 visual
-                geometry={"type": "sphere", "radius": radius},
-                origin=sph_origin,
-            ),
+                name=f"{self.cfg.name}_mesh_vis",  # 单 visual slot：与 collision 同源，便于 URDF 人工巡检
+                geometry=geometry,
+                origin=offset,
+            )
         ]
-        return collisions, visuals, inertial  # `cs` 指尖的完整局部描述
+        # metadata 显式保存 procedural 参数，供 mutator 采样、sidecar 恢复、physics density 分类共同消费。
+        metadata = {
+            **self.cfg.metadata.copy(),
+            "tip_type": "cs",
+            "procedural_tip_type": "cs",
+            "procedural_mesh_kind": "cs_tip",
+            "procedural_mesh_schema": "flat_base_cylinder_upper_hemisphere_v1",
+            "cs_radius": radius,
+            "cs_height": length,
+            "cs_ratio": length / radius,
+        }
+        return collisions, visuals, None, metadata  # 惯量统一交给 materializer 后的 `asset_physics.py` 闭包
 
     def _build_box_sphere_tip(self) -> tuple[list[CollisionGeometryCfg], list[VisualGeometryCfg], InertialCfg]:
         r"""构建 `box + sphere` 指尖。"""

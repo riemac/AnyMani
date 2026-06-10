@@ -10,9 +10,9 @@ r"""`asset_physics.py` 回归测试。
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import trimesh
-
 from assets.asset_physics import AssetPhysicsCfg, AssetPhysicsClosure
 from assets.builder.hand_builders import HumanLikeHandBuilder
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
@@ -20,7 +20,12 @@ from assets.presets import get_finger_builder_preset, make_human_like_builder_cf
 
 
 def _build_mesh_tip_hand(*, scale: float = 1.0):
-    r"""构造一只 index tip 使用 custom mesh 的稳定 LEAP hand。"""
+    r"""构造一只所有 fingertip 都已是 custom mesh 的稳定 LEAP hand。
+
+    这里是 `asset_physics.py` 的直接单元测试，因此输入必须已经是“最终 collision
+    几何”。procedural `cs` 的 materialization 属于 generator / exporter 前置阶段，
+    不应混进这个 helper，否则测试会把阶段边界错误转嫁给 physics closure。
+    """
 
     finger_cfg = get_finger_builder_preset("leap_non_thumb_v1").replace(
         name="index",  # 这里显式命名为 index，便于后续按 finger name 取 tip joint
@@ -33,7 +38,9 @@ def _build_mesh_tip_hand(*, scale: float = 1.0):
         handedness="right",
         palm_cfg="com_leap",
         finger_cfg=finger_cfg,
-        thumb_cfg="leap_thumb_v1",
+        thumb_cfg=get_finger_builder_preset("leap_thumb_v1").replace(
+            tip={"type": "mesh", "tip_type": "round", "scale": scale},
+        ),
     )
     return HumanLikeHandBuilder(builder_cfg).build()
 
@@ -159,3 +166,44 @@ def test_hand_generator_runs_physics_closure_before_returning_hand_cfg(tmp_path)
     tip_joint = _tip_joint_by_finger_name(result.hand_cfg, "index")
     assert tip_joint.metadata["inertial_source"] == "collision_closure_v1"
     assert tip_joint.metadata["inertial_backend"] == "trimesh"
+
+
+def test_hand_generator_materializes_cs_tip_before_physics_and_uses_fingertip_density(tmp_path):
+    r"""generator 应在 physics closure 前把 procedural `cs` 物化为 OBJ。
+
+    这里同时锁住密度通道：`cs` 虽然最终由 `trimesh` 计算质量属性，但它仍是
+    procedural primitive fingertip，质量应使用 `density.fingertip`，不能误用
+    `density.custom_tip`。
+    """
+
+    cfg = HandGeneratorCfg(
+        mode="made",
+        artifact_level="hand_cfg",
+        output_dir=tmp_path,
+        Made=make_human_like_builder_cfg(
+            name="procedural_cs_density_demo",
+            family="leap",
+            handedness="right",
+            palm_cfg="com_leap",
+            finger_cfg=get_finger_builder_preset("leap_non_thumb_v1"),
+            thumb_cfg="leap_thumb_v1",
+        ),
+        Physics=AssetPhysicsCfg(
+            density={"default": 1.0, "fingertip": 100.0, "custom_tip": 1000.0},
+        ),
+    )
+
+    result = HandGenerator(cfg).generate()
+
+    assert result is not None
+    tip_joint = _tip_joint_by_finger_name(result.hand_cfg, "index")
+    mesh_path = Path(tip_joint.collisions[0].geometry.file_path)
+    mesh = trimesh.load(mesh_path, force="mesh", process=True)
+    expected_mass = float(mesh.volume) * 100.0
+
+    assert mesh_path.is_file()
+    assert "procedural://" not in tip_joint.collisions[0].geometry.file_path
+    assert tip_joint.metadata["procedural_mesh_kind"] == "cs_tip"
+    assert tip_joint.metadata["inertial_backend"] == "trimesh"
+    assert tip_joint.inertial is not None
+    assert math.isclose(tip_joint.inertial.mass, expected_mass, rel_tol=0.0, abs_tol=1e-9)

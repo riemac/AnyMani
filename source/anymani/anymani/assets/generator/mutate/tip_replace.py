@@ -34,6 +34,7 @@ from ...asset_base import HandCfg, JointCfg
 from ...asset_schema_core import PoseCfg, Vector2
 from ...builder.joint_builders_custom import CustomTipBuilderCfg, apply_thumb_functional_tip_phase
 from ...builder.joint_builders_primitive import PrimJointBuilderCfg
+from ...procedural_meshes import is_procedural_cs_tip_uri, parse_procedural_cs_tip_uri
 from .base import HandPatch, MutatorBase, MutatorBaseCfg, _make_range_sampler
 
 _MODE_IDENTITY = "identity"
@@ -161,12 +162,14 @@ class TipReplaceCfg(MutatorBaseCfg):
     cs_ratio: Vector2 | dict[Literal["add", "abs"], Vector2] | None = None
     r"""`cs` 类型指尖的高度与半径比 $\lambda=h/r$ 变异范围。
 
-    `cs` 的建模约定是 cylinder + sphere：
+    `cs` 的参数化接触外形仍沿用 cylinder + upper-hemisphere：
 
     - 圆柱半径为 $r$；
     - 圆柱高度为 $h=\lambda r$；
     - 球帽半径仍为 $r$；
-    - 球心落在圆柱顶面中心，使球最大截面和圆柱顶面重合，形成平滑过渡。
+    - 球心落在圆柱顶面中心，使球最大截面和圆柱顶面重合，形成平滑过渡；
+    - 最终 schema 由 builder lowering 成单个 procedural mesh body，而不是两个
+      primitive collision slot。
 
     输入语义：
 
@@ -430,7 +433,7 @@ def _is_thumb_tip_joint(joint: JointCfg) -> bool:
 def _tip_offset_from_original(original: JointCfg) -> PoseCfg:
     r"""从原 tip joint 读取局部 tip geometry 的锚点 offset。
 
-    对 primitive `cs`，builder 写入的是几何中心：
+    对 legacy primitive `cs`，builder 写入的是几何中心：
 
     $$
     y_{\mathrm{cyl}} = d_y + h/2,\qquad
@@ -439,11 +442,15 @@ def _tip_offset_from_original(original: JointCfg) -> PoseCfg:
 
     因此这里不能把 `collision.origin` 直接当成 offset，否则会在重新 lowering 时
     把 $h/2$ 或 $h$ 重复加一次。对于 custom mesh，当前 metadata 尚未显式记录
-    原始 `mesh_offset`，首版保守回退到零位姿，让 preset anchor 贴回 tip joint。
+    新 single-mesh `cs` 则把 flat base offset 直接写在 mesh collision origin 上，
+    因此可直接复用 `collision.origin`。对于 custom mesh，当前 metadata 尚未显式
+    记录原始 `mesh_offset`，首版保守回退到零位姿，让 preset anchor 贴回 tip joint。
     """
 
     if original.collisions:
         first = original.collisions[0]
+        if first.geometry.kind == "mesh" and _is_cs_tip_metadata(original.metadata):
+            return first.origin.copy()  # single-mesh `cs` 的 origin 就是 flat base 锚点 $d$
         if first.geometry.kind == "cylinder":
             length = float(first.geometry.length)
             cap_rpy = original.collisions[1].origin.rpy if len(original.collisions) > 1 else (0.0, 0.0, 0.0)
@@ -492,10 +499,17 @@ def _current_cs_radius_and_ratio(current_tip: JointCfg | None) -> tuple[float, f
     if current_tip is None:
         return 0.012, 1.0
 
+    metadata_radius, metadata_ratio = _cs_radius_and_ratio_from_metadata(current_tip.metadata)
+    if metadata_radius is not None:
+        return metadata_radius, metadata_ratio
+
     radius: float | None = None
     height: float | None = None
     for element in current_tip.collisions:
         geometry = element.geometry
+        if geometry.kind == "mesh" and is_procedural_cs_tip_uri(geometry.file_path):
+            spec = parse_procedural_cs_tip_uri(geometry.file_path)
+            return max(_MIN_POSITIVE, float(spec.radius)), max(_MIN_POSITIVE, float(spec.ratio))
         if geometry.kind == "cylinder":
             radius = float(geometry.radius)
             height = float(geometry.length)
@@ -509,6 +523,39 @@ def _current_cs_radius_and_ratio(current_tip: JointCfg | None) -> tuple[float, f
     radius = max(_MIN_POSITIVE, float(radius if radius is not None else 0.012))
     ratio = max(_MIN_POSITIVE, float(height) / radius) if height is not None else 1.0
     return radius, ratio
+
+
+def _cs_radius_and_ratio_from_metadata(metadata: dict[str, Any]) -> tuple[float | None, float]:
+    r"""从新 single-mesh `cs` metadata 中读取 $r$ 与 $\lambda=h/r$。
+
+    builder、materializer 与 sidecar 都会保留 `cs_radius` / `cs_height` / `cs_ratio`。
+    这里优先读 metadata，是因为 materialized mesh 已经是普通 OBJ 文件，单看
+    `MeshGeometryCfg.file_path` 无法反推出它是不是 procedural `cs`。
+    """
+
+    if not _is_cs_tip_metadata(metadata):
+        return None, 1.0
+    radius_raw = metadata.get("cs_radius")
+    height_raw = metadata.get("cs_height")
+    ratio_raw = metadata.get("cs_ratio")
+    if radius_raw is None:
+        return None, 1.0
+    radius = max(_MIN_POSITIVE, float(radius_raw))  # procedural `cs` 半径 $r$ [m]
+    if ratio_raw is not None:
+        return radius, max(_MIN_POSITIVE, float(ratio_raw))
+    if height_raw is not None:
+        return radius, max(_MIN_POSITIVE, float(height_raw) / radius)
+    return radius, 1.0
+
+
+def _is_cs_tip_metadata(metadata: dict[str, Any]) -> bool:
+    r"""判断 metadata 是否声明当前 tip 属于 `cs` procedural primitive。"""
+
+    return (
+        metadata.get("tip_type") == "cs"
+        or metadata.get("procedural_tip_type") == "cs"
+        or metadata.get("procedural_mesh_kind") == "cs_tip"
+    )
 
 
 def _sample_scale(cfg: TipReplaceCfg, *, tip_type: str) -> float:

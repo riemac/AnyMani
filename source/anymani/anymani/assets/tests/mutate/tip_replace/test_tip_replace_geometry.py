@@ -102,7 +102,8 @@ def test_tip_replace_general_allows_per_finger_tip_types():
     ).mutate(hand, sampled_params={"sample": sample})
 
     assert mutated is not None
-    assert _finger_by_name(mutated, "thumb").tip_joint.collisions[0].geometry.kind == "cylinder"
+    assert _finger_by_name(mutated, "thumb").tip_joint.collisions[0].geometry.kind == "mesh"
+    assert _finger_by_name(mutated, "thumb").tip_joint.metadata["procedural_mesh_kind"] == "cs_tip"
     assert _finger_by_name(mutated, "index").tip_joint.collisions[0].geometry.kind == "mesh"
     assert _finger_by_name(mutated, "middle").tip_joint.metadata["post_mutate_tip_type"] == "wedge"
     assert _finger_by_name(mutated, "ring").tip_joint.metadata["post_mutate_tip_type"] == "thinner"
@@ -146,7 +147,7 @@ def test_tip_replace_cs_ratio_keeps_radius_and_changes_height():
 
     hand = _build_allegro_hand()
     before_tip = _finger_by_name(hand, "index").tip_joint
-    before_radius = before_tip.collisions[0].geometry.radius
+    before_radius = before_tip.metadata["cs_radius"]
     sample = {
         "resolved_self_mode": "same",
         "finger_specs": {
@@ -172,9 +173,9 @@ def test_tip_replace_cs_ratio_keeps_radius_and_changes_height():
 
     assert mutated is not None
     tip_joint = _finger_by_name(mutated, "index").tip_joint
-    assert math.isclose(tip_joint.collisions[0].geometry.radius, before_radius, rel_tol=0.0, abs_tol=1e-12)
-    assert math.isclose(tip_joint.collisions[0].geometry.length, before_radius * 1.5, rel_tol=0.0, abs_tol=1e-12)
-    assert math.isclose(tip_joint.collisions[1].origin.pos[1], before_radius * 1.5, rel_tol=0.0, abs_tol=1e-12)
-    assert tip_joint.inertial is not None
-    assert tip_joint.inertial.mass > 0.0
-    assert tip_joint.inertial.inertia.ixx > 0.0
+    assert tip_joint.collisions[0].geometry.kind == "mesh"
+    assert tip_joint.collisions[0].geometry.file_path.startswith("procedural://anymani/cs_tip?")
+    assert math.isclose(tip_joint.metadata["cs_radius"], before_radius, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(tip_joint.metadata["cs_height"], before_radius * 1.5, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(tip_joint.metadata["cs_ratio"], 1.5, rel_tol=0.0, abs_tol=1e-12)
+    assert tip_joint.inertial is None

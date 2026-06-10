@@ -84,14 +84,14 @@ AnyMani v1 为了保持来源一致，若 `JointCfg.joint_properties.friction` �
 
 from __future__ import annotations
 
+import hashlib
+import math
+import os
+import shutil
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-import os
-import math
-import hashlib
-import shutil
 from pathlib import Path
-import xml.etree.ElementTree as ET
 
 from ..asset_base import AssetCfgBase, HandCfg
 from ..asset_schema_core import (
@@ -103,8 +103,12 @@ from ..asset_schema_core import (
     PoseCfg,
     VisualGeometryCfg,
 )
+from ..procedural_meshes import (
+    is_procedural_cs_tip_uri,
+    materialize_procedural_cs_tip_mesh,
+    parse_procedural_cs_tip_uri,
+)
 from ._base import ExporterBase, ExportResult
-
 
 # ============================================================================
 #  配置类
@@ -115,7 +119,7 @@ from ._base import ExporterBase, ExportResult
 class UrdfWriterCfg(AssetCfgBase):
     r"""URDF 导出器配置。"""
 
-    class_type: type["UrdfWriter"] | None = None
+    class_type: type[UrdfWriter] | None = None
     """关联的运行时类。"""
 
     filename: str = "hand.urdf"
@@ -534,13 +538,17 @@ def _lower_elliptic_cylinder_to_mesh(
 def _materialize_mesh_geometry(geom: MeshGeometryCfg, *, mesh_state: _MeshExportState) -> str:
     r"""把真实 mesh 几何 materialize 到当前导出边界，并返回 URDF 相对路径。
 
-    v1 的 contract 是：
+    当前 mesh 导出 contract 是：
 
     - primitive 继续原样写 `<box>/<sphere>/<cylinder>`；
+    - procedural `cs` URI 在这里兜底物化为当前导出边界下的 OBJ；
     - 只有真实 `<mesh filename=...>` 会进入这里；
     - 同一导出边界内，相同源 mesh 只复制一份，尺寸差异继续由 URDF `scale`
       表达，而不是通过复制多份 STL 表达。
     """
+
+    if is_procedural_cs_tip_uri(geom.file_path):
+        return _materialize_procedural_cs_tip_geometry(geom, mesh_state=mesh_state)
 
     source_path = Path(geom.file_path).expanduser()
     if not source_path.is_absolute():
@@ -563,6 +571,27 @@ def _materialize_mesh_geometry(geom: MeshGeometryCfg, *, mesh_state: _MeshExport
     rel_path = os.path.relpath(target_path, start=mesh_state.output_dir)
     mesh_state._materialized_mesh_relpaths[source_path] = rel_path
     return rel_path
+
+
+def _materialize_procedural_cs_tip_geometry(geom: MeshGeometryCfg, *, mesh_state: _MeshExportState) -> str:
+    r"""导出器兜底物化 `procedural://anymani/cs_tip`。
+
+    generator 主链会在 physics closure 前先完成这件事；这里保留兜底，是为了让
+    单元测试、交互式调试或直接调用 `UrdfWriter.export(hand, ...)` 时，也不会把
+    运行时中间 URI 泄漏进 URDF。URDF 的 `<mesh filename=...>` 必须指向真实文件，
+    否则 IsaacLab / URDF Visualizer 都无法加载该 fingertip。
+    """
+
+    spec = parse_procedural_cs_tip_uri(geom.file_path)  # 从 URI 还原 $(r,h,N_\theta,N_\phi)$ 参数
+    mesh_root = mesh_state.mesh_root_dir or (mesh_state.output_dir / mesh_state.mesh_dirname)  # 当前导出边界共享 mesh 目录
+    mesh_path, written = materialize_procedural_cs_tip_mesh(
+        spec,
+        mesh_root,
+        write_enabled=mesh_state.write_enabled,
+    )  # `write_enabled=False` 时只返回应写路径，用于 `to_urdf_string()`
+    if written:
+        mesh_state.written.append(mesh_path)  # ExportResult 记录新写出的 procedural OBJ
+    return os.path.relpath(mesh_path, start=mesh_state.output_dir)  # URDF 始终写相对当前 hand.urdf 的路径
 
 
 def _resolve_materialized_mesh_name(source_path: Path, *, mesh_state: _MeshExportState) -> str:

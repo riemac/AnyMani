@@ -12,15 +12,15 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+
+import assets.generator.premade.batch as premade_batch_module
 import pytest
 import yaml
-
-import assets.generator.hand_generator as hand_generator_module
-import assets.generator.premade.batch as premade_batch_module
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.exporter.urdf_writer import UrdfWriter, UrdfWriterCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from assets.presets import make_human_like_builder_cfg
+from assets.procedural_meshes import materialize_hand_procedural_meshes
 from assets.validator.hand_rules import HandValidator, HandValidatorCfg
 
 
@@ -49,10 +49,13 @@ def _parse_triplet(text: str) -> tuple[float, float, float]:
     return tuple(float(value) for value in text.split())  # type: ignore[return-value]
 
 
-def test_post_mutate_hand_validator_rejects_sdf_clearance_violation():
+def test_post_mutate_hand_validator_rejects_sdf_clearance_violation(tmp_path):
     """post-mutate spacing 现在是 SDF clearance 硬闸门，不再 warning 放行。"""
 
-    hand = _build_allegro_hand()
+    hand, _written = materialize_hand_procedural_meshes(
+        _build_allegro_hand(),
+        mesh_root_dir=tmp_path / "meshes",
+    )
     validator = HandValidator(
         HandValidatorCfg(
             post_mutate=HandValidatorCfg.PostMutateCfg(min_finger_spacing=0.05)

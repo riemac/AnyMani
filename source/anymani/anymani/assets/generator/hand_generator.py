@@ -33,43 +33,53 @@ r"""手部资产生成器主入口草案。
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 from uuid import uuid4
 
-from ..asset_physics import AssetPhysicsCfg, close_hand_physics
 from ..asset_base import AssetCfgBase, HandCfg
 from ..asset_builders import HandBuilder, HandBuilderCfg
+from ..asset_physics import AssetPhysicsCfg, close_hand_physics
 from ..exporter import HandExporter, HandExporterCfg
+from ..procedural_meshes import materialize_hand_procedural_meshes
 from ..validator import HandValidator, HandValidatorCfg
-from .result import HandGenerationResult
-from .quota.accepted_mode import (
-    AcceptedModeTermSpec,
-    expand_quota_schedule as _expand_quota_schedule,
-    force_mode_terms as _force_mode_terms,
-    mode_term_specs as _mode_term_specs,
-    resolved_term_mode as _resolved_term_mode,
-)
-from .runtime.restore import PostMutateSource, load_post_mutate_source
-from .premade.connectivity import (
-    apply_connectivity_preset as _apply_premade_connectivity_preset,
-    connectivity_names_for_hand_preset as _connectivity_names_for_premade_hand_preset,
-    resolve_single_premade_selection as _resolve_single_premade_selection,
-)
-from .premade.identity import resolve_export_root as _resolve_premade_export_root, stable_premade_id
-from .premade.normalize import normalize_connectivity_mapping, normalize_name_list
-from .premade.topology import (
-    build_base_hand as _build_premade_base_hand,
-    candidate_hand_preset_names as _candidate_premade_hand_preset_names,
-)
 from .premade.batch import (
     build_premade_tasks,
     run_premade_parallel,
     run_premade_serial,
 )
-from .presentation.recolor import RecolorSpec, describe_recolor_spec, normalize_recolor_spec, resolve_visual_recolor_materials
+from .premade.connectivity import (
+    apply_connectivity_preset as _apply_premade_connectivity_preset,
+)
+from .premade.connectivity import (
+    connectivity_names_for_hand_preset as _connectivity_names_for_premade_hand_preset,
+)
+from .premade.connectivity import (
+    resolve_single_premade_selection as _resolve_single_premade_selection,
+)
+from .premade.identity import resolve_export_root as _resolve_premade_export_root
+from .premade.identity import stable_premade_id
+from .premade.normalize import normalize_connectivity_mapping, normalize_name_list
+from .premade.topology import (
+    build_base_hand as _build_premade_base_hand,
+)
+from .premade.topology import (
+    candidate_hand_preset_names as _candidate_premade_hand_preset_names,
+)
+from .presentation.recolor import (
+    RecolorSpec,
+    describe_recolor_spec,
+    normalize_recolor_spec,
+    resolve_visual_recolor_materials,
+)
+from .quota.accepted_mode import (
+    mode_term_specs as _mode_term_specs,
+)
+from .result import HandGenerationResult
 from .runtime.mutate_quota import run_mutate_batch_with_accepted_mode_quota
+from .runtime.restore import PostMutateSource, load_post_mutate_source
 from .runtime.run_context import GenerationRunContext
 
 try:
@@ -147,7 +157,7 @@ class HandGeneratorCfg(AssetCfgBase):
     则自动回退为“该 hand 所属 family 下全部已注册的合法 connectivity preset”。
     """
 
-    class_type: type["HandGenerator"] | None = None
+    class_type: type[HandGenerator] | None = None
     """关联的运行时类。"""
 
     mode: Literal["made", "mutate", "full"] = "full"
@@ -436,16 +446,36 @@ class HandGenerator:
 
         self._ensure_run_context().record_success(result, write_summary=write_summary)
 
-    def _close_physics_if_enabled(self, hand_cfg: HandCfg, *, stage: str) -> HandCfg:
-        r"""在 generator 主链中执行一次可选的物理闭包。
+    def _close_physics_if_enabled(
+        self,
+        hand_cfg: HandCfg,
+        *,
+        stage: str,
+        path_metadata: dict[str, Any] | None = None,
+    ) -> HandCfg:
+        r"""在 generator 主链中执行 mesh materialization 与可选物理闭包。
 
         这层 helper 故意保持很薄：
 
-        - `hand_generator.py` 只知道“什么时候应该闭包”；
+        - `hand_generator.py` 只知道“什么时候应该把程序化 mesh 固化、什么时候应该闭包”；
+        - `procedural_meshes.py` 负责“如何把参数化 `cs` 写成 OBJ”；
         - `asset_physics.py` 负责“如何从 collision 几何算出 inertial”。
+
+        # NOTE:
+        `cs` single-mesh contract 要求 validator / exporter / physics closure 都消费真实
+        OBJ，而不是 builder 阶段的 `procedural://...` URI。因此 materialization 必须排在
+        physics closure 之前；即便 `Physics=None`，validator 或 exporter 仍需要这一步。
         """
 
-        return close_hand_physics(hand_cfg, self.cfg.Physics, stage=stage)
+        path_probe = HandGenerationResult(
+            hand_cfg=hand_cfg,
+            metadata=dict(path_metadata or {}),
+        )  # 用当前阶段已知 provenance 解析 topology/run 级共享 mesh 根目录
+        materialized, _written_paths = materialize_hand_procedural_meshes(
+            hand_cfg,
+            mesh_root_dir=self._resolve_mesh_root(result=path_probe),
+        )  # procedural `cs` 与 legacy two-primitive `cs` 在这里统一迁移成真实 OBJ mesh
+        return close_hand_physics(materialized, self.cfg.Physics, stage=stage)
 
     def _candidate_hand_preset_names(self) -> tuple[str, ...]:
         r"""返回当前 generator 可见的 premade topology registry key 集合。
@@ -536,7 +566,7 @@ class HandGenerator:
         **删 joint = 删这个 joint 对应的 child-link 几何节点。**
         因而 pre-made connectivity 主线默认使用 `drop`，
         而不是把被删段 mesh merge 回上游节点。
-        
+
         """
 
         return _apply_premade_connectivity_preset(
@@ -613,7 +643,11 @@ class HandGenerator:
                     connectivity_preset_name=connectivity_preset_name,
                     hand_preset_name=hand_preset_name,
                 )
-            hand_cfg = self._close_physics_if_enabled(hand_cfg, stage="pre_made")
+            hand_cfg = self._close_physics_if_enabled(
+                hand_cfg,
+                stage="pre_made",
+                path_metadata=premade_metadata,
+            )
 
             # pre-made 结构闸门是“可选的显式闸门”：
             # - `Validate is None`：完全跳过 hand-level validator；
@@ -645,7 +679,11 @@ class HandGenerator:
                 self._last_rejection_detail = {"stage": "mutate", "errors": ["mutator returned None"], "metadata": {}}
                 self._record_generation_rejection(stage="mutate", write_summary=record_summary)
                 return None  # 变异被拒绝；拒绝语义统一表现为“本次样本无结果”
-            hand_cfg = self._close_physics_if_enabled(hand_cfg, stage="post_mutate")
+            hand_cfg = self._close_physics_if_enabled(
+                hand_cfg,
+                stage="post_mutate",
+                path_metadata=premade_metadata,
+            )
             if validator is not None:
                 post_mutate_validation = validator.validate_post_mutate(hand_cfg)
                 if not post_mutate_validation:

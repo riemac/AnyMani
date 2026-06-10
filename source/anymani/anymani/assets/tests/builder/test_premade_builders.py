@@ -118,7 +118,7 @@ def test_urdf_writer_lowers_elliptic_cylinder_to_mesh_geometry(tmp_path):
 
 
 def test_primitive_joint_builder_builds_composite_tip():
-    """复合 primitive tip 应保留 `fixed + is_tip + 两个几何体` 语义。"""
+    """`cs` primitive tip 应保留 `fixed + is_tip + 单 mesh body` 语义。"""
 
     cfg = PrimJointBuilderCfg(
         name="index_tip",
@@ -135,8 +135,26 @@ def test_primitive_joint_builder_builds_composite_tip():
 
     assert joint.joint_type == "fixed"
     assert joint.is_tip is True
-    assert len(joint.collisions) == 2
-    assert {collision.geometry.kind for collision in joint.collisions} == {"cylinder", "sphere"}
+    assert joint.inertial is None
+    assert len(joint.collisions) == 1
+    assert joint.collisions[0].geometry.kind == "mesh"
+    assert joint.collisions[0].geometry.file_path.startswith("procedural://anymani/cs_tip?")
+    assert joint.metadata["procedural_mesh_kind"] == "cs_tip"
+    assert math.isclose(joint.metadata["cs_ratio"], 1.2, rel_tol=0.0, abs_tol=1e-12)
+
+
+def test_urdf_writer_materializes_procedural_cs_tip_mesh(tmp_path):
+    r"""直接导出含 procedural `cs` 的 hand 时，URDF 不应泄漏中间 URI。"""
+
+    hand = HumanLikeHandBuilder(_make_allegro_hand_cfg()).build()
+
+    result = UrdfWriter(UrdfWriterCfg()).export(hand, tmp_path)
+
+    urdf_text = (tmp_path / "hand.urdf").read_text(encoding="utf-8")
+    assert result.ok
+    assert "procedural://" not in urdf_text
+    assert 'filename="meshes/cs_tip_' in urdf_text
+    assert any((tmp_path / "meshes").glob("cs_tip_*.obj"))
 
 
 def test_regular_finger_preset_builds_allegro_chain():

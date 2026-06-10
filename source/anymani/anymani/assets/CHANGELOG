@@ -1,3 +1,12 @@
+0.2.0 - 2026-06-09
+==================
+
+- 将 procedural `cs` fingertip 的导出 contract 从 `cylinder + sphere` 两个 collision / visual slot 改为单个 watertight mesh body，保持 $r,h,\lambda=h/r$ 参数语义不变。
+- 新增 `procedural_meshes.py`，在 generator physics closure 前物化 `cs` OBJ，并兼容历史 sidecar 中的 two-primitive `cs` schema。
+- `UrdfWriter` 增加 direct-export 兜底物化，防止 `procedural://anymani/cs_tip?...` 中间 URI 泄漏进 URDF。
+- `asset_physics.py` 对 single-mesh `cs` 使用 `trimesh` 质量属性后端，但密度通道仍归入 `fingertip`，不误用 `custom_tip`。
+- 更新 `tip_replace`，使 `cs_ratio` 采样可从新 metadata / procedural URI / legacy primitive schema 中恢复当前 $r$ 与 $\lambda$。
+
 0.1.1 - 2026-06-09
 ==================
 

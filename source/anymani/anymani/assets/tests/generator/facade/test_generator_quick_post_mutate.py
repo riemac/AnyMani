@@ -6,12 +6,11 @@ from importlib import import_module
 from pathlib import Path
 
 import yaml
-
 from anymani.assets.config import asset_gen_cfg as asset_cfg_module
 from anymani.assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from anymani.assets.generator.mutate import HandMutatorCfg, LimitTweakCfg, LinkScaleCfg, MountPerturbCfg, TipReplaceCfg
-from anymani.assets.scripts import generate as generate_module
 from anymani.assets.scripts import _asset_generate_runner as runner_module
+from anymani.assets.scripts import generate as generate_module
 from anymani.assets.validator.hand_rules import HandValidatorCfg
 
 
@@ -67,6 +66,16 @@ def _assert_urdf_has_no_mount_helper_topology(urdf_path: Path) -> None:
     urdf_text = urdf_path.read_text(encoding="utf-8")
     assert "_mount_link" not in urdf_text
     assert "_mount_joint" not in urdf_text
+
+
+def _mutate_run_dirs(topology_dir: Path) -> list[Path]:
+    r"""列出 topology 根下真正的 post-mutate timestamp run 目录。
+
+    `cs` single-mesh contract 后，pre-made topology 根会合法持有共享 `meshes/` 目录；
+    它不是 mutate run，也不应被这些目录结构测试当作样本运行目录。
+    """
+
+    return [path for path in topology_dir.iterdir() if path.is_dir() and path.name != "meshes"]
 
 
 class DemoMountMutatorCfg(HandMutatorCfg):
@@ -219,7 +228,7 @@ def test_independent_post_mutate_restores_from_topology_root_and_writes_timestam
         for result in results
     )
 
-    mutate_run_dirs = [path for path in topology_dir.iterdir() if path.is_dir()]
+    mutate_run_dirs = _mutate_run_dirs(topology_dir)
     assert len(mutate_run_dirs) == 1
 
     mutate_run_dir = mutate_run_dirs[0]
@@ -249,7 +258,7 @@ def test_post_mutate_run_reuses_shared_mesh_directory_for_custom_tip_outputs(tmp
     )
 
     results = list(HandGenerator(mutate_cfg).generate_batch())
-    mutate_run_dir = next(path for path in topology_dir.iterdir() if path.is_dir())
+    mutate_run_dir = _mutate_run_dirs(topology_dir)[0]
     meshes_dir = mutate_run_dir / "meshes"
 
     assert meshes_dir.is_dir()
@@ -283,7 +292,7 @@ def test_post_mutate_self_mode_probability_is_accepted_output_quota(tmp_path):
         result.metadata["post_mutate_samples"]["mount_perturb"]["resolved_self_mode"]
         for result in results
     ]
-    mutate_run_dir = next(path for path in topology_dir.iterdir() if path.is_dir())
+    mutate_run_dir = _mutate_run_dirs(topology_dir)[0]
     summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
 
     assert modes.count("identity") == 2
@@ -314,7 +323,7 @@ def test_limit_tweak_self_mode_probability_is_accepted_output_quota(tmp_path):
         result.metadata["post_mutate_samples"]["limit_tweak"]["resolved_self_mode"]
         for result in results
     ]
-    mutate_run_dir = next(path for path in topology_dir.iterdir() if path.is_dir())
+    mutate_run_dir = _mutate_run_dirs(topology_dir)[0]
     summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
 
     assert modes.count("identity") == 2
@@ -348,7 +357,7 @@ def test_multiple_mode_terms_track_marginal_accepted_output_quota(tmp_path):
         result.metadata["post_mutate_samples"]["limit_tweak"]["resolved_self_mode"]
         for result in results
     ]
-    mutate_run_dir = next(path for path in topology_dir.iterdir() if path.is_dir())
+    mutate_run_dir = _mutate_run_dirs(topology_dir)[0]
     summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
 
     assert mount_modes.count("identity") == 2
@@ -381,7 +390,7 @@ def test_tip_replace_self_mode_probability_is_accepted_output_quota(tmp_path):
         result.metadata["post_mutate_samples"]["tip_replace"]["resolved_self_mode"]
         for result in results
     ]
-    mutate_run_dir = next(path for path in topology_dir.iterdir() if path.is_dir())
+    mutate_run_dir = _mutate_run_dirs(topology_dir)[0]
     summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
 
     assert modes.count("identity") == 2
@@ -414,7 +423,7 @@ def test_link_scale_self_mode_probability_is_accepted_output_quota(tmp_path):
         result.metadata["post_mutate_samples"]["link_scale"]["resolved_self_mode"]
         for result in results
     ]
-    mutate_run_dir = next(path for path in topology_dir.iterdir() if path.is_dir())
+    mutate_run_dir = _mutate_run_dirs(topology_dir)[0]
     summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
 
     assert modes.count("identity") == 2

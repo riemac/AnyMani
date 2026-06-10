@@ -20,10 +20,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from functools import lru_cache
 import math
 import os
+from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -31,7 +31,6 @@ import numpy as np
 
 from .asset_base import AssetCfgBase, HandCfg, InertialCfg, JointCfg, PalmCfg, PoseCfg
 from .asset_schema_core import CollisionGeometryCfg, InertiaTensorCfg, MeshGeometryCfg
-
 
 _FLOAT_TOLERANCE = 1e-12
 """物理闭包里统一使用的近零容差。"""
@@ -88,6 +87,8 @@ class DensityProfileCfg(AssetCfgBase):
         r"""返回某个 joint child-link 闭包应使用的密度。"""
 
         has_mesh_collision = any(collision.geometry.kind == "mesh" for collision in joint.collisions)
+        if joint.is_tip and has_mesh_collision and _is_procedural_cs_tip_joint(joint):
+            return self.fingertip if self.fingertip is not None else self.default
         if joint.is_tip and has_mesh_collision:
             if self.custom_tip is not None:
                 return self.custom_tip
@@ -113,7 +114,7 @@ class AssetPhysicsCfg(AssetCfgBase):
     - non-uniform mesh scale 的处理策略。
     """
 
-    class_type: type["AssetPhysicsClosure"] | None = None
+    class_type: type[AssetPhysicsClosure] | None = None
     """关联的运行时类。"""
 
     enabled: bool = True
@@ -129,9 +130,11 @@ class AssetPhysicsCfg(AssetCfgBase):
     """最终 `InertialCfg` 对角项工程性 padding。"""
 
     mesh_backend: Literal["trimesh"] = "trimesh"
-    """custom mesh 质量属性后端。
+    """mesh collision 质量属性后端。
 
-    当前只落地 `trimesh`，因为它已经在 validator 里被验证过 mesh volume 相关前置条件。
+    当前只落地 `trimesh`，因为 custom tip 与 materialized `cs` 都需要真实
+    polyhedral volume / center-of-mass / inertia，而 validator 已经共享 mesh volume
+    相关前置条件。
     """
 
     nonuniform_mesh_scale_policy: Literal["fail"] = "fail"
@@ -309,6 +312,23 @@ def close_hand_physics(target: HandCfg, cfg: AssetPhysicsCfg | None, *, stage: s
     if cfg is None:
         return target.copy()
     return AssetPhysicsClosure(cfg).close(target, stage=stage)
+
+
+def _is_procedural_cs_tip_joint(joint: JointCfg) -> bool:
+    r"""判断一个 mesh fingertip 是否仍属于 procedural `cs` 密度通道。
+
+    `cs` 从 two-primitive schema 改成 single mesh schema 后，几何后端确实变成
+    `trimesh`，但材料语义并没有变成 custom fingertip：它仍是由半径 $r$ 与高度
+    $h$ 参数化的默认 fingertip primitive。因此密度应走 `DensityProfileCfg.fingertip`，
+    而不是 `custom_tip`。
+    """
+
+    metadata = dict(joint.metadata)  # joint metadata 是 builder / materializer 传递 tip provenance 的最小证书
+    return (
+        metadata.get("tip_type") == "cs"
+        or metadata.get("procedural_tip_type") == "cs"
+        or metadata.get("procedural_mesh_kind") == "cs_tip"
+    )
 
 
 def _aggregate_collision_inertial(
