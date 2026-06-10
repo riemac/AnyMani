@@ -20,7 +20,6 @@ from ...asset_base import HandCfg
 from ...asset_schema_core import MaterialCfg, _ensure_tuple
 from ...presets.color_presets import COLOR_PRESETS, DEFAULT_COLOR_PRESET_NAME
 
-
 RgbaTuple: TypeAlias = tuple[float, float, float, float]
 RecolorSpec: TypeAlias = str | dict[str, RgbaTuple] | bool | None
 
@@ -35,8 +34,8 @@ def normalize_recolor_spec(recolored: Any) -> RecolorSpec:
     - `dict[child_link_name, rgba]`：按 link 名做局部覆盖
 
     此外，为了兼容这个字段早期作为“布尔开关草稿”存在的历史，`True` 在这里被
-    收敛为默认 palette `anatomy_v1`。这样老脚本若先写了 `recolored=True`，
-    不会在功能真正落地后突然变成 hard error。
+    收敛为默认 palette `anatomy_soft_v1`。这样老脚本若先写了 `recolored=True`，
+    会直接进入当前正式使用的柔和 anatomy 调色 contract。
     """
 
     if recolored is None or recolored is False:

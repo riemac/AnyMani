@@ -1,3 +1,10 @@
+0.2.1 - 2026-06-10
+==================
+
+- 出清旧高饱和 `anatomy_v1` palette，`recolored=True` 与默认命名入口统一收敛到 `anatomy_soft_v1`。
+- 调整 `anatomy_soft_v1` 的末端视觉语义：`*_tip` 统一为 warm ivory，`*_dip` 改用原 tip 紫色，避免 distal link 与第二段深青/靛蓝视觉重复。
+- 更新 recolor / pre-made / post-mutate 回归测试，锁住 named palette 导出、显式 link override、以及 custom tip / procedural `cs` 共享 tip 颜色 contract。
+
 0.2.0 - 2026-06-09
 ==================
 

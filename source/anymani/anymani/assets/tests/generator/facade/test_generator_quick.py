@@ -6,8 +6,8 @@ from importlib import import_module
 
 from anymani.assets.config import asset_gen_cfg as asset_cfg_module
 from anymani.assets.generator.hand_generator import HandGeneratorCfg
-from anymani.assets.scripts import generate as generate_module
 from anymani.assets.scripts import _asset_generate_runner as runner_module
+from anymani.assets.scripts import generate as generate_module
 from anymani.assets.scripts._asset_generate_runner import enumerate_premade_bundles
 from anymani.assets.validator.hand_rules import HandValidatorCfg
 
@@ -36,7 +36,7 @@ def test_premade_runner_enumerates_small_recolored_space_and_writes_bundle(tmp_p
         connectivity_presets=_single_family_full_pool("single_palm_allegro", "allegro"),
         mixed=False,
         missing=False,
-        recolored="anatomy_v1",
+        recolored="anatomy_soft_v1",
         artifact_level="bundle",
         output_dir=tmp_path,
         max_enumerate=1,

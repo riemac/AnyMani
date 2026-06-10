@@ -42,7 +42,7 @@ def _make_pre_made_topology_dir(tmp_path) -> tuple[Path, str]:
                 missing=False,
                 output_dir=tmp_path,
                 max_enumerate=1,
-                recolored="anatomy_v1",
+                recolored="anatomy_soft_v1",
             )
         ).generate_batch()
     )
@@ -215,7 +215,7 @@ def test_independent_post_mutate_restores_from_topology_root_and_writes_timestam
         n_samples=2,
         Mutate=DemoMountMutatorCfg(),
         Validate=None,
-        recolored="anatomy_v1",
+        recolored="anatomy_soft_v1",
     )
 
     results = list(HandGenerator(mutate_cfg).generate_batch())
@@ -450,7 +450,7 @@ def test_unified_generate_runner_accepts_post_mutate_cli(monkeypatch, tmp_path):
             n_samples=1,
             Mutate=DemoMountMutatorCfg(),
             Validate=None,
-            recolored="anatomy_v1",
+            recolored="anatomy_soft_v1",
         ),
     )
     monkeypatch.setattr(custom_module, "POST_MUTATE_SOURCE_TOPOLOGY_PATH", topology_dir)
