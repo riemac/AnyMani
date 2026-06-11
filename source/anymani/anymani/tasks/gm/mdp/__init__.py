@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from .actions.clamped_relative_action import ClampedRelativeJointActionCfg, ClampedRelativeJointPositionAction
 from .curriculums import RewardCurriculumByGoalSuccess
+from .events import DEFAULT_GM_EVENT_DESIGN, GmEventDesign, GmObjectScaleMode, GmPhysicsDrPhase, GmResetMode
 from .rewards import (
     AxisDeltaRotationReward,
     action_l2_curriculum,
@@ -31,6 +32,11 @@ __all__ = [
     "AxisDeltaRotationReward",
     "ClampedRelativeJointActionCfg",
     "ClampedRelativeJointPositionAction",
+    "DEFAULT_GM_EVENT_DESIGN",
+    "GmEventDesign",
+    "GmObjectScaleMode",
+    "GmPhysicsDrPhase",
+    "GmResetMode",
     "RewardCurriculumByGoalSuccess",
     "action_l2_curriculum",
     "action_rate_l2_curriculum",

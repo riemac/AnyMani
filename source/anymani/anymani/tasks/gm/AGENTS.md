@@ -12,6 +12,11 @@
 
 `gm` 可以消费一个已经选好的 hand asset，并声明它对 `hand.urdf` / `hand.yaml` 的最低 contract；但不拥有整个 asset bank。
 
+`gm/grasp_cache/` 是一个例外但仍属任务语义：它只定义 cache-driven reset 的
+key/schema/store/sampler 契约，用于表达稳定手-物初始状态分布。它不负责
+asset-bank split、训练调度或离线 Isaac Sim 批量生成入口；这些应由上游
+manifest / `scripts/gm/` / `distill` 编排层注入。
+
 ## 设计风格
 
 保持浅目录。任务差异优先通过 MDP 组件组合表达，不提前拆 `manipulation/`、`grasp/` 等深目录。

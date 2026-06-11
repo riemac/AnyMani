@@ -15,15 +15,14 @@ r"""ManagerBasedRLEnv scaffold for generalized in-hand manipulation.
 
 from __future__ import annotations
 
-import math
 from dataclasses import MISSING
 
+import isaaclab.envs.mdp as isaac_mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.common import ViewerCfg
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
-from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
@@ -35,9 +34,7 @@ from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMater
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-import isaaclab.envs.mdp as isaac_mdp
 from . import mdp as gm_mdp
-
 
 DEFAULT_OBJECT_USD = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
 
@@ -227,25 +224,35 @@ class GmRewardsCfg:
 class GmEventsCfg:
     r"""Domain randomization and reset scaffold.
 
-    初期只保留对 object / robot 的常规随机化锚点。资产形态多样性已经来自
-    pre-made / post-mutate，不应在 reset 事件里偷偷改变 hand topology。
+    DONE(语义主次已固定): 第一版主线是 cache-driven reset，而不是普通
+    object pose DR + random joint reset。正式实现应新增一个 cache reset event：
+    $$
+    (q, T^h_o) \sim
+    \mathcal{D}_{\text{grasp}}(q,T^h_o\mid a,o,s,\rho),
+    $$
+    并在 reset 时写 hand joint position、object pose、零速度以及 action target。
+
+    互斥关系：
+        - `reset_grasp_cache` 启用时，不应同时启用 random object pose reset；
+        - `reset_grasp_cache` 启用时，不应再叠加 random hand joint offset；
+        - 无 cache 消融才启用 `random_reset_object_ablation` 与
+          `random_reset_robot_joints_ablation`。
+
+    DR 阶段：
+        - object scale 是 startup / usd-time 离散 bucket，不是 episode reset 噪声；
+        - object mass / CoM / friction、robot link material / mass / CoM、actuator
+          stiffness / damping、joint friction / armature 默认 startup 采样；
+        - joint limit DR、collider offset DR、fixed tendon DR、interval 外力暂缓。
+
+    NOTE:
+        这里暂不放任何 active `EventTerm`，避免当前 scaffold 在无 cache reset 实现
+        时悄悄退化成与主线不一致的随机初态环境。下面三个字段只是命名锚点，
+        后续实现时再替换为真实 Isaac Lab `EventTermCfg`。
     """
 
-    reset_object = EventTerm(
-        func=isaac_mdp.reset_root_state_uniform,
-        mode="reset",
-        params={
-            "pose_range": {"x": [-0.01, 0.01], "y": [-0.01, 0.01], "z": [-0.01, 0.01], "yaw": [-math.pi, math.pi]},
-            "velocity_range": {},
-            "asset_cfg": SceneEntityCfg("object", body_names=".*"),
-        },
-    )
-
-    reset_robot_joints = EventTerm(
-        func=isaac_mdp.reset_joints_by_offset,
-        mode="reset",
-        params={"position_range": (-0.2, 0.2), "velocity_range": (0.0, 0.0)},
-    )
+    reset_grasp_cache = None  # 主线占位：未来写入 cache sample $(q,T^h_o)$
+    random_reset_object_ablation = None  # no-cache 消融占位：才允许 object pose DR
+    random_reset_robot_joints_ablation = None  # no-cache 消融占位：才允许 random joint reset
 
 
 @configclass
