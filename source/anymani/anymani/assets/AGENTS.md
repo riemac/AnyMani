@@ -44,6 +44,12 @@
 
 资产生成相关实现、文档、版本记录保持在 `AnyMani/source/anymani/anymani/assets/` 内部，不把子项目知识散落到别处。
 
+### 4. 测试优先
+
+`assets` 子项目已经形成较多测试。后续凡是改动 builder / mutator / validator / exporter / physics closure / sidecar schema，应优先补最小单元测试或回归测试，再改实现。测试重点是几何数值、拓扑顺序、导出 contract、mass / inertia 闭包与 validator 拒绝条件，而不是启动 Isaac Sim。
+
+涉及大批量生成流程时，优先测试局部 deterministic contract；完整生成 run 可作为较少量 smoke，不应替代底层规则测试。
+
 ## 文档与版本
 
 从 **0.1** 开始，本子项目显式维护：

@@ -37,6 +37,12 @@ assets -> tasks -> distill
 
 根目录 `pyproject.toml` 配有 `ruff`(lint/format)与 `pyright`(类型检查,basic 模式,已指向 `env_isaaclab` 环境),规则对齐项目既有 pre-commit 工具链(black 行宽 120 + flake8 + isort + pyupgrade)。供 agent 改完代码后做快速自查,非强制流程;正式提交仍以 pre-commit 为准。
 
+### 4. 测试策略：contract TDD + simulation smoke
+
+本项目鼓励对**纯数学、schema、张量 shape、路径/manifest、网络模块和 MDP contract** 采用 TDD：先写最小失败用例，再实现。Isaac Sim / PhysX / 训练闭环不强行 TDD；这类重型路径用少量 headless smoke / integration test 验证能 reset、step、输出合法张量。
+
+优先测试能提前揪出科研语义错误的内容：坐标系变换、SO(3)/SE(3) 公式、reward 单调性、obs/action 量纲、mask 语义、cache key/schema、token routing、attention bias shape 与零初始化。不要为了追覆盖率给研究草稿或纯注释 scaffold 写空洞测试。
+
 ## 常用操作
 
 ### 环境激活

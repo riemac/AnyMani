@@ -159,19 +159,64 @@ class AttentionBiasCfg:
     a_{ij}^{(h)} = \frac{q_i^{(h)\top} k_j^{(h)}}{\sqrt{d_h}} + b_{ij}^{(h)}.
     $$
 
-    teacher 当前合意使用 `mode="edge_feature"`，即由 all-pairs dynamic SE(3)
-    edge feature 生成 $b_{ij}$。`mode="none"` 仍保留为 no-bias 消融基线，
-    但不再作为 teacher 默认路线。
+    teacher 第一版默认使用 `mode="hybrid_se3"`，即把结构先验与连续几何边特征
+    相加注入 logits：
+
+    $$
+    b_{ij}^{(h)} =
+      \beta_{\phi(i,j)}^{(h)}
+      + \gamma_{d(i,j)}^{(h)}
+      + \delta_{\mathrm{same\_finger}(i,j)}^{(h)}
+      + f_{\theta}^{(h)}\!\left(\tilde E_{ij}^{t}, m_{ij}\right),
+    $$
+
+    其中 $\phi(i,j)$ 是有向 edge type，$d(i,j)$ 是运动学图最短路径 bucket，
+    `same_finger` 是同指链二值关系，$\tilde E_{ij}^{t}$ 是归一化后的 dynamic
+    all-pairs SE(3) 相对位姿，$m_{ij}$ 是可选结构 metadata。这样既保留
+    Graphormer 风格的离散拓扑 inductive bias，又不丢 post-mutate mount / link
+    / tip 几何变化带来的连续差异。
+
+    消融矩阵固定为：
+
+    - `none`：$b_{ij}=0$，检验 Transformer 本体是否已足够；
+    - `structural`：只用 edge type / distance / same-finger；
+    - `se3`：只用 dynamic SE(3) edge MLP；
+    - `hybrid_se3`：结构 bias + SE(3) edge MLP，teacher 默认。
+
+    PPO 稳定性约束：SE(3) MLP 最后一层建议零初始化，或用 learnable gate
+    $\alpha\approx0$ 起步，使初期网络近似 no-bias，避免随机 $b_{ij}$ 直接打爆
+    softmax logits。
     """
 
-    mode: str = "edge_feature"
-    """bias 模式：`none` / `edge_type` / `type_triplet` / `distance` / `edge_feature`；teacher 默认使用 SE(3) edge feature。"""
+    mode: str = "hybrid_se3"
+    """bias 模式：`none` / `structural` / `se3` / `hybrid_se3`；teacher 默认 `hybrid_se3`。"""
 
     num_edge_types: int | None = None
-    """离散边类型数；仅 `edge_type` 或 `type_triplet` 模式需要。"""
+    """离散有向 edge type 数；`structural` / `hybrid_se3` 模式需要。"""
+
+    num_distance_buckets: int = 6
+    """运动学图距离 bucket 数，建议对应 `0,1,2,3,4,>=5`；只作结构 bias，不作硬 mask。"""
 
     edge_feature_dim: int | None = None
-    """连续边特征维度；仅 `edge_feature` 模式需要，如相对位姿、图距离等。"""
+    """连续边特征维度；`se3` / `hybrid_se3` 模式需要，第一版至少含 normalized $se(3)$ 6D。"""
+
+    se3_bias_hidden_dim: int | None = None
+    """SE(3) edge MLP hidden dim；`None` 时建议实现默认取 token `embed_dim // 2`。"""
+
+    se3_translation_scale: str = "palm_extent"
+    """平移归一化锚点：`palm_extent` / `hand_radius` / `fixed_meter`；避免米制平移尺度主导旋量。"""
+
+    se3_rotation_scale: float = 3.141592653589793
+    r"""旋转 log 向量归一化尺度，默认除以 $\pi$，使 $so(3)$ 量大致落入 $[-1,1]$。"""
+
+    use_same_finger_bias: bool = True
+    """是否加入同指链二值结构 bias，帮助模型区分 intra-finger coordination 与 inter-finger coordination。"""
+
+    use_zero_init_bias_mlp: bool = True
+    """是否要求 SE(3) bias MLP 最后一层零初始化；PPO 初期稳定性优先。"""
+
+    use_bias_gate: bool = True
+    """是否使用 learnable gate $\alpha$ 缩放连续 bias；建议 $\alpha$ 初始化接近 0。"""
 
     relation_features: RelationFeatureCfg = field(default_factory=RelationFeatureCfg)
     """边特征的语义归属配置，尤其是 palm→root mount pose 的位置。"""

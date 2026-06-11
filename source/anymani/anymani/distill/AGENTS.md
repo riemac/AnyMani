@@ -32,6 +32,12 @@ assets -> tasks -> distill
 
 RL teacher 的网络规模以 PPO 稳定性为第一约束，不以容量最大化为目标。大容量模型优先放到 student / distill 阶段吸收；若扩大 teacher，必须同时复核推理频率、rollout 吞吐和 PPO 收敛稳定性。
 
+## 测试策略
+
+`distill/models` 是最适合 TDD 的层：tokenizer、mask、type ids、relation batch、attention bias、backbone、heads 都应先用小 tensor 写 shape / mask / routing / zero-init 测试，再实现。尤其要测试 `valid_mask=True` 的内部约定、`JOINT`-only action routing、`hybrid_se3` bias 的 `[B,H,T,T]` shape 与初始近似 no-bias。
+
+`distill/rl` 的 rl_games adapter 可用 contract tests 验证 flat obs/action 与 grouped token batch 的互转；真正启动 IsaacLab rollout 只做 smoke / integration。不要把 Isaac Sim 依赖引入纯模型单元测试。
+
 ## 位姿与旋转的网络表示
 
 总纲沿用 `tasks/gm/AGENTS.md`〖数学偏好〗：矩阵为默认载体，需要线性 / 向量形式时用轴角 / 旋量，回避欧拉角与裸四元数。下面是这条主线落到**网络张量**上的补充，按角色区分，不必教条：

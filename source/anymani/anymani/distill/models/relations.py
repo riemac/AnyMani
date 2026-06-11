@@ -5,8 +5,8 @@ r"""token 间关系 / edge feature 构造契约。
 
 ```text
 tokenizer 输出 token frames / type_ids / valid_mask
-    └── relations.py 构造 edge_feat(i,j)
-          └── attention_bias.py 将 edge_feat(i,j) 映射为 attention logits bias b_ij
+    └── relations.py 构造 edge_feat(i,j) + structural metadata
+          └── attention_bias.py 将 relation batch 映射为 attention logits bias b_ij
 ```
 
 == 当前 teacher 合意 ==
@@ -36,12 +36,26 @@ $$
 它并没有比 `palm -> root joint` edge 多任何物理信息，反而增加 token 类型与
 路由复杂度。
 
-== 与 static edge 的关系 ==
+== 与 static / structural edge 的关系 ==
 
 static embodiment edge（如 home pose / URDF rest pose 下的相邻相对位姿）仍可作为
 消融或额外输入，但 teacher 当前主路线是 dynamic all-pairs SE(3)。
 get-zero 式 hop distance 在 same-topology teacher 阶段通常是常量，对 post-mutate
 几何变化没有信息量，因此不作为 teacher 主特征。
+
+不过 `hybrid_se3` attention bias 仍需要一组轻量 structural metadata，用作软拓扑
+先验而不是主几何信号：
+
+```text
+edge_type_ids   : [B,T,T]  # 有向 edge type，如 self / palm->joint / joint->tip / parent->child 等
+distance_bucket : [B,T,T]  # 运动学图最短路径 bucket，建议 0,1,2,3,4,>=5
+same_finger     : [B,T,T]  # 是否属于同一根手指链；palm/self/padding 需显式约定
+edge_valid_mask : [B,T,T]  # 两端 token 均有效时 True；padding 屏蔽留给 backbone mask 路径
+```
+
+这些离散结构量只能告诉网络“谁和谁在拓扑上近 / 同指 / 有方向关系”，不能表达
+mount perturb、link scale、tip offset 等连续形态差异。因此它们默认与 dynamic SE(3)
+edge feature 相加，而不是替代后者。
 
 == sim2sim 边界 ==
 
@@ -55,7 +69,11 @@ TOAGENT:
 """
 
 # TODO: 定义 `RelationFeatureBatch` 数据结构，至少包含：
-#       `edge_feat: [B,T,T,F_e]`、`edge_valid_mask: [B,T,T]`、`edge_type_ids: [B,T,T]`。
+#       - `edge_feat: [B,T,T,F_e]`：normalized dynamic SE(3) edge feature；
+#       - `edge_valid_mask: [B,T,T]`：两端 token 均有效；
+#       - `edge_type_ids: [B,T,T]`：有向结构边类型；
+#       - `distance_bucket: [B,T,T]`：最短路径距离桶；
+#       - `same_finger: [B,T,T]`：同指链二值关系。
 
 # TODO: 定义 `TokenFrameProvider` / `TokenFrameBatch`，从环境或资产缓存中提供
 #       `T_i(q_t): [B,T,4,4]`。teacher 第一版可直接用 Isaac/asset 已知 frame；
@@ -64,5 +82,9 @@ TOAGENT:
 # TODO: 定义 `AllPairsDynamicSE3RelationBuilder`，计算
 #       $E_{ij}^{t}=\log(T_i(q_t)^{-1}T_j(q_t))$，输出 6D se(3) 向量。
 
-# TODO: 同时生成离散 edge_type，如 palm-joint、joint-tip、same-finger、self-edge、
-#       padding-edge，用于给 SE(3) edge feature 附加语义标签。
+# TODO: 同时生成离散 edge_type，如 self、palm->joint、joint->palm、joint->joint、
+#       joint->tip、tip->joint、tip->tip、padding-edge。方向必须保留，不能把
+#       parent->child 与 child->parent 合并。
+
+# TODO: 生成 `same_finger` 时应区分 palm/global token。建议 palm 到任何 finger 的
+#       same_finger=False，self-edge 单独由 edge_type 处理，padding 由 valid_mask 处理。

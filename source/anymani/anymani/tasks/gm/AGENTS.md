@@ -29,6 +29,12 @@ ManagerBasedRLEnv 本身就是一个高度声明式、配置驱动的环境框�
 
 在设计 MDP 项时，也可从算法第一性原理考虑哪些是可以从流程里拆下来、可配置的组建、超参，而不是写死在流程逻辑里。
 
+### 测试策略
+
+`gm` 的纯 MDP 逻辑应尽量 TDD：obs/action 量纲、SO(3) command、reward 曲线、termination anchor、grasp-cache reset 写入语义，都应能用 fake env / 小 tensor 做 contract test。需要 Isaac Sim 的 articulation loading、contact sensor、PhysX step、完整 reset/step，则用 headless smoke / integration test，不要求像纯函数一样严格 TDD。
+
+凡实现会改变 reset 初始状态分布、reward 成功判据或坐标系语义，至少补一个能失败的最小测试或 smoke 记录，避免训练跑很久才发现数学方向错了。
+
 ## 数学偏好
 
 机器人学相关的算法、脚本、变量与注释，统一仿照《Modern Robotics》的群 / 李代数体系表达，保持学术严谨，不要临时拼凑角度约定。

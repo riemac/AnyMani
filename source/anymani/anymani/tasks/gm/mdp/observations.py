@@ -1,4 +1,4 @@
-r"""TODO:Observation terms for `tasks.gm`.
+r"""Observation terms for `tasks.gm`.
 
 IsaacLab RL 既然是服务于层次通才专家训练阶段，用于训练 specialist policy / teacher 的，而该 policy 本身不用于 sim2real。
 那么可以尽可能使用更有用的观测信息，包括各种特权信息，来帮助训练。
@@ -16,17 +16,25 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+from isaaclab.assets import Articulation
+from isaaclab.managers import SceneEntityCfg
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
-__all__: list[str] = ["reorient_command"]
+__all__: list[str] = [
+    "joint_pos_raw",
+    "joint_soft_pos_limits",
+    "joint_vel_raw",
+    "last_processed_action",
+    "reorient_command",
+]
 
 # ==================
 # state obs
 # ==================
 
-r"""TODO(state obs): 关节本体感受 (proprioception)，逐步变化的动态量，属于 obs mdp。
+r"""DONE(state obs): 关节本体感受 (proprioception)，逐步变化的动态量，属于 obs mdp。
 
 符号约定：$q_i$ 为第 $i$ 个关节角 (rad)，$\dot q_i$ 为关节角速度 (rad/s)，
 $q_i^{\min}, q_i^{\max}$ 为该关节的 soft 限位 (rad)；下标 $i$ 遍历 surviving revolute joints。
@@ -57,7 +65,7 @@ $$
     4. 数值尺度本就友好：关节角 raw 值落在温和有界区间（约 $[-0.8, 1.5]$ rad），
        scale 已适合 PPO，无需为数值稳定而归一化。
 
-本段应实现的项（仅 state obs，不含静态形态量）：
+本段已实现的项（仅 state obs，不含复杂静态形态量）：
     - q_raw   : asset.data.joint_pos[:, joint_ids]                  $q_i$，(rad)
     - dq_raw  : asset.data.joint_vel[:, joint_ids]                  $\dot q_i$，(rad/s)
     - last_action : 上一步实际下发的 raw rad delta $\Delta_{t-1}$，(rad)。
@@ -72,7 +80,7 @@ NOTE(last_action 与动作空间的耦合): 动作空间已确定为 raw rad del
 state obs 的 $q_i$ 不在同物理空间——策略需要在内部把「NN 输出值」映射回
 「rad 增量」，徒增不必要的线性层负担。
 
-TODO: 在 `observations.py` 中实现一个轻量 wrapper：
+DONE: `observations.py` 已实现轻量 wrapper：
 ```python
 def last_processed_action(env, action_name="hand_joint_pos") -> torch.Tensor:
     return env.action_manager.get_term(action_name).processed_actions
@@ -90,6 +98,125 @@ ref: `Research/总体/层次通才策略训练.md` (obs 分组); `gm/AGENTS.md` 
 TOAGENT:
     注释不可删，可重述、修改、补充和润色。
 """
+
+
+def joint_pos_raw(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    r"""读取 hand articulation 的 raw joint position $q$。
+
+    这是 `gm` teacher state obs 的主线关节位置项，刻意不使用 IsaacLab 的
+    `joint_pos_limit_normalized`。数学语义为：
+    $$
+    \mathbf{q}_t = [q_{1,t},\dots,q_{n,t}] \in \mathbb{R}^{n},
+    $$
+    单位为 rad，索引顺序由 `SceneEntityCfg.joint_ids` 与 action joint schema 决定。
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
+        asset_cfg (SceneEntityCfg): robot articulation 与 joint 子集配置。
+
+    Returns:
+        torch.Tensor: raw joint position，形状 `[num_envs, num_joints]`，单位 rad。
+    """
+
+    # `asset_cfg` 在 ObservationManager 初始化时会解析 joint_names → joint_ids；
+    # preserve_order=True 的 action contract 要求这里保持相同 joint order。
+    asset: Articulation = env.scene[asset_cfg.name]
+    return asset.data.joint_pos[:, asset_cfg.joint_ids]  # $q_i$，raw rad，不随 limit 归一化
+
+
+def joint_vel_raw(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    r"""读取 hand articulation 的 raw joint velocity $\dot q$。
+
+    速度与位置同属 state obs 的动态本体感受项：
+    $$
+    \dot{\mathbf{q}}_t = [\dot q_{1,t},\dots,\dot q_{n,t}] \in \mathbb{R}^{n}.
+    $$
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
+        asset_cfg (SceneEntityCfg): robot articulation 与 joint 子集配置。
+
+    Returns:
+        torch.Tensor: raw joint velocity，形状 `[num_envs, num_joints]`，单位 rad/s。
+    """
+
+    # 不减 default_joint_vel；手内操作关心当前真实角速度，而不是相对默认速度。
+    asset: Articulation = env.scene[asset_cfg.name]
+    return asset.data.joint_vel[:, asset_cfg.joint_ids]  # $\dot q_i$，raw rad/s
+
+
+def joint_soft_pos_limits(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    r"""读取 runtime soft joint limits $[q^{\min}, q^{\max}]$。
+
+    limits 在语义上属于 geometry / morphology，而非 state；但 teacher RL 应读取
+    runtime 的 `soft_joint_pos_limits`，因为它们正是 action clamp 与 actuator 行为
+    实际使用的边界：
+    $$
+    L_i = [q_i^{\min}, q_i^{\max}] \in \mathbb{R}^{2}.
+    $$
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
+        asset_cfg (SceneEntityCfg): robot articulation 与 joint 子集配置。
+
+    Returns:
+        torch.Tensor: soft limits，形状 `[num_envs, 2 * num_joints]`，单位 rad。
+
+    NOTE:
+        返回时 flatten 最后一维，是为了兼容 `ObsGroup.concatenate_terms=True` 的
+        扁平 obs dict；tokenizer 侧若需要 `[B,N_j,2]`，应在 adapter 中按 joint 数
+        reshape 回结构化形式。
+    """
+
+    # 用 soft 而非 hard limits：soft 才是 `ClampedRelativeJointPositionAction` clamp 的同一边界。
+    asset: Articulation = env.scene[asset_cfg.name]
+    limits = asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids, :]  # `[B,N_j,2]`，rad
+    return limits.flatten(start_dim=1)  # `[B,2*N_j]`，便于当前 rl_games 扁平 obs 消费
+
+
+def last_processed_action(
+    env: ManagerBasedRLEnv,
+    action_name: str = "hand_joint_pos",
+) -> torch.Tensor:
+    r"""读取上一帧实际下发的 raw rad delta action。
+
+    IsaacLab 内置 `last_action(action_name=...)` 返回 `raw_actions`，即 policy 网络输出
+    在 scale / clip 前的无量纲值。`gm` 的动作空间已经固定为 raw relative delta：
+    $$
+    \Delta_t = a_t^{\mathrm{raw}}\,s \quad (\mathrm{rad}),
+    $$
+    因此 state obs 中的 last action 必须读取 action term 的 `processed_actions`，
+    才与 $q$、$\dot q$ 和 soft limits 处在同一个物理量纲系统内。
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
+        action_name (str): `ActionManager` 中的 action term 名称，默认 `hand_joint_pos`。
+
+    Returns:
+        torch.Tensor: 上一步 processed action，形状 `[num_envs, num_joints]`，单位 rad。
+
+    Raises:
+        RuntimeError: 若 action term 不暴露 `processed_actions`，说明 obs/action 合同不匹配。
+    """
+
+    # 与 `ClampedRelativeJointPositionAction` 直接耦合：该 term 继承 IsaacLab JointAction，
+    # 在 `process_actions` 后维护 `processed_actions`，正是实际用于 target 更新的 $\Delta_t$。
+    action_term = env.action_manager.get_term(action_name)
+    processed_actions = getattr(action_term, "processed_actions", None)  # `[B,N_j]`，rad delta
+    if not isinstance(processed_actions, torch.Tensor):
+        raise RuntimeError(
+            f"Action term '{action_name}' must expose processed_actions for gm raw-rad last_action obs."
+        )
+    return processed_actions
 
 # ==================
 # contact obs
@@ -132,7 +259,7 @@ $$
 \in \mathbb{R}^7
 $$
 
-- $c_x, c_y, c_z$：接触点局部坐标（取力最大的接触点；无接触时填 $(0,0,0)$）
+- $c_x, c_y, c_z$：接触点局部坐标（使用 IsaacLab 平均接触位置；无接触时填 $(0,0,0)$）
 - $F_x, F_y, F_z$：净接触力矢量（局部系，从 net_forces_w 经 quat_w 旋转）
 - $\|F\|$：力幅值（frame-invariant，冗余但便宜）
 
@@ -146,12 +273,15 @@ Why 局部系而非世界系:
     - 力幅值 $\|F\|$：frame-invariant，放在哪个系都一样。
 
 接触点聚合策略:
-    `contact_pos_w` 可能每个指尖有 $M \ge 1$ 个接触点（形状 N×B×M×3）。
-    取 $\|F\|$ 最大的那个接触点——该点通常是主接触，对标 AnyRotate
-    隐含的单接触点假设。无接触时（全为 NaN）填 $(0,0,0)$。
+    IsaacLab 当前 `ContactSensorData.contact_pos_w` 不是逐 PhysX contact point
+    列表，而是 sensor body 与 filtered body pair 的**平均接触位置**，形状通常为
+    `[num_envs, num_sensor_bodies, num_filter_bodies, 3]`；无接触时为 NaN。
+    因此第一版 contact obs 应直接使用该平均接触位置，NaN 填 $(0,0,0)$。
+    若未来需要“按最大力选择主接触点”，必须改为读取更底层的 PhysX contact
+    buffer / per-contact data，不能从当前 `contact_pos_w` 误读出来。
 
 数据来源映射:
-    - c_local  ← contact_pos_w → 选出最大力接触点 → quat_w.inverse*(contact_pos_w - pos_w)
+    - c_local  ← contact_pos_w 平均接触位置 → quat_w.inverse*(contact_pos_w - pos_w)
     - F_local  ← net_forces_w → quat_w.inverse * net_forces_w
     - ||F||    ← net_forces_w → ||net_forces_w||₂
 
@@ -171,7 +301,7 @@ TOAGENT:
 
 
 def reorient_command(
-    env: "ManagerBasedRLEnv",
+    env: ManagerBasedRLEnv,
     command_name: str,
 ) -> torch.Tensor:
     r"""读取 `ReorientCommand` 生成的 policy-facing command。
@@ -210,7 +340,7 @@ def reorient_command(
 # geometry obs
 # ==================
 
-r"""TODO(geometry obs - joint limits): 关节限位作为静态形态量 (morphology feature)。
+r"""DONE(geometry obs - joint limits): 关节限位作为静态形态量 (morphology feature)。
 
 符号沿用 state obs 段：$q_i^{\min}, q_i^{\max}$ 为第 $i$ 个关节的 soft 限位 (rad)。
 
@@ -220,10 +350,10 @@ $H > 1$，会在时间窗口里被无意义地重复堆叠 $H$ 次。geometry �
 distill 接管（见 `Research/总体/层次通才策略训练.md:29` 的浅契约约定），故 limits
 在这里以「不进时间历史的静态特征」形式提供，最终挂到 joint-centric token 上。
 
-本项应提供（cheap，无历史）:
+本项已提供（cheap，当前 `history_length=1` 下无重复历史）:
     - q_min, q_max : asset.data.soft_joint_pos_limits[:, joint_ids, 0/1]
       $q_i^{\min}, q_i^{\max}$，(rad)
-    - 可选派生 margin（便宜且对接触任务有用，让「接近限位」trivially 可得）:
+    - TODO: 可选派生 margin（便宜且对接触任务有用，让「接近限位」trivially 可得）:
       $$
       \text{margin}_i^{\text{lo}} = q_i - q_i^{\min}, \qquad
       \text{margin}_i^{\text{hi}} = q_i^{\max} - q_i
@@ -231,14 +361,15 @@ distill 接管（见 `Research/总体/层次通才策略训练.md:29` 的浅契�
 
 NOTE(soft vs hard limits): 必须用 **soft** limits 而非 hard。soft 才是 actuator
 实际 clamp、策略真正会撞到的边界（行为相关）；hard limits 不是行为相关边界。
-IsaacLab 未把 limits 暴露为 observation（仅内部 clamp 用），故必须自写，
-不能复用 `isaac_mdp`。
+IsaacLab 未把 limits 暴露为直接 observation（仅在 normalized joint obs / clamp
+路径中使用），故当前已通过 `joint_soft_pos_limits(...)` 自写暴露，不能复用
+`joint_pos_limit_normalized` 间接混入 state obs。
 
 最终每个 joint-centric token 的目标形态:
     $\big[\,q_i,\ \dot q_i,\ q_i^{\min},\ q_i^{\max}\ (+\ \text{margin}_i)\,\big]$
     \ +\ last_action（raw rad delta，与 `ClampedRelativeJointPositionAction.processed_actions` 同量纲）。
 
-NOTE(limits 接口，已决策): joint limits 作为静态 ObsTerm 进 obs mdp
+DONE(limits 接口，已决策并接入): joint limits 作为静态 ObsTerm 进 obs mdp
 （不进时间历史），使 teacher RL 可直接使用。distill 侧如需更复杂的
 形态编码，可从 `asset.data` 直接读，不依赖 obs mdp 的 limits 项。
 

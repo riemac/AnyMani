@@ -18,6 +18,10 @@
 - cube 的 `<=1 cm` 平移扰动与 yaw-uniform 应进入 cache generation / validation 分布；online reset 第一版不再额外施加强扰动。
 - 多资产并行生成只是待验证目标：需要确认 IsaacLab mixed-articulation batching、joint schema、per-env asset metadata 之后才能写成正式实现。
 
+## 测试策略
+
+本目录优先 TDD：`GraspCacheKey` 路径、metadata round-trip、tensor shape 校验、sampler 索引、reset request 与 cache shard 匹配都应先有纯 Python / tensor contract test。离线 Isaac Sim cache generation 和稳定性验证属于重型 pipeline，用小规模 headless smoke 与人工/统计检查补充，不替代 schema/store/sampler 单元测试。
+
 ## 暂时产物位置
 
 短期内，cache 大文件允许自包含地放在本目录下的非源码产物子目录中，例如：

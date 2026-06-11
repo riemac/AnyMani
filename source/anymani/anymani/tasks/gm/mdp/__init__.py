@@ -14,6 +14,7 @@ from __future__ import annotations
 from .actions.clamped_relative_action import ClampedRelativeJointActionCfg, ClampedRelativeJointPositionAction
 from .curriculums import RewardCurriculumByGoalSuccess
 from .events import DEFAULT_GM_EVENT_DESIGN, GmEventDesign, GmObjectScaleMode, GmPhysicsDrPhase, GmResetMode
+from .observations import joint_pos_raw, joint_soft_pos_limits, joint_vel_raw, last_processed_action, reorient_command
 from .rewards import (
     AxisDeltaRotationReward,
     action_l2_curriculum,
@@ -43,9 +44,14 @@ __all__ = [
     "bad_non_tip_contact",
     "goal_success_bonus",
     "good_fingertip_contact",
+    "joint_pos_raw",
+    "joint_soft_pos_limits",
+    "joint_vel_raw",
     "keypoint_reorientation_reward",
+    "last_processed_action",
     "object_falling_placeholder",
     "object_out_of_hand",
+    "reorient_command",
     "reorientation_reward_placeholder",
     "termination_penalty_placeholder",
     "torque_l2_curriculum",

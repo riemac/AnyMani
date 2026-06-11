@@ -161,19 +161,25 @@ class GmObservationsCfg:
     class PolicyCfg(ObsGroup):
         r"""Deployable actor observation group scaffold.
 
-        TODO(state obs 路线 B): 当前 `joint_pos` 暂用 IsaacLab 默认的
-        `joint_pos_limit_normalized`（即 $q_i^{\text{norm}} \in [-1, 1]$），
-        这与已对齐的设计决策相悖。正式实现时应替换为 `gm_mdp` 中基于
-        **raw rad** 的关节观测项（$q_i$ + $\dot q_i$），理由见
-        `mdp/observations.py` state obs 段的四条论证（跨 variant 语义不变性、
-        post-mutate 只变 limit、$q_i^{\text{norm}}$ 还原 $q_i$ 需乘性算子、raw 尺度本就友好）。
+        DONE(state obs 路线 B): 已出清 IsaacLab 默认的
+        `joint_pos_limit_normalized` 与 `isaac_mdp.last_action` 占位。当前 actor
+        侧使用 `gm_mdp` 的 raw-rad state obs：
+        $$
+        [q_i,\ \dot q_i,\ \Delta a_{t-1},\ q_i^{\min},\ q_i^{\max}],
+        $$
+        其中 $\Delta a_{t-1}$ 来自动作项 `processed_actions`，单位 rad，和
+        `ClampedRelativeJointPositionAction` 的动作语义一致。
 
         NOTE: 关节限位 $q_i^{\min}, q_i^{\max}$ 作为静态形态量单独提供，
-        不进本 group 的时间历史（history_length），避免 $H > 1$ 时重复堆叠。
+        当前 `history_length=1` 不会重复堆叠。若后续给 dynamic state 开启
+        $H>1$ history，应把 limits 拆到不参与 history 的 geometry/static group，
+        不能让静态 morphology 被时间窗口复制 $H$ 次。
         """
 
-        joint_pos = ObsTerm(func=isaac_mdp.joint_pos_limit_normalized, params={"asset_cfg": SceneEntityCfg("robot")})
-        last_action = ObsTerm(func=isaac_mdp.last_action)
+        joint_pos = ObsTerm(func=gm_mdp.joint_pos_raw, params={"asset_cfg": SceneEntityCfg("robot")})
+        joint_vel = ObsTerm(func=gm_mdp.joint_vel_raw, params={"asset_cfg": SceneEntityCfg("robot")})
+        last_action = ObsTerm(func=gm_mdp.last_processed_action, params={"action_name": "hand_joint_pos"})
+        joint_limits = ObsTerm(func=gm_mdp.joint_soft_pos_limits, params={"asset_cfg": SceneEntityCfg("robot")})
 
         def __post_init__(self):
             r"""Configure actor observation concatenation semantics."""
