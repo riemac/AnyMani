@@ -22,6 +22,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.common import ViewerCfg
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -95,10 +96,16 @@ class GmInHandSceneCfg(InteractiveSceneCfg):
 class GmCommandsCfg:
     r"""Command scaffold for in-hand object reorientation.
 
-    TODO:
-        初期可以复用旧 `inhand` 的 relative SO(3) command 语义；但命令项名字、
-        success threshold、是否连续旋转，应在 `gm/mdp/commands.py` 中固定成
-        本项目自己的语义，而不是继续从旧 LEAP task 借名。
+    DONE:
+        当前已切到 `gm_mdp.ReorientCommandCfg`，不再借用旧 `tasks/inhand` 的
+        pose command 名字或 7D pose tensor 语义。policy-facing command 为
+        `[axis_h, error_so3_h]`；reward / termination / curriculum 读取 command
+        term 内部 buffer，例如 `goal_quat_w`、`axis_e`、`goal_success_count`。
+
+    NOTE:
+        `theta_range` 默认 `[π/6, π/2]`，下限大于 success threshold，避免刚
+        采样就成功。最终绕 `{h}` z 轴连续旋转测试时，可把 `axis_mode="fixed"`
+        且 `fixed_axis_h=(0,0,1)`。
     """
 
     goal_pose: object = MISSING
@@ -195,15 +202,25 @@ class GmObservationsCfg:
 class GmRewardsCfg:
     r"""Reward scaffold for in-hand manipulation.
 
-    TODO:
-        先把“物体姿态跟踪 + 成功 bonus + 动作/力矩正则”整理成 gm 自己的奖励项。
-        grasp 不是当前目标，不要提前扩展目录树；若未来需要抓取，只通过 reward /
-        command / termination 组合表达任务差异。
+    DONE(奖励分组已落脚手架):
+        奖励按 AnyRotate 风格拆成 `r_reorient / r_contact / r_stable /
+        r_terminate`。当前 env cfg 仍保留 `reorientation_reward_placeholder`，
+        因为真正的 `keypoint_reorientation_reward` / `AxisDeltaRotationReward`
+        依赖 `ReorientCommand` 暴露 `goal_quat_w`、`axis_e`、
+        `goal_success_count` 等 buffer / metric；这些 command contract 尚未正式
+        实现。
+
+    NOTE:
+        动作正则已切到 curriculum-gated wrapper。由于动作空间本身是
+        `scale=0.1` 的 raw rad delta 且会 clamp 到 soft limits，第一版允许
+        严格模仿 AnyRotate：action / action-rate 正则在 curriculum 释放前
+        默认不参与优化。若实际训练早期动作仍抖，可单独给这些 term 设置
+        `lambda_floor > 0`。
     """
 
     track_orientation = RewTerm(func=gm_mdp.reorientation_reward_placeholder, weight=1.0)
-    action_l2 = RewTerm(func=isaac_mdp.action_l2, weight=-1.0e-4)
-    action_rate_l2 = RewTerm(func=isaac_mdp.action_rate_l2, weight=-1.0e-2)
+    action_l2 = RewTerm(func=gm_mdp.action_l2_curriculum, weight=-1.0e-4, params={"lambda_floor": 0.0})
+    action_rate_l2 = RewTerm(func=gm_mdp.action_rate_l2_curriculum, weight=-1.0e-2, params={"lambda_floor": 0.0})
 
 
 @configclass
@@ -233,22 +250,53 @@ class GmEventsCfg:
 
 @configclass
 class GmTerminationsCfg:
-    r"""Termination scaffold for object-in-hand episodes."""
+    r"""Termination scaffold for object-in-hand episodes.
+
+    DONE(第一版边界):
+        - `time_out` 使用 IsaacLab 内置项，不额外包装。
+        - `object_falling` 使用 `object_out_of_hand`：object root 相对 reset/default
+          anchor 的 3D L2 距离超过 `0.12m` 即 reset。
+
+    NOTE:
+        不做 max success termination；不做 axis deviation；不做 joint-limit / 卡死
+        termination。卡死相持先由较短 episode timeout 兜底，避免误杀能自行恢复的
+        finger-gaiting 状态。
+    """
 
     time_out = DoneTerm(func=isaac_mdp.time_out, time_out=True)
-    object_falling = DoneTerm(func=gm_mdp.object_falling_placeholder, params={"fall_dist": 0.1})
+    object_falling = DoneTerm(func=gm_mdp.object_out_of_hand, params={"fall_dist": 0.12})
 
 
 @configclass
 class GmCurriculumCfg:
     r"""Curriculum scaffold.
 
-    TODO:
-        初期可为空。若加入 curriculum，应服务任务难度或 command 分布，不要把
-        asset-bank 采样策略混进来；后者属于 `distill`。
+    DONE(Reward curriculum 落子):
+        采用 AnyRotate 风格 adaptive reward curriculum。其物理/学习语义是：
+        先让策略学会完成随机重定向子目标，再逐步释放 contact / stable / action
+        正则项，避免一开始被吸到“稳定抓住但不旋转”的局部最优。
+
+    进度指标：
+        `goal_success_count`，即单个 episode 中完成了多少个重定向子目标。
+        该指标应由 `ReorientCommand` 维护，而不是用 IsaacLab 官方 inhand 中
+        命名含糊的 `consecutive_success`。
+
+    preset:
+        `g_min=1.0, g_max=2.0` 对齐 AnyRotate 的直觉：平均每 episode 约完成
+        1 个子目标后开始释放，约完成 2 个子目标后完全释放。所有数值保持
+        cfg 可调，后续可扫 `[0,2] / [1,2] / [1,4]` 等区间。
     """
 
-    pass
+    reward_release = CurrTerm(
+        func=gm_mdp.RewardCurriculumByGoalSuccess,
+        params={
+            "command_name": "goal_pose",
+            "metric_key": "goal_success_count",
+            "g_min": 1.0,
+            "g_max": 2.0,
+            "ema_alpha": 0.05,
+        },
+    )
 
 
 @configclass

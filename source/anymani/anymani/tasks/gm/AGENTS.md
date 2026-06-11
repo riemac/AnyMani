@@ -18,12 +18,25 @@
 
 当前主线是 same-topology post-mutated hand assets 的层次通才 RL 环境；跨拓扑 unified policy、mesh feature learning、teacher-student distillation 暂由 `distill` 后续承接。
 
-## 数学习惯
+### 声明式配置驱动
 
-关于机器人学相关的变量、注释，仿照《Modern robotics》风格，保持学术严谨。
-例如
-- $\text{Log}: SO(3) \to so(3)$ — 大写，返回**向量**
-- $\text{log}: SO(3) \to \mathbb{R}^3$ — 小写，返回**矩阵**（skew-symmetric）
+ManagerBasedRLEnv 本身就是一个高度声明式、配置驱动的环境框架，鼓励通过配置项组合出不同的任务和环境变体，而不是通过写新的 Python 代码。对于需要新代码的情况，也应优先考虑在现有组件基础上添加可配置选项，而不是直接写一个新的组件。
+
+在设计 MDP 项时，也可从算法第一性原理考虑哪些是可以从流程里拆下来、可配置的组建、超参，而不是写死在流程逻辑里。
+
+## 数学偏好
+
+机器人学相关的算法、脚本、变量与注释，统一仿照《Modern Robotics》的群 / 李代数体系表达，保持学术严谨，不要临时拼凑角度约定。
+
+**表示优先级**：
+
+1. **首选位姿矩阵 / 旋转矩阵**（$T \in SE(3)$、$R \in SO(3)$）。它们与群同构，完备、无奇异、是唯一无歧义的双射，应作为位姿存储、复合、求逆、传递的默认载体。
+2. **需要线性 / 向量形式时，优先轴角与旋量**（$\bm{\omega}\theta \in \mathbb{R}^3$、$\mathcal{S}\theta \in \mathbb{R}^6$，分别与 $so(3)$、$se(3)$ 同构）。它们是李代数上的线性量，便于做残差、插值、雅可比与特征；代价是 $\theta \to \pi$ 附近存在奇异，使用处须显式处理或回避。当前 command 即采用 axis + so(3) 形式。
+3. **回避欧拉角 / RPY 与裸四元数作为内部表示**。仅在与外部接口对接的边界上换算：URDF、可视化、以及 Isaac Lab 官方 API（查询 body 位姿时它必然返回四元数）——拿到后尽快换算回矩阵 / 旋量再进入自己的逻辑。
+
+记号示例，大小写区分向量与矩阵：
+- $\text{Log}: SO(3) \to so(3)$ — 大写，返回**矩阵**（skew-symmetric）
+- $\text{log}: SO(3) \to \mathbb{R}^3$ — 小写，返回**向量**
 
 反过来：
 - $\text{exp}: so(3) \to SO(3)$ — 矩阵指数

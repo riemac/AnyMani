@@ -12,12 +12,35 @@ r"""MDP terms for generalized manipulation tasks.
 from __future__ import annotations
 
 from .actions.clamped_relative_action import ClampedRelativeJointActionCfg, ClampedRelativeJointPositionAction
-from .rewards import reorientation_reward_placeholder
-from .terminations import object_falling_placeholder
+from .curriculums import RewardCurriculumByGoalSuccess
+from .rewards import (
+    AxisDeltaRotationReward,
+    action_l2_curriculum,
+    action_rate_l2_curriculum,
+    bad_non_tip_contact,
+    goal_success_bonus,
+    good_fingertip_contact,
+    keypoint_reorientation_reward,
+    reorientation_reward_placeholder,
+    termination_penalty_placeholder,
+    torque_l2_curriculum,
+)
+from .terminations import object_falling_placeholder, object_out_of_hand
 
 __all__ = [
+    "AxisDeltaRotationReward",
     "ClampedRelativeJointActionCfg",
     "ClampedRelativeJointPositionAction",
+    "RewardCurriculumByGoalSuccess",
+    "action_l2_curriculum",
+    "action_rate_l2_curriculum",
+    "bad_non_tip_contact",
+    "goal_success_bonus",
+    "good_fingertip_contact",
+    "keypoint_reorientation_reward",
     "object_falling_placeholder",
+    "object_out_of_hand",
     "reorientation_reward_placeholder",
+    "termination_penalty_placeholder",
+    "torque_l2_curriculum",
 ]
