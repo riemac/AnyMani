@@ -23,6 +23,7 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.common import ViewerCfg
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
@@ -105,7 +106,12 @@ class GmCommandsCfg:
         且 `fixed_axis_h=(0,0,1)`。
     """
 
-    goal_pose: object = MISSING
+    goal_pose: gm_mdp.ReorientCommandCfg = gm_mdp.ReorientCommandCfg(
+        asset_name="object",
+        robot_asset_name="robot",
+        axis_mode="random",
+        axis_resample_mode="subgoal",
+    )
 
 
 @configclass
@@ -151,10 +157,9 @@ class GmActionsCfg:
 class GmObservationsCfg:
     r"""Policy / critic observation scaffold.
 
-    初期 teacher RL 可以保持 MLP 友好的状态观测：关节位置、关节速度、
-    object pose、goal command、last action。后续 student / unified policy 的
-    joint-centric token、mesh feature、mask / padding 不应塞进本 cfg，而应由
-    `distill/models` 与训练 wrapper 明确接管。
+    初期 teacher RL 使用 flat observation 进入 `distill/rl` 的 Transformer adapter：
+    关节位置、关节速度、last action、joint limits 和 reorient command 会被 adapter
+    重新组织为轻量 token，而不是在 `tasks/gm` 中写网络结构。
     """
 
     @configclass
@@ -180,6 +185,7 @@ class GmObservationsCfg:
         joint_vel = ObsTerm(func=gm_mdp.joint_vel_raw, params={"asset_cfg": SceneEntityCfg("robot")})
         last_action = ObsTerm(func=gm_mdp.last_processed_action, params={"action_name": "hand_joint_pos"})
         joint_limits = ObsTerm(func=gm_mdp.joint_soft_pos_limits, params={"asset_cfg": SceneEntityCfg("robot")})
+        command = ObsTerm(func=gm_mdp.reorient_command, params={"command_name": "goal_pose"})
 
         def __post_init__(self):
             r"""Configure actor observation concatenation semantics."""
@@ -206,12 +212,9 @@ class GmRewardsCfg:
     r"""Reward scaffold for in-hand manipulation.
 
     DONE(奖励分组已落脚手架):
-        奖励按 AnyRotate 风格拆成 `r_reorient / r_contact / r_stable /
-        r_terminate`。当前 env cfg 仍保留 `reorientation_reward_placeholder`，
-        因为真正的 `keypoint_reorientation_reward` / `AxisDeltaRotationReward`
-        依赖 `ReorientCommand` 暴露 `goal_quat_w`、`axis_e`、
-        `goal_success_count` 等 buffer / metric；这些 command contract 尚未正式
-        实现。
+        奖励按 AnyRotate 风格拆成 `r_reorient / r_axis_progress / r_regularize`。
+        当前已接入 `ReorientCommand`，因此主任务项可以读取 `goal_quat_w` 与
+        `axis_e`，不再使用全零 placeholder。
 
     NOTE:
         动作正则已切到 curriculum-gated wrapper。由于动作空间本身是
@@ -221,7 +224,21 @@ class GmRewardsCfg:
         `lambda_floor > 0`。
     """
 
-    track_orientation = RewTerm(func=gm_mdp.reorientation_reward_placeholder, weight=1.0)
+    track_orientation = RewTerm(
+        func=gm_mdp.keypoint_reorientation_reward,
+        weight=1.0,
+        params={"command_name": "goal_pose", "object_cfg": SceneEntityCfg("object")},
+    )
+    axis_progress = RewTerm(
+        func=gm_mdp.AxisDeltaRotationReward,
+        weight=0.25,
+        params={"command_name": "goal_pose", "object_cfg": SceneEntityCfg("object"), "clip_value": 0.025},
+    )
+    success_bonus = RewTerm(
+        func=gm_mdp.goal_success_bonus,
+        weight=2.0,
+        params={"command_name": "goal_pose", "object_cfg": SceneEntityCfg("object"), "success_mode": "so3"},
+    )
     action_l2 = RewTerm(func=gm_mdp.action_l2_curriculum, weight=-1.0e-4, params={"lambda_floor": 0.0})
     action_rate_l2 = RewTerm(func=gm_mdp.action_rate_l2_curriculum, weight=-1.0e-2, params={"lambda_floor": 0.0})
 
@@ -251,14 +268,13 @@ class GmEventsCfg:
         - joint limit DR、collider offset DR、fixed tendon DR、interval 外力暂缓。
 
     NOTE:
-        这里暂不放任何 active `EventTerm`，避免当前 scaffold 在无 cache reset 实现
-        时悄悄退化成与主线不一致的随机初态环境。下面三个字段只是命名锚点，
-        后续实现时再替换为真实 Isaac Lab `EventTermCfg`。
+        本阶段用户明确要求 Grasp Cache 暂后，因此这里激活一个命名为
+        `simple_no_cache_reset` 的最小 reset。它不是长期主线，只服务同拓扑异构资产
+        并行训练管线的 first runnable slice。
     """
 
+    simple_no_cache_reset = EventTerm(func=gm_mdp.simple_no_cache_reset, mode="reset")
     reset_grasp_cache = None  # 主线占位：未来写入 cache sample $(q,T^h_o)$
-    random_reset_object_ablation = None  # no-cache 消融占位：才允许 object pose DR
-    random_reset_robot_joints_ablation = None  # no-cache 消融占位：才允许 random joint reset
 
 
 @configclass

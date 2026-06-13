@@ -12,8 +12,17 @@ r"""MDP terms for generalized manipulation tasks.
 from __future__ import annotations
 
 from .actions.clamped_relative_action import ClampedRelativeJointActionCfg, ClampedRelativeJointPositionAction
+from .commands.commands_cfg import ReorientCommandCfg
+from .commands.reorient_command import ReorientCommand
 from .curriculums import RewardCurriculumByGoalSuccess
-from .events import DEFAULT_GM_EVENT_DESIGN, GmEventDesign, GmObjectScaleMode, GmPhysicsDrPhase, GmResetMode
+from .events import (
+    DEFAULT_GM_EVENT_DESIGN,
+    GmEventDesign,
+    GmObjectScaleMode,
+    GmPhysicsDrPhase,
+    GmResetMode,
+    simple_no_cache_reset,
+)
 from .observations import joint_pos_raw, joint_soft_pos_limits, joint_vel_raw, last_processed_action, reorient_command
 from .rewards import (
     AxisDeltaRotationReward,
@@ -38,6 +47,8 @@ __all__ = [
     "GmObjectScaleMode",
     "GmPhysicsDrPhase",
     "GmResetMode",
+    "ReorientCommand",
+    "ReorientCommandCfg",
     "RewardCurriculumByGoalSuccess",
     "action_l2_curriculum",
     "action_rate_l2_curriculum",
@@ -53,6 +64,7 @@ __all__ = [
     "object_out_of_hand",
     "reorient_command",
     "reorientation_reward_placeholder",
+    "simple_no_cache_reset",
     "termination_penalty_placeholder",
     "torque_l2_curriculum",
 ]

@@ -50,6 +50,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+import isaaclab.envs.mdp as isaac_mdp
+import isaaclab.utils.math as math_utils
+import torch
+from isaaclab.assets import RigidObject
+from isaaclab.envs import ManagerBasedRLEnv
+from isaaclab.managers import SceneEntityCfg
+
 GmResetMode = Literal["grasp_cache", "random_joint_object"]
 GmObjectScaleMode = Literal["startup_discrete_bucket", "nominal_only"]
 GmPhysicsDrPhase = Literal["startup", "reset_light_ablation", "disabled"]
@@ -84,10 +91,83 @@ class GmEventDesign:
 DEFAULT_GM_EVENT_DESIGN = GmEventDesign()
 
 
+def simple_no_cache_reset(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    robot_position_range: tuple[float, float] = (-0.05, 0.05),
+    robot_velocity_range: tuple[float, float] = (0.0, 0.0),
+    object_pose_range: dict[str, tuple[float, float]] | None = None,
+    object_velocity_range: dict[str, tuple[float, float]] | None = None,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+):
+    r"""无 Grasp Cache 的最小 reset，用于第一阶段 smoke / 短训练。
+
+    该函数不是主线长期 reset 分布。它只在 Grasp Cache 暂后时给 GM teacher
+    一个可运行初态，使我们能先验证：generated hand 能加载、action/obs/reward
+    维度闭合、rl_games rollout 能完成。
+
+    reset 分布：
+
+    $$
+    q_0 = q_{home} + \epsilon_q,
+    \qquad \epsilon_q \sim \mathcal{U}(q_{min}, q_{max}),
+    $$
+
+    object 则在默认掌心附近做厘米级平移扰动与小角度姿态扰动。后续接入
+    Grasp Cache 后，应禁用该函数，改由 cache 写入稳定的 $(q,T_o^h)$。
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
+        env_ids (torch.Tensor): 需要 reset 的环境 id。
+        robot_position_range (tuple[float, float]): hand joint home pose 附近的随机偏移范围，单位 rad。
+        robot_velocity_range (tuple[float, float]): hand joint velocity 随机范围，单位 rad/s。
+        object_pose_range (dict[str, tuple[float, float]] | None): object root pose 扰动范围。
+        object_velocity_range (dict[str, tuple[float, float]] | None): object root velocity 扰动范围。
+        robot_cfg (SceneEntityCfg): robot articulation 配置。
+        object_cfg (SceneEntityCfg): object rigid body 配置。
+    """
+
+    if object_pose_range is None:
+        object_pose_range = {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.005, 0.005), "roll": (-0.1, 0.1), "pitch": (-0.1, 0.1), "yaw": (-0.2, 0.2)}
+    if object_velocity_range is None:
+        object_velocity_range = {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0), "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0)}
+
+    # 手关节 reset 使用 IsaacLab 通用实现：围绕 default_joint_pos 做小扰动并自动 clamp 到 soft limit。
+    isaac_mdp.reset_joints_by_offset(
+        env,
+        env_ids,
+        position_range=robot_position_range,
+        velocity_range=robot_velocity_range,
+        asset_cfg=robot_cfg,
+    )
+
+    # 物体 reset 使用 IsaacLab 通用实现：相对 default_root_state 做轻扰动，保证第一版初态仍在掌心附近。
+    isaac_mdp.reset_root_state_uniform(
+        env,
+        env_ids,
+        pose_range=object_pose_range,
+        velocity_range=object_velocity_range,
+        asset_cfg=object_cfg,
+    )
+
+    # 记录 reset anchor，供 `object_out_of_hand` 判断 object 是否离开初始手内区域。
+    object_asset: RigidObject = env.scene[object_cfg.name]  # 被操作物体
+    anchor_w = object_asset.data.root_pos_w[env_ids].clone()  # `[K,3]`，刚写入 sim 的 object world position
+    if not isinstance(getattr(env, "_gm_object_reset_anchor_w", None), torch.Tensor):
+        env._gm_object_reset_anchor_w = object_asset.data.root_pos_w.clone()  # `[B,3]`，初始化全量 anchor buffer
+    env._gm_object_reset_anchor_w[env_ids] = anchor_w  # 只更新 reset 的 env
+
+    # 同步 command 内部目标：EventManager reset 早于 CommandManager reset 时此处无影响；若顺序改变，
+    # command reset 也会重新采样 goal，因此这里不直接操作 command term，避免 event/command 双写。
+    _ = math_utils  # 保留数学依赖锚点；后续如改为直接写 $T_o^h$ 会在本函数使用 SE(3) 工具。
+
+
 __all__ = [
     "DEFAULT_GM_EVENT_DESIGN",
     "GmEventDesign",
     "GmObjectScaleMode",
     "GmPhysicsDrPhase",
     "GmResetMode",
+    "simple_no_cache_reset",
 ]

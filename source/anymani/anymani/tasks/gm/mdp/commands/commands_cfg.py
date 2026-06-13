@@ -2,11 +2,13 @@ import math
 from typing import Literal
 
 import isaaclab.sim as sim_utils
+from isaaclab.managers import CommandTermCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import GREEN_ARROW_X_MARKER_CFG
-from isaaclab.managers import CommandTermCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+
+from .reorient_command import ReorientCommand
 
 
 @configclass
@@ -55,11 +57,12 @@ class ReorientCommandCfg(CommandTermCfg):
           `goal_success_count`。
     """
 
-    class_type: type | None = None
-    """TODO: 指向后续实现的 `ReorientCommand`。
+    class_type: type = ReorientCommand
+    """DONE: 指向可运行的 `ReorientCommand`。
 
-    当前文件只作为 design contract / cfg scaffold，不实例化可运行 command term。
-    等 command 语义完全拍板后，再补 `reorient_command.py` 并把本字段接上。
+    该 command term 负责维护 `goal_quat_w`、`axis_h/e`、`error_so3_h/e` 与
+    `goal_success_count`，使 observation / reward / curriculum 不再从 6D command
+    反推内部目标姿态。
     """
 
     asset_name: str = "object"
