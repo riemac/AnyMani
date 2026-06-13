@@ -18,10 +18,31 @@ NOTE:
 
 from __future__ import annotations
 
-from .inhand_env_cfg import GmInHandEnvCfg, GmInHandEnvCfg_PLAY, GmInHandSceneCfg
+from typing import Any
 
 __all__ = [
     "GmInHandEnvCfg",
     "GmInHandEnvCfg_PLAY",
     "GmInHandSceneCfg",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    r"""Lazily expose GM env cfg classes without import-time Isaac Sim coupling.
+
+    `tasks/gm/tests` 是纯 tensor / config contract tests，pytest 收集时会先导入
+    `anymani.tasks.gm` 父包。如果这里急切导入 `inhand_env_cfg`，就会把测试收集
+    拖进 IsaacLab env / USD binding。实际训练和 smoke 均直接导入
+    `anymani.tasks.gm.inhand_env_cfg`，不依赖父包急切 re-export。
+    """
+
+    if name in __all__:
+        from .inhand_env_cfg import GmInHandEnvCfg, GmInHandEnvCfg_PLAY, GmInHandSceneCfg
+
+        exports = {
+            "GmInHandEnvCfg": GmInHandEnvCfg,
+            "GmInHandEnvCfg_PLAY": GmInHandEnvCfg_PLAY,
+            "GmInHandSceneCfg": GmInHandSceneCfg,
+        }
+        return exports[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

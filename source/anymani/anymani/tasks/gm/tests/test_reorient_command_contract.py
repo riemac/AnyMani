@@ -61,17 +61,7 @@ import isaaclab.utils.math as math_utils  # noqa: E402
 def _load_reorient_command_class() -> type:
     r"""直接从文件加载 `ReorientCommand`，避免触发 `anymani.tasks` 自动注册。"""
 
-    module_path = (
-        Path(__file__).resolve().parents[2]
-        / "source"
-        / "anymani"
-        / "anymani"
-        / "tasks"
-        / "gm"
-        / "mdp"
-        / "commands"
-        / "reorient_command.py"
-    )
+    module_path = Path(__file__).resolve().parents[1] / "mdp" / "commands" / "reorient_command.py"
     spec = importlib.util.spec_from_file_location("gm_reorient_command_under_test", module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot load ReorientCommand module from {module_path}")

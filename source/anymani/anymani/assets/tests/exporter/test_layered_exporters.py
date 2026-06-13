@@ -18,7 +18,6 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 
 import yaml
-
 from assets.asset_schema_core import CollisionGeometryCfg, PoseCfg
 from assets.asset_schema_embodiment import FingerCfg, HandCfg, JointCfg, PalmCfg
 from assets.builder.palm_builders import ComPalmBuilder, ComPalmBuilderCfg
@@ -128,15 +127,17 @@ def test_joint_exporter_writes_standalone_joint_preview(tmp_path):
 
 
 def test_finger_exporter_writes_standalone_finger_preview(tmp_path):
-    """finger exporter 应保留整根 finger 的 joint 链，但不引入 hand-level mount。"""
+    """finger exporter 应保留整根 finger 的 joint 链，并记录附带写出的 procedural mesh。"""
 
     finger = _build_allegro_finger()
     result = FingerExporter(FingerExporterCfg()).export(finger, tmp_path)
 
     assert result.ok is True
-    assert len(result.written) == 1
+    urdf_path = tmp_path / "finger.urdf"
+    assert urdf_path in result.written
+    assert any(path.parent.name == "meshes" and path.suffix == ".obj" for path in result.written)
 
-    root = ET.parse(result.written[0]).getroot()
+    root = ET.parse(urdf_path).getroot()
     link_names = {link.attrib["name"] for link in root.findall("link")}
     joint_names = {joint_elem.attrib["name"] for joint_elem in root.findall("joint")}
 

@@ -78,7 +78,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
-
 from isaaclab.envs.mdp.actions.actions_cfg import RelativeJointPositionActionCfg
 from isaaclab.envs.mdp.actions.joint_actions import RelativeJointPositionAction
 from isaaclab.managers.action_manager import ActionTerm
@@ -86,56 +85,6 @@ from isaaclab.utils import configclass
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
-
-
-@configclass
-class ClampedRelativeJointActionCfg(RelativeJointPositionActionCfg):
-    r"""相对关节位置动作的配置类——默认启用 joint limits clamp。
-
-    继承自 IsaacLab `RelativeJointPositionActionCfg`，只覆写：
-        - `class_type`：指向本模块的 `ClampedRelativeJointPositionAction`。
-        - `scale`：默认 $0.1$（每步最大 raw rad 增量）。
-        - `preserve_order`：默认 `True`（配合 generated asset contract 的关节顺序）。
-        - `clip`：可选项，用于限幅 per-step raw delta 极端值，
-          建议 `{".*": (-0.1, 0.1)}`；默认 `None`（暂不额外 clip，靠 scale 限幅）。
-        - `use_zero_offset`：`True`（相对动作下 offset 必须为 0，继承自父类）。
-
-    其余字段（`joint_names`, `offset` 语义等）保持父类不变。
-    """
-
-    class_type: type[ActionTerm] = None  # type: ignore[assignment]
-    """启动时将在此处注入 `ClampedRelativeJointPositionAction` 类引用。
-    写在 `__init_subclass__` 或构造后赋值；配置解析系统按 `class_type` 实例化。"""
-
-    scale: float = 0.1
-    r"""缩放系数 $s$，将 policy raw output 映射到 raw rad delta。
-
-    预设 $s = 0.1$：NN 输出 $\in[-1,1]$ 时每步增量 $\le \pm 0.1$ rad。
-    """
-
-    preserve_order: bool = True
-    """保持 articulation asset 中的关节顺序 (True)。
-
-    原因：generated assets 的关节顺序来自 same-topology contract，
-    joint-centric token 设计要求 token index 与关节一一对应。
-    `False`（IsaacLab 默认）会对 `find_joints` 返回排序后的列表，破坏 contract。
-
-    NOTE(已通过 codebase 校验): 关顺序在所有 same-topology variant 间绝对稳定。
-    ref: `hand_builders.py:39` `NON_THUMB_FINGER_NAMES = ("index", "middle", "ring", "little")`
-    （拇指永远 append 在最后）；`connectivity_lowering.py:219-241`
-    （pre-made 删关节后幸存关节保持原始链序，不重排）；
-    post-mutate 只改尺度/指尖几何，不改 schema。
-    因此 `preserve_order=True` 下，同一拓扑所有 variant 的
-    joint index → 语义关节 映射完全一致，specialist RL 阶段无需额外校验。
-    """
-
-    clip: dict[str, tuple[float, float]] | None = None
-    r"""每步 delta 的硬限幅（opend 安全网）。
-
-    若配置如 `{".*": (-0.1, 0.1)}`，则无论 NN 输出多大，
-    $|a_t^{\text{proc}}| \le 0.1$ rad。默认 `None`（依赖 scale 本身限幅）。
-    推荐：teacher RL 阶段先不设，待观察到动作抖动后按需开启。
-    """
 
 
 class ClampedRelativeJointPositionAction(RelativeJointPositionAction):
@@ -210,12 +159,48 @@ class ClampedRelativeJointPositionAction(RelativeJointPositionAction):
         self._asset.set_joint_position_target(target, joint_ids=self._joint_ids)
 
 
-# ---------------------------------------------------------------------------
-# 注入 class_type 引用（绕过 dataclass 不允许 forward reference 直接赋值）
-# ---------------------------------------------------------------------------
-# 因为 `ClampedRelativeJointPositionAction` 在 `ClampedRelativeJointActionCfg`
-# 之后才定义，无法在 cfg 的 class body 中直接引用。此处手动注入。
-ClampedRelativeJointActionCfg.class_type = ClampedRelativeJointPositionAction
+@configclass
+class ClampedRelativeJointActionCfg(RelativeJointPositionActionCfg):
+    r"""相对关节位置动作的配置类——默认启用 joint limits clamp。
+
+    继承自 IsaacLab `RelativeJointPositionActionCfg`，只覆写：
+        - `class_type`：指向本模块的 `ClampedRelativeJointPositionAction`。
+        - `scale`：默认 $0.1$（每步最大 raw rad 增量）。
+        - `preserve_order`：默认 `True`（配合 generated asset contract 的关节顺序）。
+        - `clip`：可选项，用于限幅 per-step raw delta 极端值，
+          建议 `{ ".*": (-0.1, 0.1) }`；默认 `None`（暂不额外 clip，靠 scale 限幅）。
+        - `use_zero_offset`：`True`（相对动作下 offset 必须为 0，继承自父类）。
+
+    DONE(class_type 修复):
+        `class_type` 必须在 `@configclass` 处理 class body 时就是目标 action 类。
+        之前用后置赋值会让 dataclass field default 仍停留在 `None`，导致
+        `ActionManager` 在真实 smoke 中报 `NoneType is not callable`。
+    """
+
+    class_type: type[ActionTerm] = ClampedRelativeJointPositionAction
+    """IsaacLab `ActionManager` 实例化的 action term 类。"""
+
+    scale: float = 0.1
+    r"""缩放系数 $s$，将 policy raw output 映射到 raw rad delta。
+
+    预设 $s = 0.1$：NN 输出 $\in[-1,1]$ 时每步增量 $\le \pm 0.1$ rad。
+    """
+
+    preserve_order: bool = True
+    """保持 articulation asset 中的关节顺序 (True)。
+
+    原因：generated assets 的关节顺序来自 same-topology contract，
+    joint-centric token 设计要求 token index 与关节一一对应。
+    `False`（IsaacLab 默认）会对 `find_joints` 返回排序后的列表，破坏 contract。
+    """
+
+    clip: dict[str, tuple[float, float]] | None = None
+    r"""每步 delta 的硬限幅（opend 安全网）。
+
+    若配置如 `{ ".*": (-0.1, 0.1) }`，则无论 NN 输出多大，
+    $|a_t^{\text{proc}}| \le 0.1$ rad。默认 `None`（依赖 scale 本身限幅）。
+    推荐：teacher RL 阶段先不设，待观察到动作抖动后按需开启。
+    """
 
 __all__ = [
     "ClampedRelativeJointActionCfg",
