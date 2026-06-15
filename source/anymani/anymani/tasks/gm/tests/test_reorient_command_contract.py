@@ -35,27 +35,48 @@ class _PxrTypeStub(types.ModuleType):
         return type(name, (), {})
 
 
-pxr_stub = types.ModuleType("pxr")
-pxr_stub.Usd = _PxrTypeStub("Usd")
-pxr_stub.UsdGeom = _PxrTypeStub("UsdGeom")
-sys.modules.setdefault("pxr", pxr_stub)
-sys.modules.setdefault("pxr.Usd", pxr_stub.Usd)
-sys.modules.setdefault("pxr.UsdGeom", pxr_stub.UsdGeom)
+def _install_reorient_import_stubs() -> dict[str, types.ModuleType | None]:
+    r"""安装加载 `ReorientCommand` 所需的临时 Isaac / Omni stub。
 
-omni_stub = types.ModuleType("omni")
-omni_stub.kit = types.ModuleType("omni.kit")
-omni_stub.kit.app = types.ModuleType("omni.kit.app")
-omni_stub.timeline = types.ModuleType("omni.timeline")
-sys.modules.setdefault("omni", omni_stub)
-sys.modules.setdefault("omni.kit", omni_stub.kit)
-sys.modules.setdefault("omni.kit.app", omni_stub.kit.app)
-sys.modules.setdefault("omni.timeline", omni_stub.timeline)
+    Returns:
+        dict[str, types.ModuleType | None]: 每个被接管模块原先的 `sys.modules` 状态。
+    """
 
-managers_stub = types.ModuleType("isaaclab.managers")
-managers_stub.CommandTerm = type("CommandTerm", (), {})
-sys.modules.setdefault("isaaclab.managers", managers_stub)
+    pxr_stub = types.ModuleType("pxr")
+    pxr_stub.Usd = _PxrTypeStub("Usd")
+    pxr_stub.UsdGeom = _PxrTypeStub("UsdGeom")
 
-import isaaclab.utils.math as math_utils  # noqa: E402
+    omni_stub = types.ModuleType("omni")
+    omni_stub.kit = types.ModuleType("omni.kit")
+    omni_stub.kit.app = types.ModuleType("omni.kit.app")
+    omni_stub.timeline = types.ModuleType("omni.timeline")
+
+    managers_stub = types.ModuleType("isaaclab.managers")
+    managers_stub.CommandTerm = type("CommandTerm", (), {})
+
+    replacements = {
+        "pxr": pxr_stub,
+        "pxr.Usd": pxr_stub.Usd,
+        "pxr.UsdGeom": pxr_stub.UsdGeom,
+        "omni": omni_stub,
+        "omni.kit": omni_stub.kit,
+        "omni.kit.app": omni_stub.kit.app,
+        "omni.timeline": omni_stub.timeline,
+        "isaaclab.managers": managers_stub,
+    }
+    previous = {name: sys.modules.get(name) for name in replacements}
+    sys.modules.update(replacements)
+    return previous
+
+
+def _restore_modules(previous: dict[str, types.ModuleType | None]) -> None:
+    r"""恢复 `_install_reorient_import_stubs` 接管前的 `sys.modules` 状态。"""
+
+    for name, module in previous.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module
 
 
 def _load_reorient_command_class() -> type:
@@ -70,7 +91,13 @@ def _load_reorient_command_class() -> type:
     return module.ReorientCommand
 
 
-ReorientCommand = _load_reorient_command_class()
+_previous_import_modules = _install_reorient_import_stubs()
+try:
+    import isaaclab.utils.math as math_utils  # noqa: E402
+
+    ReorientCommand = _load_reorient_command_class()
+finally:
+    _restore_modules(_previous_import_modules)
 
 
 def _identity_quat(batch: int) -> torch.Tensor:

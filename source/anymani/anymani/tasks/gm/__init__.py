@@ -20,10 +20,22 @@ from __future__ import annotations
 
 from typing import Any
 
+import gymnasium as gym
+
+gym.register(
+    id="AnyMani-GM-Heterogeneous-Test-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.heterogeneous_test_env_cfg:HeterogeneousHandTestEnvCfg",
+    },
+)
+
 __all__ = [
     "GmInHandEnvCfg",
     "GmInHandEnvCfg_PLAY",
     "GmInHandSceneCfg",
+    "HeterogeneousHandTestEnvCfg",
 ]
 
 
@@ -37,6 +49,11 @@ def __getattr__(name: str) -> Any:
     """
 
     if name in __all__:
+        if name == "HeterogeneousHandTestEnvCfg":
+            from .heterogeneous_test_env_cfg import HeterogeneousHandTestEnvCfg
+
+            return HeterogeneousHandTestEnvCfg
+
         from .inhand_env_cfg import GmInHandEnvCfg, GmInHandEnvCfg_PLAY, GmInHandSceneCfg
 
         exports = {
