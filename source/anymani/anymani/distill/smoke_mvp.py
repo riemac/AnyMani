@@ -1,4 +1,4 @@
-r"""Self-contained smoke test entry for AnyMani distill RL tasks.
+r"""Self-contained MVP smoke test entry for AnyMani distill RL tasks.
 
 本入口用于验证 `distill` 注册的 GM teacher 环境能完成 reset / step。它替代外层
 `scripts/random_agent.py` 在新训练管线中的角色，避免训练、测试脚本继续散落在项目根部。
@@ -8,7 +8,7 @@ r"""Self-contained smoke test entry for AnyMani distill RL tasks.
 ```bash
 cd /home/hac/isaac/AnyMani
 source /home/hac/isaac/env_isaaclab/bin/activate
-python -m anymani.distill.smoke --task AnyMani-GM-Teacher-Debug-v0 --num_envs 4 --steps 100 --headless
+python -m anymani.distill.smoke_mvp --task AnyMani-GM-Teacher-Debug-v0 --num_envs 4 --steps 100 --headless
 ```
 """
 

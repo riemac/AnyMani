@@ -1,17 +1,41 @@
-r"""异构资产手内操作环境配置文件。
+r"""同拓扑异构 generated hand 的 IsaacLab 环境 MVP。
 
-这里仅用最简单的观察、动作、重置等 MDP 组件（尽量 IsaacLab 官方预定义即可）来测试同拓扑异构资产在同一环境训练的可能性，做低侵入式 MVP。分两步：
+本文件只拥有 `tasks/gm` 层的环境语义：scene、asset spawn、obs、action、reward、
+termination、viewer 和 Gym 注册所需 env cfg。它不拥有训练算法、网络结构、checkpoint
+或 asset-bank split；这些由 `distill` 消费本环境后自包含实现。
 
-1. 测试同拓扑异构资产是否可以通过类似 `random_agent.py` 的随机运行测试，这里不做训练
-2. 在确认第一步可行后，测试同拓扑异构资产是否可以通过类似 `train.py` 的训练测试，用最简单的 MLP 网络即可，仅判断训练的可行性，不追求表现。
+科研目标是用最小可运行闭环验证同一 schema 下的异构手能进入 batched IsaacLab env：
 
-目标 urdf 用：
+1. 随机动作 / GUI MVP：用 `AnyMani-GM-Heterogeneous-Test-v0` 检查 3 个 URDF hand
+   variants 能 round-robin spawn、reset、step，并且材质颜色、天空、手部姿态可视可信。
+2. MLP 训练 MVP：用 `distill` 中的 `AnyMani-GM-Heterogeneous-MLP-Smoke-v0` 绑定本环境，
+   以 $3\times100=300$ envs 和极简 MLP PPO 只验证 rollout / backward / checkpoint 闭环，
+   不评价 reward 表现或 policy 质量。
 
-- AnyMani/source/anymani/anymani/assets/generated/2026-06-10_11-30-08/single_palm_leap/right_t4_i4_m4_r4/2026-06-11_14-20-22/0b6fbfce/hand.urdf
-- AnyMani/source/anymani/anymani/assets/generated/2026-06-10_11-30-08/single_palm_leap/right_t4_i4_m4_r4/2026-06-11_14-20-22/0bdf0eca/hand.urdf
-- AnyMani/source/anymani/anymani/assets/generated/2026-06-10_11-30-08/single_palm_leap/right_t4_i4_m4_r4/2026-06-11_14-20-22/00d68163/hand.urdf
+本 MVP 涉及的自包含文件路径如下，后续主 pipeline 开发可按这个依赖方向扩展：
 
-这 3 个 urdf 即可。
+- `source/anymani/anymani/tasks/gm/heterogeneous_test_env_cfg.py`：环境语义与 3-URDF asset set；
+- `source/anymani/anymani/tasks/gm/__init__.py`：注册随机动作 / GUI 检查 task；
+- `source/anymani/anymani/distill/rl/gm_heterogeneous_mlp_smoke_env_cfg.py`：训练 MVP 的 300-env 包装 cfg；
+- `source/anymani/anymani/distill/rl/agents/gm_heterogeneous_mlp_ppo_smoke.yaml`：rl_games 内置 MLP PPO 配置；
+- `source/anymani/anymani/distill/rl/__init__.py`：注册 MLP smoke task alias；
+- `source/anymani/anymani/distill/train_mvp.py`：MVP 训练入口，修复 argparse / Hydra argv 边界；
+- `source/anymani/anymani/distill/smoke_mvp.py`：MVP 随机动作 smoke 入口；
+- `source/anymani/anymani/distill/tests/test_rl_games_mlp_smoke_contract.py`：MLP smoke 纯配置 contract；
+- `source/anymani/anymani/tasks/gm/tests/test_heterogeneous_visual_material_contract.py`：URDF 材质、天空、姿态 contract。
+
+目标 URDF 固定为同一 post-mutate run 下的 3 个 same-schema variants：
+
+- `source/anymani/anymani/assets/generated/2026-06-10_11-30-08/single_palm_leap/right_t4_i4_m4_r4/2026-06-11_14-20-22/0b6fbfce/hand.urdf`
+- `source/anymani/anymani/assets/generated/2026-06-10_11-30-08/single_palm_leap/right_t4_i4_m4_r4/2026-06-11_14-20-22/0bdf0eca/hand.urdf`
+- `source/anymani/anymani/assets/generated/2026-06-10_11-30-08/single_palm_leap/right_t4_i4_m4_r4/2026-06-11_14-20-22/00d68163/hand.urdf`
+
+推荐验证命令：
+
+```bash
+python scripts/random_agent.py --task AnyMani-GM-Heterogeneous-Test-v0 --num_envs 9
+python -m anymani.distill.train_mvp --task AnyMani-GM-Heterogeneous-MLP-Smoke-v0 --num_envs 300 --max_iterations 1 --headless
+```
 """
 
 from __future__ import annotations
