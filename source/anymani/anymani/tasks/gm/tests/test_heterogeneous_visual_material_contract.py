@@ -1,54 +1,53 @@
-r"""Pure config tests for heterogeneous URDF visual material restoration.
+r"""Pure config tests for GM heterogeneous hand spawn.
 
-这些测试不启动 Isaac Sim，也不导入真实 USD / Omni binding。它们只锁住本轮
-低侵入修复的两个 contract：
-
-1. generated URDF 中 `<visual name="..."><material><color rgba="..."/>` 能被解析成
-   `visual_name -> RGBA`；
-2. opt-in `restore_urdf_visual_materials=True` 只替换 child `UrdfFileCfg.func`，不改变
-   `MultiAssetSpawnerCfg` 的资产选择语义。
+这些测试不启动 Isaac Sim，也不导入真实 USD / Omni binding。它们锁住本轮迁移后的
+接口 contract：`heterogeneous_test_env_cfg.py` 不再维护私有 hand-set/helper，而是通过
+`HandSpawnCfg + HandSpawnAdapter + HandBankCfg` 直接验证 asset bank 到 IsaacLab
+`ArticulationCfg` 的 lower 路径。
 """
 
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import sys
 import types
+from dataclasses import MISSING, Field
 from pathlib import Path
+
+from anymani.assets.bank.path_utils import resolve_anymani_root
+from anymani.assets.bank.urdf_utils import parse_urdf_visual_rgba_by_name
 
 
 def _load_heterogeneous_cfg_module():
     r"""用最小 IsaacLab stub 加载 heterogeneous env cfg 文件。
 
     Returns:
-        module: 包含 URDF 颜色解析 helper 与 `HeterogeneousHandSetCfg` 的临时模块。
+        module: 包含 heterogeneous env cfg 与 `HandSpawnCfg` 默认实例的模块。
     """
 
-    module_path = Path(__file__).resolve().parents[1] / "heterogeneous_test_env_cfg.py"
-    spec = importlib.util.spec_from_file_location(
-        "anymani.tasks.gm.heterogeneous_test_env_cfg_under_test",
-        module_path,
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load heterogeneous test env cfg module from {module_path}")
-
     previous_modules = _install_isaaclab_cfg_stubs()
-    module = importlib.util.module_from_spec(spec)
-    previous_target_module = sys.modules.get(spec.name)
-    sys.modules[spec.name] = module
+    target_modules = (
+        "anymani.tasks.gm.hand_spawn",
+        "anymani.tasks.gm.heterogeneous_test_env_cfg",
+    )
+    previous_target_modules = {name: sys.modules.get(name) for name in target_modules}
+    for name in target_modules:
+        sys.modules.pop(name, None)
+
     try:
-        spec.loader.exec_module(module)
+        module = importlib.import_module("anymani.tasks.gm.heterogeneous_test_env_cfg")
     finally:
-        if previous_target_module is None:
-            sys.modules.pop(spec.name, None)
-        else:
-            sys.modules[spec.name] = previous_target_module
+        for name, previous in previous_target_modules.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
         _restore_modules(previous_modules)
     return module
 
 
 def _install_isaaclab_cfg_stubs() -> dict[str, types.ModuleType | None]:
-    r"""安装加载 heterogeneous cfg 所需的 IsaacLab stub module tree。
+    r"""安装加载 GM hand spawn cfg 所需的 IsaacLab stub module tree。
 
     Returns:
         dict[str, types.ModuleType | None]: 被本测试临时接管模块的旧状态。
@@ -94,6 +93,17 @@ def _install_isaaclab_cfg_stubs() -> dict[str, types.ModuleType | None]:
 
         JointDriveCfg = _JointDriveCfg
 
+    def _clone_config_default(value):
+        r"""复刻 IsaacLab configclass 对 dataclasses.field default_factory 的处理。"""
+
+        if isinstance(value, Field):
+            if value.default_factory is not MISSING:  # type: ignore[attr-defined]
+                return value.default_factory()  # type: ignore[misc]
+            if value.default is not MISSING:
+                return value.default
+            return None
+        return value
+
     def configclass(cls):
         r"""极小 `configclass`：按 annotated fields 生成 keyword-only init。"""
 
@@ -106,7 +116,7 @@ def _install_isaaclab_cfg_stubs() -> dict[str, types.ModuleType | None]:
                 if name in kwargs:
                     value = kwargs[name]
                 elif hasattr(cls, name):
-                    value = getattr(cls, name)
+                    value = _clone_config_default(getattr(cls, name))
                 else:
                     value = None
                 setattr(self, name, value)
@@ -130,12 +140,8 @@ def _install_isaaclab_cfg_stubs() -> dict[str, types.ModuleType | None]:
     physics_materials_cfg = types.ModuleType("isaaclab.sim.spawners.materials.physics_materials_cfg")
     utils = types.ModuleType("isaaclab.utils")
     utils_assets = types.ModuleType("isaaclab.utils.assets")
-    anymani = types.ModuleType("anymani")
-    tasks = types.ModuleType("anymani.tasks")
-    gm = types.ModuleType("anymani.tasks.gm")
-    asset_binding = types.ModuleType("anymani.tasks.gm.asset_binding")
 
-    for package in (isaaclab, envs, sim, anymani, tasks, gm):
+    for package in (isaaclab, envs, sim):
         package.__path__ = []
 
     actuators.ImplicitActuatorCfg = _Cfg
@@ -166,8 +172,6 @@ def _install_isaaclab_cfg_stubs() -> dict[str, types.ModuleType | None]:
     physics_materials_cfg.RigidBodyMaterialCfg = _Cfg
     utils.configclass = configclass
     utils_assets.ISAAC_NUCLEUS_DIR = "/Isaac/Nucleus"
-    asset_binding.DEFAULT_HAND_INIT_POS = (0.0, 0.0, 0.0)
-    asset_binding.DEFAULT_HAND_INIT_ROT = (1.0, 0.0, 0.0, 0.0)
 
     replacements = {
         "isaaclab": isaaclab,
@@ -183,10 +187,6 @@ def _install_isaaclab_cfg_stubs() -> dict[str, types.ModuleType | None]:
         "isaaclab.sim.spawners.materials.physics_materials_cfg": physics_materials_cfg,
         "isaaclab.utils": utils,
         "isaaclab.utils.assets": utils_assets,
-        "anymani": anymani,
-        "anymani.tasks": tasks,
-        "anymani.tasks.gm": gm,
-        "anymani.tasks.gm.asset_binding": asset_binding,
     }
     previous = {name: sys.modules.get(name) for name in replacements}
     sys.modules.update(replacements)
@@ -206,49 +206,73 @@ def _restore_modules(previous: dict[str, types.ModuleType | None]) -> None:
 def test_generated_hand_urdf_visual_rgba_is_parsed_by_visual_name() -> None:
     r"""generated URDF 的 palm/finger/tip debug color 必须能按 visual name 解析。"""
 
-    module = _load_heterogeneous_cfg_module()
-    urdf_path = module.DEFAULT_HETEROGENEOUS_HAND_SET.resolve_urdf_path(
-        module.DEFAULT_HETEROGENEOUS_HAND_SET.variants[0]
+    repo_root = resolve_anymani_root()
+    urdf_path = repo_root / (
+        "source/anymani/anymani/assets/generated/2026-06-10_11-30-08/"
+        "single_palm_leap/right_t4_i4_m4_r4/2026-06-11_14-20-22/0b6fbfce/hand.urdf"
     )
 
-    visual_rgba_by_name = module._parse_urdf_visual_rgba_by_name(urdf_path)
+    visual_rgba_by_name = parse_urdf_visual_rgba_by_name(urdf_path)
 
     assert visual_rgba_by_name["palm_visual"] == (0.603921569, 0.149019608, 0.149019608, 1.0)
     assert visual_rgba_by_name["index_j0_vis"] == (0.866666667, 0.866666667, 0.0509803922, 1.0)
     assert visual_rgba_by_name["index_tip_mesh_vis"] == (0.92, 0.88, 0.78, 1.0)
 
 
+def test_heterogeneous_spawn_cfg_resolves_three_round_robin_assets() -> None:
+    r"""heterogeneous smoke 必须通过 asset bank 选择 3 个 round-robin hand assets。"""
+
+    module = _load_heterogeneous_cfg_module()
+    spawn_cfg = module.DEFAULT_HETEROGENEOUS_HAND_SPAWN_CFG
+    robot_cfg = module.HeterogeneousHandTestSceneCfg.robot
+
+    assert tuple(str(container.path) for container in spawn_cfg.bank.containers) == module.HETEROGENEOUS_HAND_IDS
+    assert robot_cfg.spawn.random_choice is False
+    assert len(robot_cfg.spawn.assets_cfg) == 3
+    assert [Path(child.asset_path).parent.name for child in robot_cfg.spawn.assets_cfg] == list(module.HETEROGENEOUS_HAND_IDS)
+
+
 def test_restore_visual_materials_is_opt_in_on_urdf_child_cfg(tmp_path: Path) -> None:
-    r"""只有 opt-in hand set 会把 child `UrdfFileCfg.func` 替换成颜色恢复 wrapper。"""
+    r"""只有 opt-in hand spawn cfg 会把 child `UrdfFileCfg.func` 替换成颜色恢复 wrapper。"""
 
     module = _load_heterogeneous_cfg_module()
     bundle_dir = tmp_path / "variant_a"
     bundle_dir.mkdir()
     (bundle_dir / "hand.urdf").write_text("<robot name='stub'/>", encoding="utf-8")
-    (bundle_dir / "hand.yaml").write_text("variant: a\n", encoding="utf-8")
-    variant = module.HeterogeneousHandVariantCfg(variant_id="variant_a", bundle_dir="variant_a")
-
-    default_hand_set = module.HeterogeneousHandSetCfg(
-        topology_name="stub",
-        base_dir=str(tmp_path),
-        variants=(variant,),
-        restore_urdf_visual_materials=False,
-        validate_mesh_relpaths=False,
-    )
-    restored_hand_set = module.HeterogeneousHandSetCfg(
-        topology_name="stub",
-        base_dir=str(tmp_path),
-        variants=(variant,),
-        restore_urdf_visual_materials=True,
-        validate_mesh_relpaths=False,
+    (bundle_dir / "hand.yaml").write_text(
+        "id: variant_a\n"
+        "topology_name: stub_topology\n"
+        "dof: 1\n"
+        "surviving_slots: [index]\n"
+        "fingers:\n"
+        "- name: index\n"
+        "  revolute_dof: 1\n",
+        encoding="utf-8",
     )
 
-    default_child_cfg = default_hand_set.build_multi_urdf_spawn_cfg().assets_cfg[0]
-    restored_child_cfg = restored_hand_set.build_multi_urdf_spawn_cfg().assets_cfg[0]
+    default_spawn_cfg = module.HandSpawnCfg(
+        bank=module.HandBankCfg(
+            selection_mode="explicit",
+            containers=(str(bundle_dir),),
+            validate_mesh_relpaths=False,
+        ),
+        restore_visual_materials=False,
+    )
+    restored_spawn_cfg = module.HandSpawnCfg(
+        bank=module.HandBankCfg(
+            selection_mode="explicit",
+            containers=(str(bundle_dir),),
+            validate_mesh_relpaths=False,
+        ),
+        restore_visual_materials=True,
+    )
 
-    assert default_child_cfg.func is not module._spawn_urdf_with_restored_visual_materials
-    assert restored_child_cfg.func is module._spawn_urdf_with_restored_visual_materials
-    assert module.DEFAULT_HETEROGENEOUS_HAND_SET.restore_urdf_visual_materials is True
+    default_child_cfg = module.HandSpawnAdapter(default_spawn_cfg).build_multi_hand_spawn_cfg().assets_cfg[0]
+    restored_child_cfg = module.HandSpawnAdapter(restored_spawn_cfg).build_multi_hand_spawn_cfg().assets_cfg[0]
+
+    assert default_child_cfg.func is not restored_child_cfg.func
+    assert restored_child_cfg.func.__name__ == "_spawn_urdf_with_restored_visual_materials"
+    assert module.DEFAULT_HETEROGENEOUS_HAND_SPAWN_CFG.restore_visual_materials is True
 
 
 def test_heterogeneous_scene_uses_clear_sky_dome_light() -> None:
@@ -263,10 +287,11 @@ def test_heterogeneous_scene_uses_clear_sky_dome_light() -> None:
 
 
 def test_heterogeneous_hand_root_pose_aligns_semantic_frame_to_world() -> None:
-    r"""异构 smoke 的 generated hand 初态应表达 $R_{wh}=I$。"""
+    r"""异构 smoke 的 generated hand 初态应表达 $R_{wh}=I$ 和默认 hand anchor。"""
 
     module = _load_heterogeneous_cfg_module()
     robot_init_state = module.HeterogeneousHandTestSceneCfg.robot.init_state
 
     assert module.HETEROGENEOUS_HAND_INIT_ROT == (1.0, 0.0, 0.0, 0.0)
     assert robot_init_state.rot == module.HETEROGENEOUS_HAND_INIT_ROT
+    assert robot_init_state.pos == module.DEFAULT_HAND_ANCHOR_POS_E

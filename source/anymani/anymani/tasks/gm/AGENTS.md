@@ -66,3 +66,20 @@ ManagerBasedRLEnv 本身就是一个高度声明式、配置驱动的环境框�
 `{o}`：object body frame。它随物体自身旋转剧烈变化，不适合作为默认 command frame，但可用于计算物体当前姿态或局部几何观测。
 
 `gm` 的 command 语义默认应锚定在 `{h}`，而不是 `{w}` / `{e}` / raw `{a}`。例如“绕 z 轴手内旋转”应解释为 `k^{h} = [0, 0, 1]`，即绕手心语义法向轴旋转物体；运行时再把该轴变换到 `{e}` 或 `{w}` 中供 reward、goal update 和 visualization 使用。
+
+### Hand frame / orientation reset 约定
+
+配置层优先使用旋转矩阵和平移向量 $(R,p)$，实现层应组合为 $T\in SE(3)$ 进行复合、求逆和传递；只有在 Isaac Lab 边界（如 `ArticulationCfg.InitialStateCfg.rot` 或 `write_root_pose_to_sim`）才转换为 `(w,x,y,z)` 四元数。`so3` / 全 $SO(3)$ 随机采样实现时可以使用四元数算法，但文档和中间语义仍以 $SO(3)$ / $SE(3)$ 表达。
+
+`hand_spawn.HandFrameCfg` 是静态装配锚点，记录：
+
+- $T_{ha}$：raw asset/root frame `{a}` 到 hand semantic frame `{h}` 的固定校准；
+- $T_{eh}^{anchor}$：hand semantic frame `{h}` 在 env frame `{e}` 中的默认参考 pose。
+
+spawn 层只负责把已选资产按 anchor 装配进 scene，不负责 episode 级随机朝向。若需要任意 hand orientation 训练，reset event 应采样 hand semantic pose $T_{eh}$，再写入 raw root pose：
+
+$$
+T_{ea}=T_{eh}T_{ha}.
+$$
+
+orientation domain randomization 的默认语义是 hand-frame body/right 扰动：从 anchor 出发右乘 $\Delta R_h$，即 $R'_{eh}=R_{eh}^{anchor}\Delta R_h$。默认 reference mode 应为 `anchor`，保证 reset 初态是 i.i.d. 分布；`current` 随机游走只作为未来 continual perturbation / curriculum 预留。

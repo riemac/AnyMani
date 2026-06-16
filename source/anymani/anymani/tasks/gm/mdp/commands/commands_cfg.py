@@ -32,8 +32,8 @@ class ReorientCommandCfg(CommandTermCfg):
     2. 通过语义对齐矩阵 $R_{ha}$ 把 `{h}` 轴转到 raw asset/root frame `{a}`，
        再经 robot root 姿态转到运行时 `{e}`：
        $$
-       v^{\{h\}} = R_{ha}v^{\{a\}},\quad
-       v^{\{e\}} = R_{ea}R_{ha}^{\top}v^{\{h\}}
+       \hat\omega^{\{h\}} = R_{ha}\hat\omega^{\{a\}},\quad
+       \hat\omega^{\{e\}} = R_{ea}R_{ha}^{\top}\hat\omega^{\{h\}}
        $$
        generated assets 第一版默认 $R_{ha}=I$。
     3. 获取目标姿态：
@@ -129,7 +129,7 @@ class ReorientCommandCfg(CommandTermCfg):
 
     语义为：
     $$
-    v^{\{h\}} = R_{ha} v^{\{a\}}
+    \hat\omega^{\{h\}} = R_{ha}\hat\omega^{\{a\}}
     $$
 
     generated assets 默认 raw asset/root frame `{a}` 与 hand semantic frame `{h}`

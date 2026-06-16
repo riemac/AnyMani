@@ -1,0 +1,648 @@
+r"""GM hand spawn adapter.
+
+本模块是 `tasks/gm` 侧的 **IsaacLab runtime spawn 适配层**。它的长期职责是把
+`assets.bank` 选出的 hand assets 包装成 IsaacLab 可消费的 `ArticulationCfg`。
+
+当前文件实现第一版 **URDF runtime spawn adapter**：字段、公式、接口、职责边界、
+bank resolve、schema check、URDF importer cfg、可选 USD material restore 与 root pose
+anchor lower。orientation reset 仍不在本文件实现，它属于 `mdp/events.py` 的 episode
+级 reset 语义。
+
+设计目标：
+
+```text
+HandSpawnCfg
+  ├─ bank: HandBankCfg                  # assets 层资产选择配置
+  ├─ frame: HandFrameCfg                # {a}->{h} 语义对齐与默认 T_eh anchor
+  ├─ urdf: HandUrdfSpawnCfg             # URDF importer 参数
+  ├─ actuator: HandActuatorSpawnCfg     # implicit actuator 参数
+  └─ ...
+
+HandSpawnAdapter(cfg)
+  ├─ selection                          # lazy: HandBank(cfg.bank).resolve()
+  ├─ build_articulation_cfg(...)        # -> ArticulationCfg
+  ├─ build_multi_hand_spawn_cfg(...)    # -> MultiAssetSpawnerCfg
+  └─ semantic_R_ha                      # env cfg 显式同步给 command cfg
+```
+
+边界约定：
+
+- `assets.bank` 负责路径解析、资产选择、虚拟 bundle、URDF mesh / color 解析；
+- `tasks/gm.hand_spawn` 只负责 IsaacLab spawn 适配；
+- `tasks/gm.inhand_env_cfg` 仍只表达 MDP，`scene.robot` 由上游 cfg 注入；
+- `distill` 负责训练时选用哪个 bank / split / manifest。
+
+Frame 语义：
+
+- `{a}`：raw asset/root frame，即 URDF/USD 被 IsaacLab 加载后的资产根坐标系；
+- `{h}`：hand semantic frame，任务语义使用的手坐标系；
+- `semantic_R_ha` 表示 $R_{ha}$，即 $v^h = R_{ha}v^a$；
+- `semantic_p_ha` 表示 $p_{ha}$，即 `{a}` 原点在 `{h}` 中的位置；
+- `anchor_R_eh` / `anchor_p_eh` 表示 reset / spawn 的默认 hand semantic pose
+  $T_{eh}^{anchor}$；
+- 第一版默认目标是让 hand semantic frame 初始满足 $R_{wh}=I$，即
+  $R_{eh}^{anchor}=I$。
+
+在 IsaacLab cloned env 默认只相对 world 平移、无旋转的假设下，默认 anchor 对应：
+
+$$
+T_{ea}^{anchor}=T_{eh}^{anchor}T_{ha},\qquad
+R_{ea}^{anchor}=R_{eh}^{anchor}R_{ha},\qquad
+p_{ea}^{anchor}=p_{eh}^{anchor}+R_{eh}^{anchor}p_{ha}.
+$$
+
+当前默认 $R_{eh}^{anchor}=I$，所以退化为 $R_{ea}=R_{ha}$，
+$p_{ea}=p_{eh}+p_{ha}$。episode 级任意 hand orientation 由 `events.py` 中的
+orientation reset scaffold 表达：采样 $\Delta R_h$ 并右乘到 anchor 上，而不是
+在 spawn 层局部随机化 root pose。
+
+TOAGENT: 本文件只实现 spawn/bank adapter。episode 级 orientation reset、object reset、
+Grasp Cache 和 command update 不要塞进这里。
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import re
+from dataclasses import field
+from pathlib import Path
+from typing import Literal
+
+import isaaclab.sim as sim_utils
+from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.assets import ArticulationCfg
+from isaaclab.sim.converters import UrdfConverterCfg
+from isaaclab.utils import configclass
+
+from anymani.assets.bank import HandBank, HandBankCfg, HandContainer, HandSelection, UrdfRgba
+from anymani.assets.bank.urdf_utils import parse_urdf_visual_rgba_by_name
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_HAND_ANCHOR_POS_E = (0.0, 0.0, 0.5)
+r"""默认 hand semantic origin anchor 在 env frame `{e}` 中的位置，单位 m。"""
+
+IDENTITY_R = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+"""Row-major $3\times3$ identity rotation。"""
+
+
+@configclass
+class HandFrameCfg:
+    r"""Hand raw asset frame `{a}` 与 hand semantic frame `{h}` 的对齐配置。
+
+    配置层使用 $(R,p)$；未来实现层应组合为 $SE(3)$ 计算，最后仅在 IsaacLab 边界
+    转成 quaternion。`semantic_*` 是资产校准 $T_{ha}$；`anchor_*` 是 hand semantic
+    frame 在 env frame 中的默认参考 pose $T_{eh}^{anchor}$。reset-time orientation
+    DR 应以该 anchor 为默认参考，而不是覆盖 `{h}` 的语义定义。
+    """
+
+    semantic_R_ha: tuple[float, ...] = IDENTITY_R
+    r"""$R_{ha}$，row-major 9 个 float，语义为 $v^h=R_{ha}v^a$。"""
+
+    semantic_p_ha: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    r"""$p_{ha}$，raw asset origin `{a}` 在 hand semantic frame `{h}` 中的位置，单位 m。"""
+
+    anchor_R_eh: tuple[float, ...] = IDENTITY_R
+    r"""$R_{eh}^{anchor}$，hand semantic frame `{h}` 在 env frame `{e}` 中的默认参考朝向。"""
+
+    anchor_p_eh: tuple[float, float, float] = DEFAULT_HAND_ANCHOR_POS_E
+    r"""$p_{eh}^{anchor}$，hand semantic origin `{h}` 在 env frame `{e}` 中的默认参考位置，单位 m。"""
+
+    align_hand_frame_to_env: bool = True
+    r"""是否按 `anchor_R_eh` / `anchor_p_eh` 自动推导 spawn root pose。
+
+    第一版设计只支持 `True`：spawn 使用 $T_{ea}^{anchor}=T_{eh}^{anchor}T_{ha}$。
+    任意 hand orientation 的 episode 级采样应由 reset event 在该 anchor 上右乘扰动。
+    """
+
+
+@configclass
+class HandJointInitCfg:
+    r"""Hand articulation 初始关节状态配置。"""
+
+    joint_pos: dict[str, float] = field(default_factory=lambda: {".*": 0.0})
+    """默认关节位置，key 为 IsaacLab joint regex。"""
+
+    joint_vel: dict[str, float] = field(default_factory=lambda: {".*": 0.0})
+    """默认关节速度，key 为 IsaacLab joint regex。"""
+
+
+@configclass
+class HandUrdfSpawnCfg:
+    r"""Generated hand URDF importer 参数 scaffold。
+
+    数值锚点来自 `heterogeneous_test_env_cfg.py` 的 generated-hand MVP：它已经通过
+    3 个 same-schema post-mutate variants 的 IsaacLab GUI / random-agent smoke。这里
+    把这些数值迁移到可复用 adapter，避免每个 GM env 重复维护 URDF importer 细节。
+    """
+
+    fix_base: bool = True
+    merge_fixed_joints: bool = False
+    force_usd_conversion: bool = False
+    make_instanceable: bool = True
+    collision_from_visuals: bool = False
+    self_collision: bool = True
+    activate_contact_sensors: bool = False
+    drive_stiffness: float = 3.0
+    drive_damping: float = 0.1
+
+
+@configclass
+class HandActuatorSpawnCfg:
+    r"""Generated hand implicit actuator 参数 scaffold。"""
+
+    joint_names_expr: tuple[str, ...] = (".*",)
+    effort_limit_sim: float = 0.95
+    velocity_limit_sim: float = 8.48
+    stiffness: float = 3.0
+    damping: float = 0.1
+    friction: float = 0.01
+    armature: float = 0.001
+
+
+@configclass
+class HandSpawnCfg:
+    r"""GM hand spawn 声明式配置 scaffold。
+
+    `bank` 保持嵌套，避免在 GM 层重复 asset-bank schema。便利写法应通过
+    `HandBankCfg.containers=("id0", "id1")` 这类资产层接口解决。
+    """
+
+    bank: HandBankCfg = field(default_factory=HandBankCfg)
+    """资产选择配置；由 `assets.bank.HandBank` 负责解析。"""
+
+    frame: HandFrameCfg = field(default_factory=HandFrameCfg)
+    """`{a}->{h}` frame 对齐配置；env cfg 应显式同步到 command cfg。"""
+
+    joint_init: HandJointInitCfg = field(default_factory=HandJointInitCfg)
+    """Articulation 初始关节状态。"""
+
+    urdf: HandUrdfSpawnCfg = field(default_factory=HandUrdfSpawnCfg)
+    """URDF importer 参数。"""
+
+    actuator: HandActuatorSpawnCfg = field(default_factory=HandActuatorSpawnCfg)
+    """Implicit actuator 参数。"""
+
+    spawn_backend: Literal["urdf", "usd"] = "urdf"
+    """spawn 后端；`usd` 预留给未来离线 USD cache，第一版应显式报 `NotImplementedError`。"""
+
+    asset_routing: Literal["round_robin", "random_choice"] = "round_robin"
+    r"""多资产 env routing。
+
+    `round_robin` 对应 IsaacLab `MultiAssetSpawnerCfg.random_choice=False`，确定且便于
+    smoke；`random_choice` 透传 IsaacLab 全局 random，第一版不承诺 seed 可复现。
+    """
+
+    restore_visual_materials: bool = False
+    """是否在 URDF spawn 后用 `HandContainer.visual_rgba_by_name` 恢复 generated debug color。"""
+
+    validate_same_schema: bool = True
+    """是否轻量检查 selection 内所有 assets 的 `topology_name` 与 `dof` 一致。"""
+
+
+class HandSpawnAdapter:
+    r"""`HandSpawnCfg` 的 runtime adapter。
+
+    构造函数保持无 IO；首次访问 `selection` 或构造 articulation 时才调用
+    `HandBank.resolve()`。这使 env cfg import 阶段仍保持轻量，而 IsaacLab 真正需要
+    spawn cfg 时可以得到完整的 `MultiAssetSpawnerCfg`。
+    """
+
+    def __init__(self, cfg: HandSpawnCfg):
+        r"""保存配置；不在构造阶段扫描 asset bank。"""
+
+        self.cfg = cfg  # 声明式 hand spawn 配置；不在此处触发文件 IO
+        self._selection: HandSelection | None = None  # lazy resolve cache，保持 env import 轻量
+
+    @property
+    def selection(self) -> HandSelection:
+        r"""Resolved hand selection。
+
+        Returns:
+            HandSelection: asset bank resolve 后的有序 hand container 列表。
+        """
+
+        if self._selection is None:
+            self._selection = HandBank(self.cfg.bank).resolve()  # 解析 hand.urdf / hand.yaml / mesh refs
+        return self._selection
+
+    @property
+    def semantic_R_ha(self) -> tuple[float, ...]:
+        r"""供 env cfg 显式同步到 `ReorientCommandCfg.semantic_R_ha` 的矩阵。"""
+
+        return tuple(float(value) for value in self.cfg.frame.semantic_R_ha)
+
+    def build_articulation_cfg(self, *, prim_path: str) -> ArticulationCfg:
+        r"""构造 IsaacLab `ArticulationCfg`。
+
+        Args:
+            prim_path (str): scene 中 robot articulation 的 prim path。
+
+        Returns:
+            ArticulationCfg: 可直接赋给 `scene.robot` 的 hand articulation 配置。
+        """
+
+        if self.cfg.spawn_backend != "urdf":
+            raise NotImplementedError(f"HandSpawnAdapter spawn_backend={self.cfg.spawn_backend!r} is not implemented")
+
+        if self.cfg.validate_same_schema:
+            _validate_same_hand_schema(self.selection.assets)  # 多资产 articulation 必须同关节 schema
+
+        root_pos_e, root_quat_ea = _compose_anchor_root_pose(self.cfg.frame)  # $T_{ea}=T_{eh}^{anchor}T_{ha}$
+        return ArticulationCfg(
+            prim_path=prim_path,
+            spawn=self.build_multi_hand_spawn_cfg(),
+            init_state=ArticulationCfg.InitialStateCfg(
+                pos=root_pos_e,
+                rot=root_quat_ea,
+                joint_pos=dict(self.cfg.joint_init.joint_pos),
+                joint_vel=dict(self.cfg.joint_init.joint_vel),
+            ),
+            actuators={"fingers": _build_implicit_actuator_cfg(self.cfg.actuator)},
+            soft_joint_pos_limit_factor=1.0,
+        )
+
+    def build_multi_hand_spawn_cfg(self) -> sim_utils.MultiAssetSpawnerCfg:
+        r"""构造同拓扑 generated hands 的 `MultiAssetSpawnerCfg`。
+
+        Returns:
+            sim_utils.MultiAssetSpawnerCfg: IsaacLab 多资产 spawner 配置。
+        """
+
+        if self.cfg.spawn_backend != "urdf":
+            raise NotImplementedError(f"HandSpawnAdapter spawn_backend={self.cfg.spawn_backend!r} is not implemented")
+
+        assets_cfg = [
+            _build_hand_urdf_file_cfg(container, self.cfg)
+            for container in self.selection.assets
+        ]  # 每个 child cfg 对应一个 post-mutate hand variant
+        return sim_utils.MultiAssetSpawnerCfg(
+            assets_cfg=assets_cfg,
+            random_choice=self.cfg.asset_routing == "random_choice",
+        )
+
+
+def _build_hand_urdf_file_cfg(container: HandContainer, cfg: HandSpawnCfg) -> sim_utils.UrdfFileCfg:
+    r"""为单个 generated hand container 构造 `UrdfFileCfg`。
+
+    Args:
+        container (HandContainer): asset bank 输出的单 hand container。
+        cfg (HandSpawnCfg): GM hand spawn 配置。
+
+    Returns:
+        sim_utils.UrdfFileCfg: IsaacLab URDF importer cfg。
+    """
+
+    urdf_cfg = cfg.urdf  # URDF importer 超参锚点，来自 heterogeneous MVP
+    urdf_file_cfg = sim_utils.UrdfFileCfg(
+        asset_path=str(container.urdf_path.resolve()),
+        fix_base=urdf_cfg.fix_base,
+        merge_fixed_joints=urdf_cfg.merge_fixed_joints,
+        force_usd_conversion=urdf_cfg.force_usd_conversion,
+        make_instanceable=urdf_cfg.make_instanceable,
+        collision_from_visuals=urdf_cfg.collision_from_visuals,
+        self_collision=urdf_cfg.self_collision,
+        joint_drive=UrdfConverterCfg.JointDriveCfg(
+            target_type="position",
+            drive_type="force",
+            gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
+                stiffness=urdf_cfg.drive_stiffness,
+                damping=urdf_cfg.drive_damping,
+            ),
+        ),
+        activate_contact_sensors=urdf_cfg.activate_contact_sensors,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=True,
+            retain_accelerations=False,
+            enable_gyroscopic_forces=False,
+            angular_damping=0.01,
+            max_linear_velocity=1000.0,
+            max_angular_velocity=64.0 / math.pi * 180.0,
+            max_depenetration_velocity=1000.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=True,
+            solver_position_iteration_count=8,
+            solver_velocity_iteration_count=0,
+            sleep_threshold=0.005,
+            stabilization_threshold=0.0005,
+            fix_root_link=True,
+        ),
+    )
+    if cfg.restore_visual_materials:
+        urdf_file_cfg.func = _spawn_urdf_with_restored_visual_materials  # 只恢复 GUI debug color，不改动力学
+    return urdf_file_cfg
+
+
+def _build_implicit_actuator_cfg(cfg: HandActuatorSpawnCfg) -> ImplicitActuatorCfg:
+    r"""构造 generated hand 的 implicit actuator 配置。
+
+    Args:
+        cfg (HandActuatorSpawnCfg): hand actuator 数值锚点。
+
+    Returns:
+        ImplicitActuatorCfg: IsaacLab articulation actuator cfg。
+    """
+
+    return ImplicitActuatorCfg(
+        joint_names_expr=list(cfg.joint_names_expr),
+        effort_limit_sim=cfg.effort_limit_sim,
+        velocity_limit_sim=cfg.velocity_limit_sim,
+        stiffness=cfg.stiffness,
+        damping=cfg.damping,
+        friction=cfg.friction,
+        armature=cfg.armature,
+    )
+
+
+def _compose_anchor_root_pose(frame: HandFrameCfg) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    r"""把 hand semantic anchor lower 成 IsaacLab raw root pose。
+
+    核心公式：
+    $$
+    T_{ea}^{anchor}=T_{eh}^{anchor}T_{ha},\qquad
+    R_{ea}=R_{eh}^{anchor}R_{ha},\qquad
+    p_{ea}=p_{eh}^{anchor}+R_{eh}^{anchor}p_{ha}.
+    $$
+
+    Args:
+        frame (HandFrameCfg): `{a}->{h}` 静态校准与 `{h}` 在 `{e}` 中的 anchor。
+
+    Returns:
+        tuple[tuple[float, float, float], tuple[float, float, float, float]]: IsaacLab
+            `InitialStateCfg` 需要的 `(pos, quat_wxyz)`。
+    """
+
+    if not frame.align_hand_frame_to_env:
+        raise NotImplementedError("HandFrameCfg.align_hand_frame_to_env=False is reserved for future manual root pose")
+
+    R_ha = _as_matrix3(frame.semantic_R_ha, label="semantic_R_ha")  # $R_{ha}$，raw asset axis -> hand semantic axis
+    R_eh = _as_matrix3(frame.anchor_R_eh, label="anchor_R_eh")  # $R_{eh}^{anchor}$，hand semantic axis -> env axis
+    p_ha = tuple(float(value) for value in frame.semantic_p_ha)  # $p_{ha}$，raw origin in hand semantic frame, m
+    p_eh = tuple(float(value) for value in frame.anchor_p_eh)  # $p_{eh}^{anchor}$，hand semantic origin in env frame, m
+
+    R_ea = _matmul3(R_eh, R_ha)  # $R_{ea}=R_{eh}R_{ha}$，raw asset orientation in env frame
+    p_ea = _vec_add3(p_eh, _matvec3(R_eh, p_ha))  # $p_{ea}=p_{eh}+R_{eh}p_{ha}$，raw root position in env frame
+    quat_ea = _quat_wxyz_from_matrix3(R_ea)  # IsaacLab boundary 表示，内部语义仍是 $SO(3)$
+    return p_ea, quat_ea
+
+
+def _as_matrix3(values: tuple[float, ...], *, label: str) -> tuple[tuple[float, float, float], ...]:
+    r"""把 row-major 9 元组解析为 $3\times3$ 旋转矩阵。"""
+
+    if len(values) != 9:
+        raise ValueError(f"{label} must contain 9 row-major values, got {len(values)}")
+    scalar_values = tuple(float(value) for value in values)  # row-major $[r_{00},r_{01},...,r_{22}]$
+    return (scalar_values[0:3], scalar_values[3:6], scalar_values[6:9])
+
+
+def _matmul3(
+    lhs: tuple[tuple[float, float, float], ...],
+    rhs: tuple[tuple[float, float, float], ...],
+) -> tuple[tuple[float, float, float], ...]:
+    r"""计算 $3\times3$ 矩阵乘法 $C=AB$。"""
+
+    return tuple(
+        tuple(sum(lhs[row][k] * rhs[k][col] for k in range(3)) for col in range(3))
+        for row in range(3)
+    )
+
+
+def _matvec3(
+    matrix: tuple[tuple[float, float, float], ...],
+    vector: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    r"""计算 $3\times3$ 矩阵与三维向量乘法 $y=Rv$。"""
+
+    return tuple(sum(matrix[row][col] * vector[col] for col in range(3)) for row in range(3))
+
+
+def _vec_add3(lhs: tuple[float, float, float], rhs: tuple[float, float, float]) -> tuple[float, float, float]:
+    r"""计算三维平移向量相加 $p=p_1+p_2$。"""
+
+    return tuple(lhs[index] + rhs[index] for index in range(3))
+
+
+def _quat_wxyz_from_matrix3(matrix: tuple[tuple[float, float, float], ...]) -> tuple[float, float, float, float]:
+    r"""把旋转矩阵转换为 IsaacLab `(w,x,y,z)` 四元数。
+
+    该函数只用于 IsaacLab cfg 边界。内部 frame 语义仍以 $R\in SO(3)$ 表达，避免在
+    研究代码里把四元数双覆盖问题扩散到上游配置。
+    """
+
+    m00, m01, m02 = matrix[0]  # 第一行，row-major $R_{0*}$
+    m10, m11, m12 = matrix[1]  # 第二行，row-major $R_{1*}$
+    m20, m21, m22 = matrix[2]  # 第三行，row-major $R_{2*}$
+    trace = m00 + m11 + m22  # $	ext{tr}(R)$，选择稳定分支的数值锚点
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0  # $s=4q_w$，trace 正时 $q_w$ 分支稳定
+        qw = 0.25 * s
+        qx = (m21 - m12) / s
+        qy = (m02 - m20) / s
+        qz = (m10 - m01) / s
+    elif m00 > m11 and m00 > m22:
+        s = math.sqrt(1.0 + m00 - m11 - m22) * 2.0  # $s=4q_x$，x 对角项主导
+        qw = (m21 - m12) / s
+        qx = 0.25 * s
+        qy = (m01 + m10) / s
+        qz = (m02 + m20) / s
+    elif m11 > m22:
+        s = math.sqrt(1.0 + m11 - m00 - m22) * 2.0  # $s=4q_y$，y 对角项主导
+        qw = (m02 - m20) / s
+        qx = (m01 + m10) / s
+        qy = 0.25 * s
+        qz = (m12 + m21) / s
+    else:
+        s = math.sqrt(1.0 + m22 - m00 - m11) * 2.0  # $s=4q_z$，z 对角项主导
+        qw = (m10 - m01) / s
+        qx = (m02 + m20) / s
+        qy = (m12 + m21) / s
+        qz = 0.25 * s
+
+    norm = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)  # 数值归一化，抵消浮点舍入误差
+    if norm == 0.0:
+        raise ValueError("rotation matrix produced a zero quaternion")
+    return (qw / norm, qx / norm, qy / norm, qz / norm)
+
+
+def _validate_same_hand_schema(containers: tuple[HandContainer, ...]) -> None:
+    r"""检查 MultiAssetSpawner 内所有 hands 是否共享 articulation schema。
+
+    IsaacLab 的一个 batched `Articulation` 要求各 prototype 的 joint/body schema 兼容。
+    这里用 sidecar 中最直接的科研语义字段做 fail-fast：topology、DOF、slot 顺序和
+    每根手指的 revolute DOF。
+    """
+
+    if len(containers) == 0:
+        raise ValueError("HandSpawnAdapter requires at least one selected hand asset")
+
+    reference = _hand_schema_signature(containers[0])  # 第一个 asset 作为 same-schema 参照
+    for container in containers[1:]:
+        signature = _hand_schema_signature(container)  # 当前 asset 的 sidecar schema 摘要
+        if signature != reference:
+            raise ValueError(
+                "selected hand assets are not same-schema: "
+                f"reference={containers[0].asset_id}:{reference!r}, "
+                f"offender={container.asset_id}:{signature!r}"
+            )
+
+
+def _hand_schema_signature(container: HandContainer) -> tuple[object, ...]:
+    r"""从 `hand.yaml` sidecar 抽取 same-schema 轻量签名。"""
+
+    sidecar = container.sidecar  # generated hand sidecar，保持 dict 以兼容资产 schema 演化
+    finger_signature = tuple(
+        (finger.get("name"), finger.get("revolute_dof"))
+        for finger in sidecar.get("fingers", [])
+    )  # 有序 finger schema，避免同 DOF 但 finger routing 不同的资产混入
+    return (
+        sidecar.get("topology_name"),
+        sidecar.get("dof"),
+        tuple(sidecar.get("surviving_slots", [])),
+        finger_signature,
+    )
+
+
+def _spawn_urdf_with_restored_visual_materials(
+    prim_path: str,
+    cfg: sim_utils.UrdfFileCfg,
+    translation: tuple[float, float, float] | None = None,
+    orientation: tuple[float, float, float, float] | None = None,
+    **kwargs,
+):
+    r"""官方 URDF spawn 后恢复 generated hand 的 per-visual debug color。
+
+    该 wrapper 只修复 GUI / render 语义。动力学资产仍由 IsaacLab 官方
+    `spawn_from_urdf` 创建；collision、mass、joint、drive、root pose 均不在这里改变。
+    """
+
+    from isaaclab.sim.spawners.from_files import spawn_from_urdf
+
+    spawned_prim = spawn_from_urdf(prim_path, cfg, translation=translation, orientation=orientation, **kwargs)
+    visual_rgba_by_name = parse_urdf_visual_rgba_by_name(Path(cfg.asset_path))
+    _restore_visual_materials_on_spawned_prim(spawned_prim, visual_rgba_by_name)
+    return spawned_prim
+
+
+def _restore_visual_materials_on_spawned_prim(spawned_prim, visual_rgba_by_name: dict[str, UrdfRgba]) -> None:
+    r"""在 spawned hand prim 子树上绑定 URDF visual colors。"""
+
+    if len(visual_rgba_by_name) == 0:
+        return
+
+    visual_prims = _find_spawned_visual_prims_by_name(spawned_prim, set(visual_rgba_by_name))
+    bound_target_by_path: dict[str, str] = {}
+    missing_visual_names: list[str] = []
+
+    for visual_name, rgba in visual_rgba_by_name.items():
+        visual_prim = visual_prims.get(visual_name)
+        if visual_prim is None:
+            missing_visual_names.append(visual_name)
+            continue
+
+        target_prim = _nearest_editable_material_binding_prim(visual_prim)
+        target_path = str(target_prim.GetPath())
+        previous_visual_name = bound_target_by_path.get(target_path)
+        if previous_visual_name is not None and visual_rgba_by_name[previous_visual_name][:3] != rgba[:3]:
+            logger.warning(
+                "Skip URDF visual color for %s because editable USD target %s was already bound for %s.",
+                visual_name,
+                target_path,
+                previous_visual_name,
+            )
+            continue
+
+        try:
+            _bind_urdf_preview_surface(spawned_prim, target_prim, visual_name, rgba)
+        except Exception as exc:
+            logger.warning("Failed to restore URDF visual color for %s on %s: %s", visual_name, target_path, exc)
+            continue
+
+        bound_target_by_path[target_path] = visual_name
+
+    if missing_visual_names:
+        logger.warning(
+            "Could not find %d URDF visual prims under spawned hand %s; examples: %s",
+            len(missing_visual_names),
+            spawned_prim.GetPath(),
+            missing_visual_names[:5],
+        )
+
+
+def _find_spawned_visual_prims_by_name(spawned_prim, visual_names: set[str]) -> dict[str, object]:
+    r"""在 spawned hand 子树内查找与 URDF visual name 同名的 USD prim。"""
+
+    from pxr import Usd
+
+    visual_prims: dict[str, object] = {}
+    prim_range = Usd.PrimRange(spawned_prim, Usd.TraverseInstanceProxies())
+    for prim in prim_range:
+        prim_name = prim.GetName()
+        prim_path = str(prim.GetPath())
+        if prim_name in visual_names and "/visuals/" in prim_path and prim_name not in visual_prims:
+            visual_prims[prim_name] = prim
+    return visual_prims
+
+
+def _nearest_editable_material_binding_prim(visual_prim):
+    r"""为 material binding 选择最近的非 instance-proxy ancestor。"""
+
+    target_prim = visual_prim
+    while target_prim.IsInstanceProxy():
+        parent_prim = target_prim.GetParent()
+        if not parent_prim.IsValid():
+            break
+        target_prim = parent_prim
+    return target_prim
+
+
+def _bind_urdf_preview_surface(spawned_prim, target_prim, visual_name: str, rgba: UrdfRgba) -> None:
+    r"""创建并绑定一个表示 URDF RGB 的 USD PreviewSurface material。"""
+
+    from pxr import UsdShade
+
+    stage = spawned_prim.GetStage()
+    root_path = str(spawned_prim.GetPath())
+    looks_path = f"{root_path}/Looks"
+    material_path = f"{looks_path}/{_sanitize_usd_prim_name('urdf_' + visual_name)}"
+
+    if not stage.GetPrimAtPath(looks_path).IsValid():
+        stage.DefinePrim(looks_path, "Scope")
+
+    if not stage.GetPrimAtPath(material_path).IsValid():
+        material_cfg = sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(rgba[0], rgba[1], rgba[2]),
+            roughness=0.5,
+            metallic=0.0,
+        )
+        material_cfg.func(material_path, material_cfg)
+
+    material = UsdShade.Material(stage.GetPrimAtPath(material_path))
+    if target_prim.HasAPI(UsdShade.MaterialBindingAPI):
+        material_binding_api = UsdShade.MaterialBindingAPI(target_prim)
+    else:
+        material_binding_api = UsdShade.MaterialBindingAPI.Apply(target_prim)
+    material_binding_api.Bind(material, bindingStrength=UsdShade.Tokens.strongerThanDescendants)
+
+
+def _sanitize_usd_prim_name(raw_name: str) -> str:
+    r"""把 URDF visual name 转成保守合法的 USD prim name 片段。"""
+
+    sanitized = re.sub(r"[^A-Za-z0-9_]", "_", raw_name)
+    if sanitized == "" or sanitized[0].isdigit():
+        sanitized = f"_{sanitized}"
+    return sanitized
+
+
+__all__ = [
+    "DEFAULT_HAND_ANCHOR_POS_E",
+    "HandActuatorSpawnCfg",
+    "HandFrameCfg",
+    "HandJointInitCfg",
+    "HandSpawnAdapter",
+    "HandSpawnCfg",
+    "HandUrdfSpawnCfg",
+    "_compose_anchor_root_pose",
+    "_spawn_urdf_with_restored_visual_materials",
+]

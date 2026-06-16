@@ -39,6 +39,19 @@ hand 相关 event 的分解：
       因为它们会更直接改变可达域、接触 margin 或扰动课程，容易和 grasp cache
       稳定性验证语义混淆。
 
+hand orientation reset scaffold：
+    任意手朝向训练的核心被控量不是 raw asset frame `{a}` 本身，而是 hand semantic
+    frame `{h}` 在 env frame `{e}` 中的位姿 $T_{eh}$。`hand_spawn.HandFrameCfg`
+    负责记录静态校准 $T_{ha}$ 与默认 anchor $T_{eh}^{anchor}$；reset event 后续
+    负责采样 episode 级 $T_{eh}$，再 lower 成 raw root pose：
+    $$
+    T_{ea}=T_{eh}T_{ha}.
+    $$
+    第一版 scaffold 只定义 orientation 分布，不实现写 sim。默认 reference mode
+    是 `anchor`：每次 reset 从 $R_{eh}^{anchor}$ 右乘 hand-frame 扰动
+    $\Delta R_h$，即 $R_{eh}'=R_{eh}^{anchor}\Delta R_h$。`current` 随机游走模式
+    仅作预留，避免训练初期把 i.i.d. 初态分布误写成 episode 间漂移。
+
 TODO:
     后续实现 `reset_from_grasp_cache(...)` 时，应只消费
     `tasks/gm/grasp_cache` 的 store / sampler 契约；不要在这里扫描 asset bank、
@@ -60,6 +73,8 @@ from isaaclab.managers import SceneEntityCfg
 GmResetMode = Literal["grasp_cache", "random_joint_object"]
 GmObjectScaleMode = Literal["startup_discrete_bucket", "nominal_only"]
 GmPhysicsDrPhase = Literal["startup", "reset_light_ablation", "disabled"]
+GmHandOrientationMode = Literal["disabled", "roll", "pitch", "yaw", "so3"]
+GmHandOrientationReferenceMode = Literal["anchor", "current"]
 
 
 @dataclass(frozen=True)
@@ -89,6 +104,45 @@ class GmEventDesign:
 
 
 DEFAULT_GM_EVENT_DESIGN = GmEventDesign()
+
+
+@dataclass(frozen=True)
+class HandOrientationResetCfg:
+    r"""Hand semantic frame orientation reset 的 scaffold 配置。
+
+    该 dataclass 只表达 reset 分布语义，不是 IsaacLab `EventTermCfg`，也不实现
+    采样 / 写 sim。未来实现时应在 reset event 中消费它：采样 $T_{eh}$，再结合
+    `hand_spawn.HandFrameCfg` 的 $T_{ha}$ 写入 robot raw root pose $T_{ea}=T_{eh}T_{ha}$。
+
+    设计要点：
+
+    - `roll/pitch/yaw` 均解释为 hand semantic frame `{h}` 的 body/right 轴扰动；
+    - `so3` 表示 Haar-uniform 全 $SO(3)$，实现时可在采样边界使用 quaternion 算法；
+    - 默认 `reference_mode="anchor"`，即每次 reset 从 $R_{eh}^{anchor}$ 右乘扰动；
+    - `reference_mode="current"` 只作为未来 continual perturbation / curriculum 预留。
+    """
+
+    mode: GmHandOrientationMode = "disabled"
+    """orientation reset 模式；`disabled` 表示不改变 hand orientation。"""
+
+    reference_mode: GmHandOrientationReferenceMode = "anchor"
+    """扰动参考：`anchor` 为 i.i.d. reset 分布，`current` 为 episode 间累积随机游走预留。"""
+
+    angle_range: tuple[float, float] = (0.0, 0.0)
+    r"""`roll/pitch/yaw` 模式的角度范围，单位 rad。
+
+    对 `so3` 模式，该字段应被忽略；`so3` 的科研语义是全 $SO(3)$ 均匀采样，
+    不是随机轴 + 受限角度。
+    """
+
+    perturbation_frame: Literal["h"] = "h"
+    """扰动轴所在 frame。第一版固定为 hand semantic frame `{h}` 的 body/right 语义。"""
+
+    robot_asset_name: str = "robot"
+    """scene 中 hand articulation 的名字；未来 event 实现用它读取 / 写入 root pose。"""
+
+
+DEFAULT_HAND_ORIENTATION_RESET_CFG = HandOrientationResetCfg()
 
 
 def simple_no_cache_reset(
@@ -165,9 +219,13 @@ def simple_no_cache_reset(
 
 __all__ = [
     "DEFAULT_GM_EVENT_DESIGN",
+    "DEFAULT_HAND_ORIENTATION_RESET_CFG",
     "GmEventDesign",
+    "GmHandOrientationMode",
+    "GmHandOrientationReferenceMode",
     "GmObjectScaleMode",
     "GmPhysicsDrPhase",
     "GmResetMode",
+    "HandOrientationResetCfg",
     "simple_no_cache_reset",
 ]
