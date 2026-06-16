@@ -1,3 +1,11 @@
+0.3.0 - 2026-06-16
+==================
+
+- 新增 hand asset bank façade，提供 `HandBankCfg` / `HandBank` / `HandSelection` 与虚拟标准 bundle 视图，统一 post-mutate hand asset 的路径解析、mesh relpath 校验、sidecar 读取和 visual RGBA 解析。
+- 支持 `HandBankCfg.containers=("sample_id", ...)` 简写，并将显式 / 全量 / 固定 seed 采样选择结果暴露给 `tasks/gm` 与后续 `distill` 配置消费。
+- 将 GM heterogeneous smoke 迁移到 `HandSpawnCfg + HandSpawnAdapter`，验证 asset bank 可直接 lower 成 IsaacLab `ArticulationCfg`，并保留 round-robin same-schema hand routing。
+- 删除旧 `tasks/gm/asset_binding.py` 单资产绑定路线，后续 GM / distill 侧统一通过 asset bank 与 hand spawn adapter 表达 generated hand 选择与装配。
+
 0.2.1 - 2026-06-10
 ==================
 
