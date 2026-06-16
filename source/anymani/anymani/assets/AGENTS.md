@@ -10,7 +10,8 @@
 - post-mutate 几何与运动学局部派生；
 - validator 对机械合理性的显式闸门；
 - exporter / sidecar / summary 的可追溯落盘；
-- `asset_physics.py` 对最终 collision 几何的动力学闭包。
+- `asset_physics.py` 对最终 collision 几何的动力学闭包；
+- asset bank 对已落盘资产集合做路径解析、bundle 校验、虚拟视图和可复现选择，供下游任务模块消费。
 
 ## 核心原则
 
@@ -35,6 +36,7 @@
 - **Validator**：显式拒绝不合法资产；
 - **Exporter**：URDF / sidecar / tree / mesh materialization；
 - **Physics Closure**：`asset_physics.py`，只负责由最终 collision 几何重建 `mass / inertial`；
+- **Asset Bank**：整理已落盘资产集合，负责路径解析、bundle 校验、虚拟视图和可复现选择；
 - **Generator**：最高 façade，只编排阶段，不吞并各阶段职责。
 
 尤其注意：**动力学闭包不要再塞回 builder、mutator 或 exporter**。  

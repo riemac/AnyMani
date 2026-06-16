@@ -1,3 +1,9 @@
+0.3.1 - 2026-06-16
+==================
+
+- `HandBank` 的 `post_mutate` 候选集合默认拉平为“母体 pre-made topology + post-mutate leaf samples”同级虚拟视图，`selection_mode="all"` / `"sample"` 现在会把 source topology 作为普通候选计入。
+- 母体 topology 的 mesh 引用继续按 topology 根自身的 `meshes/` 解析；post-mutate sample 的相对 mesh URI 仍按 run root 解析，避免把两类产物误并到同一 physical mesh 根。
+
 0.3.0 - 2026-06-16
 ==================
 

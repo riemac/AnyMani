@@ -71,6 +71,60 @@ def _write_sample(
     return sample_dir
 
 
+def _write_source_topology(
+    topology_root: Path,
+    *,
+    asset_id: str = "source_topology",
+    mesh_name: str = "source_tip.stl",
+) -> Path:
+    r"""写出 post-mutate run 的母体 pre-made topology bundle。
+
+    Args:
+        topology_root (Path): pre-made topology 根目录，也就是 post-mutate run 的父目录。
+        asset_id (str): 母体在 asset bank 中暴露的稳定 ID，真实产物来自 `hand.yaml.id`。
+        mesh_name (str): 母体自己 `meshes/` 目录下的 mesh 文件名。
+
+    Returns:
+        Path: topology 根目录；它本身就是一个可消费的虚拟 hand bundle。
+    """
+
+    mesh_dir = topology_root / "meshes"
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+    (mesh_dir / mesh_name).write_text("solid source\nendsolid source\n", encoding="utf-8")
+    (topology_root / "hand.urdf").write_text(
+        textwrap.dedent(
+            f"""
+            <robot name="source_hand">
+              <link name="tip">
+                <visual name="source_tip_visual">
+                  <geometry><mesh filename="meshes/{mesh_name}" /></geometry>
+                  <material name="source_color"><color rgba="0.1 0.2 0.3 1" /></material>
+                </visual>
+                <collision name="source_tip_collision">
+                  <geometry><mesh filename="meshes/{mesh_name}" /></geometry>
+                </collision>
+              </link>
+            </robot>
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+    (topology_root / "hand.yaml").write_text(
+        textwrap.dedent(
+            f"""
+            id: {asset_id}
+            topology_name: right_t4_i4_m4_r4
+            dof: 16
+            validation:
+              pre_made: {{}}
+            hand_cfg: {{}}
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+    return topology_root
+
+
 def test_hand_container_exposes_virtual_bundle_bijection(tmp_path: Path) -> None:
     r"""post-mutate shared mesh layout 应被作伪成标准 `hand.urdf + meshes/` 视图。"""
 
@@ -117,8 +171,16 @@ def test_hand_bank_all_and_sample_are_stable(tmp_path: Path) -> None:
     for sample_id in ("b_sample", "a_sample", "c_sample"):
         _write_sample(run_root, sample_id, mesh_name=f"{sample_id}.stl")
 
-    all_selection = HandBank(HandBankCfg(post_mutate_path=run_root, selection_mode="all")).resolve()
-    sample_cfg = HandBankCfg(post_mutate_path=run_root, selection_mode="sample", sample_count=2, sample_seed=17)
+    all_selection = HandBank(
+        HandBankCfg(post_mutate_path=run_root, selection_mode="all", include_source_topology=False)
+    ).resolve()
+    sample_cfg = HandBankCfg(
+        post_mutate_path=run_root,
+        selection_mode="sample",
+        sample_count=2,
+        sample_seed=17,
+        include_source_topology=False,
+    )
     first_sample = HandBank(sample_cfg).resolve()
     second_sample = HandBank(sample_cfg).resolve()
 
@@ -127,14 +189,81 @@ def test_hand_bank_all_and_sample_are_stable(tmp_path: Path) -> None:
     assert len({asset.asset_id for asset in first_sample.assets}) == 2
 
 
+def test_post_mutate_discovery_includes_source_topology_as_peer_candidate(tmp_path: Path) -> None:
+    r"""post-mutate source 应把母体 topology 与后变异样本拉平成同级候选。"""
+
+    topology_root = tmp_path / "right_t4_i4_m4_r4"
+    run_root = topology_root / "2026-06-11_14-20-22"
+    _write_source_topology(topology_root, asset_id="premade_root", mesh_name="source_tip.stl")
+    _write_sample(run_root, "variant_b", mesh_name="sample_tip.stl")
+    _write_sample(run_root, "variant_a", mesh_name="sample_tip.stl")
+
+    selection = HandBank(HandBankCfg(post_mutate_path=run_root, selection_mode="all")).resolve()
+    assets_by_id = {asset.asset_id: asset for asset in selection.assets}
+
+    assert [asset.asset_id for asset in selection.assets] == ["premade_root", "variant_a", "variant_b"]
+    assert selection.source_root == run_root.resolve(strict=False)
+    assert assets_by_id["premade_root"].real_path("hand.urdf") == (topology_root / "hand.urdf").resolve(strict=False)
+    assert assets_by_id["premade_root"].real_path("meshes/source_tip.stl") == (
+        topology_root / "meshes" / "source_tip.stl"
+    ).resolve(strict=False)
+    assert assets_by_id["variant_a"].real_path("meshes/sample_tip.stl") == (
+        run_root / "meshes" / "sample_tip.stl"
+    ).resolve(strict=False)
+    assert assets_by_id["premade_root"].mesh_refs[0].raw_uri == "meshes/source_tip.stl"
+    assert assets_by_id["variant_a"].mesh_refs[0].raw_uri == "../meshes/sample_tip.stl"
+
+
+def test_post_mutate_source_topology_inclusion_can_be_disabled(tmp_path: Path) -> None:
+    r"""调试旧实验时可显式关闭母体候选，恢复纯 post-mutate leaf 集合。"""
+
+    topology_root = tmp_path / "right_t4_i4_m4_r4"
+    run_root = topology_root / "2026-06-11_14-20-22"
+    _write_source_topology(topology_root, asset_id="premade_root")
+    _write_sample(run_root, "variant_a")
+
+    selection = HandBank(
+        HandBankCfg(post_mutate_path=run_root, selection_mode="all", include_source_topology=False)
+    ).resolve()
+
+    assert [asset.asset_id for asset in selection.assets] == ["variant_a"]
+
+
+def test_post_mutate_source_topology_inclusion_requires_parent_bundle(tmp_path: Path) -> None:
+    r"""默认包含母体时，非标准 run root 应 fail-fast，而不是退回旧式纯 leaf 语义。"""
+
+    run_root = tmp_path / "standalone_post_mutate"
+    _write_sample(run_root, "variant_a")
+
+    with pytest.raises(FileNotFoundError, match="source topology bundle"):
+        HandBank(HandBankCfg(post_mutate_path=run_root, selection_mode="all")).resolve()
+
+
+def test_post_mutate_sample_count_sees_source_topology_candidate(tmp_path: Path) -> None:
+    r"""固定 seed 采样的候选池应包含母体，因此容量上限是 $1+N_{variant}$。"""
+
+    topology_root = tmp_path / "right_t4_i4_m4_r4"
+    run_root = topology_root / "2026-06-11_14-20-22"
+    _write_source_topology(topology_root, asset_id="premade_root")
+    _write_sample(run_root, "variant_a")
+
+    selection = HandBank(
+        HandBankCfg(post_mutate_path=run_root, selection_mode="sample", sample_count=2, sample_seed=23)
+    ).resolve()
+
+    assert {asset.asset_id for asset in selection.assets} == {"premade_root", "variant_a"}
+
+
 def test_hand_bank_sample_rejects_oversized_request(tmp_path: Path) -> None:
     r"""sample_count 大于候选数时应 fail-fast，而不是静默重复资产。"""
 
-    run_root = tmp_path / "post_mutate"
+    topology_root = tmp_path / "right_t4_i4_m4_r4"
+    run_root = topology_root / "post_mutate"
+    _write_source_topology(topology_root, asset_id="source_topology")
     _write_sample(run_root, "only_one")
 
     with pytest.raises(ValueError, match="exceeds available"):
-        HandBank(HandBankCfg(post_mutate_path=run_root, selection_mode="sample", sample_count=2)).resolve()
+        HandBank(HandBankCfg(post_mutate_path=run_root, selection_mode="sample", sample_count=3)).resolve()
 
 
 def test_hand_container_requires_sidecar_by_default(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-r"""单个 generated hand asset 的虚拟标准视图 scaffold。
+r"""单个 generated hand asset 的虚拟标准视图。
 
 本模块只描述“一个 hand asset container 长什么样”，不负责资产集合发现、随机采样、
 train / heldout split，也不负责 IsaacLab spawn。它是 `HandBank` 输出给下游的最小
@@ -14,7 +14,7 @@ train / heldout split，也不负责 IsaacLab spawn。它是 `HandBank` 输出�
     hand.yaml
 ```
 
-以及未来 pre-made topology 根目录，统一呈现为“作伪”的虚拟标准 bundle：
+以及 pre-made topology 根目录，统一呈现为“作伪”的虚拟标准 bundle：
 
 ```text
 <virtual-hand-bundle>/
