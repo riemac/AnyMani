@@ -219,6 +219,25 @@ def test_generated_hand_urdf_visual_rgba_is_parsed_by_visual_name() -> None:
     assert visual_rgba_by_name["index_tip_mesh_vis"] == (0.92, 0.88, 0.78, 1.0)
 
 
+def test_generated_hand_urdf_visual_names_map_to_parent_links() -> None:
+    r"""颜色恢复应把 URDF visual name 稳定映射到 spawned USD 的 `<link>/visuals`。"""
+
+    module = _load_heterogeneous_cfg_module()
+    repo_root = resolve_anymani_root()
+    urdf_path = repo_root / (
+        "source/anymani/anymani/assets/generated/2026-06-10_11-30-08/"
+        "single_palm_leap/right_t4_i4_m4_r4/2026-06-11_14-20-22/0b6fbfce/hand.urdf"
+    )
+
+    visual_link_parser = module.HandSpawnAdapter.__init__.__globals__["_parse_urdf_visual_link_by_name"]
+    visual_link_by_name = visual_link_parser(urdf_path)
+
+    assert visual_link_by_name["palm_visual"] == "palm"
+    assert visual_link_by_name["index_j0_vis"] == "index_mcp1"
+    assert visual_link_by_name["thumb_j2_vis"] == "thumb_mcp"
+    assert visual_link_by_name["index_tip_mesh_vis"] == "index_tip"
+
+
 def test_heterogeneous_spawn_cfg_resolves_three_round_robin_assets() -> None:
     r"""heterogeneous smoke 必须通过 asset bank 选择 3 个 round-robin hand assets。"""
 
@@ -271,6 +290,8 @@ def test_restore_visual_materials_is_opt_in_on_urdf_child_cfg(tmp_path: Path) ->
     restored_child_cfg = module.HandSpawnAdapter(restored_spawn_cfg).build_multi_hand_spawn_cfg().assets_cfg[0]
 
     assert default_child_cfg.func is not restored_child_cfg.func
+    assert default_child_cfg.make_instanceable is True
+    assert restored_child_cfg.make_instanceable is False
     assert restored_child_cfg.func.__name__ == "_spawn_urdf_with_restored_visual_materials"
     assert module.DEFAULT_HETEROGENEOUS_HAND_SPAWN_CFG.restore_visual_materials is True
 

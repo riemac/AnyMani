@@ -65,6 +65,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import field
 from pathlib import Path
 from typing import Literal
@@ -141,6 +142,14 @@ class HandUrdfSpawnCfg:
     merge_fixed_joints: bool = False
     force_usd_conversion: bool = False
     make_instanceable: bool = True
+    r"""是否让 URDF converter 生成 instanceable USD。
+
+    `restore_visual_materials=True` 的 debug 可视化路径会在 child `UrdfFileCfg` 中强制
+    设为 `False`：颜色恢复需要在 spawned prim 子树上 author material binding，而 GUI
+    模式遍历 instance proxy 曾在第三个 heterogeneous prototype 之后触发 Kit hang。
+    动力学 smoke / 训练路径不依赖 URDF debug 色，仍可保持默认 instanceable 优化。
+    """
+
     collision_from_visuals: bool = False
     self_collision: bool = True
     activate_contact_sensors: bool = False
@@ -295,12 +304,16 @@ def _build_hand_urdf_file_cfg(container: HandContainer, cfg: HandSpawnCfg) -> si
     """
 
     urdf_cfg = cfg.urdf  # URDF importer 超参锚点，来自 heterogeneous MVP
+    # 材质恢复是 GUI/debug 语义：为了给每个 visual name 绑定 URDF RGB，需要 author USD material binding。
+    # 若继续生成 instanceable USD，就必须遍历 instance proxy；该路径在 GUI smoke 中出现过 Kit hang。
+    make_instanceable = False if cfg.restore_visual_materials else urdf_cfg.make_instanceable
+
     urdf_file_cfg = sim_utils.UrdfFileCfg(
         asset_path=str(container.urdf_path.resolve()),
         fix_base=urdf_cfg.fix_base,
         merge_fixed_joints=urdf_cfg.merge_fixed_joints,
         force_usd_conversion=urdf_cfg.force_usd_conversion,
-        make_instanceable=urdf_cfg.make_instanceable,
+        make_instanceable=make_instanceable,
         collision_from_visuals=urdf_cfg.collision_from_visuals,
         self_collision=urdf_cfg.self_collision,
         joint_drive=UrdfConverterCfg.JointDriveCfg(
@@ -520,18 +533,61 @@ def _spawn_urdf_with_restored_visual_materials(
     from isaaclab.sim.spawners.from_files import spawn_from_urdf
 
     spawned_prim = spawn_from_urdf(prim_path, cfg, translation=translation, orientation=orientation, **kwargs)
-    visual_rgba_by_name = parse_urdf_visual_rgba_by_name(Path(cfg.asset_path))
-    _restore_visual_materials_on_spawned_prim(spawned_prim, visual_rgba_by_name)
+    visual_rgba_by_name = parse_urdf_visual_rgba_by_name(Path(cfg.asset_path))  # URDF visual name -> debug RGBA
+    visual_link_by_name = _parse_urdf_visual_link_by_name(Path(cfg.asset_path))  # URDF visual name -> parent link name
+    _restore_visual_materials_on_spawned_prim(spawned_prim, visual_rgba_by_name, visual_link_by_name)
     return spawned_prim
 
 
-def _restore_visual_materials_on_spawned_prim(spawned_prim, visual_rgba_by_name: dict[str, UrdfRgba]) -> None:
-    r"""在 spawned hand prim 子树上绑定 URDF visual colors。"""
+def _parse_urdf_visual_link_by_name(urdf_path: Path) -> dict[str, str]:
+    r"""解析 URDF visual name 对应的 parent link name。
+
+    Isaac Sim URDF importer 会把每个 link 的可视几何组织到 spawned USD 的
+    `/<link_name>/visuals` 可编辑 prim 下；真正的 URDF visual name（例如
+    `palm_visual`）位于该 prim 的 instance proxy 子树里。为了避免 GUI 模式遍历
+    instance proxy 导致 Kit hang，本函数从原始 URDF 直接恢复
+    `visual_name -> link_name` 映射，再把 material 绑定到 `/<link_name>/visuals`。
+
+    Args:
+        urdf_path (Path): 已解析到真实磁盘的 `hand.urdf` 路径。
+
+    Returns:
+        dict[str, str]: URDF visual name 到 parent link name 的映射。
+    """
+
+    resolved_urdf_path = Path(urdf_path).expanduser().resolve(strict=False)
+    if not resolved_urdf_path.is_file():
+        raise FileNotFoundError(f"URDF file does not exist: {resolved_urdf_path}")
+
+    root = ET.parse(resolved_urdf_path).getroot()  # URDF XML root，纯解析，不触碰 USD/Isaac state
+    link_by_visual_name: dict[str, str] = {}
+    for link_elem in root.findall("./link"):
+        link_name = link_elem.attrib.get("name")  # URDF link name，对应 spawned USD 的一级 body prim
+        if not link_name:
+            continue
+        for visual_elem in link_elem.findall("./visual"):
+            visual_name = visual_elem.attrib.get("name")  # URDF visual name，对应 debug color key
+            if visual_name:
+                link_by_visual_name[visual_name] = link_name
+    return link_by_visual_name
+
+
+def _restore_visual_materials_on_spawned_prim(
+    spawned_prim,
+    visual_rgba_by_name: dict[str, UrdfRgba],
+    visual_link_by_name: dict[str, str],
+) -> None:
+    r"""在 spawned hand prim 子树上绑定 URDF visual colors。
+
+    颜色恢复只服务 GUI/debug 语义，不改变 collision、mass、joint、drive 或 root pose。
+    绑定目标优先选择 `/<link_name>/visuals` 这个可编辑 ancestor，而不是进入
+    instance proxy 里的真实 mesh prim；这样能保留 URDF 颜色，又规避 GUI hang 风险。
+    """
 
     if len(visual_rgba_by_name) == 0:
         return
 
-    visual_prims = _find_spawned_visual_prims_by_name(spawned_prim, set(visual_rgba_by_name))
+    visual_prims = _find_spawned_visual_prims_by_name(spawned_prim, visual_link_by_name)
     bound_target_by_path: dict[str, str] = {}
     missing_visual_names: list[str] = []
 
@@ -570,18 +626,23 @@ def _restore_visual_materials_on_spawned_prim(spawned_prim, visual_rgba_by_name:
         )
 
 
-def _find_spawned_visual_prims_by_name(spawned_prim, visual_names: set[str]) -> dict[str, object]:
-    r"""在 spawned hand 子树内查找与 URDF visual name 同名的 USD prim。"""
+def _find_spawned_visual_prims_by_name(spawned_prim, visual_link_by_name: dict[str, str]) -> dict[str, object]:
+    r"""在 spawned hand 子树内查找每个 URDF visual 对应的 editable USD target prim。
 
-    from pxr import Usd
+    本函数刻意不使用 `Usd.TraverseInstanceProxies()`。URDF debug color 是纯可视化注解，
+    不值得为了进入 instance proxy 子树承担 GUI hang 风险；调用方在
+    `restore_visual_materials=True` 时会把 material 绑定到 `/<link_name>/visuals`，该 prim
+    是 instanceable 但不是 instance proxy，仍然允许 author material binding。
+    """
 
     visual_prims: dict[str, object] = {}
-    prim_range = Usd.PrimRange(spawned_prim, Usd.TraverseInstanceProxies())
-    for prim in prim_range:
-        prim_name = prim.GetName()
-        prim_path = str(prim.GetPath())
-        if prim_name in visual_names and "/visuals/" in prim_path and prim_name not in visual_prims:
-            visual_prims[prim_name] = prim
+    stage = spawned_prim.GetStage()
+    root_path = str(spawned_prim.GetPath())
+    for visual_name, link_name in visual_link_by_name.items():
+        target_path = f"{root_path}/{link_name}/visuals"  # editable visual ancestor；内部 mesh 可能是 instance proxy
+        target_prim = stage.GetPrimAtPath(target_path)
+        if target_prim.IsValid():
+            visual_prims[visual_name] = target_prim
     return visual_prims
 
 
