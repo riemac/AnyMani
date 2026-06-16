@@ -296,6 +296,22 @@ def test_restore_visual_materials_is_opt_in_on_urdf_child_cfg(tmp_path: Path) ->
     assert module.DEFAULT_HETEROGENEOUS_HAND_SPAWN_CFG.restore_visual_materials is True
 
 
+def test_visual_material_restore_plan_is_shared_across_same_topology_assets() -> None:
+    r"""同拓扑 post-mutate variants 应复用第一个 URDF 解析出的颜色恢复计划。"""
+
+    module = _load_heterogeneous_cfg_module()
+    robot_cfg = module.HeterogeneousHandTestSceneCfg.robot
+    child_cfgs = robot_cfg.spawn.assets_cfg
+
+    plans = [getattr(child_cfg, "_anymani_visual_material_plan") for child_cfg in child_cfgs]
+
+    assert len(child_cfgs) == 3
+    assert plans[0] == plans[1] == plans[2]
+    assert plans[0]["source_urdf_path"] == child_cfgs[0].asset_path
+    assert plans[0]["visual_link_by_name"]["palm_visual"] == "palm"
+    assert plans[0]["visual_rgba_by_name"]["index_j0_vis"] == [0.866666667, 0.866666667, 0.0509803922, 1.0]
+
+
 def test_heterogeneous_scene_uses_clear_sky_dome_light() -> None:
     r"""异构 GUI smoke 应复用 DexSuite 的清天 HDRI，而不是纯灰 dome light。"""
 

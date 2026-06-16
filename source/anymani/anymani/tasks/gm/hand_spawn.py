@@ -66,7 +66,7 @@ import logging
 import math
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -86,6 +86,68 @@ r"""默认 hand semantic origin anchor 在 env frame `{e}` 中的位置，单位
 
 IDENTITY_R = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
 """Row-major $3\times3$ identity rotation。"""
+
+
+@dataclass(frozen=True)
+class _VisualMaterialRestorePlan:
+    r"""同拓扑 hand selection 共享的 URDF debug color 恢复计划。
+
+    pre-made topology 的 post-mutate variants 共享 visual name、parent link name 与 debug
+    color palette；几何可以变（例如不同 fingertip mesh），但 `visual_name -> link_name`
+    和 `visual_name -> rgba` 仍是拓扑级语义。因而 `MultiAssetSpawnerCfg` 内只需从第一个
+    selected URDF 解析一次，后续 variants 复用该计划即可，避免每个 prototype spawn
+    重复读取 XML。
+    """
+
+    source_urdf_path: Path
+    """提供 visual/link/color contract 的 reference `hand.urdf` 路径。"""
+
+    visual_rgba_by_name: dict[str, UrdfRgba]
+    """URDF visual name -> RGBA debug color；颜色只服务 GUI/debug，不参与动力学。"""
+
+    visual_link_by_name: dict[str, str]
+    """URDF visual name -> parent link name；用于定位 spawned USD 的 `/<link>/visuals`。"""
+
+
+def _serialize_visual_material_restore_plan(plan: _VisualMaterialRestorePlan) -> dict[str, object]:
+    r"""把内部颜色恢复计划转成 `UrdfFileCfg.to_dict()` 可 JSON hash 的 payload。
+
+    IsaacLab `UrdfConverter` 会在转换前对整个 cfg 做 `json.dumps(cfg.to_dict())`。
+    因此不能把 `Path` 或 dataclass 直接挂到 `UrdfFileCfg` 上；这里显式降为
+    `str + dict + list[float]`，既保留同拓扑共享计划，也不污染 converter hash。
+    """
+
+    return {
+        "source_urdf_path": str(plan.source_urdf_path),
+        "visual_rgba_by_name": {
+            visual_name: list(rgba) for visual_name, rgba in plan.visual_rgba_by_name.items()
+        },
+        "visual_link_by_name": dict(plan.visual_link_by_name),
+    }
+
+
+def _deserialize_visual_material_restore_plan(payload: object) -> _VisualMaterialRestorePlan | None:
+    r"""把挂在 `UrdfFileCfg` 上的 JSON-safe payload 还原为内部颜色恢复计划。"""
+
+    if not isinstance(payload, dict):
+        return None
+
+    source_urdf_path = payload.get("source_urdf_path")
+    visual_rgba_by_name = payload.get("visual_rgba_by_name")
+    visual_link_by_name = payload.get("visual_link_by_name")
+    if not isinstance(source_urdf_path, str) or not isinstance(visual_rgba_by_name, dict):
+        return None
+    if not isinstance(visual_link_by_name, dict):
+        return None
+
+    return _VisualMaterialRestorePlan(
+        source_urdf_path=Path(source_urdf_path),
+        visual_rgba_by_name={
+            str(visual_name): tuple(float(value) for value in rgba)  # type: ignore[misc]
+            for visual_name, rgba in visual_rgba_by_name.items()
+        },
+        visual_link_by_name={str(visual_name): str(link_name) for visual_name, link_name in visual_link_by_name.items()},
+    )
 
 
 @configclass
@@ -282,22 +344,33 @@ class HandSpawnAdapter:
         if self.cfg.spawn_backend != "urdf":
             raise NotImplementedError(f"HandSpawnAdapter spawn_backend={self.cfg.spawn_backend!r} is not implemented")
 
+        assets = self.selection.assets  # resolved post-mutate hand variants；同一个 spawner 内应为 same-schema
+        visual_material_plan = _build_visual_material_restore_plan(assets[0].urdf_path) if (
+            self.cfg.restore_visual_materials and len(assets) > 0
+        ) else None  # 同拓扑颜色/visual-link contract 只从 reference URDF 解析一次
         assets_cfg = [
-            _build_hand_urdf_file_cfg(container, self.cfg)
-            for container in self.selection.assets
-        ]  # 每个 child cfg 对应一个 post-mutate hand variant
+            _build_hand_urdf_file_cfg(container, self.cfg, visual_material_plan=visual_material_plan)
+            for container in assets
+        ]  # 每个 child cfg 对应一个 post-mutate hand variant；材质计划共享
         return sim_utils.MultiAssetSpawnerCfg(
             assets_cfg=assets_cfg,
             random_choice=self.cfg.asset_routing == "random_choice",
         )
 
 
-def _build_hand_urdf_file_cfg(container: HandContainer, cfg: HandSpawnCfg) -> sim_utils.UrdfFileCfg:
+def _build_hand_urdf_file_cfg(
+    container: HandContainer,
+    cfg: HandSpawnCfg,
+    *,
+    visual_material_plan: _VisualMaterialRestorePlan | None = None,
+) -> sim_utils.UrdfFileCfg:
     r"""为单个 generated hand container 构造 `UrdfFileCfg`。
 
     Args:
         container (HandContainer): asset bank 输出的单 hand container。
         cfg (HandSpawnCfg): GM hand spawn 配置。
+        visual_material_plan (_VisualMaterialRestorePlan | None): 同拓扑 selection 共享的
+            debug color 恢复计划；`None` 表示 wrapper 需要按当前 URDF fallback 解析。
 
     Returns:
         sim_utils.UrdfFileCfg: IsaacLab URDF importer cfg。
@@ -345,6 +418,12 @@ def _build_hand_urdf_file_cfg(container: HandContainer, cfg: HandSpawnCfg) -> si
     )
     if cfg.restore_visual_materials:
         urdf_file_cfg.func = _spawn_urdf_with_restored_visual_materials  # 只恢复 GUI debug color，不改动力学
+        # IsaacLab converter 会 JSON-hash `UrdfFileCfg.to_dict()`；因此挂载的计划必须只含 JSON-safe 数据。
+        urdf_file_cfg._anymani_visual_material_plan = (
+            _serialize_visual_material_restore_plan(visual_material_plan)
+            if visual_material_plan is not None
+            else None
+        )
     return urdf_file_cfg
 
 
@@ -533,10 +612,36 @@ def _spawn_urdf_with_restored_visual_materials(
     from isaaclab.sim.spawners.from_files import spawn_from_urdf
 
     spawned_prim = spawn_from_urdf(prim_path, cfg, translation=translation, orientation=orientation, **kwargs)
-    visual_rgba_by_name = parse_urdf_visual_rgba_by_name(Path(cfg.asset_path))  # URDF visual name -> debug RGBA
-    visual_link_by_name = _parse_urdf_visual_link_by_name(Path(cfg.asset_path))  # URDF visual name -> parent link name
-    _restore_visual_materials_on_spawned_prim(spawned_prim, visual_rgba_by_name, visual_link_by_name)
+    visual_material_plan = _deserialize_visual_material_restore_plan(
+        getattr(cfg, "_anymani_visual_material_plan", None)
+    )  # adapter 预计算的同拓扑共享计划
+    if visual_material_plan is None:
+        visual_material_plan = _build_visual_material_restore_plan(Path(cfg.asset_path))  # direct wrapper 使用时的安全 fallback
+    _restore_visual_materials_on_spawned_prim(
+        spawned_prim,
+        visual_material_plan.visual_rgba_by_name,
+        visual_material_plan.visual_link_by_name,
+    )
     return spawned_prim
+
+
+def _build_visual_material_restore_plan(urdf_path: Path) -> _VisualMaterialRestorePlan:
+    r"""从一个 reference URDF 构造同拓扑 variants 共享的 debug color 恢复计划。
+
+    Args:
+        urdf_path (Path): reference `hand.urdf`。对于 post-mutate same-topology selection，
+            只使用第一个 selected asset 即可，因为 visual/link/color contract 是 topology-level。
+
+    Returns:
+        _VisualMaterialRestorePlan: 可挂到多个 child `UrdfFileCfg` 上复用的颜色恢复计划。
+    """
+
+    resolved_urdf_path = Path(urdf_path).expanduser().resolve(strict=False)
+    return _VisualMaterialRestorePlan(
+        source_urdf_path=resolved_urdf_path,
+        visual_rgba_by_name=parse_urdf_visual_rgba_by_name(resolved_urdf_path),
+        visual_link_by_name=_parse_urdf_visual_link_by_name(resolved_urdf_path),
+    )
 
 
 def _parse_urdf_visual_link_by_name(urdf_path: Path) -> dict[str, str]:
