@@ -15,12 +15,14 @@ from pathlib import Path
 import anymani.tasks.gm  # noqa: F401  # 注册 tasks-owned Gym task aliases；不导入 `inhand_env_cfg`
 import gymnasium as gym
 
-
 INHAND_ENV_CFG_PATH = Path(__file__).resolve().parents[1] / "inhand_env_cfg.py"
 r"""被测试的 GM in-hand env cfg 源文件路径；只做 AST 读取，不执行模块。"""
 
 REORIENT_COMMAND_PATH = Path(__file__).resolve().parents[1] / "mdp" / "commands" / "reorient_command.py"
 r"""被测试的 command term 源文件路径；用于检查 command-owned debug marker contract。"""
+
+MDP_INIT_PATH = Path(__file__).resolve().parents[1] / "mdp" / "__init__.py"
+r"""被测试的 GM MDP re-export 文件路径；用于检查 `gm_mdp.xxx` 扁平 API。"""
 
 
 def _module_ast() -> ast.Module:
@@ -46,12 +48,10 @@ def _constant_values() -> dict[str, object]:
         "GM_DEFAULT_HAND_BANK_PATH",
         "GM_DEFAULT_HAND_SAMPLE_COUNT",
         "GM_DEFAULT_HAND_SAMPLE_SEED",
-        "GM_FINGERTIP_CONTACT_SENSOR_NAMES",
-        "GM_NON_TIP_CONTACT_SENSOR_NAMES",
         "GM_DEFAULT_NUM_ENVS",
         "GM_DEFAULT_OBJECT_INIT_OFFSET_H",
         "GM_DEFAULT_OBJECT_INIT_POS_E",
-    }  # 本测试只解析 first runnable slice 的实验规模锚点，跳过 sensor tuple 等无关声明
+    }  # 本测试只解析 first runnable slice 的实验规模锚点
     for node in _module_ast().body:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
             continue
@@ -94,11 +94,27 @@ def _eval_literal_expr(node: ast.AST, values: dict[str, object]) -> object:
 def _default_hand_spawn_call() -> ast.Call:
     r"""定位 `DEFAULT_GM_HAND_SPAWN_CFG = HandSpawnCfg(...)` 调用。"""
 
+    return _module_assign_call("DEFAULT_GM_HAND_SPAWN_CFG")
+
+
+def _module_assign_call(assign_name: str) -> ast.Call:
+    r"""定位模块级 `assign_name = SomeCall(...)` 声明。"""
+
     for node in _module_ast().body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            if node.targets[0].id == "DEFAULT_GM_HAND_SPAWN_CFG" and isinstance(node.value, ast.Call):
-                return node.value  # HandSpawnCfg(...) 调用节点
-    raise AssertionError("DEFAULT_GM_HAND_SPAWN_CFG declaration not found")
+            if node.targets[0].id == assign_name and isinstance(node.value, ast.Call):
+                return node.value  # 声明式 cfg / helper 调用节点
+    raise AssertionError(f"{assign_name} declaration not found")
+
+
+def _call_func_name(call: ast.Call) -> str:
+    r"""返回简单函数调用的函数名，服务 AST contract test。"""
+
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    raise AssertionError(f"Unsupported call func: {ast.dump(call.func)}")
 
 
 def _keyword_call(call: ast.Call, keyword_name: str) -> ast.Call:
@@ -197,24 +213,32 @@ def test_gm_inhand_object_init_uses_generated_hand_palm_offset() -> None:
     assert values["GM_DEFAULT_OBJECT_INIT_POS_E"] == (0.0, 0.055, 0.56)  # $p^e_h=(0,0,0.5)$ 加 `{h}` 偏置
 
 
-def test_gm_inhand_contact_layout_declares_tip_palm_and_non_tip_sensors() -> None:
-    r"""contact layout 应覆盖 fingertip、palm 与 non-tip links，支撑 obs/reward 读取。"""
+def test_gm_inhand_contact_layout_is_sidecar_derived_and_installed() -> None:
+    r"""contact layout 应由 selected hand sidecar 推导，而不是在 env cfg 中硬编码四指字段。"""
 
-    values = _constant_values()  # 解析 sensor name tuple 常量
-    scene_fields = _class_assigned_names("GmInHandSceneCfg")  # scene 中显式声明的 sensor cfg 字段
+    values = _constant_values()  # 解析 validate_all_assets=False 这类安全字面量
+    source = INHAND_ENV_CFG_PATH.read_text(encoding="utf-8")  # 纯文本检查，不 import Isaac/pxr binding
+    layout_call = _module_assign_call("GM_DEFAULT_CONTACT_LAYOUT")  # `build_contact_sensor_layout_from_hand_spawn(...)`
+    scene_fields = _class_assigned_names("GmInHandSceneCfg")  # scene class body 中不应再有硬编码 contact 字段
 
-    expected_contact_fields = set(values["GM_FINGERTIP_CONTACT_SENSOR_NAMES"]) | set(
-        values["GM_NON_TIP_CONTACT_SENSOR_NAMES"]
-    )  # reward/obs 会按这些名字从 env.scene 读取 ContactSensor
+    assert _call_func_name(layout_call) == "build_contact_sensor_layout_from_hand_spawn"
+    assert isinstance(layout_call.args[0], ast.Name) and layout_call.args[0].id == "DEFAULT_GM_HAND_SPAWN_CFG"
+    assert _keyword_literal(layout_call, "validate_all_assets", values) is False  # 默认只读首个 selected asset
+    assert not any(name.startswith("contact_") for name in scene_fields)  # per-link sensors 改为 scene instance 动态安装
+    assert "install_contact_sensors(self, GM_DEFAULT_CONTACT_LAYOUT)" in source  # scene __post_init__ 安装 sensors
+    assert "GM_DEFAULT_CONTACT_LAYOUT.fingertip_sensor_names" in source  # obs/reward 从 layout 取 tip sensor names
+    assert "GM_DEFAULT_CONTACT_LAYOUT.non_tip_sensor_names" in source  # bad contact 从 layout 取 non-tip sensor names
 
-    assert "contact_palm" in expected_contact_fields  # palm penalty 必须显式存在
-    assert set(values["GM_FINGERTIP_CONTACT_SENSOR_NAMES"]) == {
-        "contact_index_tip",
-        "contact_middle_tip",
-        "contact_ring_tip",
-        "contact_thumb_tip",
-    }  # 四指 fingertip binary contact 顺序合同
-    assert expected_contact_fields.issubset(scene_fields)  # 每个被 obs/reward 引用的 sensor 都必须在 scene 声明
+
+def test_gm_mdp_preserves_flat_public_observation_and_reward_exports() -> None:
+    r"""observations/rewards 转成 package 后，外部仍应通过 `gm_mdp.xxx` 扁平访问。"""
+
+    source = MDP_INIT_PATH.read_text(encoding="utf-8")  # 纯文本检查 re-export，不 import Isaac runtime
+
+    assert "from .observations import" in source  # package 化后仍从 `.observations` re-export obs terms
+    assert "from .rewards import" in source  # package 化后仍从 `.rewards` re-export reward terms
+    assert '"joint_pos_raw"' in source and '"fingertip_contact_binary"' in source
+    assert '"keypoint_reorientation_reward"' in source and '"good_fingertip_contact"' in source
 
 
 def test_gm_inhand_task_aliases_point_to_tasks_env_cfg() -> None:

@@ -23,9 +23,9 @@ $$
 joint-to-joint relative pose、palm-to-tip pose 等关系量。关系量属于
 `distill/models/relations.py`，attention bias 属于 `distill/models/attention_bias.py`。
 
-== 与 observations.py 的边界 ==
+== 与 GM observations package 的边界 ==
 
-`tasks/gm/mdp/observations.py` 负责运行时 obs MDP 的浅契约，尤其是：
+`tasks/gm/mdp/observations/` 负责运行时 obs MDP 的浅契约，尤其是：
 
 - state obs：$q,\dot q,\Delta a_{t-1}$ 等动态关节本体感受；
 - contact obs：per-tip 接触点 / 接触力等动态触觉；

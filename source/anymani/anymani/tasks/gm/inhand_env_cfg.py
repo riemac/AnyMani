@@ -30,13 +30,13 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
-from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from anymani.assets.bank import HandBankCfg
 
 from . import mdp as gm_mdp
+from .contact_sensors import build_contact_sensor_layout_from_hand_spawn, install_contact_sensors
 from .hand_spawn import DEFAULT_HAND_ANCHOR_POS_E, HandFrameCfg, HandSpawnAdapter, HandSpawnCfg, HandUrdfSpawnCfg
 
 DEFAULT_OBJECT_USD = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
@@ -76,38 +76,6 @@ $p^e_o=p^e_h+p^h_o=(0,0.055,0.56)$。若后续启用 episode 级 hand orientatio
 reset，应把该常量升级为 reset-time 的 $p^e_o=p^e_h+R_{eh}p^h_o$ 计算。
 """
 
-GM_FINGERTIP_CONTACT_SENSOR_NAMES = (
-    "contact_index_tip",
-    "contact_middle_tip",
-    "contact_ring_tip",
-    "contact_thumb_tip",
-)
-"""指尖 ContactSensor 名称，顺序与 generated hand 的四指语义一致。"""
-
-GM_NON_TIP_CONTACT_SENSOR_NAMES = (
-    "contact_palm",
-    "contact_index_root",
-    "contact_middle_root",
-    "contact_ring_root",
-    "contact_index_mcp1",
-    "contact_index_mcp2",
-    "contact_index_pip",
-    "contact_index_dip",
-    "contact_middle_mcp1",
-    "contact_middle_mcp2",
-    "contact_middle_pip",
-    "contact_middle_dip",
-    "contact_ring_mcp1",
-    "contact_ring_mcp2",
-    "contact_ring_pip",
-    "contact_ring_dip",
-    "contact_thumb_cmc1",
-    "contact_thumb_cmc2",
-    "contact_thumb_mcp",
-    "contact_thumb_dip",
-)
-"""非指尖 ContactSensor 名称；用于 bad-contact penalty。"""
-
 DEFAULT_GM_HAND_SPAWN_CFG = HandSpawnCfg(
     bank=HandBankCfg(
         source_mode="post_mutate",
@@ -137,27 +105,22 @@ obs、good-contact reward 与 bad-contact penalty 都读取 scene 中显式声�
 但接触项会在第一步 observation / reward 读取时失效。
 """
 
+GM_DEFAULT_CONTACT_LAYOUT = build_contact_sensor_layout_from_hand_spawn(
+    DEFAULT_GM_HAND_SPAWN_CFG,
+    validate_all_assets=False,
+)
+r"""默认 contact sensor layout，由第一个 selected hand sidecar 自动推导。
+
+当前 same-topology training slice 已由 `HandSpawnCfg.validate_same_schema=True` 约束为
+同一 articulation schema，因此默认只读取第一个 selected asset 的 `hand_cfg`。若后续调试
+跨 topology bank，可在 helper 层打开 `validate_all_assets=True` 做全量 sidecar 对照。
+"""
+
 
 def build_gm_hand_articulation_cfg(hand_spawn_cfg: HandSpawnCfg, *, prim_path: str) -> ArticulationCfg:
     r"""将 GM hand spawn cfg lower 成 `scene.robot` articulation cfg。"""
 
     return HandSpawnAdapter(hand_spawn_cfg).build_articulation_cfg(prim_path=prim_path)
-
-
-def _contact_sensor_cfg(link_name: str, *, debug_vis: bool = False) -> ContactSensorCfg:
-    r"""构造 generated hand 某个 link 对 object 的 ContactSensorCfg。"""
-
-    return ContactSensorCfg(
-        prim_path=f"{{ENV_REGEX_NS}}/Robot/{link_name}",
-        filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
-        update_period=0.0,
-        history_length=3,
-        track_air_time=True,
-        track_friction_forces=True,
-        max_contact_data_count_per_prim=64,
-        force_threshold=0.125,
-        debug_vis=debug_vis,
-    )
 
 
 @configclass
@@ -213,30 +176,16 @@ class GmInHandSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75)),
     )
 
-    contact_index_tip = _contact_sensor_cfg("index_tip")
-    contact_middle_tip = _contact_sensor_cfg("middle_tip")
-    contact_ring_tip = _contact_sensor_cfg("ring_tip")
-    contact_thumb_tip = _contact_sensor_cfg("thumb_tip")
-    contact_palm = _contact_sensor_cfg("palm")
-    contact_index_root = _contact_sensor_cfg("index_root_fixed_link")
-    contact_middle_root = _contact_sensor_cfg("middle_root_fixed_link")
-    contact_ring_root = _contact_sensor_cfg("ring_root_fixed_link")
-    contact_index_mcp1 = _contact_sensor_cfg("index_mcp1")
-    contact_index_mcp2 = _contact_sensor_cfg("index_mcp2")
-    contact_index_pip = _contact_sensor_cfg("index_pip")
-    contact_index_dip = _contact_sensor_cfg("index_dip")
-    contact_middle_mcp1 = _contact_sensor_cfg("middle_mcp1")
-    contact_middle_mcp2 = _contact_sensor_cfg("middle_mcp2")
-    contact_middle_pip = _contact_sensor_cfg("middle_pip")
-    contact_middle_dip = _contact_sensor_cfg("middle_dip")
-    contact_ring_mcp1 = _contact_sensor_cfg("ring_mcp1")
-    contact_ring_mcp2 = _contact_sensor_cfg("ring_mcp2")
-    contact_ring_pip = _contact_sensor_cfg("ring_pip")
-    contact_ring_dip = _contact_sensor_cfg("ring_dip")
-    contact_thumb_cmc1 = _contact_sensor_cfg("thumb_cmc1")
-    contact_thumb_cmc2 = _contact_sensor_cfg("thumb_cmc2")
-    contact_thumb_mcp = _contact_sensor_cfg("thumb_mcp")
-    contact_thumb_dip = _contact_sensor_cfg("thumb_dip")
+    def __post_init__(self):
+        r"""Install sidecar-derived per-link contact sensors on the scene instance.
+
+        `InteractiveScene` 读取 scene cfg 实例属性来发现 sensors；因此这里动态挂载
+        `contact_<link>` 字段，而不是在 class body 中写死当前四指 topology。每个 sensor
+        仍然是一条 link 对 object 的 filtered contact，保持 reward/obs 的物理语义。
+        """
+
+        super().__post_init__()
+        install_contact_sensors(self, GM_DEFAULT_CONTACT_LAYOUT)  # per-link ContactSensorCfg，object-only filter
 
 
 @configclass
@@ -284,7 +233,7 @@ class GmActionsCfg:
         - state obs 用 raw rad $q_i$，动作用 raw rad $\Delta_i$，同量纲。
         - last_action 应喂 $a_{t-1}^{\text{proc}}$（rad delta），
           不是 `isaac_mdp.last_action` 返回的 `raw_actions`（pre-scale），
-          见 `mdp/observations.py` state obs 段的对应 TODO。
+          见 `mdp/observations/observations_state.py` state obs 段的对应 TODO。
 
     preset:
         $s = 0.1$：NN 输出 $\in[-1,1]$ 时每步增量 $\le 0.1$ rad。
@@ -337,7 +286,7 @@ class GmObservationsCfg:
         joint_limits = ObsTerm(func=gm_mdp.joint_soft_pos_limits, params={"asset_cfg": SceneEntityCfg("robot")})
         fingertip_contact = ObsTerm(
             func=gm_mdp.fingertip_contact_binary,
-            params={"sensor_names": GM_FINGERTIP_CONTACT_SENSOR_NAMES, "force_threshold": 0.2},
+            params={"sensor_names": GM_DEFAULT_CONTACT_LAYOUT.fingertip_sensor_names, "force_threshold": 0.2},
         )
         command = ObsTerm(func=gm_mdp.reorient_command, params={"command_name": "goal_pose"})
 
@@ -358,7 +307,7 @@ class GmObservationsCfg:
         )
         fingertip_force_w = ObsTerm(
             func=gm_mdp.fingertip_contact_force_w,
-            params={"sensor_names": GM_FINGERTIP_CONTACT_SENSOR_NAMES},
+            params={"sensor_names": GM_DEFAULT_CONTACT_LAYOUT.fingertip_sensor_names},
         )
 
     policy: ObsGroup = PolicyCfg(history_length=1)
@@ -401,7 +350,7 @@ class GmRewardsCfg:
         func=gm_mdp.good_fingertip_contact,
         weight=0.5,
         params={
-            "sensor_names": GM_FINGERTIP_CONTACT_SENSOR_NAMES,
+            "sensor_names": GM_DEFAULT_CONTACT_LAYOUT.fingertip_sensor_names,
             "min_contacts": 2,
             "force_threshold": 0.2,
             "lambda_floor": 0.05,
@@ -411,7 +360,7 @@ class GmRewardsCfg:
         func=gm_mdp.bad_non_tip_contact,
         weight=-0.2,
         params={
-            "sensor_names": GM_NON_TIP_CONTACT_SENSOR_NAMES,
+            "sensor_names": GM_DEFAULT_CONTACT_LAYOUT.non_tip_sensor_names,
             "force_threshold": 0.2,
             "lambda_floor": 0.0,
         },
@@ -585,8 +534,7 @@ __all__ = [
     "GM_DEFAULT_HAND_BANK_PATH",
     "GM_DEFAULT_HAND_SAMPLE_COUNT",
     "GM_DEFAULT_HAND_SAMPLE_SEED",
-    "GM_FINGERTIP_CONTACT_SENSOR_NAMES",
-    "GM_NON_TIP_CONTACT_SENSOR_NAMES",
+    "GM_DEFAULT_CONTACT_LAYOUT",
     "GM_DEFAULT_NUM_ENVS",
     "GM_DEFAULT_OBJECT_INIT_OFFSET_H",
     "GM_DEFAULT_OBJECT_INIT_POS_E",
