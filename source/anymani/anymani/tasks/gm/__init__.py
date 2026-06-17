@@ -1,19 +1,14 @@
 r"""Generalized manipulation task family for AnyMani.
 
-本包是新一代“手型泛化的手内操作”任务环境入口。
+本包是新一代“手型泛化的手内操作”任务环境入口。`gm` 只注册 Isaac Lab
+环境语义：scene、obs、action、command、reward、reset、termination。训练算法、
+rl_games YAML、checkpoint、rollout dataset 与网络结构仍由 `distill` 消费本包后
+自包含维护。
 
-当前处于 design scaffold 阶段：这里先稳定 package 边界和研究语义，
-暂不注册一个会被误认为可直接训练的 Gym 环境。正式注册应等到
-`GmInHandEnvCfg` 至少满足以下条件后再加入：
-
-- 能把一个已选定的 generated hand asset 绑定为 `scene.robot`；
-- action joint order 与该 asset 的 same-topology contract 对齐；
-- policy / critic observation schema 在 `distill` 侧可被记录到训练 manifest；
-- random agent smoke test 可在 Isaac Lab 中启动并完成若干步。
-
-NOTE:
-    `tasks` 只定义环境；`distill` 负责训练入口、rl_games 配置、asset-bank
-    split、checkpoint、rollout dataset 和模型结构。
+当前主环境 `AnyMani-GM-InHand-v0` 绑定的是 `inhand_env_cfg.GmInHandEnvCfg`：
+它使用 same-topology post-mutate hand selection，并按默认 env-per-hand routing
+给出 teacher RL 并行规模。该注册只表达任务默认 contract；正式实验仍应在
+`distill` 侧记录 asset selection、训练 seed 与网络配置。
 """
 
 from __future__ import annotations
@@ -28,6 +23,24 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.heterogeneous_test_env_cfg:HeterogeneousHandTestEnvCfg",
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-InHand-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.inhand_env_cfg:GmInHandEnvCfg",
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-InHand-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.inhand_env_cfg:GmInHandEnvCfg_PLAY",
     },
 )
 

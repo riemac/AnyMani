@@ -41,5 +41,15 @@ gym.register(
     },
 )
 
+gym.register(
+    id="AnyMani-GM-InHand-MLP-Smoke-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.gm_inhand_mlp_smoke_env_cfg:GmInHandMlpSmokeEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:gm_inhand_mlp_ppo_smoke.yaml",
+    },
+)
+
 
 __all__ = []

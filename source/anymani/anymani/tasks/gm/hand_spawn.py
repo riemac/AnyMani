@@ -355,6 +355,7 @@ class HandSpawnAdapter:
         return sim_utils.MultiAssetSpawnerCfg(
             assets_cfg=assets_cfg,
             random_choice=self.cfg.asset_routing == "random_choice",
+            activate_contact_sensors=self.cfg.urdf.activate_contact_sensors,
         )
 
 

@@ -23,7 +23,15 @@ from .events import (
     GmResetMode,
     simple_no_cache_reset,
 )
-from .observations import joint_pos_raw, joint_soft_pos_limits, joint_vel_raw, last_processed_action, reorient_command
+from .observations import (
+    fingertip_contact_binary,
+    fingertip_contact_force_w,
+    joint_pos_raw,
+    joint_soft_pos_limits,
+    joint_vel_raw,
+    last_processed_action,
+    reorient_command,
+)
 from .rewards import (
     AxisDeltaRotationReward,
     action_l2_curriculum,
@@ -53,6 +61,8 @@ __all__ = [
     "action_l2_curriculum",
     "action_rate_l2_curriculum",
     "bad_non_tip_contact",
+    "fingertip_contact_binary",
+    "fingertip_contact_force_w",
     "goal_success_bonus",
     "good_fingertip_contact",
     "joint_pos_raw",

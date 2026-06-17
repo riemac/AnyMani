@@ -75,10 +75,9 @@ class ReorientCommandCfg(CommandTermCfg):
     """是否启用 command 可视化。
 
     这是 Isaac Lab ``CommandTermCfg`` 的标准 debug visualization 开关。
-    在 ``ReorientCommandCfg`` 中，它包括两类 marker：
-
-    1. goal object marker：显示当前 subgoal 的目标物体姿态；
-    2. axis arrow marker：显示 axis + error-so(3) command 中的 axis 方向。
+    在 ``ReorientCommandCfg`` 中，当前已实现 goal object marker：显示当前
+    subgoal 的目标物体姿态。axis arrow marker 仍作为后续 debug 辅助预留，避免
+    第一版为箭头朝向引入额外实现风险。
 
     训练默认关闭，play / review 时可打开。
     """
@@ -185,9 +184,9 @@ class ReorientCommandCfg(CommandTermCfg):
     axis_arrow_visualizer_cfg: VisualizationMarkersCfg = GREEN_ARROW_X_MARKER_CFG.replace(
         prim_path="/Visuals/Command/reorient_axis"
     )
-    """axis arrow marker 的 USD / scale / prim_path 配置。
+    """axis arrow marker 的 USD / scale / prim_path 预留配置。
 
-    IsaacLab 的 arrow marker 默认沿 marker 局部 +x 方向。未来实现时，应构造
+    IsaacLab 的 arrow marker 默认沿 marker 局部 +x 方向。后续实现时，应构造
     一个 quaternion，将 +x 旋到当前 command axis 的 world/env 表达 `axis_e`，
     并在 `goal_marker_pos_h` 对应的 world 位置显示该箭头。
 

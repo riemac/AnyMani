@@ -61,20 +61,19 @@ DONE(Isaac Lab hook 语义):
     - `_update_metrics()`：更新 error buffers 和 logging metrics；不得在这里改变 goal。
     - `_update_command()`：检测 success，递增 `goal_success_count`，再触发 subgoal resample。
 
-TODO(debug visualization 语义):
-    - `_set_debug_vis_impl(debug_vis)`：创建 / 隐藏 goal object marker 和 axis arrow marker。
-    - `_debug_vis_callback(event)`：重复 visualize 当前 buffers；位置由
+DONE(debug visualization 语义):
+    - `_set_debug_vis_impl(debug_vis)`：创建 / 隐藏 goal object marker。
+    - `_debug_vis_callback(event)`：重复 visualize 当前 `goal_quat_w` buffer；位置由
       `goal_marker_pos_h` 经同一个 `semantic_R_ha` / hand-root pose 转到 world。
     - goal object marker 的 orientation 使用 `goal_quat_w`，代表当前 subgoal
       期望物体达到的真实目标姿态。
-    - axis arrow marker 的 orientation 应把 marker 局部 +x 方向旋到当前 `axis_e`；
-      该 axis 就是 `[axis_h, error_so3_h]` 中的 axis 经 `{h}->{e}` 变换后的方向。
     - marker 只在 debug/play 中服务人的视觉理解，不应进入 observation、reward、
       termination，也不应被误解为位置目标。
 
 TODO(debug visualization):
-    训练默认 `debug_vis=False`，因此第一版只兑现 command/reward 所需 buffer。
-    goal object marker / axis arrow 后续作为 play/review 辅助补上，不影响训练闭环。
+    axis arrow marker 仍预留：它的 orientation 应把 marker 局部 +x 方向旋到当前
+    `axis_e`；该 axis 就是 `[axis_h, error_so3_h]` 中的 axis 经 `{h}->{e}` 变换后
+    的方向。第一版先补 LEAP 风格 goal object marker，避免为箭头姿态引入额外实现风险。
 """
 
 from __future__ import annotations
@@ -85,6 +84,7 @@ from typing import TYPE_CHECKING
 import isaaclab.utils.math as math_utils
 import torch
 from isaaclab.managers import CommandTerm
+from isaaclab.markers import VisualizationMarkers
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -252,6 +252,36 @@ class ReorientCommand(CommandTerm):
         self._resample_command(success_ids)  # 默认 subgoal 模式会采新 axis + theta
         self.command_counter[success_ids] += 1  # success-driven subgoal 也计入 command counter
         self.time_left[success_ids] = self.cfg.resampling_time_range[1]  # 继续禁用时间驱动重采样
+
+    def _set_debug_vis_impl(self, debug_vis: bool):
+        r"""创建或隐藏目标姿态 marker。
+
+        该 marker 对齐 LEAP 参考实现的“虚拟目标物体”语义：它只展示 command term
+        内部的目标姿态 $R_g$，不参与物理碰撞、不改变 reward，也不作为位置目标。
+        """
+
+        if debug_vis:
+            if not hasattr(self, "goal_pose_visualizer"):
+                self.goal_pose_visualizer = VisualizationMarkers(self.cfg.goal_pose_visualizer_cfg)  # USD goal cube marker
+            self.goal_pose_visualizer.set_visibility(True)  # 由 CommandTerm callback 每帧写入 pose
+        elif hasattr(self, "goal_pose_visualizer"):
+            self.goal_pose_visualizer.set_visibility(False)  # 保留对象但隐藏，便于后续重新打开
+
+    def _debug_vis_callback(self, event):
+        r"""把当前目标姿态 buffer 写到虚拟目标物体 marker。
+
+        位置使用 `goal_marker_pos_h`，即 hand semantic frame `{h}` 中的纯显示偏置；
+        姿态使用 `goal_quat_w`，即当前 subgoal 真实要求的 object orientation。
+        """
+
+        if not hasattr(self, "goal_pose_visualizer"):
+            return
+
+        marker_offset_h = torch.tensor(self.cfg.goal_marker_pos_h, dtype=torch.float32, device=self.device).reshape(1, 3)  # $p^h_{marker}$，只服务可视化
+        marker_offset_a = marker_offset_h @ self.semantic_R_ha  # $p^a_{marker}=R_{ha}^\top p^h$ 的 row-vector 写法
+        marker_offset_w = math_utils.quat_apply(self.robot.data.root_quat_w, marker_offset_a.repeat(self.num_envs, 1))  # $R_{wa}p^a$
+        marker_pos_w = self.robot.data.root_pos_w + marker_offset_w  # `[B,3]`，每个 env 中 marker 的世界位置
+        self.goal_pose_visualizer.visualize(translations=marker_pos_w, orientations=self.goal_quat_w)  # 姿态目标来自 command 单一真源
 
     def _as_env_id_tensor(self, env_ids: Sequence[int] | slice | torch.Tensor) -> torch.Tensor:
         r"""把 Isaac Lab 传入的 env id 表达统一成 LongTensor。"""

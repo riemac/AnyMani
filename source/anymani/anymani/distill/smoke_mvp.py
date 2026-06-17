@@ -32,6 +32,8 @@ simulation_app = app_launcher.app
 
 
 import anymani.distill.rl  # noqa: F401  # 注册 distill 自包含 task
+import anymani.tasks  # noqa: F401  # 同时允许 smoke tasks-owned env aliases，例如 GM-InHand-Play
+import anymani.tasks.gm  # noqa: F401  # 显式注册 gm-owned aliases，避免父包自动发现被 runtime 条件跳过
 import gymnasium as gym
 import isaaclab_tasks  # noqa: F401
 import torch

@@ -15,8 +15,6 @@ r"""ManagerBasedRLEnv scaffold for generalized in-hand manipulation.
 
 from __future__ import annotations
 
-from dataclasses import MISSING
-
 import isaaclab.envs.mdp as isaac_mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
@@ -32,12 +30,134 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
+from anymani.assets.bank import HandBankCfg
+
 from . import mdp as gm_mdp
+from .hand_spawn import DEFAULT_HAND_ANCHOR_POS_E, HandFrameCfg, HandSpawnAdapter, HandSpawnCfg, HandUrdfSpawnCfg
 
 DEFAULT_OBJECT_USD = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
+
+GM_DEFAULT_HAND_BANK_PATH = (
+    "source/anymani/anymani/assets/generated/2026-06-10_11-30-08/"
+    "single_palm_leap/right_t4_i4_m4_r4/2026-06-11_14-20-22"
+)
+r"""GM in-hand 默认使用的 same-topology post-mutate run。"""
+
+GM_DEFAULT_HAND_SAMPLE_COUNT = 16
+"""默认抽样 hand asset 数；包含 source topology 母体作为普通候选，可按 smoke/训练阶段调节。"""
+
+GM_DEFAULT_HAND_SAMPLE_SEED = 42
+"""默认资产抽样种子；与训练 seed 分离，只控制 hand bank 选择。"""
+
+GM_DEFAULT_ENVS_PER_HAND = 32
+"""默认每个 hand asset 分配的 env 数；当前 preset 为 32。"""
+
+GM_DEFAULT_NUM_ENVS = GM_DEFAULT_HAND_SAMPLE_COUNT * GM_DEFAULT_ENVS_PER_HAND
+"""默认总并行环境数，始终由 hand sample count 与 env-per-hand routing 相乘得到。"""
+
+GM_DEFAULT_OBJECT_INIT_OFFSET_H = (0.0, 0.055, 0.06)
+r"""默认 object root 相对 hand semantic frame `{h}` 的初始偏置，单位 m。
+
+当前 generated hand 的 palm box 约覆盖 $y^h\in[0,0.08]$，四指从 palm 向
+$+y^h$ 方向展开；因此 object 初态不能沿用旧 LEAP cfg 的 $y=-0.10$。这里把
+DexCube root 放在掌心到指根之间，并让 $z^h=0.06$ 约等于 palm half-height
+加 cube half-height 后的轻微离手高度，reset 后由重力落到手上。
+"""
+
+GM_DEFAULT_OBJECT_INIT_POS_E = (0.0, 0.055, 0.56)
+r"""默认 object root 在 env frame `{e}` 中的位置，单位 m。
+
+当前 $R_{eh}^{anchor}=I$ 且 $p_{eh}^{anchor}=(0,0,0.5)$，所以
+$p^e_o=p^e_h+p^h_o=(0,0.055,0.56)$。若后续启用 episode 级 hand orientation
+reset，应把该常量升级为 reset-time 的 $p^e_o=p^e_h+R_{eh}p^h_o$ 计算。
+"""
+
+GM_FINGERTIP_CONTACT_SENSOR_NAMES = (
+    "contact_index_tip",
+    "contact_middle_tip",
+    "contact_ring_tip",
+    "contact_thumb_tip",
+)
+"""指尖 ContactSensor 名称，顺序与 generated hand 的四指语义一致。"""
+
+GM_NON_TIP_CONTACT_SENSOR_NAMES = (
+    "contact_palm",
+    "contact_index_root",
+    "contact_middle_root",
+    "contact_ring_root",
+    "contact_index_mcp1",
+    "contact_index_mcp2",
+    "contact_index_pip",
+    "contact_index_dip",
+    "contact_middle_mcp1",
+    "contact_middle_mcp2",
+    "contact_middle_pip",
+    "contact_middle_dip",
+    "contact_ring_mcp1",
+    "contact_ring_mcp2",
+    "contact_ring_pip",
+    "contact_ring_dip",
+    "contact_thumb_cmc1",
+    "contact_thumb_cmc2",
+    "contact_thumb_mcp",
+    "contact_thumb_dip",
+)
+"""非指尖 ContactSensor 名称；用于 bad-contact penalty。"""
+
+DEFAULT_GM_HAND_SPAWN_CFG = HandSpawnCfg(
+    bank=HandBankCfg(
+        source_mode="post_mutate",
+        selection_mode="sample",
+        post_mutate_path=GM_DEFAULT_HAND_BANK_PATH,
+        sample_count=GM_DEFAULT_HAND_SAMPLE_COUNT,
+        sample_seed=GM_DEFAULT_HAND_SAMPLE_SEED,
+        validate_mesh_relpaths=True,
+        parse_visual_rgba=True,
+    ),
+    frame=HandFrameCfg(
+        semantic_R_ha=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        semantic_p_ha=(0.0, 0.0, 0.0),
+        anchor_R_eh=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        anchor_p_eh=DEFAULT_HAND_ANCHOR_POS_E,
+    ),
+    urdf=HandUrdfSpawnCfg(activate_contact_sensors=True),
+    asset_routing="round_robin",
+    restore_visual_materials=True,
+    validate_same_schema=True,
+)
+r"""GM in-hand 默认 hand spawn 配置：当前默认选择一组 same-topology generated hands。
+
+`activate_contact_sensors=True` 是 MDP contract 的一部分：本环境的 policy obs、critic
+obs、good-contact reward 与 bad-contact penalty 都读取 scene 中显式声明的
+`ContactSensorCfg`。若 URDF importer 不为 hand links 打开 contact report，环境能 spawn
+但接触项会在第一步 observation / reward 读取时失效。
+"""
+
+
+def build_gm_hand_articulation_cfg(hand_spawn_cfg: HandSpawnCfg, *, prim_path: str) -> ArticulationCfg:
+    r"""将 GM hand spawn cfg lower 成 `scene.robot` articulation cfg。"""
+
+    return HandSpawnAdapter(hand_spawn_cfg).build_articulation_cfg(prim_path=prim_path)
+
+
+def _contact_sensor_cfg(link_name: str, *, debug_vis: bool = False) -> ContactSensorCfg:
+    r"""构造 generated hand 某个 link 对 object 的 ContactSensorCfg。"""
+
+    return ContactSensorCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/Robot/{link_name}",
+        filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
+        update_period=0.0,
+        history_length=3,
+        track_air_time=True,
+        track_friction_forces=True,
+        max_contact_data_count_per_prim=64,
+        force_threshold=0.125,
+        debug_vis=debug_vis,
+    )
 
 
 @configclass
@@ -53,7 +173,11 @@ class GmInHandSceneCfg(InteractiveSceneCfg):
     表达。
     """
 
-    robot: ArticulationCfg = MISSING
+    robot: ArticulationCfg = build_gm_hand_articulation_cfg(
+        DEFAULT_GM_HAND_SPAWN_CFG,
+        prim_path="{ENV_REGEX_NS}/Robot",
+    )
+    r"""默认绑定当前配置选中的 same-topology generated hands；训练配置可覆盖该字段。"""
 
     object: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/object",
@@ -73,7 +197,7 @@ class GmInHandSceneCfg(InteractiveSceneCfg):
             scale=(1.2, 1.2, 1.2),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.0, -0.10, 0.56),
+            pos=GM_DEFAULT_OBJECT_INIT_POS_E,
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
     )
@@ -88,6 +212,31 @@ class GmInHandSceneCfg(InteractiveSceneCfg):
         prim_path="/World/light",
         spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75)),
     )
+
+    contact_index_tip = _contact_sensor_cfg("index_tip")
+    contact_middle_tip = _contact_sensor_cfg("middle_tip")
+    contact_ring_tip = _contact_sensor_cfg("ring_tip")
+    contact_thumb_tip = _contact_sensor_cfg("thumb_tip")
+    contact_palm = _contact_sensor_cfg("palm")
+    contact_index_root = _contact_sensor_cfg("index_root_fixed_link")
+    contact_middle_root = _contact_sensor_cfg("middle_root_fixed_link")
+    contact_ring_root = _contact_sensor_cfg("ring_root_fixed_link")
+    contact_index_mcp1 = _contact_sensor_cfg("index_mcp1")
+    contact_index_mcp2 = _contact_sensor_cfg("index_mcp2")
+    contact_index_pip = _contact_sensor_cfg("index_pip")
+    contact_index_dip = _contact_sensor_cfg("index_dip")
+    contact_middle_mcp1 = _contact_sensor_cfg("middle_mcp1")
+    contact_middle_mcp2 = _contact_sensor_cfg("middle_mcp2")
+    contact_middle_pip = _contact_sensor_cfg("middle_pip")
+    contact_middle_dip = _contact_sensor_cfg("middle_dip")
+    contact_ring_mcp1 = _contact_sensor_cfg("ring_mcp1")
+    contact_ring_mcp2 = _contact_sensor_cfg("ring_mcp2")
+    contact_ring_pip = _contact_sensor_cfg("ring_pip")
+    contact_ring_dip = _contact_sensor_cfg("ring_dip")
+    contact_thumb_cmc1 = _contact_sensor_cfg("thumb_cmc1")
+    contact_thumb_cmc2 = _contact_sensor_cfg("thumb_cmc2")
+    contact_thumb_mcp = _contact_sensor_cfg("thumb_mcp")
+    contact_thumb_dip = _contact_sensor_cfg("thumb_dip")
 
 
 @configclass
@@ -111,6 +260,7 @@ class GmCommandsCfg:
         robot_asset_name="robot",
         axis_mode="random",
         axis_resample_mode="subgoal",
+        semantic_R_ha=DEFAULT_GM_HAND_SPAWN_CFG.frame.semantic_R_ha,
     )
 
 
@@ -185,6 +335,10 @@ class GmObservationsCfg:
         joint_vel = ObsTerm(func=gm_mdp.joint_vel_raw, params={"asset_cfg": SceneEntityCfg("robot")})
         last_action = ObsTerm(func=gm_mdp.last_processed_action, params={"action_name": "hand_joint_pos"})
         joint_limits = ObsTerm(func=gm_mdp.joint_soft_pos_limits, params={"asset_cfg": SceneEntityCfg("robot")})
+        fingertip_contact = ObsTerm(
+            func=gm_mdp.fingertip_contact_binary,
+            params={"sensor_names": GM_FINGERTIP_CONTACT_SENSOR_NAMES, "force_threshold": 0.2},
+        )
         command = ObsTerm(func=gm_mdp.reorient_command, params={"command_name": "goal_pose"})
 
         def __post_init__(self):
@@ -201,6 +355,10 @@ class GmObservationsCfg:
         object_quat = ObsTerm(
             func=isaac_mdp.root_quat_w,
             params={"asset_cfg": SceneEntityCfg("object"), "make_quat_unique": False},
+        )
+        fingertip_force_w = ObsTerm(
+            func=gm_mdp.fingertip_contact_force_w,
+            params={"sensor_names": GM_FINGERTIP_CONTACT_SENSOR_NAMES},
         )
 
     policy: ObsGroup = PolicyCfg(history_length=1)
@@ -238,6 +396,25 @@ class GmRewardsCfg:
         func=gm_mdp.goal_success_bonus,
         weight=2.0,
         params={"command_name": "goal_pose", "object_cfg": SceneEntityCfg("object"), "success_mode": "so3"},
+    )
+    good_contact = RewTerm(
+        func=gm_mdp.good_fingertip_contact,
+        weight=0.5,
+        params={
+            "sensor_names": GM_FINGERTIP_CONTACT_SENSOR_NAMES,
+            "min_contacts": 2,
+            "force_threshold": 0.2,
+            "lambda_floor": 0.05,
+        },
+    )
+    bad_non_tip_contact = RewTerm(
+        func=gm_mdp.bad_non_tip_contact,
+        weight=-0.2,
+        params={
+            "sensor_names": GM_NON_TIP_CONTACT_SENSOR_NAMES,
+            "force_threshold": 0.2,
+            "lambda_floor": 0.0,
+        },
     )
     action_l2 = RewTerm(func=gm_mdp.action_l2_curriculum, weight=-1.0e-4, params={"lambda_floor": 0.0})
     action_rate_l2 = RewTerm(func=gm_mdp.action_rate_l2_curriculum, weight=-1.0e-2, params={"lambda_floor": 0.0})
@@ -332,18 +509,23 @@ class GmCurriculumCfg:
 class GmInHandEnvCfg(ManagerBasedRLEnvCfg):
     r"""Generalized in-hand manipulation environment config scaffold.
 
-    该 cfg 是 task-level assembly surface。它表达“环境由哪些 MDP 组件组成”，
-    不表达“训练时选哪 64 个 assets”。
+    该 cfg 是 task-level assembly surface。它表达“环境由哪些 MDP 组件组成”，并给出
+    first runnable slice 的默认 generated-hand binding：固定 post-mutate run、
+    默认 hand sample count、asset-sampling seed 与 env-per-hand routing。
+
+    DONE:
+        1. `scene.robot` 已通过 `HandSpawnAdapter` 绑定当前默认选择的 same-topology generated hands；
+        2. action joint order 由 `preserve_order=True` 与 same-topology sidecar schema 共同约束；
+        3. command / reward 已接入 `ReorientCommand`、keypoint orientation reward、axis progress
+           与 goal-success curriculum；
+        4. Grasp Cache 暂后时启用 `simple_no_cache_reset`，作为 first runnable slice。
 
     TODO:
-        正式实现前必须解决：
-        1. `scene.robot` 的 generated hand binding；
-        2. same-topology action joint order contract；
-        3. command / reward 函数从 placeholder 变成可验证实现；
-        4. random-agent smoke test。
+        仍需用 Isaac Lab headless random-agent smoke 验证真实 articulation loading、contact sensor
+        report、reset/step 张量输出与 `rl_games` rollout。该验证依赖仿真运行，不伪装成纯单测完成。
     """
 
-    scene: GmInHandSceneCfg = GmInHandSceneCfg(num_envs=4096, env_spacing=0.75, replicate_physics=False)
+    scene: GmInHandSceneCfg = GmInHandSceneCfg(num_envs=GM_DEFAULT_NUM_ENVS, env_spacing=0.75, replicate_physics=False)
     viewer: ViewerCfg = ViewerCfg()
     sim: SimulationCfg = SimulationCfg(
         physics_material=RigidBodyMaterialCfg(static_friction=0.5, dynamic_friction=0.5),
@@ -377,6 +559,18 @@ class GmInHandEnvCfg(ManagerBasedRLEnvCfg):
 class GmInHandEnvCfg_PLAY(GmInHandEnvCfg):
     r"""Small-scene variant for visual review and smoke tests."""
 
+    commands: GmCommandsCfg = GmCommandsCfg(
+        goal_pose=gm_mdp.ReorientCommandCfg(
+            asset_name="object",
+            robot_asset_name="robot",
+            axis_mode="fixed",
+            axis_resample_mode="episode",
+            debug_vis=True,
+            fixed_axis_h=(0.0, 0.0, 1.0),
+            semantic_R_ha=DEFAULT_GM_HAND_SPAWN_CFG.frame.semantic_R_ha,
+        )
+    )
+
     def __post_init__(self):
         r"""Disable training-only noise for visual inspection."""
 
@@ -385,8 +579,17 @@ class GmInHandEnvCfg_PLAY(GmInHandEnvCfg):
         self.observations.policy.enable_corruption = False
         self.terminations.time_out = None
 
-
 __all__ = [
+    "DEFAULT_GM_HAND_SPAWN_CFG",
+    "GM_DEFAULT_ENVS_PER_HAND",
+    "GM_DEFAULT_HAND_BANK_PATH",
+    "GM_DEFAULT_HAND_SAMPLE_COUNT",
+    "GM_DEFAULT_HAND_SAMPLE_SEED",
+    "GM_FINGERTIP_CONTACT_SENSOR_NAMES",
+    "GM_NON_TIP_CONTACT_SENSOR_NAMES",
+    "GM_DEFAULT_NUM_ENVS",
+    "GM_DEFAULT_OBJECT_INIT_OFFSET_H",
+    "GM_DEFAULT_OBJECT_INIT_POS_E",
     "GmActionsCfg",
     "GmCommandsCfg",
     "GmCurriculumCfg",

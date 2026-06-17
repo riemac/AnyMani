@@ -1,66 +1,54 @@
-r"""GM teacher RL 环境配置，由 `distill` 选择资产并消费 `tasks/gm`。
+r"""GM teacher RL 环境配置，由 `distill` 消费 `tasks/gm`。
 
-`tasks/gm` 只定义 object-in-hand MDP；它不决定训练用哪只手、哪批资产、如何
-划分 train/heldout。这里位于 `distill/rl`，因此可以把一个 generated hand bundle
-绑定进 GM env，形成第一阶段 debug teacher task。
+`tasks/gm` 只定义 object-in-hand MDP；它不决定训练算法、网络结构、checkpoint、
+rollout dataset 或实验 manifest。这里位于 `distill/rl`，因此可以把 `gm` 的默认
+in-hand 环境作为 teacher debug route 暴露给 rl_games 配置。
 
-当前第一版只选择单个 same-topology post-mutate asset。多资产并行时，本文件会
-演化为 manifest-driven 配置：由 manifest 给出一组 `GmHandAssetRef`，再按 env id
-分配 asset。Grasp Cache 暂后，不在本文件实现。
+当前 debug teacher 不再维护旧的单资产 `asset_binding`。资产选择的声明式 contract 已经
+落在 `GmInHandEnvCfg.scene.robot` 内部：固定 post-mutate run、`sample_count=128`、
+`sample_seed=42`、round-robin routing。`distill` 后续若需要 train/heldout split，
+应通过替换 `HandSpawnCfg.bank` 或 manifest wrapper 实现，而不是恢复旧单资产接口。
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from anymani.tasks.gm.asset_binding import GmHandAssetRef, build_hand_articulation_cfg
-from anymani.tasks.gm.inhand_env_cfg import GmInHandEnvCfg
+from anymani.tasks.gm.inhand_env_cfg import GM_DEFAULT_ENVS_PER_HAND, GM_DEFAULT_NUM_ENVS, GmInHandEnvCfg
 from isaaclab.utils import configclass
 
-DEBUG_GM_HAND_ROOT = Path(
-    "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-06-10_11-30-08/"
-    "single_palm_leap/right_t4_i4_m4_r4/2026-06-11_14-20-22/46e6ea57"
-)
-r"""第一阶段 GM teacher debug asset。
+GM_TEACHER_DEBUG_NUM_ENVS = GM_DEFAULT_NUM_ENVS
+r"""debug teacher 默认并行环境数，沿用 `gm` 的默认 hand routing 合同。"""
 
-该路径指向一个已生成的 `hand.urdf` / `hand.yaml` bundle，topology 为
-`right_t4_i4_m4_r4`，DOF=16。它只用于先打通 vertical slice；正式同拓扑并行训练
-应由 manifest 传入一组同 topology asset，而不是继续硬编码单路径。
-"""
+GM_TEACHER_DEBUG_ENVS_PER_HAND = GM_DEFAULT_ENVS_PER_HAND
+r"""每个 selected hand asset 的 env 数，保持 $32$ 作为 round-robin routing 的阅读锚点。"""
 
-
-DEBUG_GM_HAND_REF = GmHandAssetRef(
-    root_dir=DEBUG_GM_HAND_ROOT,
-    topology_name="right_t4_i4_m4_r4",
-    asset_id="46e6ea57",
-)
-"""传给 `tasks/gm` 的单资产引用；它是已选资产，不是 asset bank。"""
+GM_TEACHER_DEBUG_EPISODE_LENGTH_S = 10.0
+r"""debug teacher 的较短 episode 长度，便于 first runnable slice 快速暴露 reset/reward 问题。"""
 
 
 @configclass
 class GmTeacherDebugEnvCfg(GmInHandEnvCfg):
-    r"""单资产 GM teacher debug 环境。
+    r"""GM teacher debug 环境。
 
-    该 cfg 是 distill 训练管线消费 tasks/gm 的最小例子：
+    该 cfg 是 distill 训练管线消费 `tasks/gm` 的最小例子：
 
     $$
-    \texttt{DEBUG\_GM\_HAND\_REF}
-    \rightarrow \texttt{build\_hand\_articulation\_cfg}
-    \rightarrow \texttt{scene.robot}.
+    \texttt{GmInHandEnvCfg}
+    \rightarrow \texttt{rl\_games\_cfg\_entry\_point}
+    \rightarrow \texttt{teacher rollout}.
     $$
 
-    它不负责 asset split、不负责网络结构、不负责 rl_games runner；这些继续留在
-    `distill/rl` 的训练入口与模型 adapter 中。
+    它不覆写 `scene.robot`，因此默认消费 `gm` 已装配好的 generated hand asset
+    selection。这里仅调整训练入口语义上的 episode 长度，避免把资产选择重新复制到
+    `distill`。
     """
 
     def __post_init__(self):
-        r"""绑定 debug hand asset 并降低默认并行规模，便于 smoke。"""
+        r"""设置 teacher debug 的训练时长参数。"""
 
         super().__post_init__()
-        self.scene.robot = build_hand_articulation_cfg(DEBUG_GM_HAND_REF, prim_path="{ENV_REGEX_NS}/robot")
-        self.scene.num_envs = 256  # debug teacher 默认小规模；命令行可覆盖
-        self.scene.replicate_physics = False  # 后续多资产混合需要 False；单资产先保持一致语义
-        self.episode_length_s = 10.0  # 第一阶段短 episode，便于快速发现 reset/reward 问题
+        self.scene.num_envs = GM_TEACHER_DEBUG_NUM_ENVS  # 与 gm 默认 hand routing 对齐
+        self.scene.replicate_physics = False  # 多 URDF prototype 的 batched scene 必须保持非 replicate physics
+        self.episode_length_s = GM_TEACHER_DEBUG_EPISODE_LENGTH_S  # 短 episode，优先发现 reset/reward contract 问题
 
 
 @configclass
@@ -77,8 +65,9 @@ class GmTeacherDebugEnvCfg_PLAY(GmTeacherDebugEnvCfg):
 
 
 __all__ = [
-    "DEBUG_GM_HAND_REF",
-    "DEBUG_GM_HAND_ROOT",
+    "GM_TEACHER_DEBUG_ENVS_PER_HAND",
+    "GM_TEACHER_DEBUG_EPISODE_LENGTH_S",
+    "GM_TEACHER_DEBUG_NUM_ENVS",
     "GmTeacherDebugEnvCfg",
     "GmTeacherDebugEnvCfg_PLAY",
 ]

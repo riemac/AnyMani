@@ -296,6 +296,38 @@ def test_restore_visual_materials_is_opt_in_on_urdf_child_cfg(tmp_path: Path) ->
     assert module.DEFAULT_HETEROGENEOUS_HAND_SPAWN_CFG.restore_visual_materials is True
 
 
+def test_multi_asset_spawner_propagates_urdf_contact_sensor_flag(tmp_path: Path) -> None:
+    r"""MultiAssetSpawner 顶层必须同步 URDF contact flag，避免 ContactSensor 找不到 reporter API。"""
+
+    module = _load_heterogeneous_cfg_module()
+    bundle_dir = tmp_path / "variant_contact"
+    bundle_dir.mkdir()
+    (bundle_dir / "hand.urdf").write_text("<robot name='stub'/>", encoding="utf-8")
+    (bundle_dir / "hand.yaml").write_text(
+        "id: variant_contact\n"
+        "topology_name: stub_topology\n"
+        "dof: 1\n"
+        "surviving_slots: [index]\n"
+        "fingers:\n"
+        "- name: index\n"
+        "  revolute_dof: 1\n",
+        encoding="utf-8",
+    )
+
+    spawn_cfg = module.HandSpawnCfg(
+        bank=module.HandBankCfg(
+            selection_mode="explicit",
+            containers=(str(bundle_dir),),
+            validate_mesh_relpaths=False,
+        ),
+        urdf=module.HandSpawnAdapter.__init__.__globals__["HandUrdfSpawnCfg"](activate_contact_sensors=True),
+    )
+    multi_asset_cfg = module.HandSpawnAdapter(spawn_cfg).build_multi_hand_spawn_cfg()
+
+    assert multi_asset_cfg.activate_contact_sensors is True
+    assert multi_asset_cfg.assets_cfg[0].activate_contact_sensors is True
+
+
 def test_visual_material_restore_plan_is_shared_across_same_topology_assets() -> None:
     r"""同拓扑 post-mutate variants 应复用第一个 URDF 解析出的颜色恢复计划。"""
 

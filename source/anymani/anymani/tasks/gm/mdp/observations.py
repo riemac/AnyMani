@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 __all__: list[str] = [
+    "fingertip_contact_binary",
+    "fingertip_contact_force_w",
     "joint_pos_raw",
     "joint_soft_pos_limits",
     "joint_vel_raw",
@@ -292,6 +294,76 @@ binary contact 等 student 侧设计。这些可在 student distill 阶段回流
 TOAGENT:
     注释不可删，可重述、修改、补充和润色。
 """
+
+
+def _sensor_total_force_w(env: ManagerBasedRLEnv, sensor_name: str) -> torch.Tensor:
+    r"""读取单个 ContactSensor 对 object 的总接触力。
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
+        sensor_name (str): scene 中 ContactSensor 的名称。
+
+    Returns:
+        torch.Tensor: 总接触力，形状 `[num_envs, 3]`，单位 N，世界系 `{w}` 表达。
+    """
+
+    sensor = env.scene[sensor_name]  # ContactSensor；由 scene cfg 显式声明 prim_path/filter
+    force_w = getattr(sensor.data, "force_matrix_w", None)  # `[B,body,filter,3]`，filtered normal force
+    if force_w is None:
+        force_w = getattr(sensor.data, "net_forces_w", None)  # `[B,body,3]`，fallback：未过滤 normal force
+    if force_w is None:
+        raise RuntimeError(f"Contact sensor {sensor_name!r} does not expose force data.")
+
+    total_force_w = torch.nan_to_num(force_w, nan=0.0)  # 无接触 / NaN pair 视为 0N
+    friction_w = getattr(sensor.data, "friction_forces_w", None)  # `[B,body,filter,3]`，切向摩擦力
+    if friction_w is not None:
+        total_force_w = total_force_w + torch.nan_to_num(friction_w, nan=0.0)  # normal + tangential contact force
+
+    # ContactSensor 可能含 body/filter 两个中间维；这里把它们合并求和成该 sensor 的总力。
+    while total_force_w.ndim > 2:
+        total_force_w = total_force_w.sum(dim=1)  # `[B,...,3] -> [B,3]`
+    return total_force_w  # `[B,3]`，世界系总接触力
+
+
+def fingertip_contact_force_w(
+    env: ManagerBasedRLEnv,
+    sensor_names: tuple[str, ...],
+) -> torch.Tensor:
+    r"""读取所有 fingertip ContactSensor 的世界系接触力。
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
+        sensor_names (tuple[str, ...]): 指尖传感器名称，顺序应与 hand/finger 语义顺序一致。
+
+    Returns:
+        torch.Tensor: 拼接后的接触力，形状 `[num_envs, 3 * num_sensors]`，单位 N。
+    """
+
+    forces = [_sensor_total_force_w(env, sensor_name) for sensor_name in sensor_names]  # 每项 `[B,3]`
+    return torch.cat(forces, dim=-1)  # `[B,3K]`，teacher critic 可直接使用的 force obs
+
+
+def fingertip_contact_binary(
+    env: ManagerBasedRLEnv,
+    sensor_names: tuple[str, ...],
+    force_threshold: float = 0.2,
+) -> torch.Tensor:
+    r"""读取 fingertip 是否有效接触 object 的二值观测。
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
+        sensor_names (tuple[str, ...]): 指尖传感器名称。
+        force_threshold (float): 接触判定阈值，单位 N。
+
+    Returns:
+        torch.Tensor: 二值接触观测，形状 `[num_envs, num_sensors]`。
+    """
+
+    contact_bits = []  # 每个 fingertip 一列 0/1
+    for sensor_name in sensor_names:
+        force_w = _sensor_total_force_w(env, sensor_name)  # `[B,3]`，该 fingertip 总接触力
+        contact_bits.append((torch.linalg.norm(force_w, dim=-1) > float(force_threshold)).float())  # `[B]`
+    return torch.stack(contact_bits, dim=-1)  # `[B,K]`，K 个指尖接触位
 
 
 
