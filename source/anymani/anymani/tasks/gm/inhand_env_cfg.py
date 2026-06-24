@@ -41,6 +41,18 @@ from .hand_spawn import DEFAULT_HAND_ANCHOR_POS_E, HandFrameCfg, HandSpawnAdapte
 
 DEFAULT_OBJECT_USD = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
 
+GM_CLEAR_SKY_TEXTURE_FILE = (
+    f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr"
+)
+r"""GM GUI / smoke 默认使用的 clear-sky HDRI。
+
+该视觉 preset 来自 `AnyMani-GM-Heterogeneous-Test-v0` 的可视检查路径。它不改变物理
+任务语义，只让 `AnyMani-GM-InHand-*` 系列在 GUI 中共享同一套可读性更好的天空环境光。
+"""
+
+GM_CLEAR_SKY_LIGHT_INTENSITY = 750.0
+"""clear-sky HDRI dome light 强度；与 heterogeneous GUI smoke 保持一致。"""
+
 GM_DEFAULT_HAND_BANK_PATH = (
     "source/anymani/anymani/assets/generated/2026-06-10_11-30-08/"
     "single_palm_leap/right_t4_i4_m4_r4/2026-06-11_14-20-22"
@@ -172,8 +184,11 @@ class GmInHandSceneCfg(InteractiveSceneCfg):
     )
 
     light = AssetBaseCfg(
-        prim_path="/World/light",
-        spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75)),
+        prim_path="/World/skyLight",
+        spawn=sim_utils.DomeLightCfg(
+            intensity=GM_CLEAR_SKY_LIGHT_INTENSITY,
+            texture_file=GM_CLEAR_SKY_TEXTURE_FILE,
+        ),
     )
 
     def __post_init__(self):
@@ -501,7 +516,8 @@ class GmInHandEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = 30.0
         self.sim.dt = 1.0 / 120.0
         self.sim.render_interval = self.decimation
-        self.viewer.eye = (2.0, 2.0, 2.0)
+        self.viewer.eye = (2.0, 2.0, 1.5)
+        self.viewer.lookat = (0.0, 0.0, 0.5)  # 对准 hand/object anchor 高度，让天空-地板-操作区同时进入视野
 
 
 @configclass
@@ -530,6 +546,8 @@ class GmInHandEnvCfg_PLAY(GmInHandEnvCfg):
 
 __all__ = [
     "DEFAULT_GM_HAND_SPAWN_CFG",
+    "GM_CLEAR_SKY_LIGHT_INTENSITY",
+    "GM_CLEAR_SKY_TEXTURE_FILE",
     "GM_DEFAULT_ENVS_PER_HAND",
     "GM_DEFAULT_HAND_BANK_PATH",
     "GM_DEFAULT_HAND_SAMPLE_COUNT",

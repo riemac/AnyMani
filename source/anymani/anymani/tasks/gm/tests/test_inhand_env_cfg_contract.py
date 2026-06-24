@@ -44,6 +44,8 @@ def _constant_values() -> dict[str, object]:
 
     values: dict[str, object] = {}  # 逐条保存已解析常量，供后续表达式引用
     target_names = {
+        "GM_CLEAR_SKY_LIGHT_INTENSITY",
+        "GM_CLEAR_SKY_TEXTURE_FILE",
         "GM_DEFAULT_ENVS_PER_HAND",
         "GM_DEFAULT_HAND_BANK_PATH",
         "GM_DEFAULT_HAND_SAMPLE_COUNT",
@@ -142,6 +144,9 @@ def _class_assign_call(class_name: str, assign_name: str) -> ast.Call:
         if not isinstance(node, ast.ClassDef) or node.name != class_name:
             continue
         for class_node in node.body:
+            if isinstance(class_node, ast.Assign) and isinstance(class_node.value, ast.Call):
+                if any(isinstance(target, ast.Name) and target.id == assign_name for target in class_node.targets):
+                    return class_node.value  # class-level config field call
             if isinstance(class_node, ast.AnnAssign) and isinstance(class_node.target, ast.Name):
                 if class_node.target.id == assign_name and isinstance(class_node.value, ast.Call):
                     return class_node.value  # class-level config field call
@@ -228,6 +233,23 @@ def test_gm_inhand_contact_layout_is_sidecar_derived_and_installed() -> None:
     assert "install_contact_sensors(self, GM_DEFAULT_CONTACT_LAYOUT)" in source  # scene __post_init__ 安装 sensors
     assert "GM_DEFAULT_CONTACT_LAYOUT.fingertip_sensor_names" in source  # obs/reward 从 layout 取 tip sensor names
     assert "GM_DEFAULT_CONTACT_LAYOUT.non_tip_sensor_names" in source  # bad contact 从 layout 取 non-tip sensor names
+
+
+def test_gm_inhand_scene_uses_clear_sky_visual_preset() -> None:
+    r"""GM in-hand GUI / smoke 应复用异构 smoke 的清天 HDRI，而不是纯灰 dome light。"""
+
+    values = _constant_values()  # 解析 clear-sky HDRI 路径与 dome light 强度常量
+    source = INHAND_ENV_CFG_PATH.read_text(encoding="utf-8")  # 纯文本检查 viewer 默认视角，不执行 cfg
+    light_call = _class_assign_call("GmInHandSceneCfg", "light")  # `light = AssetBaseCfg(...)`
+    spawn_call = _keyword_call(light_call, "spawn")  # `sim_utils.DomeLightCfg(...)`
+
+    assert _keyword_literal(light_call, "prim_path", values) == "/World/skyLight"
+    assert _keyword_literal(spawn_call, "intensity", values) == values["GM_CLEAR_SKY_LIGHT_INTENSITY"] == 750.0
+    assert str(_keyword_literal(spawn_call, "texture_file", values)).endswith(
+        "/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr"
+    )
+    assert "self.viewer.eye = (2.0, 2.0, 1.5)" in source  # 对齐 heterogeneous smoke 的可读观察高度
+    assert "self.viewer.lookat = (0.0, 0.0, 0.5)" in source  # 对准 hand/object anchor，而不是默认看世界原点
 
 
 def test_gm_mdp_preserves_flat_public_observation_and_reward_exports() -> None:
