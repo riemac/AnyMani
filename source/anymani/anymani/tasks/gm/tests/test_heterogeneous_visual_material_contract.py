@@ -27,7 +27,7 @@ def _load_heterogeneous_cfg_module():
 
     previous_modules = _install_isaaclab_cfg_stubs()
     target_modules = (
-        "anymani.tasks.gm.hand_spawn",
+        "anymani.robots.hand_spawn",
         "anymani.tasks.gm.heterogeneous_test_env_cfg",
     )
     previous_target_modules = {name: sys.modules.get(name) for name in target_modules}

@@ -186,7 +186,7 @@ import torch  # IsaacLab runtime buffers 使用 torch tensor
 import yaml  # preset 使用 YAML，便于人工读写与 diff
 from anymani.assets.bank import HandBankCfg  # 复用 AnyMani asset-bank 显式单资产选择语义
 from anymani.assets.bank.path_utils import resolve_bank_path  # 解析项目相对 bundle / asset ID
-from anymani.tasks.gm.hand_spawn import (
+from anymani.robots.hand_spawn import (
     DEFAULT_HAND_ANCHOR_POS_E,  # 与 GM single asset 默认 hand anchor 对齐
     HandFrameCfg,  # `{a}` / `{h}` 语义 frame 配置
     HandSpawnAdapter,  # AnyMani hand bundle -> IsaacLab ArticulationCfg

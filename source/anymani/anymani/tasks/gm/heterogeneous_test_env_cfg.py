@@ -8,9 +8,8 @@ asset-bank split；这些由 `distill` 消费本环境后自包含实现。
 
 1. 随机动作 / GUI MVP：用 `AnyMani-GM-Heterogeneous-Test-v0` 检查 3 个 URDF hand
    variants 能 round-robin spawn、reset、step，并且材质颜色、天空、手部姿态可视可信。
-2. MLP 训练 MVP：用 `distill` 中的 `AnyMani-GM-Heterogeneous-MLP-Smoke-v0` 绑定本环境，
-   以 $3\times100=300$ envs 和极简 MLP PPO 只验证 rollout / backward / checkpoint 闭环，
-   不评价 reward 表现或 policy 质量。
+2. 训练 MVP 曾用于验证 rollout / backward / checkpoint 闭环；当前正式训练主线已经收敛到
+   single-asset MLP probe，异构训练别名不再保留，避免旧 smoke 路线污染当前科研语义。
 
 本轮实现的关键变化：hand asset set 不再由本文件维护私有 `HeterogeneousHandSetCfg`。
 本文件改为通过 `HandSpawnCfg(bank=HandBankCfg(...))` 调用 `HandSpawnAdapter`，从而让
@@ -26,7 +25,6 @@ asset-bank split；这些由 `distill` 消费本环境后自包含实现。
 
 ```bash
 python scripts/random_agent.py --task AnyMani-GM-Heterogeneous-Test-v0 --num_envs 9
-python -m anymani.distill.train_mvp --task AnyMani-GM-Heterogeneous-MLP-Smoke-v0 --num_envs 300 --max_iterations 1 --headless
 ```
 """
 
@@ -48,8 +46,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from anymani.assets.bank import HandBankCfg
-
-from .hand_spawn import DEFAULT_HAND_ANCHOR_POS_E, HandFrameCfg, HandSpawnAdapter, HandSpawnCfg
+from anymani.robots.hand_spawn import DEFAULT_HAND_ANCHOR_POS_E, HandFrameCfg, HandSpawnAdapter, HandSpawnCfg
 
 HETEROGENEOUS_RUN_PATH = (
     "source/anymani/anymani/assets/generated/2026-06-10_11-30-08/"

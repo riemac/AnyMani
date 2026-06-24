@@ -1,8 +1,8 @@
-r"""Contract tests for the single-asset MLP PPO training route.
+r"""Contract tests for the unified single-asset MLP PPO training route.
 
 这些测试不启动 Isaac Sim。它们只验证 distill 侧的训练管线声明：single-asset MDP
-probe 使用独立训练入口、绑定 single-asset env cfg、采用 rl_games 内置 MLP，且默认
-2048/4096 env 的 PPO batch 可以被 minibatch 整除。
+probe 使用唯一 `anymani.distill.train` 入口、绑定 tasks-owned single-asset env cfg、
+采用 rl_games 内置 MLP，且 2048/4096 env 的 PPO batch 都可以被 minibatch 整除。
 """
 
 from __future__ import annotations
@@ -12,10 +12,12 @@ from pathlib import Path
 import anymani.distill.rl  # noqa: F401  # 注册 distill-owned Gym aliases
 import anymani.distill.rl.agents as agent_package
 import gymnasium as gym
+import pytest
 import yaml
+from gymnasium.error import NameNotFound
 
-TRAIN_ENTRY_PATH = Path(__file__).resolve().parents[1] / "train_mlp_single_asset.py"
-"""单资产 MLP 独立训练入口源码路径。"""
+TRAIN_ENTRY_PATH = Path(__file__).resolve().parents[1] / "train.py"
+"""统一 RL 训练入口源码路径；当前默认 route 是 single-asset MLP probe。"""
 
 
 def _single_asset_agent_cfg() -> dict:
@@ -35,13 +37,19 @@ def test_single_asset_mlp_task_alias_points_to_distill_agent() -> None:
     assert spec.kwargs["rl_games_cfg_entry_point"].endswith("agents:gm_single_asset_mlp_ppo.yaml")
 
 
-def test_single_asset_mlp_play_alias_enables_goal_marker_env() -> None:
-    r"""回放 checkpoint 时应使用 PLAY env cfg，同时仍加载同一个 MLP PPO YAML。"""
+def test_legacy_distill_debug_and_play_aliases_are_removed() -> None:
+    r"""旧 MVP/debug/play aliases 应及时出清，避免污染当前训练语义。"""
 
-    spec = gym.spec("AnyMani-GM-SingleAsset-MLP-Play-v0")
-
-    assert spec.kwargs["env_cfg_entry_point"].endswith("single_asset_env_cfg:GmSingleAssetEnvCfg_PLAY")
-    assert spec.kwargs["rl_games_cfg_entry_point"].endswith("agents:gm_single_asset_mlp_ppo.yaml")
+    removed_aliases = (
+        "AnyMani-GM-Teacher-Debug-v0",
+        "AnyMani-GM-Teacher-Debug-Play-v0",
+        "AnyMani-GM-Heterogeneous-MLP-Smoke-v0",
+        "AnyMani-GM-InHand-MLP-Smoke-v0",
+        "AnyMani-GM-SingleAsset-MLP-Play-v0",
+    )
+    for task_id in removed_aliases:
+        with pytest.raises(NameNotFound):
+            gym.spec(task_id)
 
 
 def test_single_asset_mlp_yaml_uses_builtin_mlp_not_transformer() -> None:
@@ -52,7 +60,8 @@ def test_single_asset_mlp_yaml_uses_builtin_mlp_not_transformer() -> None:
     train_cfg = agent_cfg["params"]["config"]
 
     assert network_cfg["name"] == "actor_critic"
-    assert network_cfg["mlp"]["units"] == [512, 512, 256]
+    assert network_cfg["space"]["continuous"]["sigma_init"]["val"] == -0.5
+    assert network_cfg["mlp"]["units"] == [512, 256, 128]
     assert network_cfg["mlp"]["activation"] == "elu"
     assert train_cfg["name"] == "gm_single_asset_mlp"
     assert train_cfg["horizon_length"] == 32
@@ -72,19 +81,20 @@ def test_single_asset_mlp_batch_divides_2048_and_4096_envs() -> None:
         assert batch_size % minibatch_size == 0
 
 
-def test_train_mlp_single_asset_entry_has_independent_defaults() -> None:
-    r"""独立训练入口应默认指向 single-asset task 和 2048 env，而不是 teacher debug。"""
+def test_unified_train_entry_has_single_asset_defaults() -> None:
+    r"""统一训练入口应默认指向 single-asset task 和 4096 env，而不是旧 debug route。"""
 
     source = TRAIN_ENTRY_PATH.read_text(encoding="utf-8")
 
-    assert 'DEFAULT_SINGLE_ASSET_TASK = "AnyMani-GM-SingleAsset-MLP-v0"' in source
-    assert "DEFAULT_SINGLE_ASSET_NUM_ENVS = 2048" in source
+    assert 'DEFAULT_TASK = "AnyMani-GM-SingleAsset-MLP-v0"' in source
+    assert "DEFAULT_NUM_ENVS = 4096" in source
     assert "from isaaclab.app import AppLauncher" in source
     assert "@hydra_task_config(args_cli.task, \"rl_games_cfg_entry_point\")" in source
     assert "import anymani.distill.rl" in source
+    assert "register_anymani_rl_games_networks()" in source
 
 
-def test_train_mlp_single_asset_logs_are_anchored_to_anymani_root() -> None:
+def test_unified_train_entry_logs_are_anchored_to_anymani_root() -> None:
     r"""训练日志必须落在 `AnyMani/logs`，不能依赖启动命令时的 shell cwd。"""
 
     source = TRAIN_ENTRY_PATH.read_text(encoding="utf-8")
@@ -92,3 +102,16 @@ def test_train_mlp_single_asset_logs_are_anchored_to_anymani_root() -> None:
     assert "from anymani.assets.bank.path_utils import resolve_anymani_root" in source
     assert "ANYMANI_ROOT = resolve_anymani_root()" in source
     assert 'ANYMANI_ROOT / "logs" / "distill" / "rl_games" / config_name' in source
+
+
+def test_unified_train_entry_keeps_core_cli_without_full_experiment_stack() -> None:
+    r"""当前入口保留核心训练 CLI，不把 wandb/distributed/PBT 重新塞回 first runnable route。"""
+
+    source = TRAIN_ENTRY_PATH.read_text(encoding="utf-8")
+
+    assert 'parser.add_argument("--video"' in source
+    assert 'parser.add_argument("--experiment_name"' in source
+    assert 'parser.add_argument("--rl_games_strict"' in source
+    assert 'parser.add_argument("--distributed"' not in source
+    assert "wandb" not in source
+    assert "PbtAlgoObserver" not in source

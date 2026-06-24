@@ -1,7 +1,8 @@
-r"""GM hand spawn adapter.
+r"""Generated hand spawn adapter.
 
-本模块是 `tasks/gm` 侧的 **IsaacLab runtime spawn 适配层**。它的长期职责是把
-`assets.bank` 选出的 hand assets 包装成 IsaacLab 可消费的 `ArticulationCfg`。
+本模块是 `robots` 侧的 **IsaacLab runtime spawn 适配层**。它的长期职责是把
+`assets.bank` 选出的 generated hand assets 包装成 IsaacLab 可消费的
+`ArticulationCfg`，供 `tasks/gm` 与后续 `distill` runtime smoke 共同复用。
 
 当前文件实现第一版 **URDF runtime spawn adapter**：字段、公式、接口、职责边界、
 bank resolve、schema check、URDF importer cfg、可选 USD material restore 与 root pose
@@ -28,9 +29,9 @@ HandSpawnAdapter(cfg)
 边界约定：
 
 - `assets.bank` 负责路径解析、资产选择、虚拟 bundle、URDF mesh / color 解析；
-- `tasks/gm.hand_spawn` 只负责 IsaacLab spawn 适配；
-- `tasks/gm.inhand_env_cfg` 仍只表达 MDP，`scene.robot` 由上游 cfg 注入；
-- `distill` 负责训练时选用哪个 bank / split / manifest。
+- `robots.hand_spawn` 只负责把已选 embodiment lower 成 IsaacLab robot cfg；
+- `tasks/gm` 只消费 robot cfg 来表达 MDP，不拥有资产生成或训练算法；
+- `distill` 负责训练时选用哪个 task / agent YAML / checkpoint / manifest。
 
 Frame 语义：
 

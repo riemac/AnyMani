@@ -1,8 +1,8 @@
-r"""RL teacher training entry package for AnyMani distill.
+r"""RL training registry for AnyMani distill.
 
-本包自包含 GM teacher 的训练注册、rl_games backend 固定、网络 builder 和训练入口。
-外层 `scripts/rl_games/train.py` 仍可作为历史通用工具存在，但层次通才策略训练主线
-从这里进入，避免训练逻辑散落在项目根脚本目录。
+本包只注册 distill 侧的训练任务别名：环境语义仍由 `tasks/gm` 拥有，训练算法、
+agent YAML、checkpoint 和日志路径由 `distill` 拥有。当前正式主线是单资产 MLP
+MDP probe，用它先验证 generated asset、reset、reward、obs/action 与 PhysX 接触闭环。
 """
 
 from __future__ import annotations
@@ -10,46 +10,6 @@ from __future__ import annotations
 import gymnasium as gym
 
 from . import agents
-
-gym.register(
-    id="AnyMani-GM-Teacher-Debug-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.gm_teacher_env_cfg:GmTeacherDebugEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:gm_teacher_transformer_ppo.yaml",
-    },
-)
-
-gym.register(
-    id="AnyMani-GM-Teacher-Debug-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.gm_teacher_env_cfg:GmTeacherDebugEnvCfg_PLAY",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:gm_teacher_transformer_ppo.yaml",
-    },
-)
-
-gym.register(
-    id="AnyMani-GM-Heterogeneous-MLP-Smoke-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.gm_heterogeneous_mlp_smoke_env_cfg:HeterogeneousMlpSmokeEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:gm_heterogeneous_mlp_ppo_smoke.yaml",
-    },
-)
-
-gym.register(
-    id="AnyMani-GM-InHand-MLP-Smoke-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.gm_inhand_mlp_smoke_env_cfg:GmInHandMlpSmokeEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:gm_inhand_mlp_ppo_smoke.yaml",
-    },
-)
 
 gym.register(
     id="AnyMani-GM-SingleAsset-MLP-v0",
@@ -60,16 +20,5 @@ gym.register(
         "rl_games_cfg_entry_point": f"{agents.__name__}:gm_single_asset_mlp_ppo.yaml",
     },
 )
-
-gym.register(
-    id="AnyMani-GM-SingleAsset-MLP-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "anymani.tasks.gm.single_asset_env_cfg:GmSingleAssetEnvCfg_PLAY",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:gm_single_asset_mlp_ppo.yaml",
-    },
-)
-
 
 __all__ = []

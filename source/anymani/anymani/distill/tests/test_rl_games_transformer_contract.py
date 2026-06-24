@@ -23,7 +23,7 @@ def _network_params() -> dict:
     r"""返回测试用的最小 Transformer 配置。
 
     Returns:
-        dict: 与 `gm_teacher_transformer_ppo.yaml` 中 `network` 字段同形状的配置。
+        dict: 与未来 teacher YAML 的 `network` 字段同形状的配置；当前不注册可运行 route。
     """
 
     return {

@@ -35,9 +35,9 @@ ManagerBasedRLEnv 本身就是一个高度声明式、配置驱动的环境框�
 
 凡实现会改变 reset 初始状态分布、reward 成功判据或坐标系语义，至少补一个能失败的最小测试或 smoke 记录，避免训练跑很久才发现数学方向错了。
 
-凡实现会改变 USD / PhysX stage 级语义，例如 `PhysicsCollisionGroup`、self-collision filter、contact sensor authoring、URDF/USD import 参数、scene replication / clone 策略，不能只用 AST 或 fake-env contract test 验收。contract test 只能锁住“应该生成什么配置 / pair / 张量语义”，还必须补一个 `source/anymani/anymani/smokes/isaacsim/` 下的显式 headless smoke，确认运行时 stage 副作用真的发生并且 env 可 reset/step。
+GM 的测试应围绕“科研命题能在哪里被证伪”来选层级：配置组合、坐标系公式、reward 曲线和 reset 参数分布优先用 contract test；只在 Isaac Sim runtime 才存在的事实，例如 stage authoring、importer 结果、scene clone 后的实体、传感器读数、PhysX 初始化后的 handle 与 reset/step 生命周期，必须补 `source/anymani/anymani/smokes/isaacsim/` 下的显式 headless smoke。contract test 只能证明“我们声明了什么”，runtime smoke 才能证明“仿真实际看见了什么”。
 
-IsaacSim smoke 不放入 `tasks/gm/tests/`，也不加入默认 `pytest.ini testpaths`。运行时必须显式指定路径，并用 `timeout --kill-after` 防止 Kit 卡住。单资产 generated structural collision filter 的当前 smoke 是：
+IsaacSim smoke 不放入 `tasks/gm/tests/`，也不加入默认 `pytest.ini testpaths`。运行时必须显式指定路径，并用 `timeout --kill-after` 防止 Kit 卡住。单资产 generated structural collision filter 的当前 smoke 是一个具体例子：
 
 ```bash
 cd /home/hac/isaac/AnyMani
@@ -82,7 +82,7 @@ timeout --kill-after=20s 240s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest 
 
 配置层优先使用旋转矩阵和平移向量 $(R,p)$，实现层应组合为 $T\in SE(3)$ 进行复合、求逆和传递；只有在 Isaac Lab 边界（如 `ArticulationCfg.InitialStateCfg.rot` 或 `write_root_pose_to_sim`）才转换为 `(w,x,y,z)` 四元数。`so3` / 全 $SO(3)$ 随机采样实现时可以使用四元数算法，但文档和中间语义仍以 $SO(3)$ / $SE(3)$ 表达。
 
-`hand_spawn.HandFrameCfg` 是静态装配锚点，记录：
+`robots.hand_spawn.HandFrameCfg` 是静态装配锚点，记录：
 
 - $T_{ha}$：raw asset/root frame `{a}` 到 hand semantic frame `{h}` 的固定校准；
 - $T_{eh}^{anchor}$：hand semantic frame `{h}` 在 env frame `{e}` 中的默认参考 pose。

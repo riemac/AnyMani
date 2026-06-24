@@ -33,8 +33,8 @@ leaf sample。使用它的原因不是追求泛化，而是固定 morphology 变
   标定台导出的 pre-grasp / contact basin；若失败再单独排查 reset 扰动与接触盆地。
 - command 难度第一轮主动收窄到 fixed `{h}` z 轴 + episode 目标，贴近 LEAP 官方
   z-axis 成功基线；random-axis / subgoal 留给 single-asset 跑通后的下一轮消融。
-- 训练策略第一轮使用 MLP PPO，网络复杂度不参与本文件；训练入口放在
-  `anymani.distill.train_mlp_single_asset`。
+- 训练策略第一轮使用 MLP PPO，网络复杂度不参与本文件；训练入口统一使用
+  `python -m anymani.distill.train --task AnyMani-GM-SingleAsset-MLP-v0`。
 
 == 推荐的最小验收信号 ==
 
@@ -88,10 +88,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from anymani.assets.bank import HandBankCfg
 from anymani.assets.bank.path_utils import resolve_bank_path
-
-from . import mdp as gm_mdp
-from .contact_sensors import build_contact_sensor_layout_from_hand_spawn, install_contact_sensors
-from .hand_spawn import (
+from anymani.robots.hand_spawn import (
     DEFAULT_HAND_ANCHOR_POS_E,
     HandFrameCfg,
     HandJointInitCfg,
@@ -99,6 +96,9 @@ from .hand_spawn import (
     HandSpawnCfg,
     HandUrdfSpawnCfg,
 )
+
+from . import mdp as gm_mdp
+from .contact_sensors import build_contact_sensor_layout_from_hand_spawn, install_contact_sensors
 
 
 def _single_asset_bundle_path() -> str:

@@ -5,21 +5,24 @@
 
 ## 项目架构
 
-当前按 “资产生产-训练管线-网络架构” 功能职责和边界划分：
+当前按 “资产生产-机器人适配-任务环境-训练管线-网络架构” 功能职责和边界划分：
 
 | 目录 | 职责 | 边界 |
 |------|------|------|
 | `source/anymani/anymani/assets/` | 手资产生成：pre-made、post-mutate、validator、exporter、physics closure | 不写任务 reward / policy / 训练逻辑 |
+| `source/anymani/anymani/robots/` | embodiment runtime adapter：把 generated hand / 真实手资产 lower 成 Isaac Lab robot cfg | 不写任务 MDP，不拥有 asset bank 生成逻辑，不承载训练算法 |
 | `source/anymani/anymani/tasks/` | Isaac Lab 任务环境：scene、obs、action、reward、reset、termination、Gym 注册 | 不处理资产生成细节，不承载训练算法 |
-| `source/anymani/anymani/distill/` | 网络架构与训练管线：models、IL / distillation、RL、训练入口 | 消费 `assets` 和 `tasks`，不接管 env 内部实现 |
+| `source/anymani/anymani/distill/` | 网络架构与训练管线：models、IL / distillation、RL、训练入口 | 消费 `tasks` 暴露的 env contract，不接管 env / spawn 内部实现 |
 
 核心依赖方向：
 
 ```text
-assets -> tasks -> distill
+assets -> robots -> tasks -> distill
 ```
 
-`tasks` 定义“手在什么任务里交互”，`distill` 定义“如何训练跨手型策略”; `distill` 依赖于 `tasks` 定义的环境接口，`distill` 和 `tasks` 都消费 `assets` 导出的 asset bank。
+`robots` 定义“某个手如何被 Isaac Lab spawn”，`tasks` 定义“手在什么任务里交互”，
+`distill` 定义“如何训练跨手型策略”。`distill` 依赖于 `tasks` 定义的环境接口，
+`tasks` 通过 `robots` 消费 `assets` 导出的 asset bank，而不是直接拥有 spawn/importer 细节。
 
 ## 开发约定
 
@@ -37,13 +40,15 @@ assets -> tasks -> distill
 
 根目录 `pyproject.toml` 配有 `ruff`(lint/format)与 `pyright`(类型检查,basic 模式,已指向 `env_isaaclab` 环境),规则对齐项目既有 pre-commit 工具链(black 行宽 120 + flake8 + isort + pyupgrade)。供 agent 改完代码后做快速自查,非强制流程;正式提交仍以 pre-commit 为准。
 
-### 4. 测试策略：contract TDD + simulation smoke
+### 4. 测试策略：contract TDD + runtime smoke
 
 本项目鼓励对**纯数学、schema、张量 shape、路径/manifest、网络模块和 MDP contract** 采用 TDD：先写最小失败用例，再实现。Isaac Sim / PhysX / 训练闭环不强行 TDD；这类重型路径用少量 headless smoke / integration test 验证能 reset、step、输出合法张量。
 
 优先测试能提前揪出科研语义错误的内容：坐标系变换、SO(3)/SE(3) 公式、reward 单调性、obs/action 量纲、mask 语义、cache key/schema、token routing、attention bias shape 与零初始化。不要为了追覆盖率给研究草稿或纯注释 scaffold 写空洞测试。
 
-默认 `pytest` 只运行 `pytest.ini` 中声明的 contract paths，约定为不启动 Isaac Sim / Kit / `AppLauncher`。凡验证 URDF/USD import、`PhysicsCollisionGroup`、contact sensor、scene cloning、PhysX step、完整 reset/step 生命周期的测试，放在 `source/anymani/anymani/smokes/` 下，并通过显式路径运行。不要主要依赖 pytest marker 排除 IsaacSim 测试，因为 pytest 收集阶段可能已 import 测试模块并启动 Kit。
+测试按“要证伪的命题”选择最低足够层级：若命题是公式、schema、配置声明或张量 shape，就用默认 contract test；若命题依赖 Isaac Sim 运行时状态、USD stage 副作用、PhysX handle、传感器 buffer 或完整 reset/step 生命周期，就用显式 runtime smoke；若命题只能从 rollout 统计判断，例如 reward 量级、成功判据释放、训练入口日志是否闭合，就用短训练 sanity，不把它伪装成普通单元测试。
+
+默认 `pytest` 只运行 `pytest.ini` 中声明的 contract paths，约定为不启动 Isaac Sim / Kit / `AppLauncher`。runtime smoke 统一放在 `source/anymani/anymani/smokes/` 下，并通过显式路径运行。不要主要依赖 pytest marker 排除 IsaacSim 测试，因为 pytest 收集阶段可能已 import 测试模块并启动 Kit。
 
 IsaacSim smoke 必须小而硬：少量 env、少量 step、明确 assert 运行时副作用，并用 `timeout --kill-after` 包住。例如：
 

@@ -13,7 +13,7 @@ object root pose reset、刚体材质或质量随机化，都应在 env cfg 中�
 
 hand orientation reset scaffold：
     任意手朝向训练的核心被控量不是 raw asset frame `{a}` 本身，而是 hand semantic
-    frame `{h}` 在 env frame `{e}` 中的位姿 $T_{eh}$。`hand_spawn.HandFrameCfg`
+    frame `{h}` 在 env frame `{e}` 中的位姿 $T_{eh}$。`robots.hand_spawn.HandFrameCfg`
     负责记录静态校准 $T_{ha}$ 与默认 anchor $T_{eh}^{anchor}$；reset event 后续
     负责采样 episode 级 $T_{eh}$，再 lower 成 raw root pose：
     $$
@@ -47,7 +47,7 @@ class HandOrientationResetCfg:
 
     该 dataclass 只表达 reset 分布语义，不是 IsaacLab `EventTermCfg`，也不实现
     采样 / 写 sim。未来实现时应在 reset event 中消费它：采样 $T_{eh}$，再结合
-    `hand_spawn.HandFrameCfg` 的 $T_{ha}$ 写入 robot raw root pose $T_{ea}=T_{eh}T_{ha}$。
+    `robots.hand_spawn.HandFrameCfg` 的 $T_{ha}$ 写入 robot raw root pose $T_{ea}=T_{eh}T_{ha}$。
 
     设计要点：
 

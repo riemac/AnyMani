@@ -27,11 +27,13 @@ params:
           name: default
         sigma_init:
           name: const_initializer
-          val: -1.0
+          # fixed log sigma；$\exp(-0.5)\approx0.61$，经 action scale=0.1 后给约 0.06 rad 探索步长。
+          val: -0.5
         fixed_sigma: True
 
     mlp:
-      units: [512, 512, 256]
+      # single-asset MLP probe 对齐 AnyRotate / IsaacLab / LEAP 常见 teacher 宽度，容量足够且比 [512,512,256] 更稳。
+      units: [512, 256, 128]
       activation: elu
       d2rl: False
       initializer:

@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 if TYPE_CHECKING:
-    from .hand_spawn import HandSpawnCfg
+    from anymani.robots.hand_spawn import HandSpawnCfg
 
 
 @dataclass(frozen=True)
@@ -108,7 +108,7 @@ def build_contact_sensor_layout_from_hand_spawn(
     """
 
     # 延迟导入 `HandSpawnAdapter`，使本模块的纯 sidecar 解析函数可在无 IsaacLab stub 的单测中导入。
-    from .hand_spawn import HandSpawnAdapter
+    from anymani.robots.hand_spawn import HandSpawnAdapter
 
     adapter = HandSpawnAdapter(hand_spawn_cfg)  # runtime adapter；首次访问 selection 时解析 HandBank
     return build_contact_sensor_layout_from_assets(adapter.selection.assets, validate_all_assets=validate_all_assets)

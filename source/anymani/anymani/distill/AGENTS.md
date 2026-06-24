@@ -1,6 +1,6 @@
 # AGENTS.md
 
-`distill` 服务于 AnyMani 的**训练管线与网络架构**阶段：消费 `assets` 生成的手资产，调用 `tasks` 定义的 Isaac Lab 环境，训练、蒸馏和评估面向手型泛化的手内操作策略。
+`distill` 服务于 AnyMani 的**训练管线与网络架构**阶段：消费 `tasks` 定义的 Isaac Lab 环境，训练、蒸馏和评估面向手型泛化的手内操作策略。手资产如何 lower 成 robot cfg 属于 `robots`，不在 `distill` 内复制 env cfg wrapper。
 
 ## 目录职责
 
@@ -19,12 +19,20 @@ models/   # policy、encoder、tokenizer、adapter 等共享网络定义
 ## 依赖边界
 
 ```text
-assets -> tasks -> distill
+assets -> robots -> tasks -> distill
 ```
 
 - `assets` 生产 hand asset bank；不要把训练算法、rollout dataset、checkpoint 逻辑塞进去。
+- `robots` 把 generated hand / 真实手 lower 成 Isaac Lab robot cfg；不要把 reward、reset 或训练入口塞进去。
 - `tasks` 定义 Isaac Lab 环境语义：scene、obs、action、reward、reset、termination；不要把网络结构塞进去。
-- `distill` 可以消费 `assets` 与 `tasks`，但不得反向污染二者边界。
+- `distill` 可以消费 `tasks` 暴露的 Gym task 和 agent YAML，但不得通过 env cfg wrapper 反向接管 MDP 语义。
+
+## 训练入口边界
+
+当前 RL 训练入口统一为 `python -m anymani.distill.train`。新增训练路线时优先新增
+Gym task alias + agent YAML；只有当训练编排本身发生变化时才扩展入口参数。不要为
+临时 debug/smoke 训练重新创建 `train_mvp.py`、`train_xxx.py` 或 distill-owned env cfg
+wrapper；运行时 reset/step/PhysX 验证放到 `source/anymani/anymani/smokes/` 显式 smoke。
 
 ## 模型规模与频率硬约束
 
@@ -57,6 +65,17 @@ RL teacher 的网络规模以 PPO 稳定性为第一约束，不以容量最大�
 | Hugging Face | ML artifact 管理生态 | 不作为开发主框架；长期用于 release 级 checkpoint、dataset、model card、dataset card、demo。 |
 
 暂不优先引入 Hugging Face `Trainer`。AnyMani 的核心变量是手型拓扑、joint-centric representation、mask / padding、teacher-student 对齐与 Isaac Lab rollout，不是标准 NLP / CV supervised pipeline。`accelerate` 仅在 IL / 蒸馏明确需要多 GPU、AMP 或分布式时再引入。
+
+## RL 训练日志分析
+
+`rl_games` / Isaac Lab 训练默认会产出 TensorBoard event 文件。用户给出 run 目录或 `events.out.tfevents.*` 时，agent 应优先直接解析原始 scalar 数据，而不是要求用户截图 TensorBoard 曲线。TensorBoard UI 仍可作为用户人工查看曲线的工具，但 agent 的诊断应基于 `tag / step / wall_time / value` 这类结构化数据。
+
+常用工具（位于 uv 环境）如下：
+
+| 工具 | 用途 | 何时需要 |
+|------|------|----------|
+| `tensorboard`| 读取 event 文件中的 scalar、tag、step、wall time | 单次 run 诊断的默认底座；当前环境已有，优先使用。 |
+| `pandas`| 将 scalar 转为表格后做筛选、统计、异常检测和跨 run 对比 | 日志较多、需要按 tag / run / epoch 查询或聚合时。 |
 
 ## 可复现元数据
 
