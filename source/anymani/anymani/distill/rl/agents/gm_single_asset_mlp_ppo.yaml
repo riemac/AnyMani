@@ -56,6 +56,7 @@ params:
     normalize_value: True
     value_bootstrap: True
     torch_compile: False
+    rsl_style_console: True
     num_actors: -1
     reward_shaper:
       scale_value: 1.0

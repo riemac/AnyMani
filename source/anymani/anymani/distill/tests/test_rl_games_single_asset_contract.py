@@ -67,6 +67,7 @@ def test_single_asset_mlp_yaml_uses_builtin_mlp_not_transformer() -> None:
     assert train_cfg["horizon_length"] == 32
     assert train_cfg["minibatch_size"] == 16384
     assert train_cfg["torch_compile"] is False
+    assert train_cfg["rsl_style_console"] is True
 
 
 def test_single_asset_mlp_batch_divides_2048_and_4096_envs() -> None:
@@ -92,6 +93,8 @@ def test_unified_train_entry_has_single_asset_defaults() -> None:
     assert "@hydra_task_config(args_cli.task, \"rl_games_cfg_entry_point\")" in source
     assert "import anymani.distill.rl" in source
     assert "register_anymani_rl_games_networks()" in source
+    assert "class RslStyleIsaacAlgoObserver" in source
+    assert "Runner(_make_isaac_algo_observer(agent_cfg))" in source
 
 
 def test_unified_train_entry_logs_are_anchored_to_anymani_root() -> None:
