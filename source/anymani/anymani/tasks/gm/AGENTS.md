@@ -12,10 +12,10 @@
 
 `gm` 可以消费一个已经选好的 hand asset，并声明它对 `hand.urdf` / `hand.yaml` 的最低 contract；但不拥有整个 asset bank。
 
-`gm/grasp_cache/` 是一个例外但仍属任务语义：它只定义 cache-driven reset 的
-key/schema/store/sampler 契约，用于表达稳定手-物初始状态分布。它不负责
-asset-bank split、训练调度或离线 Isaac Sim 批量生成入口；这些应由上游
-manifest / `scripts/gm/` / `distill` 编排层注入。
+reset 初始状态分布仍属 `gm` 任务语义：例如 hand joint reset、object pose reset、
+object reset anchor 记录、hand orientation reset scaffold。能直接复用 IsaacLab
+官方 MDP event 的 reset 不要再包一层；只有 AnyMani 专属的物理/坐标系语义才放在
+`gm/mdp/events.py`。
 
 ## 设计风格
 
@@ -31,9 +31,20 @@ ManagerBasedRLEnv 本身就是一个高度声明式、配置驱动的环境框�
 
 ### 测试策略
 
-`gm` 的纯 MDP 逻辑应尽量 TDD：obs/action 量纲、SO(3) command、reward 曲线、termination anchor、grasp-cache reset 写入语义，都应能用 fake env / 小 tensor 做 contract test。需要 Isaac Sim 的 articulation loading、contact sensor、PhysX step、完整 reset/step，则用 headless smoke / integration test，不要求像纯函数一样严格 TDD。
+`gm` 的纯 MDP 逻辑应尽量 TDD：obs/action 量纲、SO(3) command、reward 曲线、termination anchor、reset event 拆分语义，都应能用 fake env / 小 tensor 做 contract test。需要 Isaac Sim 的 articulation loading、contact sensor、PhysX step、完整 reset/step，则用 headless smoke / integration test，不要求像纯函数一样严格 TDD。
 
 凡实现会改变 reset 初始状态分布、reward 成功判据或坐标系语义，至少补一个能失败的最小测试或 smoke 记录，避免训练跑很久才发现数学方向错了。
+
+凡实现会改变 USD / PhysX stage 级语义，例如 `PhysicsCollisionGroup`、self-collision filter、contact sensor authoring、URDF/USD import 参数、scene replication / clone 策略，不能只用 AST 或 fake-env contract test 验收。contract test 只能锁住“应该生成什么配置 / pair / 张量语义”，还必须补一个 `source/anymani/anymani/smokes/isaacsim/` 下的显式 headless smoke，确认运行时 stage 副作用真的发生并且 env 可 reset/step。
+
+IsaacSim smoke 不放入 `tasks/gm/tests/`，也不加入默认 `pytest.ini testpaths`。运行时必须显式指定路径，并用 `timeout --kill-after` 防止 Kit 卡住。单资产 generated structural collision filter 的当前 smoke 是：
+
+```bash
+cd /home/hac/isaac/AnyMani
+source /home/hac/isaac/env_isaaclab/bin/activate
+timeout --kill-after=20s 240s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest \
+  source/anymani/anymani/smokes/isaacsim/test_gm_single_asset_structural_collision.py -q -s
+```
 
 ## 数学偏好
 

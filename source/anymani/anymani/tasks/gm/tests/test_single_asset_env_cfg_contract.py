@@ -75,7 +75,7 @@ def _module_assign_call(assign_name: str) -> ast.Call:
 def _class_assign_call(class_name: str, assign_name: str) -> ast.Call:
     r"""在指定 config class body 中定位 class-level cfg field call。"""
 
-    for node in _module_ast().body:
+    for node in ast.walk(_module_ast()):
         if not isinstance(node, ast.ClassDef) or node.name != class_name:
             continue
         for class_node in node.body:
@@ -144,16 +144,42 @@ def test_single_asset_binds_premade_mother_bundle_with_explicit_selection() -> N
 
 
 def test_single_asset_default_training_scale_and_object_init_are_declared() -> None:
-    r"""单资产 probe 默认应使用 2048 env 和 generated hand 掌心初态。"""
+    r"""单资产 probe 默认应使用 2048 env 和标定台导出的 GUI/contact-basin 初态。"""
 
     values = _constant_values()
     source = _source()
     scene_call = _class_assign_call("GmSingleAssetEnvCfg", "scene")
+    hand_spawn_call = _module_assign_call("GM_SINGLE_ASSET_HAND_SPAWN_CFG")
     object_call = _class_assign_call("GmSingleAssetSceneCfg", "object")
+    spawn_call = _keyword_call(object_call, "spawn")
     init_state_call = _keyword_call(object_call, "init_state")
+    joint_init_call = _keyword_call(hand_spawn_call, "joint_init")
+    calibrated_joint_pos = {
+        "thumb_j0": 0.71999997,
+        "index_j0": -0.0,
+        "middle_j0": 0.0,
+        "ring_j0": 0.11,
+        "thumb_j1": 1.56999993,
+        "index_j1": -0.52999997,
+        "middle_j1": -0.12,
+        "ring_j1": 0.44999999,
+        "thumb_j2": 0.75999999,
+        "index_j2": 1.23000002,
+        "middle_j2": 1.13999999,
+        "ring_j2": 1.29999995,
+        "thumb_j3": 1.63,
+        "index_j3": 0.94999999,
+        "middle_j3": 0.91999996,
+        "ring_j3": 0.66999996,
+    }
 
     assert _keyword_literal(scene_call, "num_envs", values) == 2048
-    assert _keyword_literal(init_state_call, "pos", values) == (0.0, 0.055, 0.56)
+    assert _keyword_literal(scene_call, "replicate_physics", values) is False
+    assert _keyword_literal(spawn_call, "scale", values) == (1.0, 1.0, 1.0)
+    assert _call_func_name(joint_init_call) == "HandJointInitCfg"
+    for joint_name, joint_pos in calibrated_joint_pos.items():
+        assert f'"{joint_name}": {joint_pos}' in source
+    assert _keyword_literal(init_state_call, "pos", values) == (0.02, 0.08, 0.56)
     assert "self.episode_length_s = 10.0" in source
 
 
@@ -172,12 +198,36 @@ def test_single_asset_uses_own_sidecar_contact_layout() -> None:
     assert "GM_SINGLE_ASSET_CONTACT_LAYOUT.non_tip_sensor_names" in source
 
 
-def test_single_asset_reuses_no_cache_reset_and_fixed_z_axis_command() -> None:
-    r"""第一轮单资产 probe 应沿用 no-cache reset，并把 command 收窄到 fixed z-axis。"""
+def test_single_asset_policy_uses_hand_frame_object_pose_obs() -> None:
+    r"""teacher policy 应读取 `{h}` 下 object pose / contact force，而不是 world-frame 表征。"""
+
+    source = _source()
+    object_pos_call = _class_assign_call("PolicyCfg", "object_pos_h")
+    object_rot_call = _class_assign_call("PolicyCfg", "object_rot6d_h")
+    force_call = _class_assign_call("PolicyCfg", "fingertip_force_h")
+
+    assert _call_func_name(object_pos_call) == "ObsTerm"
+    assert _call_func_name(object_rot_call) == "ObsTerm"
+    assert _call_func_name(force_call) == "ObsTerm"
+    assert "func=gm_mdp.object_pos_h" in source
+    assert "func=gm_mdp.object_rot6d_h" in source
+    assert "func=gm_mdp.fingertip_contact_force_h" in source
+    assert '"semantic_R_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_R_ha' in source
+    assert "func=isaac_mdp.root_pos_w" not in source
+    assert "func=isaac_mdp.root_quat_w" not in source
+    assert "fingertip_contact_force_w" not in source
+
+
+def test_single_asset_uses_split_reset_events_and_fixed_z_axis_command() -> None:
+    r"""第一轮单资产 probe 应拆分 reset 语义，并把 command 收窄到 fixed z-axis。"""
 
     values = _constant_values()
+    source = _source()
     command_call = _class_assign_call("GmSingleAssetCommandsCfg", "goal_pose")
-    event_call = _class_assign_call("GmSingleAssetEventsCfg", "simple_no_cache_reset")
+    reset_robot_call = _class_assign_call("GmSingleAssetEventsCfg", "reset_robot_joints")
+    reset_object_call = _class_assign_call("GmSingleAssetEventsCfg", "reset_object")
+    record_anchor_call = _class_assign_call("GmSingleAssetEventsCfg", "record_object_reset_anchor")
+    structural_filter_call = _class_assign_call("GmSingleAssetEventsCfg", "apply_structural_collision_filter")
     action_call = _class_assign_call("GmSingleAssetActionsCfg", "hand_joint_pos")
 
     assert _keyword_literal(command_call, "axis_mode", values) == "fixed"
@@ -185,5 +235,19 @@ def test_single_asset_reuses_no_cache_reset_and_fixed_z_axis_command() -> None:
     assert _keyword_literal(command_call, "fixed_axis_h", values) == (0.0, 0.0, 1.0)
     assert _keyword_literal(action_call, "scale", values) == 0.1
     assert _keyword_literal(action_call, "preserve_order", values) is True
-    assert _call_func_name(event_call) == "EventTerm"
-    assert "func=gm_mdp.simple_no_cache_reset" in _source()
+    assert _call_func_name(reset_robot_call) == "EventTerm"
+    assert _call_func_name(reset_object_call) == "EventTerm"
+    assert _call_func_name(record_anchor_call) == "EventTerm"
+    assert _call_func_name(structural_filter_call) == "EventTerm"
+    assert "func=gm_mdp.apply_generated_structural_collision_filter" in source
+    assert 'mode="prestartup"' in source
+    assert '"palm_link_name": GM_SINGLE_ASSET_CONTACT_LAYOUT.palm_link_name' in source
+    assert '"finger_link_chains": GM_SINGLE_ASSET_CONTACT_LAYOUT.finger_link_chains' in source
+    assert '"filter_palm_finger": True' in source
+    assert '"filter_same_finger": True' in source
+    assert "func=isaac_mdp.reset_joints_by_offset" in source
+    assert '"position_range": (0.0, 0.0)' in source
+    assert "func=isaac_mdp.reset_root_state_uniform" in source
+    assert '"pose_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0), "yaw": (-math.pi, math.pi)}' in source
+    assert "func=gm_mdp.record_object_reset_anchor" in source
+    assert "func=gm_mdp.simple_no_cache_reset" not in source

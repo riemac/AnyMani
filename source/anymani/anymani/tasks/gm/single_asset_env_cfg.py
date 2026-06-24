@@ -28,8 +28,9 @@ leaf sample。使用它的原因不是追求泛化，而是固定 morphology 变
 - 观测先按当前 MDP scaffold 走：raw joint state、processed last action、soft limits、
   fingertip contact binary、`[axis_h, error_so3_h]` command。暂不引入
   `distill/models` 的 PALM / JOINT / TIP geometry tokenizer，也不在这里实现 tip BPS。
-- reset 第一轮按当前 scaffold 走随机 no-cache reset，即 `simple_no_cache_reset`。
-  这不是长期主线，也不是最稳的训练初态；但用户当前希望先跑起来，若失败再回头排查。
+- reset 第一轮采用“一事一议”的 split event：hand joint reset、object pose reset
+  直接复用 IsaacLab 官方项，AnyMani 只额外记录 object reset anchor。默认初态来自
+  标定台导出的 pre-grasp / contact basin；若失败再单独排查 reset 扰动与接触盆地。
 - command 难度第一轮主动收窄到 fixed `{h}` z 轴 + episode 目标，贴近 LEAP 官方
   z-axis 成功基线；random-axis / subgoal 留给 single-asset 跑通后的下一轮消融。
 - 训练策略第一轮使用 MLP PPO，网络复杂度不参与本文件；训练入口放在
@@ -65,6 +66,8 @@ TOAGENT:
 
 from __future__ import annotations
 
+import math
+
 import isaaclab.envs.mdp as isaac_mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
@@ -88,7 +91,14 @@ from anymani.assets.bank.path_utils import resolve_bank_path
 
 from . import mdp as gm_mdp
 from .contact_sensors import build_contact_sensor_layout_from_hand_spawn, install_contact_sensors
-from .hand_spawn import DEFAULT_HAND_ANCHOR_POS_E, HandFrameCfg, HandSpawnAdapter, HandSpawnCfg, HandUrdfSpawnCfg
+from .hand_spawn import (
+    DEFAULT_HAND_ANCHOR_POS_E,
+    HandFrameCfg,
+    HandJointInitCfg,
+    HandSpawnAdapter,
+    HandSpawnCfg,
+    HandUrdfSpawnCfg,
+)
 
 
 def _single_asset_bundle_path() -> str:
@@ -123,6 +133,26 @@ GM_SINGLE_ASSET_HAND_SPAWN_CFG = HandSpawnCfg(
         semantic_p_ha=(0.0, 0.0, 0.0),
         anchor_R_eh=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
         anchor_p_eh=DEFAULT_HAND_ANCHOR_POS_E,
+    ),
+    joint_init=HandJointInitCfg(
+        joint_pos={
+            "thumb_j0": 0.71999997,
+            "index_j0": -0.0,
+            "middle_j0": 0.0,
+            "ring_j0": 0.11,
+            "thumb_j1": 1.56999993,
+            "index_j1": -0.52999997,
+            "middle_j1": -0.12,
+            "ring_j1": 0.44999999,
+            "thumb_j2": 0.75999999,
+            "index_j2": 1.23000002,
+            "middle_j2": 1.13999999,
+            "ring_j2": 1.29999995,
+            "thumb_j3": 1.63,
+            "index_j3": 0.94999999,
+            "middle_j3": 0.91999996,
+            "ring_j3": 0.66999996,
+        }
     ),
     urdf=HandUrdfSpawnCfg(activate_contact_sensors=True),
     asset_routing="round_robin",
@@ -187,11 +217,11 @@ class GmSingleAssetSceneCfg(InteractiveSceneCfg):
                 max_depenetration_velocity=1000.0,
             ),
             mass_props=sim_utils.MassPropertiesCfg(density=400.0),
-            scale=(1.2, 1.2, 1.2),
+            scale=(1.0, 1.0, 1.0),  # 与标定台 local cube 的“无额外缩放”语义对齐，先降低 contact-basin 迁移误差
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.055, 0.56), rot=(1.0, 0.0, 0.0, 0.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.02, 0.08, 0.56), rot=(1.0, 0.0, 0.0, 0.0)),
     )
-    """被操作物体；第一轮仍使用 DexCube 和当前 GM object 初始化位置。"""
+    """被操作物体；默认 GUI 初态对齐标定台导出的 contact basin，episode reset 仍由 events 接管。"""
 
     ground = AssetBaseCfg(
         prim_path="/World/ground",
@@ -252,8 +282,10 @@ class GmSingleAssetObservationsCfg:
     r"""单资产 actor / critic observation 配置。
 
     这里保持当前 MDP scaffold，不引入 `distill/models` 的 PALM / JOINT / TIP tokenizer。
-    actor 看到 raw joint state、processed last action、soft limits、二值 fingertip contact 和
-    `[axis_h, error_so3_h]` command；critic 额外看到 object pose 与 fingertip force。
+    actor 看到 raw joint state、processed last action、hand-frame fingertip force、hand-frame object pose
+    和 `[axis_h, error_so3_h]` command。这里是 teacher / single-asset MDP probe，
+    允许 policy 读取 object pose privileged state，先降低学习难度；后续 student /
+    deployment 再决定是否遮蔽或蒸馏该信息。
     """
 
     @configclass
@@ -263,12 +295,32 @@ class GmSingleAssetObservationsCfg:
         joint_pos = ObsTerm(func=gm_mdp.joint_pos_raw, params={"asset_cfg": SceneEntityCfg("robot")})
         joint_vel = ObsTerm(func=gm_mdp.joint_vel_raw, params={"asset_cfg": SceneEntityCfg("robot")})
         last_action = ObsTerm(func=gm_mdp.last_processed_action, params={"action_name": "hand_joint_pos"})
-        joint_limits = ObsTerm(func=gm_mdp.joint_soft_pos_limits, params={"asset_cfg": SceneEntityCfg("robot")})
-        fingertip_contact = ObsTerm(
-            func=gm_mdp.fingertip_contact_binary,
-            params={"sensor_names": GM_SINGLE_ASSET_CONTACT_LAYOUT.fingertip_sensor_names, "force_threshold": 0.1},
+        # joint_limits = ObsTerm(func=gm_mdp.joint_soft_pos_limits, params={"asset_cfg": SceneEntityCfg("robot")})
+        fingertip_force_h = ObsTerm(
+            func=gm_mdp.fingertip_contact_force_h,
+            params={
+                "sensor_names": GM_SINGLE_ASSET_CONTACT_LAYOUT.fingertip_sensor_names,
+                "robot_cfg": SceneEntityCfg("robot"),
+                "semantic_R_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_R_ha,
+            },
         )
         command = ObsTerm(func=gm_mdp.reorient_command, params={"command_name": "goal_pose"})
+        object_pos_h = ObsTerm(
+            func=gm_mdp.object_pos_h,
+            params={
+                "object_cfg": SceneEntityCfg("object"),
+                "robot_cfg": SceneEntityCfg("robot"),
+                "semantic_R_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_R_ha,
+            },
+        )
+        object_rot6d_h = ObsTerm(
+            func=gm_mdp.object_rot6d_h,
+            params={
+                "object_cfg": SceneEntityCfg("object"),
+                "robot_cfg": SceneEntityCfg("robot"),
+                "semantic_R_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_R_ha,
+            },
+        )
 
         def __post_init__(self):
             r"""拼接 actor obs，并保留 IsaacLab observation corruption 开关。"""
@@ -279,16 +331,6 @@ class GmSingleAssetObservationsCfg:
     @configclass
     class CriticCfg(PolicyCfg):
         r"""Critic-facing privileged observation group。"""
-
-        object_pos = ObsTerm(func=isaac_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
-        object_quat = ObsTerm(
-            func=isaac_mdp.root_quat_w,
-            params={"asset_cfg": SceneEntityCfg("object"), "make_quat_unique": False},
-        )
-        fingertip_force_w = ObsTerm(
-            func=gm_mdp.fingertip_contact_force_w,
-            params={"sensor_names": GM_SINGLE_ASSET_CONTACT_LAYOUT.fingertip_sensor_names},
-        )
 
     policy: ObsGroup = PolicyCfg(history_length=1)
     critic: ObsGroup = CriticCfg(history_length=1)
@@ -308,12 +350,12 @@ class GmSingleAssetRewardsCfg:
     )
     axis_progress = RewTerm(
         func=gm_mdp.AxisDeltaRotationReward,
-        weight=0.25,
+        weight=2.5,
         params={"command_name": "goal_pose", "object_cfg": SceneEntityCfg("object"), "clip_value": 0.025},
     )
     success_bonus = RewTerm(
         func=gm_mdp.goal_success_bonus,
-        weight=2.0,
+        weight=5.0,
         params={"command_name": "goal_pose", "object_cfg": SceneEntityCfg("object"), "success_mode": "so3"},
     )
     good_contact = RewTerm(
@@ -343,12 +385,48 @@ class GmSingleAssetRewardsCfg:
 class GmSingleAssetEventsCfg:
     r"""单资产 reset / event 配置。
 
-    第一轮按用户要求沿用随机 no-cache reset；它不是长期主线，但能最快暴露当前 MDP
-    组合是否至少具备训练闭环。
+    采用“一事一议”的 event 组合：官方项负责写 hand/object 物理状态，AnyMani 项
+    只记录 object reset anchor，供 `object_out_of_hand` 使用。初期不扰动 hand joint
+    与 object position，先精确复现标定台导出的 pre-grasp / contact basin；object
+    yaw 允许 $[-\pi,\pi]$ 全角度随机，避免策略只适配单一 cube 初始朝向。
     """
 
-    simple_no_cache_reset = EventTerm(func=gm_mdp.simple_no_cache_reset, mode="reset")
-    reset_grasp_cache = None
+    apply_structural_collision_filter = EventTerm(
+        func=gm_mdp.apply_generated_structural_collision_filter,
+        mode="prestartup",
+        params={
+            "robot_prim_path": "{ENV_REGEX_NS}/Robot",
+            "palm_link_name": GM_SINGLE_ASSET_CONTACT_LAYOUT.palm_link_name,
+            "finger_link_chains": GM_SINGLE_ASSET_CONTACT_LAYOUT.finger_link_chains,
+            "filter_palm_finger": True,
+            "filter_same_finger": True,
+        },
+    )
+    """PhysX 初始化前写入 generated structural collision groups：finger-palm 与 same-finger 不碰，finger-finger 保留。"""
+
+    reset_robot_joints = EventTerm(
+        func=isaac_mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "position_range": (0.0, 0.0),
+            "velocity_range": (0.0, 0.0),
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    reset_object = EventTerm(
+        func=isaac_mdp.reset_root_state_uniform,
+        mode="reset",
+        params={
+            "pose_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0), "yaw": (-math.pi, math.pi)},
+            "velocity_range": {},
+            "asset_cfg": SceneEntityCfg("object"),
+        },
+    )
+    record_object_reset_anchor = EventTerm(
+        func=gm_mdp.record_object_reset_anchor,
+        mode="reset",
+        params={"object_cfg": SceneEntityCfg("object")},
+    )
 
 
 @configclass
@@ -382,7 +460,7 @@ class GmSingleAssetEnvCfg(ManagerBasedRLEnvCfg):
     scene: GmSingleAssetSceneCfg = GmSingleAssetSceneCfg(
         num_envs=2048,
         env_spacing=0.75,
-        replicate_physics=True,
+        replicate_physics=False,
     )
     viewer: ViewerCfg = ViewerCfg()
     sim: SimulationCfg = SimulationCfg(

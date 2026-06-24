@@ -40,6 +40,8 @@ class GmContactSensorLayout:
     Args:
         source_asset_id (str): 产生该 layout 的 hand asset id，仅用于报错和日志追踪。
         palm_link_name (str): palm/root link 名称，通常为 `palm`。
+        finger_link_chains (tuple[tuple[str, ...], ...]): 每根 finger 的 child link 链；
+            该字段服务 generated structural collision filter，不要求固定四指名称。
         fingertip_link_names (tuple[str, ...]): `is_tip=True` joint 的 child link，顺序沿 sidecar finger/joint 顺序。
         non_tip_link_names (tuple[str, ...]): palm 加所有 `is_tip=False` joint child link，顺序沿运动链展开。
         fingertip_sensor_names (tuple[str, ...]): 与 fingertip link 一一对应的 scene sensor 名称。
@@ -51,6 +53,9 @@ class GmContactSensorLayout:
 
     palm_link_name: str
     """掌部 root link 名称；bad-contact penalty 默认把 palm 接触视为 non-tip 接触。"""
+
+    finger_link_chains: tuple[tuple[str, ...], ...]
+    """每根 generated finger 的 link 链；结构碰撞过滤用它区分 same-finger 与 cross-finger。"""
 
     fingertip_link_names: tuple[str, ...]
     """所有 fingertip link 名称；`is_tip=True` 是 sidecar 中的显式语义标签。"""
@@ -190,6 +195,7 @@ def build_contact_sensor_layout_from_sidecar(
     palm_link_name = _require_nonempty_string(palm_cfg.get("name"), f"asset {asset_id!r} palm.name")
 
     # 沿 sidecar finger/joint 顺序展开 child links；该顺序也就是当前 generated hand 的 semantic joint order。
+    finger_link_chains = _finger_link_chains_from_hand_cfg(hand_cfg, asset_id=asset_id)  # 每根 finger 的 child link 链
     tip_links: list[str] = []  # `is_tip=True` 的 child links，服务 fingertip obs / good contact
     non_tip_links: list[str] = [palm_link_name]  # palm 作为 non-tip 接触项的第一个 body，便于显式 bad-contact penalty
     for joint_cfg in _iter_joint_cfgs(hand_cfg, asset_id=asset_id):
@@ -210,6 +216,7 @@ def build_contact_sensor_layout_from_sidecar(
     return GmContactSensorLayout(
         source_asset_id=str(asset_id),
         palm_link_name=palm_link_name,
+        finger_link_chains=finger_link_chains,
         fingertip_link_names=tuple(tip_links),
         non_tip_link_names=tuple(non_tip_links),
         fingertip_sensor_names=fingertip_sensor_names,
@@ -370,6 +377,17 @@ def _sensor_force_tensor_w(env: Any, sensor_name: str) -> torch.Tensor:
 def _iter_joint_cfgs(hand_cfg: Mapping[str, Any], *, asset_id: str) -> Iterable[Mapping[str, Any]]:
     r"""按 sidecar 中的 finger/joint 顺序迭代所有 joint cfg。"""
 
+    for _, _, joint_cfg in _iter_finger_joint_cfgs(hand_cfg, asset_id=asset_id):
+        yield joint_cfg
+
+
+def _iter_finger_joint_cfgs(
+    hand_cfg: Mapping[str, Any],
+    *,
+    asset_id: str,
+) -> Iterable[tuple[int, Mapping[str, Any], Mapping[str, Any]]]:
+    r"""按 sidecar 中的 finger/joint 顺序迭代 `(finger_index, finger_cfg, joint_cfg)`。"""
+
     fingers = hand_cfg.get("fingers")  # `HandCfg.fingers`，应为 list[dict]
     if not isinstance(fingers, Sequence) or isinstance(fingers, str):
         raise ValueError(f"asset {asset_id!r} hand_cfg['fingers'] must be a sequence of finger mappings.")
@@ -380,7 +398,35 @@ def _iter_joint_cfgs(hand_cfg: Mapping[str, Any], *, asset_id: str) -> Iterable[
         if not isinstance(joints, Sequence) or isinstance(joints, str):
             raise ValueError(f"asset {asset_id!r} finger[{finger_index}]['joints'] must be a sequence.")
         for joint_index, joint_cfg in enumerate(joints):
-            yield _require_mapping(joint_cfg, f"asset {asset_id!r} finger[{finger_index}].joints[{joint_index}]")
+            yield (
+                finger_index,
+                finger_mapping,
+                _require_mapping(joint_cfg, f"asset {asset_id!r} finger[{finger_index}].joints[{joint_index}]"),
+            )
+
+
+def _finger_link_chains_from_hand_cfg(
+    hand_cfg: Mapping[str, Any],
+    *,
+    asset_id: str,
+) -> tuple[tuple[str, ...], ...]:
+    r"""从 sidecar 解析每根 finger 的 child link 链。
+
+    Returns:
+        tuple[tuple[str, ...], ...]: 外层按 finger 顺序，内层按 joint 顺序。
+    """
+
+    chains_by_finger: dict[int, list[str]] = {}  # finger index -> child link 链，保持 sidecar 顺序
+    for finger_index, _, joint_cfg in _iter_finger_joint_cfgs(hand_cfg, asset_id=asset_id):
+        child_link = _require_nonempty_string(joint_cfg.get("child"), f"asset {asset_id!r} joint.child")
+        chains_by_finger.setdefault(finger_index, []).append(child_link)  # 同一 finger 内部链，用于 same-finger filter
+
+    finger_link_chains = tuple(
+        tuple(_dedupe_preserve_order(chains_by_finger[index])) for index in sorted(chains_by_finger)
+    )  # 防御性去重，但保留每根 finger 的顺序
+    if not finger_link_chains:
+        raise ValueError(f"asset {asset_id!r} hand_cfg does not contain any finger link chain.")
+    return finger_link_chains
 
 
 def _sensor_name_for_link(link_name: str) -> str:
@@ -418,10 +464,10 @@ def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
     return deduped
 
 
-def _layout_signature(layout: GmContactSensorLayout) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    r"""提取用于 same-topology validation 的 contact 语义签名。"""
+def _layout_signature(layout: GmContactSensorLayout) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...], tuple[str, ...]]:
+    r"""提取用于 same-topology validation 的 contact / structural-collision 语义签名。"""
 
-    return layout.fingertip_link_names, layout.non_tip_link_names
+    return layout.finger_link_chains, layout.fingertip_link_names, layout.non_tip_link_names
 
 
 __all__ = [

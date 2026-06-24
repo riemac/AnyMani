@@ -43,6 +43,17 @@ assets -> tasks -> distill
 
 优先测试能提前揪出科研语义错误的内容：坐标系变换、SO(3)/SE(3) 公式、reward 单调性、obs/action 量纲、mask 语义、cache key/schema、token routing、attention bias shape 与零初始化。不要为了追覆盖率给研究草稿或纯注释 scaffold 写空洞测试。
 
+默认 `pytest` 只运行 `pytest.ini` 中声明的 contract paths，约定为不启动 Isaac Sim / Kit / `AppLauncher`。凡验证 URDF/USD import、`PhysicsCollisionGroup`、contact sensor、scene cloning、PhysX step、完整 reset/step 生命周期的测试，放在 `source/anymani/anymani/smokes/` 下，并通过显式路径运行。不要主要依赖 pytest marker 排除 IsaacSim 测试，因为 pytest 收集阶段可能已 import 测试模块并启动 Kit。
+
+IsaacSim smoke 必须小而硬：少量 env、少量 step、明确 assert 运行时副作用，并用 `timeout --kill-after` 包住。例如：
+
+```bash
+cd /home/hac/isaac/AnyMani
+source /home/hac/isaac/env_isaaclab/bin/activate
+timeout --kill-after=20s 240s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest \
+  source/anymani/anymani/smokes/isaacsim/test_gm_single_asset_structural_collision.py -q -s
+```
+
 ### 5. 训练记录分析
 
 本项目 uv 环境内装了 tensorboard 等库，可供 agent 使用 bash 脚本命令来分析训练记录，给出合适建议。

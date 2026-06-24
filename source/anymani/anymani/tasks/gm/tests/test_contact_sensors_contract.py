@@ -72,6 +72,12 @@ def test_contact_layout_parses_real_default_hand_cfg_tip_and_non_tip_links() -> 
     layout = build_contact_sensor_layout_from_sidecar(_real_default_sidecar(), asset_id="0b6fbfce")
 
     assert layout.palm_link_name == "palm"
+    assert layout.finger_link_chains == (
+        ("index_root_fixed_link", "index_mcp1", "index_mcp2", "index_pip", "index_dip", "index_tip"),
+        ("middle_root_fixed_link", "middle_mcp1", "middle_mcp2", "middle_pip", "middle_dip", "middle_tip"),
+        ("ring_root_fixed_link", "ring_mcp1", "ring_mcp2", "ring_pip", "ring_dip", "ring_tip"),
+        ("thumb_cmc1", "thumb_cmc2", "thumb_mcp", "thumb_dip", "thumb_tip"),
+    )
     assert layout.fingertip_link_names == ("index_tip", "middle_tip", "ring_tip", "thumb_tip")
     assert layout.fingertip_sensor_names == tuple(f"contact_{link_name}" for link_name in layout.fingertip_link_names)
     assert layout.non_tip_link_names[0] == "palm"  # palm bad-contact sensor 必须显式存在
@@ -88,6 +94,7 @@ def test_contact_layout_accepts_noncanonical_finger_names_and_counts() -> None:
     )
 
     assert layout.palm_link_name == "central_palm"
+    assert layout.finger_link_chains == (("root_link", "alpha_tip", "beta_tip"),)
     assert layout.fingertip_link_names == ("alpha_tip", "beta_tip")
     assert layout.non_tip_link_names == ("central_palm", "root_link")
     assert layout.fingertip_sensor_names == ("contact_alpha_tip", "contact_beta_tip")

@@ -287,7 +287,8 @@ class GmObservationsCfg:
         [q_i,\ \dot q_i,\ \Delta a_{t-1},\ q_i^{\min},\ q_i^{\max}],
         $$
         其中 $\Delta a_{t-1}$ 来自动作项 `processed_actions`，单位 rad，和
-        `ClampedRelativeJointPositionAction` 的动作语义一致。
+        `ClampedRelativeJointPositionAction` 的动作语义一致。teacher actor 还读取
+        hand-frame object pose $(p_o^h, R_{ho})$，先让专家策略拥有充分物体状态。
 
         NOTE: 关节限位 $q_i^{\min}, q_i^{\max}$ 作为静态形态量单独提供，
         当前 `history_length=1` 不会重复堆叠。若后续给 dynamic state 开启
@@ -303,6 +304,22 @@ class GmObservationsCfg:
             func=gm_mdp.fingertip_contact_binary,
             params={"sensor_names": GM_DEFAULT_CONTACT_LAYOUT.fingertip_sensor_names, "force_threshold": 0.2},
         )
+        object_pos_h = ObsTerm(
+            func=gm_mdp.object_pos_h,
+            params={
+                "object_cfg": SceneEntityCfg("object"),
+                "robot_cfg": SceneEntityCfg("robot"),
+                "semantic_R_ha": DEFAULT_GM_HAND_SPAWN_CFG.frame.semantic_R_ha,
+            },
+        )
+        object_rot6d_h = ObsTerm(
+            func=gm_mdp.object_rot6d_h,
+            params={
+                "object_cfg": SceneEntityCfg("object"),
+                "robot_cfg": SceneEntityCfg("robot"),
+                "semantic_R_ha": DEFAULT_GM_HAND_SPAWN_CFG.frame.semantic_R_ha,
+            },
+        )
         command = ObsTerm(func=gm_mdp.reorient_command, params={"command_name": "goal_pose"})
 
         def __post_init__(self):
@@ -313,16 +330,18 @@ class GmObservationsCfg:
 
     @configclass
     class CriticCfg(PolicyCfg):
-        r"""Privileged critic observation group scaffold."""
+        r"""Privileged critic observation group scaffold.
 
-        object_pos = ObsTerm(func=isaac_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
-        object_quat = ObsTerm(
-            func=isaac_mdp.root_quat_w,
-            params={"asset_cfg": SceneEntityCfg("object"), "make_quat_unique": False},
-        )
-        fingertip_force_w = ObsTerm(
-            func=gm_mdp.fingertip_contact_force_w,
-            params={"sensor_names": GM_DEFAULT_CONTACT_LAYOUT.fingertip_sensor_names},
+        critic 继承 policy 的 hand-frame object pose；额外读取 hand-frame fingertip force。
+        """
+
+        fingertip_force_h = ObsTerm(
+            func=gm_mdp.fingertip_contact_force_h,
+            params={
+                "sensor_names": GM_DEFAULT_CONTACT_LAYOUT.fingertip_sensor_names,
+                "robot_cfg": SceneEntityCfg("robot"),
+                "semantic_R_ha": DEFAULT_GM_HAND_SPAWN_CFG.frame.semantic_R_ha,
+            },
         )
 
     policy: ObsGroup = PolicyCfg(history_length=1)
@@ -386,21 +405,13 @@ class GmRewardsCfg:
 
 @configclass
 class GmEventsCfg:
-    r"""Domain randomization and reset scaffold.
+    r"""Domain randomization and reset scaffold。
 
-    DONE(语义主次已固定): 第一版主线是 cache-driven reset，而不是普通
-    object pose DR + random joint reset。正式实现应新增一个 cache reset event：
-    $$
-    (q, T^h_o) \sim
-    \mathcal{D}_{\text{grasp}}(q,T^h_o\mid a,o,s,\rho),
-    $$
-    并在 reset 时写 hand joint position、object pose、零速度以及 action target。
-
-    互斥关系：
-        - `reset_grasp_cache` 启用时，不应同时启用 random object pose reset；
-        - `reset_grasp_cache` 启用时，不应再叠加 random hand joint offset；
-        - 无 cache 消融才启用 `random_reset_object_ablation` 与
-          `random_reset_robot_joints_ablation`。
+    DONE(拆分 reset 语义):
+        第一版 runnable slice 不再使用聚合式 wrapper，而是把 reset 拆成独立
+        `EventTerm`：hand joint state 由 IsaacLab 官方 `reset_joints_by_offset`
+        写入，object root pose 由 IsaacLab 官方 `reset_root_state_uniform`
+        写入，AnyMani 只额外记录 object reset anchor。
 
     DR 阶段：
         - object scale 是 startup / usd-time 离散 bucket，不是 episode reset 噪声；
@@ -409,13 +420,41 @@ class GmEventsCfg:
         - joint limit DR、collider offset DR、fixed tendon DR、interval 外力暂缓。
 
     NOTE:
-        本阶段用户明确要求 Grasp Cache 暂后，因此这里激活一个命名为
-        `simple_no_cache_reset` 的最小 reset。它不是长期主线，只服务同拓扑异构资产
-        并行训练管线的 first runnable slice。
+        这里保留原先 runnable slice 的轻扰动幅度：hand joint 约 $\pm0.05$ rad，
+        object 平移厘米级、姿态小角度扰动。后续若单资产标定 basin 更稳定，可继续
+        把这些扰动收窄或分阶段释放。
     """
 
-    simple_no_cache_reset = EventTerm(func=gm_mdp.simple_no_cache_reset, mode="reset")
-    reset_grasp_cache = None  # 主线占位：未来写入 cache sample $(q,T^h_o)$
+    reset_robot_joints = EventTerm(
+        func=isaac_mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "position_range": (-0.05, 0.05),
+            "velocity_range": (0.0, 0.0),
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    reset_object = EventTerm(
+        func=isaac_mdp.reset_root_state_uniform,
+        mode="reset",
+        params={
+            "pose_range": {
+                "x": (-0.01, 0.01),
+                "y": (-0.01, 0.01),
+                "z": (-0.005, 0.005),
+                "roll": (-0.1, 0.1),
+                "pitch": (-0.1, 0.1),
+                "yaw": (-0.2, 0.2),
+            },
+            "velocity_range": {},
+            "asset_cfg": SceneEntityCfg("object"),
+        },
+    )
+    record_object_reset_anchor = EventTerm(
+        func=gm_mdp.record_object_reset_anchor,
+        mode="reset",
+        params={"object_cfg": SceneEntityCfg("object")},
+    )
 
 
 @configclass
@@ -482,7 +521,8 @@ class GmInHandEnvCfg(ManagerBasedRLEnvCfg):
         2. action joint order 由 `preserve_order=True` 与 same-topology sidecar schema 共同约束；
         3. command / reward 已接入 `ReorientCommand`、keypoint orientation reward、axis progress
            与 goal-success curriculum；
-        4. Grasp Cache 暂后时启用 `simple_no_cache_reset`，作为 first runnable slice。
+        4. reset 已拆成 hand joint / object pose / object anchor 三个独立 event，
+           便于逐项调试初始接触盆地与扰动分布。
 
     TODO:
         仍需用 Isaac Lab headless random-agent smoke 验证真实 articulation loading、contact sensor

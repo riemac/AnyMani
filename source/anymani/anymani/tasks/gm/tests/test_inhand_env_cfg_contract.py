@@ -260,7 +260,30 @@ def test_gm_mdp_preserves_flat_public_observation_and_reward_exports() -> None:
     assert "from .observations import" in source  # package 化后仍从 `.observations` re-export obs terms
     assert "from .rewards import" in source  # package 化后仍从 `.rewards` re-export reward terms
     assert '"joint_pos_raw"' in source and '"fingertip_contact_binary"' in source
+    assert '"fingertip_contact_force_h"' in source and "fingertip_contact_force_w" not in source
+    assert '"object_pos_h"' in source and '"object_rot6d_h"' in source
     assert '"keypoint_reorientation_reward"' in source and '"good_fingertip_contact"' in source
+    assert '"record_object_reset_anchor"' in source  # AnyMani 专属 reset anchor event 保持扁平导出
+    assert "simple_no_cache_reset" not in source  # 不再导出聚合式 reset wrapper，避免 reset 语义重新杂糅
+
+
+def test_gm_inhand_uses_split_reset_events() -> None:
+    r"""GM in-hand 默认 reset 应拆成官方物理写入项和 AnyMani anchor 记录项。"""
+
+    source = INHAND_ENV_CFG_PATH.read_text(encoding="utf-8")  # 纯文本检查，不触发 Isaac runtime
+    reset_robot_call = _class_assign_call("GmEventsCfg", "reset_robot_joints")
+    reset_object_call = _class_assign_call("GmEventsCfg", "reset_object")
+    record_anchor_call = _class_assign_call("GmEventsCfg", "record_object_reset_anchor")
+
+    assert _call_func_name(reset_robot_call) == "EventTerm"
+    assert _call_func_name(reset_object_call) == "EventTerm"
+    assert _call_func_name(record_anchor_call) == "EventTerm"
+    assert "func=isaac_mdp.reset_joints_by_offset" in source
+    assert '"position_range": (-0.05, 0.05)' in source
+    assert "func=isaac_mdp.reset_root_state_uniform" in source
+    assert '"yaw": (-0.2, 0.2)' in source  # 保留原 runnable slice 的小角度 object yaw 扰动
+    assert "func=gm_mdp.record_object_reset_anchor" in source
+    assert "func=gm_mdp.simple_no_cache_reset" not in source
 
 
 def test_gm_inhand_task_aliases_point_to_tasks_env_cfg() -> None:
