@@ -44,10 +44,31 @@ gym.register(
     },
 )
 
+gym.register(
+    id="AnyMani-GM-SingleAsset-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.single_asset_env_cfg:GmSingleAssetEnvCfg",
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-SingleAsset-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.single_asset_env_cfg:GmSingleAssetEnvCfg_PLAY",
+    },
+)
+
 __all__ = [
     "GmInHandEnvCfg",
     "GmInHandEnvCfg_PLAY",
     "GmInHandSceneCfg",
+    "GmSingleAssetEnvCfg",
+    "GmSingleAssetEnvCfg_PLAY",
+    "GmSingleAssetSceneCfg",
     "HeterogeneousHandTestEnvCfg",
 ]
 
@@ -68,11 +89,15 @@ def __getattr__(name: str) -> Any:
             return HeterogeneousHandTestEnvCfg
 
         from .inhand_env_cfg import GmInHandEnvCfg, GmInHandEnvCfg_PLAY, GmInHandSceneCfg
+        from .single_asset_env_cfg import GmSingleAssetEnvCfg, GmSingleAssetEnvCfg_PLAY, GmSingleAssetSceneCfg
 
         exports = {
             "GmInHandEnvCfg": GmInHandEnvCfg,
             "GmInHandEnvCfg_PLAY": GmInHandEnvCfg_PLAY,
             "GmInHandSceneCfg": GmInHandSceneCfg,
+            "GmSingleAssetEnvCfg": GmSingleAssetEnvCfg,
+            "GmSingleAssetEnvCfg_PLAY": GmSingleAssetEnvCfg_PLAY,
+            "GmSingleAssetSceneCfg": GmSingleAssetSceneCfg,
         }
         return exports[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

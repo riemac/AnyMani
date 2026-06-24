@@ -83,3 +83,12 @@ T_{ea}=T_{eh}T_{ha}.
 $$
 
 orientation domain randomization 的默认语义是 hand-frame body/right 扰动：从 anchor 出发右乘 $\Delta R_h$，即 $R'_{eh}=R_{eh}^{anchor}\Delta R_h$。默认 reference mode 应为 `anchor`，保证 reset 初态是 i.i.d. 分布；`current` 随机游走只作为未来 continual perturbation / curriculum 预留。
+
+## Progress
+
+当前正在进行单资产 MLP 训练，来排查资产合理性和核验 MDP 模块正确性，有两个成功案例值得当前对比和借鉴
+
+- LEAP_Hand_Isaac_Lab/source/LEAP_Isaaclab/LEAP_Isaaclab/tasks/leap_hand_reorient/reorientation_env.py
+  > LEAP Hand 官方的 IsaacLab 手内操作任务 demo，训练效果既快又好，只训练绕 z 轴的旋转
+- IsaacLab/source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/inhand/config/allegro_hand/allegro_env_cfg.py
+  > IsaacLab 官方的随机重定向任务，command 偏向当前我这版，训练效果也不错
