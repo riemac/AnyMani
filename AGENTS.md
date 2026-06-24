@@ -43,9 +43,14 @@ assets -> tasks -> distill
 
 优先测试能提前揪出科研语义错误的内容：坐标系变换、SO(3)/SE(3) 公式、reward 单调性、obs/action 量纲、mask 语义、cache key/schema、token routing、attention bias shape 与零初始化。不要为了追覆盖率给研究草稿或纯注释 scaffold 写空洞测试。
 
+### 5. 训练记录分析
+
+本项目 uv 环境内装了 tensorboard 等库，可供 agent 使用 bash 脚本命令来分析训练记录，给出合适建议。
+
 ## 常用操作
 
 ### 环境激活
+
 项目为 uv 环境
 
 ```bash
