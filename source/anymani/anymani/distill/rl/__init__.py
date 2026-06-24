@@ -51,5 +51,25 @@ gym.register(
     },
 )
 
+gym.register(
+    id="AnyMani-GM-SingleAsset-MLP-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "anymani.tasks.gm.single_asset_env_cfg:GmSingleAssetEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:gm_single_asset_mlp_ppo.yaml",
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-SingleAsset-MLP-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "anymani.tasks.gm.single_asset_env_cfg:GmSingleAssetEnvCfg_PLAY",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:gm_single_asset_mlp_ppo.yaml",
+    },
+)
+
 
 __all__ = []

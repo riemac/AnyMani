@@ -47,25 +47,24 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 
-import gymnasium as gym
 import math
 import os
 import time
+
+import anymani.distill.rl  # noqa: F401
+import anymani.tasks  # noqa: F401
+import gymnasium as gym
+import isaaclab_tasks  # noqa: F401
 import torch
-
-from rl_games.common import env_configurations, vecenv
-from rl_games.common.player import BasePlayer
-from rl_games.torch_runner import Runner
-
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
 from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
-
-import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path, load_cfg_from_registry, parse_env_cfg
-import anymani.tasks  # noqa: F401
+from rl_games.common import env_configurations, vecenv
+from rl_games.common.player import BasePlayer
+from rl_games.torch_runner import Runner
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
@@ -93,11 +92,8 @@ def main():
         # specify directory for logging runs
         run_dir = agent_cfg["params"]["config"].get("full_experiment_name", ".*")
         # specify name of checkpoint
-        if args_cli.use_last_checkpoint:
-            checkpoint_file = ".*"
-        else:
-            # this loads the best checkpoint
-            checkpoint_file = f"{agent_cfg['params']['config']['name']}.pth"
+        # `.*` selects the latest checkpoint; otherwise we load the best checkpoint named after the rl_games run.
+        checkpoint_file = ".*" if args_cli.use_last_checkpoint else f"{agent_cfg['params']['config']['name']}.pth"
         # get path to previous checkpoint
         resume_path = get_checkpoint_path(log_root_path, run_dir, checkpoint_file, other_dirs=["nn"])
     else:
