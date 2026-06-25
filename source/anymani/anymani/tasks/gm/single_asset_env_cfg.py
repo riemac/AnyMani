@@ -402,7 +402,7 @@ class GmSingleAssetEventsCfg:
             "filter_same_finger": True,
         },
     )
-    """PhysX 初始化前写入 generated structural collision groups：finger-palm 与 same-finger 不碰，finger-finger 保留。"""
+    """PhysX 初始化前写入 generated structural `FilteredPairsAPI`：finger-palm 与 same-finger 不碰，finger-finger 保留。"""
 
     reset_robot_joints = EventTerm(
         func=isaac_mdp.reset_joints_by_offset,

@@ -12,7 +12,7 @@ timeout --kill-after=20s 240s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest 
 
 该 smoke 针对 2026-06-24 单资产标定台消融暴露出的“伪测试”风险：纯 contract test
 只能证明 link-pair 集合 $\mathcal{F}$ 的组合逻辑正确，不能证明
-`PhysicsCollisionGroup` 已经在 USD stage 中 author，也不能证明 PhysX 初始化后环境可
+`PhysicsFilteredPairsAPI` 已经在 USD stage 中 author，也不能证明 PhysX 初始化后环境可
 reset / step。这里显式启动 IsaacSim，验证 `prestartup` event 的 stage 级副作用。
 """
 
@@ -43,14 +43,11 @@ from anymani.tasks.gm.single_asset_env_cfg import GM_SINGLE_ASSET_CONTACT_LAYOUT
 TASK_ID = "AnyMani-GM-SingleAsset-v0"
 r"""被验证的单资产 GM 环境；训练侧 MLP alias 复用同一个 env cfg，因此这里测 gm-owned task 即可。"""
 
-COLLISION_GROUP_ROOT = "/World/anymani_gm_generated_structural_collision_filters"
-r"""`apply_generated_structural_collision_filter(...)` 默认写入的 external collision group scope。"""
-
 SMOKE_NUM_ENVS = 2
-r"""headless smoke 的最小并行规模；两个 env 可同时验证 collection include 覆盖 cloned env roots。"""
+r"""headless smoke 的最小并行规模；两个 env 可同时验证 pairwise authoring 覆盖 cloned env roots。"""
 
-SMOKE_STEPS = 3
-r"""随机动作步数；目标是验证 reset/step 链路 finite，不把本 smoke 扩展成训练稳定性测试。"""
+SMOKE_STEPS = 64
+r"""随机动作步数；约半秒仿真时间，用于覆盖连续 PhysX step，但不扩展成训练稳定性测试。"""
 
 
 def teardown_module() -> None:
@@ -71,7 +68,7 @@ def test_single_asset_structural_collision_filter_authors_usd_and_steps() -> Non
             \cup \bigcup_f \{(a,b)\mid a,b\in F_f,\ a\ne b\}.
         $$
         纯 contract test 只检查 $\mathcal{F}$；本 smoke 进一步检查每个参与 link
-        对应的 `PhysicsCollisionGroup` 是否在 stage 中存在，并用少量随机动作证明
+        对应的 `PhysicsFilteredPairsAPI` 是否在 stage 中存在，并用少量随机动作证明
         PhysX 初始化、reset、step 没有被该过滤 schema 破坏。
     """
 
@@ -89,10 +86,10 @@ def test_single_asset_structural_collision_filter_authors_usd_and_steps() -> Non
         assert isinstance(stats, Mapping), "missing structural collision filter stats; prestartup event likely did not run"
         _assert_structural_collision_filter_stats(stats)
 
-        # 再检查 USD stage 中的 external collision group scope 和每个 link-level group。
-        _assert_structural_collision_groups_authored(runtime_env.scene.stage)
+        # 再检查 USD stage 中每个结构过滤 link pair 的 `physics:filteredPairs` 关系。
+        _assert_structural_filtered_pairs_authored(runtime_env)
 
-        # 最后做 reset/step finite 检查，确认 stage-level collision schema 没破坏真实 PhysX rollout。
+        # 最后做短 rollout finite 检查，确认 stage-level collision schema 没在连续 PhysX step 中失效。
         obs, _ = env.reset()
         _assert_finite_tree("reset_obs", obs)
         for step_id in range(SMOKE_STEPS):
@@ -110,11 +107,11 @@ def _assert_structural_collision_filter_stats(stats: Mapping[str, Any]) -> None:
     r"""检查 `prestartup` 写入的结构碰撞过滤统计量。
 
     Args:
-        stats (Mapping[str, Any]): `env._gm_structural_collision_filter_stats`，记录 group 数、pair 数、
-            directed edge 数与缺失 link 名称。
+        stats (Mapping[str, Any]): `env._gm_structural_collision_filter_stats`，记录 API 类型、pair 数、
+            directed pair edge 数与缺失 link 名称。
     """
 
-    expected_link_names = _expected_structural_filter_link_names()  # 参与 collision group 的 semantic links
+    expected_link_names = _expected_structural_filter_link_names()  # 参与 pairwise filter 的 semantic links
     expected_pairs = generated_structural_collision_filter_pairs(
         palm_link_name=GM_SINGLE_ASSET_CONTACT_LAYOUT.palm_link_name,
         finger_link_chains=GM_SINGLE_ASSET_CONTACT_LAYOUT.finger_link_chains,
@@ -122,27 +119,61 @@ def _assert_structural_collision_filter_stats(stats: Mapping[str, Any]) -> None:
         filter_same_finger=True,
     )  # $\mathcal{F}$，无向 link pair 集合
 
-    assert stats["groups"] == len(expected_link_names)
+    assert stats["api"] == "FilteredPairsAPI"
     assert stats["link_pairs"] == len(expected_pairs)
-    assert stats["directed_edges"] == 2 * len(expected_pairs)
+    assert stats["directed_edges"] == 2 * len(expected_pairs) * SMOKE_NUM_ENVS
     assert tuple(stats["missing_link_names"]) == ()
+    assert len(expected_link_names) > 0  # 防止未来 layout 解析失败但 stats 恰好为空
 
 
-def _assert_structural_collision_groups_authored(stage) -> None:
-    r"""检查 USD stage 中 external `PhysicsCollisionGroup` prim 是否存在。
+def _assert_structural_filtered_pairs_authored(runtime_env) -> None:
+    r"""检查 USD stage 中 link-level `PhysicsFilteredPairsAPI` relationship 是否存在。
 
     Args:
-        stage: 当前 IsaacSim USD stage；类型来自 `pxr.Usd.Stage`，为避免纯 Python 解析期依赖不写静态类型。
+        runtime_env: 当前 unwrapped `ManagerBasedRLEnv`；需要读取 stage 与 cloned env prim paths。
     """
 
-    root_prim = stage.GetPrimAtPath(COLLISION_GROUP_ROOT)
-    assert root_prim.IsValid(), f"missing collision group root prim: {COLLISION_GROUP_ROOT}"
+    stage = runtime_env.scene.stage  # 当前 USD stage；prestartup event 已在 sim.reset 前完成 authoring
+    old_group_root = "/World/anymani_gm_generated_structural_collision_filters"  # 旧 CollisionGroup 实现的 scope
+    assert not stage.GetPrimAtPath(old_group_root).IsValid(), "old CollisionGroup filter root should not be authored"
 
-    for link_name in _expected_structural_filter_link_names():
-        group_path = f"{COLLISION_GROUP_ROOT}/{link_name}"  # 每个 semantic link 对应一个 external group
-        group_prim = stage.GetPrimAtPath(group_path)
-        assert group_prim.IsValid(), f"missing collision group prim: {group_path}"
-        assert group_prim.GetTypeName() == "PhysicsCollisionGroup"
+    expected_pairs = generated_structural_collision_filter_pairs(
+        palm_link_name=GM_SINGLE_ASSET_CONTACT_LAYOUT.palm_link_name,
+        finger_link_chains=GM_SINGLE_ASSET_CONTACT_LAYOUT.finger_link_chains,
+        filter_palm_finger=True,
+        filter_same_finger=True,
+    )  # $\mathcal{F}$，无向 link pair 集合
+
+    for env_prim_path in runtime_env.scene.env_prim_paths:
+        robot_path = f"{env_prim_path}/Robot"  # single-asset scene 中 robot prim path 的 resolved 形式
+        for link_a, link_b in expected_pairs:
+            _assert_filtered_pair_target(stage, f"{robot_path}/{link_a}", f"{robot_path}/{link_b}")
+            _assert_filtered_pair_target(stage, f"{robot_path}/{link_b}", f"{robot_path}/{link_a}")
+
+
+def _assert_filtered_pair_target(stage, source_link_path: str, target_link_path: str) -> None:
+    r"""检查一个 directed `source -> target` filtered pair 是否存在。
+
+    Args:
+        stage: 当前 IsaacSim USD stage。
+        source_link_path (str): 应持有 `PhysicsFilteredPairsAPI` 的 link prim path。
+        target_link_path (str): 应出现在 `physics:filteredPairs` relationship target 中的 link prim path。
+    """
+
+    source_prim = stage.GetPrimAtPath(source_link_path)
+    target_prim = stage.GetPrimAtPath(target_link_path)
+    assert source_prim.IsValid(), f"missing source link prim: {source_link_path}"
+    assert target_prim.IsValid(), f"missing target link prim: {target_link_path}"
+    assert "PhysicsFilteredPairsAPI" in source_prim.GetAppliedSchemas(), (
+        f"missing PhysicsFilteredPairsAPI on {source_link_path}; applied={source_prim.GetAppliedSchemas()}"
+    )
+
+    filtered_pairs_rel = source_prim.GetRelationship("physics:filteredPairs")
+    assert filtered_pairs_rel, f"missing physics:filteredPairs relationship on {source_link_path}"
+    assert target_prim.GetPath() in filtered_pairs_rel.GetTargets(), (
+        f"missing filtered pair target {target_link_path} on {source_link_path}; "
+        f"targets={filtered_pairs_rel.GetTargets()}"
+    )
 
 
 def _expected_structural_filter_link_names() -> tuple[str, ...]:

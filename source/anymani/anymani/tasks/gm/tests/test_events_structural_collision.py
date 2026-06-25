@@ -70,3 +70,14 @@ def test_generated_structural_collision_filter_keeps_cross_finger_collisions() -
     assert tuple(sorted(("thumb_root", "thumb_tip"))) in pairs
     assert tuple(sorted(("index_tip", "thumb_tip"))) not in pairs
     assert tuple(sorted(("index_root", "thumb_root"))) not in pairs
+
+
+def test_generated_structural_collision_filter_uses_filtered_pairs_api() -> None:
+    r"""runtime authoring 应使用 pairwise `FilteredPairsAPI`，不要回退到 collision group。"""
+
+    source = EVENTS_PATH.read_text(encoding="utf-8")
+
+    assert "FilteredPairsAPI.Apply" in source
+    assert '"PhysicsCollisionGroup"' not in source
+    assert "CollectionAPI:colliders" not in source
+    assert "CreateFilteredPairsRel" in source

@@ -62,9 +62,15 @@ generated collision filter authored mode='finger_palm_same_finger', groups=24, l
 
 ## 训练环境接入
 
-标定台消融通过后，该规则被提升为 generated asset 的训练物理约定，并接入 `tasks/gm`：
+标定台消融通过后，该规则被提升为 generated asset 的训练物理约定，并接入 `tasks/gm`。训练环境最初复用了标定台的 `PhysicsCollisionGroup` 写法；2026-06-25 在 4096-env 训练启动时观察到 PhysX warning：
 
-- `GmSingleAssetEventsCfg.apply_structural_collision_filter` 使用 `mode="prestartup"`，在 PhysX 初始化前写入 external `PhysicsCollisionGroup`。
+```text
+Collisions are supported currently only in one collision group.
+```
+
+本地 IsaacSim schema 显示 `PhysicsCollisionGroup` 是 coarse filtering，而 `PhysicsFilteredPairsAPI` 是 fine-grained filtering，且后者优先级高于 collision group。由于 IsaacLab / Cloner 也会用 collision group 表达 env 间 collision filtering，训练环境的 generated-hand 内部结构过滤已改为 pairwise `FilteredPairsAPI`，避免同一 collider 同时进入多个 group。
+
+- `GmSingleAssetEventsCfg.apply_structural_collision_filter` 使用 `mode="prestartup"`，在 PhysX 初始化前向 link prim 写入 `PhysicsFilteredPairsAPI` / `physics:filteredPairs`。
 - 过滤 palm 与任意 finger link 的 collision pair。
 - 过滤同一根 finger 内部任意 link-link collision pair。
 - 保留不同 fingers 之间的 collision pair，避免把真实 finger-finger 接触也抹掉。
@@ -83,7 +89,7 @@ $$
     \bigcup_f \{(a,b)\mid a,b\in F_f,\ a\ne b\}
 $$
 
-生成正确，不能证明 USD stage 上真的存在 `PhysicsCollisionGroup`，也不能证明 PhysX reset / step 稳定。因此新增显式 IsaacSim smoke：
+生成正确，不能证明 USD stage 上真的存在 `PhysicsFilteredPairsAPI`，也不能证明 PhysX reset / step 稳定。因此新增显式 IsaacSim smoke：
 
 ```bash
 cd /home/hac/isaac/AnyMani
@@ -95,10 +101,14 @@ timeout --kill-after=20s 240s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest 
 该 smoke 不进入默认 `pytest`，验收信号为：
 
 - `env._gm_structural_collision_filter_stats` 存在；
-- `groups`、`link_pairs`、`directed_edges` 与 sidecar 推导的结构规则一致；
+- `api == "FilteredPairsAPI"`；
+- `link_pairs`、`directed_edges` 与 sidecar 推导的结构规则一致；
 - `missing_link_names == ()`；
-- `/World/anymani_gm_generated_structural_collision_filters` 及其 link-level group prim 均已 author；
-- `AnyMani-GM-SingleAsset-v0` 可 reset，并完成少量随机 action step，obs / reward 全 finite。
+- 每个结构过滤 link pair 都在对应 link prim 的 `physics:filteredPairs` relationship 中双向出现；
+- 不再 author `/World/anymani_gm_generated_structural_collision_filters` 旧 group root；
+- `AnyMani-GM-SingleAsset-v0` 可 reset，并完成 64 步随机 action 短 rollout，obs / reward 全 finite。
+
+这个 smoke 的边界是“证明 USD / PhysX 运行时看见了 pairwise filter，并且短 rollout 没有基础数值崩溃”。它不能替代长训练回放，也不声称 reward、action space 或 contact basin 已经足够好；这些仍需要通过单资产训练曲线、视频回放和后续 ablation 判断。
 
 ## 后续建议
 

@@ -141,13 +141,12 @@ def apply_generated_structural_collision_filter(
     finger_link_chains: Sequence[Sequence[str]],
     filter_palm_finger: bool = True,
     filter_same_finger: bool = True,
-    collision_group_root: str = "/World/anymani_gm_generated_structural_collision_filters",
 ) -> None:
-    r"""在 PhysX 初始化前 author generated-hand 结构性 collision group 过滤。
+    r"""在 PhysX 初始化前 author generated-hand 结构性 pairwise collision 过滤。
 
     该 event 必须以 `mode="prestartup"` 挂到 IsaacLab `EventTerm`。此时 scene prim
     已经 spawn 完成，但 `sim.reset()` 尚未启动 PhysX handles；把 USD
-    `PhysicsCollisionGroup` 写在这个阶段，PhysX solver 才能在初始化时读取 pair filter。
+    `FilteredPairsAPI` 写在这个阶段，PhysX solver 才能在初始化时读取 pair filter。
 
     当前规则来自 2026-06-24 单资产标定台消融：generated hand 的 palm/finger root /
     same-finger link mesh 可能存在结构性穿插或过近距离，若全自碰撞开启，会导致 slider
@@ -158,6 +157,13 @@ def apply_generated_structural_collision_filter(
     - 同一根 finger 内部 links 不碰；
     - 不同 fingers 之间仍然碰，保留真实 finger-finger 接触约束。
 
+    NOTE(2026-06-25): 旧实现使用 external `PhysicsCollisionGroup`，会和 IsaacLab /
+    IsaacSim Cloner 的 env-level collision filtering 竞争同一个 collider 的 group 归属。
+    PhysX 日志会出现 `Collisions are supported currently only in one collision group`，
+    并可能导致部分过滤规则被忽略。`FilteredPairsAPI` 是 IsaacSim 对 pairwise 过滤的
+    更细粒度接口，且 schema 注释明确其优先级高于 `CollisionGroup`，因此这里改为
+    对每个 link pair 显式写双向 `physics:filteredPairs`。
+
     Args:
         env (ManagerBasedRLEnv): IsaacLab manager-based env；需提供 `scene.stage` 与 `scene.env_prim_paths`。
         env_ids (Sequence[int] | None): `prestartup` 模式下由 EventManager 传入，当前忽略。
@@ -166,10 +172,9 @@ def apply_generated_structural_collision_filter(
         finger_link_chains (Sequence[Sequence[str]]): 每根 finger 的 link 链。
         filter_palm_finger (bool): 是否过滤 palm-finger collision。
         filter_same_finger (bool): 是否过滤 same-finger internal collision。
-        collision_group_root (str): stage 中 external collision group scope 路径。
 
     Raises:
-        RuntimeError: 当前 USD build 缺少 `UsdPhysics.CollisionGroup` 或 group scope 写入失败。
+        RuntimeError: 当前 USD build 缺少 `UsdPhysics.FilteredPairsAPI` 或 API authoring 失败。
         ValueError: 未提供 finger link chains，或 `robot_prim_path` 不能映射 cloned env prim。
     """
 
@@ -179,13 +184,12 @@ def apply_generated_structural_collision_filter(
         raise ValueError("finger_link_chains must be non-empty for generated structural collision filtering.")
 
     # 懒加载 pxr：纯 contract / tensor tests 不需要 USD runtime，只有 Isaac Sim prestartup 才需要。
-    from pxr import Sdf, Usd, UsdGeom, UsdPhysics  # noqa: PLC0415
+    from pxr import Usd, UsdPhysics  # noqa: PLC0415
 
-    if not hasattr(UsdPhysics, "CollisionGroup"):
-        raise RuntimeError("Current USD build does not expose UsdPhysics.CollisionGroup")
+    if not hasattr(UsdPhysics, "FilteredPairsAPI"):
+        raise RuntimeError("Current USD build does not expose UsdPhysics.FilteredPairsAPI")
 
     stage = env.scene.stage  # 当前 USD stage；scene 已 spawn，但 PhysX 尚未 reset
-    root_layer = stage.GetRootLayer()  # 过滤 schema 写在 root layer，保证 PhysX 初始化可见
     env_prim_paths = tuple(str(env_prim_path) for env_prim_path in env.scene.env_prim_paths)  # cloned env roots
     filtered_pairs = generated_structural_collision_filter_pairs(
         palm_link_name=palm_link_name,
@@ -198,74 +202,51 @@ def apply_generated_structural_collision_filter(
         finger_link_chains=finger_link_chains,
         filter_palm_finger=filter_palm_finger,
         filter_same_finger=filter_same_finger,
-    )  # 需要建 CollisionGroup 的 link 名集合
+    )  # 需要解析成 prim path 的 link 名集合
 
-    # 先创建 external scope，然后在其中为每个 link 建 `PhysicsCollisionGroup`。
-    with Usd.EditContext(stage, Usd.EditTarget(root_layer)):
-        UsdGeom.Scope.Define(stage, collision_group_root)
-    collision_group_root_spec = root_layer.GetPrimAtPath(collision_group_root)
-    if collision_group_root_spec is None:
-        raise RuntimeError(f"Failed to define collision group scope at {collision_group_root}")
-
-    link_group_paths: dict[str, str] = {}  # link name -> `/World/.../<link>` collision group prim path
+    link_paths_by_env: dict[str, dict[str, str]] = {}  # env path -> link name -> link prim path，便于逐 env 写 pair
     missing_link_names: set[str] = set()  # schema/link-name 不匹配时显式 warning，避免 silent wrong physics
-
-    # 用 Sdf author collection，collection include 指向 link prim，并用 expandPrims 纳入其下 collision descendants。
-    with Sdf.ChangeBlock():
+    for env_prim_path in env_prim_paths:
+        link_paths: dict[str, str] = {}  # 当前 cloned env 内的 link prim path 表
         for link_name in link_names:
-            first_env_link_path = _structural_collision_link_prim_path(env_prim_paths[0], robot_prim_path, link_name)
-            if not stage.GetPrimAtPath(first_env_link_path).IsValid():
+            link_path = _structural_collision_link_prim_path(env_prim_path, robot_prim_path, link_name)
+            if not stage.GetPrimAtPath(link_path).IsValid():
                 missing_link_names.add(link_name)
                 continue
+            link_paths[link_name] = link_path  # `$l \mapsto /World/envs/env_i/Robot/l$`
+        link_paths_by_env[env_prim_path] = link_paths
 
-            collision_group = Sdf.PrimSpec(
-                collision_group_root_spec,
-                link_name,
-                Sdf.SpecifierDef,
-                "PhysicsCollisionGroup",
-            )  # external collision group，不修改原 URDF/USD asset
-            collision_group.SetInfo(Usd.Tokens.apiSchemas, Sdf.TokenListOp.Create({"CollectionAPI:colliders"}))
-
-            expansion_rule = Sdf.AttributeSpec(
-                collision_group,
-                "collection:colliders:expansionRule",
-                Sdf.ValueTypeNames.Token,
-                Sdf.VariabilityUniform,
-            )  # collection expansion rule attribute
-            expansion_rule.default = "expandPrims"  # link prim 下的 collision mesh descendants 全部纳入 group
-
-            includes_rel = Sdf.RelationshipSpec(collision_group, "collection:colliders:includes", False)
-            for env_prim_path in env_prim_paths:
-                includes_rel.targetPathList.Append(
-                    _structural_collision_link_prim_path(env_prim_path, robot_prim_path, link_name)
-                )  # 每个 cloned env 的同名 link 都进入同一个 link-level group
-
-            link_group_paths[link_name] = f"{collision_group_root}/{link_name}"  # 供 filteredGroups relationship 使用
-
-    authored_group_edges = 0  # directed `physics:filteredGroups` edge 数；无向 pair 双向写入
-    for link_a, link_b in filtered_pairs:
-        group_a_path = link_group_paths.get(link_a)
-        group_b_path = link_group_paths.get(link_b)
-        if group_a_path is None or group_b_path is None:
-            missing_link_names.update(
-                link_name for link_name, group_path in ((link_a, group_a_path), (link_b, group_b_path)) if group_path is None
-            )
-            continue
-        authored_group_edges += _author_structural_filtered_group_edge(stage, group_a_path, group_b_path)
-        authored_group_edges += _author_structural_filtered_group_edge(stage, group_b_path, group_a_path)
+    authored_pair_edges = 0  # directed `physics:filteredPairs` edge 数；无向 pair 双向写入
+    # 4096-env 训练会写约 $4096\times78\times2$ 条 directed edges，因此 edit target 外提，
+    # 避免每条 edge 都进入一次 `Usd.EditContext` 造成启动时间膨胀。这里不使用 `Sdf.ChangeBlock`，
+    # 因为 `UsdPrim.ApplyAPI(...)` 这类高层 API 在 ChangeBlock 中可能不可靠。
+    with Usd.EditContext(stage, Usd.EditTarget(stage.GetRootLayer())):
+        for link_paths in link_paths_by_env.values():
+            for link_a, link_b in filtered_pairs:
+                link_a_path = link_paths.get(link_a)
+                link_b_path = link_paths.get(link_b)
+                if link_a_path is None or link_b_path is None:
+                    missing_link_names.update(
+                        link_name
+                        for link_name, link_path in ((link_a, link_a_path), (link_b, link_b_path))
+                        if link_path is None
+                    )
+                    continue
+                authored_pair_edges += _author_structural_filtered_pair_edge(stage, link_a_path, link_b_path)
+                authored_pair_edges += _author_structural_filtered_pair_edge(stage, link_b_path, link_a_path)
 
     if missing_link_names:
         print(f"[WARN]: GM structural collision filter skipped missing hand links: {sorted(missing_link_names)}")
     print(
         "[INFO]: GM structural collision filter authored "
-        f"groups={len(link_group_paths)}, link_pairs={len(filtered_pairs)}, directed_edges={authored_group_edges}"
+        f"link_pairs={len(filtered_pairs)}, directed_pair_edges={authored_pair_edges}"
     )
     env._gm_structural_collision_filter_stats = {
-        "groups": len(link_group_paths),
+        "api": "FilteredPairsAPI",
         "link_pairs": len(filtered_pairs),
-        "directed_edges": authored_group_edges,
+        "directed_edges": authored_pair_edges,
         "missing_link_names": tuple(sorted(missing_link_names)),
-    }  # debug-only metadata，便于 smoke / 日志排查 stage 过滤是否生效
+    }  # debug-only metadata，便于 smoke / 日志排查 pairwise 过滤是否生效
 
 
 def _structural_collision_filter_link_names(
@@ -275,9 +256,9 @@ def _structural_collision_filter_link_names(
     filter_palm_finger: bool,
     filter_same_finger: bool,
 ) -> tuple[str, ...]:
-    r"""返回需要创建 `PhysicsCollisionGroup` 的 link 名集合。"""
+    r"""返回需要写入 `FilteredPairsAPI` 的 link 名集合。"""
 
-    link_names: set[str] = set()  # group collection 只为参与 filter 的 links 创建
+    link_names: set[str] = set()  # 只为参与结构过滤集合 $\mathcal{F}$ 的 links 写 pairwise API
     if filter_palm_finger:
         link_names.add(palm_link_name)  # palm 是 palm-finger pair 的固定端点
     if filter_palm_finger or filter_same_finger:
@@ -292,28 +273,52 @@ def _structural_collision_link_prim_path(env_prim_path: str, robot_prim_path: st
     if "{ENV_REGEX_NS}" not in robot_prim_path:
         raise ValueError("robot_prim_path must contain '{ENV_REGEX_NS}' so it can be resolved for each cloned env.")
     robot_path = robot_prim_path.replace("{ENV_REGEX_NS}", env_prim_path)  # `/World/envs/env_i/Robot`
-    return f"{robot_path}/{link_name}"  # link prim path，collection expandPrims 会纳入其 collision descendants
+    return f"{robot_path}/{link_name}"  # link prim path，FilteredPairsAPI 以 link prim 作为 pairwise source/target
 
 
-def _author_structural_filtered_group_edge(stage, source_group_path: str, target_group_path: str) -> int:
-    r"""写入一条 directed `physics:filteredGroups` relationship edge。"""
+def _author_structural_filtered_pair_edge(stage, source_link_path: str, target_link_path: str) -> int:
+    r"""写入一条 directed `physics:filteredPairs` relationship edge。
 
-    from pxr import Sdf, Usd, UsdPhysics  # noqa: PLC0415
+    `FilteredPairsAPI` 的语义是“source prim 不与 relationship target prim 碰撞”。IsaacSim
+    `RobotAssembler.mask_collisions(...)` 也按 prim-to-prim target 写法使用该 API。这里
+    对无向结构 pair 写两条 directed edge，避免不同 PhysX/USD 版本对单向关系是否对称的解释
+    影响训练物理。
 
-    with Usd.EditContext(stage, Usd.EditTarget(stage.GetRootLayer())):
-        source_group = UsdPhysics.CollisionGroup.Get(stage, source_group_path)
-        if not source_group:
-            raise RuntimeError(f"Missing structural collision group at {source_group_path}")
+    Args:
+        stage: 当前 IsaacSim USD stage。
+        source_link_path (str): 被应用 `PhysicsFilteredPairsAPI` 的 link prim path。
+        target_link_path (str): 需要过滤碰撞的另一个 link prim path。
 
-        filtered_groups_rel = source_group.GetFilteredGroupsRel()
-        if not filtered_groups_rel:
-            filtered_groups_rel = source_group.CreateFilteredGroupsRel()
+    Returns:
+        int: 新增 relationship target 时返回 1，目标已存在时返回 0。
 
-        target_path = Sdf.Path(target_group_path)  # relationship target 指向另一个 collision group prim
-        if target_path in set(filtered_groups_rel.GetTargets()):
-            return 0
-        filtered_groups_rel.AddTarget(target_path)
-        return 1
+    Raises:
+        RuntimeError: 当 source/target link prim 不存在，或 `FilteredPairsAPI.Apply(...)` 失败。
+    """
+
+    from pxr import Sdf, UsdPhysics  # noqa: PLC0415
+
+    source_prim = stage.GetPrimAtPath(source_link_path)
+    target_prim = stage.GetPrimAtPath(target_link_path)
+    if not source_prim.IsValid() or not target_prim.IsValid():
+        raise RuntimeError(
+            "Cannot author structural filtered pair for invalid link prims: "
+            f"source={source_link_path!r}, target={target_link_path!r}."
+        )
+
+    filtered_pairs_api = UsdPhysics.FilteredPairsAPI.Apply(source_prim)
+    if not filtered_pairs_api:
+        raise RuntimeError(f"Failed to apply UsdPhysics.FilteredPairsAPI to {source_link_path}")
+
+    filtered_pairs_rel = filtered_pairs_api.GetFilteredPairsRel()
+    if not filtered_pairs_rel:
+        filtered_pairs_rel = filtered_pairs_api.CreateFilteredPairsRel()
+
+    target_path = Sdf.Path(target_link_path)  # relationship target 指向另一个 link prim
+    if target_path in set(filtered_pairs_rel.GetTargets()):
+        return 0
+    filtered_pairs_rel.AddTarget(target_path)
+    return 1
 
 
 def record_object_reset_anchor(
