@@ -7,6 +7,7 @@
 ```text
 distill.py
 train.py
+play.py
 il/       # 模仿学习 / 蒸馏入口
 rl/       # 强化学习入口
 models/   # policy、encoder、tokenizer、adapter 等共享网络定义
@@ -29,10 +30,11 @@ assets -> robots -> tasks -> distill
 
 ## 训练入口边界
 
-当前 RL 训练入口统一为 `python -m anymani.distill.train`。新增训练路线时优先新增
-Gym task alias + agent YAML；只有当训练编排本身发生变化时才扩展入口参数。不要为
-临时 debug/smoke 训练重新创建 `train_mvp.py`、`train_xxx.py` 或 distill-owned env cfg
-wrapper；运行时 reset/step/PhysX 验证放到 `source/anymani/anymani/smokes/` 显式 smoke。
+当前 RL 入口统一为 `python -m anymani.distill.train` 与
+`python -m anymani.distill.play`。新增训练路线时优先新增 Gym task alias + agent YAML；
+只有当训练/回放编排本身发生变化时才扩展入口参数。不要为临时 debug/smoke 训练重新创建
+`train_mvp.py`、`train_xxx.py` 或 distill-owned env cfg wrapper；运行时 reset/step/PhysX
+验证放到 `source/anymani/anymani/smokes/` 显式 smoke。
 
 ## 模型规模与频率硬约束
 

@@ -7,6 +7,8 @@ r"""AnyMani distill package façade.
 
 - `python -m anymani.distill.train --task AnyMani-GM-SingleAsset-MLP-v0`：
   single-asset MLP PPO 训练入口。
+- `python -m anymani.distill.play --task AnyMani-GM-SingleAsset-MLP-v0 --checkpoint <ckpt>`：
+  single-asset MLP PPO checkpoint 回放入口。
 
 运行时 reset/step / PhysX 语义验证不再放在 distill 临时脚本中，而是放到
 `source/anymani/anymani/smokes/` 下通过显式 pytest smoke 执行。

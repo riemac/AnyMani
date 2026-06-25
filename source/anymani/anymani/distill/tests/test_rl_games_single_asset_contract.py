@@ -19,6 +19,9 @@ from gymnasium.error import NameNotFound
 TRAIN_ENTRY_PATH = Path(__file__).resolve().parents[1] / "train.py"
 """统一 RL 训练入口源码路径；当前默认 route 是 single-asset MLP probe。"""
 
+PLAY_ENTRY_PATH = Path(__file__).resolve().parents[1] / "play.py"
+"""统一 RL checkpoint 回放入口源码路径；当前默认 route 是 single-asset MLP probe。"""
+
 
 def _single_asset_agent_cfg() -> dict:
     r"""读取 single-asset MLP YAML，不依赖 Hydra / Isaac Sim 启动。"""
@@ -118,3 +121,18 @@ def test_unified_train_entry_keeps_core_cli_without_full_experiment_stack() -> N
     assert 'parser.add_argument("--distributed"' not in source
     assert "wandb" not in source
     assert "PbtAlgoObserver" not in source
+
+
+def test_unified_play_entry_loads_distill_checkpoint_from_anymani_logs() -> None:
+    r"""统一回放入口应和训练入口共享 task、rl_games backend pinning 与 AnyMani log root。"""
+
+    source = PLAY_ENTRY_PATH.read_text(encoding="utf-8")
+
+    assert 'DEFAULT_TASK = "AnyMani-GM-SingleAsset-MLP-v0"' in source
+    assert "DEFAULT_NUM_ENVS = 1" in source
+    assert "prefer_local_rl_games" in source
+    assert "ANYMANI_ROOT / \"logs\" / \"distill\" / \"rl_games\"" in source
+    assert "@hydra_task_config(args_cli.task, \"rl_games_cfg_entry_point\")" in source
+    assert "agent.restore(resume_path)" in source
+    assert 'parser.add_argument("--checkpoint"' in source
+    assert 'parser.add_argument("--run_name"' in source
