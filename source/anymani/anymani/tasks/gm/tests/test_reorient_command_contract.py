@@ -54,6 +54,9 @@ def _install_reorient_import_stubs() -> dict[str, types.ModuleType | None]:
     managers_stub = types.ModuleType("isaaclab.managers")
     managers_stub.CommandTerm = type("CommandTerm", (), {})
 
+    markers_stub = types.ModuleType("isaaclab.markers")
+    markers_stub.VisualizationMarkers = type("VisualizationMarkers", (), {})
+
     replacements = {
         "pxr": pxr_stub,
         "pxr.Usd": pxr_stub.Usd,
@@ -63,6 +66,7 @@ def _install_reorient_import_stubs() -> dict[str, types.ModuleType | None]:
         "omni.kit.app": omni_stub.kit.app,
         "omni.timeline": omni_stub.timeline,
         "isaaclab.managers": managers_stub,
+        "isaaclab.markers": markers_stub,
     }
     previous = {name: sys.modules.get(name) for name in replacements}
     sys.modules.update(replacements)

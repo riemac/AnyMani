@@ -72,8 +72,8 @@ timeout --kill-after=20s 240s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest 
 
 `{w}`：Isaac Lab 全局世界坐标系。
 `{e}`：每个 cloned env 的局部环境坐标系。它通常只相对 `{w}` 平移，姿态多与 `{w}` 对齐，因此不能表达“手自身朝向变化后的任务语义”。
-`{a}`：raw asset/root frame，即 URDF/USD 被 Isaac Lab 加载后的资产根坐标系。它反映文件作者或 importer 的坐标约定，不必然等于 AnyMani 的手部建模语义。
-`{h}`：hand semantic frame。它是 `gm` 任务语义真正依赖的手坐标系，由 AnyMani 资产建模约定定义：手处于 home position 时，手掌平面、手指展开方向、手心法向应与 `AnyMani/source/anymani/anymani/assets/doc/平面示意-右手.png` 的语义一致。对官方 LEAP / Allegro / 其他真实 URDF，允许通过人工视觉校准或配置项给出 `{a} -> {h}` 的固定对齐变换。
+`{a}`：raw asset/root frame，即 URDF/USD 被 Isaac Lab 加载后的资产根坐标系。它是资产文件天然存在的根 frame，反映文件作者或 importer 的坐标约定，不必然等于 AnyMani 的手部建模语义；对官方 LEAP / Allegro 这类真实资产，默认不通过改 URDF/USD 来“修正” `{a}`。训练配置中的 `ArticulationCfg.InitialStateCfg.pos/rot` 表达 $T_{ea}^{init}$，负责把这个 raw asset frame `{a}` 摆到任务需要的 env 姿态，例如官方 LEAP 对照中的 `(0,0,0.5)` 与 `(0.5,0.5,-0.5,0.5)`。
+`{h}`：hand semantic frame。它是 `gm` 任务语义真正依赖的手坐标系，由 AnyMani 资产建模约定定义：手处于 home position 时，手掌平面、手指展开方向、手心法向应与 `AnyMani/source/anymani/anymani/assets/doc/平面示意-右手.png` 的语义一致。`{h}` 不负责把手摆到正确姿态；它只是固定附着在 `{a}` 上的语义锚点，供 command axis、object pose、contact force 等 MDP 项获得跨资产一致的手部语义。对官方 LEAP / Allegro / 其他真实 URDF，允许通过人工视觉校准或配置项给出 `{a} -> {h}` 的固定对齐变换，这是 sim2sim embodiment transfer 的先行语义对齐工作。
 `{o}`：object body frame。它随物体自身旋转剧烈变化，不适合作为默认 command frame，但可用于计算物体当前姿态或局部几何观测。
 
 `gm` 的 command 语义默认应锚定在 `{h}`，而不是 `{w}` / `{e}` / raw `{a}`。例如“绕 z 轴手内旋转”应解释为 `k^{h} = [0, 0, 1]`，即绕手心语义法向轴旋转物体；运行时再把该轴变换到 `{e}` 或 `{w}` 中供 reward、goal update 和 visualization 使用。
@@ -82,16 +82,24 @@ timeout --kill-after=20s 240s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest 
 
 配置层优先使用旋转矩阵和平移向量 $(R,p)$，实现层应组合为 $T\in SE(3)$ 进行复合、求逆和传递；只有在 Isaac Lab 边界（如 `ArticulationCfg.InitialStateCfg.rot` 或 `write_root_pose_to_sim`）才转换为 `(w,x,y,z)` 四元数。`so3` / 全 $SO(3)$ 随机采样实现时可以使用四元数算法，但文档和中间语义仍以 $SO(3)$ / $SE(3)$ 表达。
 
-`robots.hand_spawn.HandFrameCfg` 是静态装配锚点，记录：
+`robots.hand_spawn.HandFrameCfg` 是 generated-hand spawn 路径的静态装配锚点，记录：
 
 - $T_{ha}$：raw asset/root frame `{a}` 到 hand semantic frame `{h}` 的固定校准；
 - $T_{eh}^{anchor}$：hand semantic frame `{h}` 在 env frame `{e}` 中的默认参考 pose。
 
-spawn 层只负责把已选资产按 anchor 装配进 scene，不负责 episode 级随机朝向。若需要任意 hand orientation 训练，reset event 应采样 hand semantic pose $T_{eh}$，再写入 raw root pose：
+对 generated hand，spawn 层可以把已选资产按 hand semantic anchor 装配进 scene，不负责 episode 级随机朝向。若需要任意 hand orientation 训练，reset event 应采样 hand semantic pose $T_{eh}$，再写入 raw root pose：
 
 $$
 T_{ea}=T_{eh}T_{ha}.
 $$
+
+对 official LEAP / Allegro 这类对照资产，也允许暂时不走 `HandSpawnCfg` 装配公式，而是在对应 env cfg 里直接保留人工确认过的 `InitialStateCfg` root pose $T_{ea}^{init}$。此时 $T_{ea}^{init}$ 负责摆手，$T_{ah}$ / $T_{ha}$ 只负责描述 `{h}` 相对 `{a}` 的语义标定；不要把二者混成同一个“修正姿态”。若用户先用 VSCode URDF viewer 或 Isaac Sim viewer 标定出 $T_{ah}$，代码侧应按
+
+$$
+R_{ha}=R_{ah}^{\top},\qquad p_{ha}=-R_{ha}p_{ah}
+$$
+
+反算给 MDP 配置消费，同时保持 official asset 文件本身不变。
 
 orientation domain randomization 的默认语义是 hand-frame body/right 扰动：从 anchor 出发右乘 $\Delta R_h$，即 $R'_{eh}=R_{eh}^{anchor}\Delta R_h$。默认 reference mode 应为 `anchor`，保证 reset 初态是 i.i.d. 分布；`current` 随机游走只作为未来 continual perturbation / curriculum 预留。
 
