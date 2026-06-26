@@ -135,6 +135,11 @@ def _make_fake_command(num_envs: int = 2, theta: float = math.pi / 2) -> Reorien
         orientation_success_threshold=1.0e-3,  # 到达目标时触发 success
         keypoint_radius=0.05,  # AnyRotate 六轴 keypoint 半径锚点
         resampling_time_range=(1.0e6, 1.0e6),  # 与真实 cfg 一致，禁用时间驱动重采样
+        command_output={
+            "frame": "h",
+            "axis": {"mode": "include"},
+            "target": {"kind": "relative", "representation": "axis_angle"},
+        },  # 测试默认复现历史 `[axis_h,error_so3_h]` 输出
     )
     cmd.semantic_R_ha = torch.eye(3)  # generated asset 第一版默认 `{a}` 与 `{h}` 对齐
     cmd.robot = SimpleNamespace(data=SimpleNamespace(root_quat_w=_identity_quat(num_envs)))  # hand root 姿态
@@ -175,6 +180,40 @@ def test_reorient_command_resample_populates_axis_goal_and_error() -> None:
     assert torch.allclose(cmd.goal_quat_w, expected_quat, atol=1.0e-6)  # 目标姿态 quaternion
     assert torch.allclose(cmd.error_so3_h, expected_error, atol=1.0e-5)  # command 后三维 rotvec
     assert cmd.command.shape == (2, 6)  # `[axis_h,error_so3_h]`
+
+
+def test_reorient_command_auto_omits_fixed_axis_from_policy_command() -> None:
+    r"""`axis.mode="auto"` 在 fixed-axis 任务下应省略常量轴，只返回 target 表示。"""
+
+    cmd = _make_fake_command(theta=math.pi / 3)  # 60 degree subgoal，便于检查输出维度
+    cmd.cfg.command_output = {
+        "frame": "h",
+        "axis": {"mode": "auto"},
+        "target": {"kind": "relative", "representation": "axis_angle"},
+    }
+    cmd._resample_command(torch.tensor([0, 1], dtype=torch.long))
+
+    command = cmd.command  # `[B,3]`，fixed-axis auto 模式只输出 $\phi^h$
+
+    assert command.shape == (2, 3)
+    assert torch.allclose(command, torch.full((2, 3), 0.0).index_fill(1, torch.tensor([2]), math.pi / 3), atol=1.0e-5)
+
+
+def test_reorient_command_can_output_absolute_goal_quat_e() -> None:
+    r"""absolute quaternion command obs 应直接暴露当前 subgoal 的 $q_g^e$，用于平稳 goal 表示消融。"""
+
+    cmd = _make_fake_command(theta=math.pi / 2)  # 90 degree around fixed z axis
+    cmd.cfg.command_output = {
+        "frame": "e",
+        "axis": {"mode": "omit"},
+        "target": {"kind": "absolute", "representation": "quat"},
+    }
+    cmd._resample_command(torch.tensor([0, 1], dtype=torch.long))
+
+    command = cmd.command  # `[B,4]`，absolute goal quaternion `(w,x,y,z)`
+
+    assert command.shape == (2, 4)
+    assert torch.allclose(command, cmd.goal_quat_w, atol=1.0e-6)
 
 
 def test_reorient_command_success_updates_progress_and_next_goal() -> None:

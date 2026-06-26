@@ -260,8 +260,8 @@ def test_gm_mdp_preserves_flat_public_observation_and_reward_exports() -> None:
     assert "from .observations import" in source  # package 化后仍从 `.observations` re-export obs terms
     assert "from .rewards import" in source  # package 化后仍从 `.rewards` re-export reward terms
     assert '"joint_pos_raw"' in source and '"fingertip_contact_binary"' in source
-    assert '"fingertip_contact_force_h"' in source and "fingertip_contact_force_w" not in source
-    assert '"object_pos_h"' in source and '"object_rot6d_h"' in source
+    assert '"fingertip_contact_force"' in source and "fingertip_contact_force_h" not in source
+    assert '"object_pos"' in source and '"object_orientation"' in source
     assert '"keypoint_reorientation_reward"' in source and '"good_fingertip_contact"' in source
     assert '"record_object_reset_anchor"' in source  # AnyMani 专属 reset anchor event 保持扁平导出
     assert "simple_no_cache_reset" not in source  # 不再导出聚合式 reset wrapper，避免 reset 语义重新杂糅

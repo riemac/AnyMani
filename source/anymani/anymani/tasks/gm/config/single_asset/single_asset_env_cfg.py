@@ -25,8 +25,9 @@ leaf sample。使用它的原因不是追求泛化，而是固定 morphology 变
 
 - 新写一个 single-asset env cfg，但复用 `tasks/gm/mdp` 已有 term；不复制一套新的
   command / reward / action 数学逻辑，避免同一科研语义出现两个实现版本。
-- 观测先按当前 MDP scaffold 走：raw joint state、processed last action、soft limits、
-  fingertip contact binary、`[axis_h, error_so3_h]` command。暂不引入
+- 观测先按当前 MDP scaffold 走：关节本体感受、last action、hand-frame fingertip force、
+  hand-frame object pose；command obs 由 `ReorientCommandCfg.command_output` 与 ObsTerm
+  显式配置决定。暂不引入
   `distill/models` 的 PALM / JOINT / TIP geometry tokenizer，也不在这里实现 tip BPS。
 - reset 第一轮采用“一事一议”的 split event：hand joint reset、object pose reset
   直接复用 IsaacLab 官方项，AnyMani 只额外记录 object reset anchor。默认初态来自
@@ -290,8 +291,8 @@ class GmSingleAssetObservationsCfg:
     r"""单资产 actor / critic observation 配置。
 
     这里保持当前 MDP scaffold，不引入 `distill/models` 的 PALM / JOINT / TIP tokenizer。
-    actor 看到 raw joint state、processed last action、hand-frame fingertip force、hand-frame object pose
-    和 `[axis_h, error_so3_h]` command。这里是 teacher / single-asset MDP probe，
+    actor 看到当前 cfg 声明的 joint state / last action、hand-frame fingertip force、hand-frame object pose；
+    command obs 可按 `ReorientCommandCfg.command_output` 或 ObsTerm override 打开。这里是 teacher / single-asset MDP probe，
     允许 policy 读取 object pose privileged state，先降低学习难度；后续 student /
     deployment 再决定是否遮蔽或蒸馏该信息。
     """
@@ -306,29 +307,35 @@ class GmSingleAssetObservationsCfg:
         # last_action = ObsTerm(func=gm_mdp.last_processed_action, params={"action_name": "hand_joint_pos"})
         last_action = ObsTerm(func=isaac_mdp.last_action)
         # joint_limits = ObsTerm(func=gm_mdp.joint_soft_pos_limits, params={"asset_cfg": SceneEntityCfg("robot")})
-        fingertip_force_h = ObsTerm(
-            func=gm_mdp.fingertip_contact_force_h,
+        fingertip_force = ObsTerm(
+            func=gm_mdp.fingertip_contact_force,
             params={
                 "sensor_names": GM_SINGLE_ASSET_CONTACT_LAYOUT.fingertip_sensor_names,
                 "robot_cfg": SceneEntityCfg("robot"),
                 "semantic_R_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_R_ha,
+                "frame": "h",
             },
         )
         # command = ObsTerm(func=gm_mdp.reorient_command, params={"command_name": "goal_pose"})
-        object_pos_h = ObsTerm(
-            func=gm_mdp.object_pos_h,
+        object_pos = ObsTerm(
+            func=gm_mdp.object_pos,
             params={
                 "object_cfg": SceneEntityCfg("object"),
                 "robot_cfg": SceneEntityCfg("robot"),
                 "semantic_R_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_R_ha,
+                "semantic_p_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_p_ha,
+                "frame": "h",
+                "reference": "hand",
             },
         )
-        object_rot6d_h = ObsTerm(
-            func=gm_mdp.object_rot6d_h,
+        object_orientation = ObsTerm(
+            func=gm_mdp.object_orientation,
             params={
                 "object_cfg": SceneEntityCfg("object"),
                 "robot_cfg": SceneEntityCfg("robot"),
                 "semantic_R_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_R_ha,
+                "frame": "h",
+                "representation": "rot6d",
             },
         )
 

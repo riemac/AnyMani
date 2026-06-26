@@ -22,13 +22,13 @@ from .events import (
 )
 from .observations import (
     fingertip_contact_binary,
-    fingertip_contact_force_h,
+    fingertip_contact_force,
     joint_pos_raw,
     joint_soft_pos_limits,
     joint_vel_raw,
     last_processed_action,
-    object_pos_h,
-    object_rot6d_h,
+    object_orientation,
+    object_pos,
     reorient_command,
 )
 from .rewards import (
@@ -57,7 +57,7 @@ __all__ = [
     "apply_generated_structural_collision_filter",
     "bad_non_tip_contact",
     "fingertip_contact_binary",
-    "fingertip_contact_force_h",
+    "fingertip_contact_force",
     "generated_structural_collision_filter_pairs",
     "goal_success_bonus",
     "good_fingertip_contact",
@@ -66,8 +66,8 @@ __all__ = [
     "joint_vel_raw",
     "keypoint_reorientation_reward",
     "last_processed_action",
-    "object_pos_h",
-    "object_rot6d_h",
+    "object_orientation",
+    "object_pos",
     "object_falling_placeholder",
     "object_out_of_hand",
     "record_object_reset_anchor",

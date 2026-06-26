@@ -12,19 +12,19 @@ IsaacLab RL 既然服务于层次通才专家训练阶段，用于训练 special
 from __future__ import annotations
 
 from .observations_command import reorient_command
-from .observations_contact import fingertip_contact_binary, fingertip_contact_force_h
+from .observations_contact import fingertip_contact_binary, fingertip_contact_force
 from .observations_geometry import joint_soft_pos_limits
-from .observations_priv import object_pos_h, object_rot6d_h
+from .observations_priv import object_orientation, object_pos
 from .observations_state import joint_pos_raw, joint_vel_raw, last_processed_action
 
 __all__ = [
     "fingertip_contact_binary",
-    "fingertip_contact_force_h",
+    "fingertip_contact_force",
     "joint_pos_raw",
     "joint_soft_pos_limits",
     "joint_vel_raw",
     "last_processed_action",
-    "object_pos_h",
-    "object_rot6d_h",
+    "object_orientation",
+    "object_pos",
     "reorient_command",
 ]

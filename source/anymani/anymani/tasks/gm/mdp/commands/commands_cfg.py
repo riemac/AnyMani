@@ -1,5 +1,5 @@
 import math
-from typing import Literal
+from typing import Any, Literal
 
 import isaaclab.sim as sim_utils
 from isaaclab.managers import CommandTermCfg
@@ -52,9 +52,9 @@ class ReorientCommandCfg(CommandTermCfg):
     DONE(当前默认):
         - `axis_resample_mode="subgoal"`：每个成功 subgoal 后重采样 axis + theta。
         - `theta_range=(pi/6, pi/2)`：下限显式大于成功阈值，避免刚采样就成功。
-        - policy obs 只暴露 `[axis_h, error_so3_h]`；reward / termination / curriculum
-          读取内部 buffer：`goal_quat_w`、`axis_e`、`error_so3_e`、
-          `goal_success_count`。
+        - command 内部始终维护 canonical source buffers；policy-facing `command` tensor
+          由 `command_output` 决定，既可复现 `[axis_h,error_so3_h]`，也可切到
+          absolute quaternion / 6D 等更平稳的目标表示。
     """
 
     class_type: type = ReorientCommand
@@ -146,6 +146,33 @@ class ReorientCommandCfg(CommandTermCfg):
     不直接吃裸四元数，因此默认 False。
     """
 
+    command_output: dict[str, Any] = {
+        "frame": "h",
+        "axis": {"mode": "auto"},
+        "target": {"kind": "relative", "representation": "axis_angle"},
+    }
+    r"""policy-facing command tensor 的格式配置。
+
+    `ReorientCommand` 内部始终维护 canonical buffers，例如 `axis_h/e`、`goal_quat_w`
+    与 `error_so3_h/e`。本字段只决定 `@property command` 如何把这些 buffers 编码成
+    给 policy 的扁平向量，不改变目标生成、reward、termination 或 curriculum 语义。
+
+    默认值等价于历史版本的 `[axis_h,error_so3_h]`，但 `axis.mode="auto"` 会在
+    `axis_mode="fixed"` 时默认省略常量轴，在 `axis_mode="random"` 时默认输出轴：
+    $$
+    c_t = [\hat\omega^{\{h\}},\phi^{\{h\}}]\quad\text{or}\quad c_t = \phi^{\{h\}}.
+    $$
+
+    字段语义：
+        - `frame`: 默认输出 frame，取值 `"h"` 或 `"e"`；axis 和 target 可继承它。
+        - `axis.mode`: `"auto"`、`"include"` 或 `"omit"`。
+        - `target.kind`: `"relative"` 表示 $R_gR_o^{-1}$，`"absolute"` 表示 $R_g$。
+        - `target.representation`: `"axis_angle"`、`"quat"`、`"rot6d"` 或 `"matrix"`。
+
+    NOTE: 若研究者手工把 axis 与 target 配到不同 frame，代码允许但不推荐；默认
+    schema 用顶层 `frame` 保证二者同 frame，避免无意混合 `{h}` 轴和 `{e}` 目标。
+    """
+
     keypoint_radius: float = 0.05
     r"""command metric `keypoint_error` 使用的六轴向 keypoint 半径（单位: m）。
 
@@ -225,3 +252,23 @@ class ReorientCommandCfg(CommandTermCfg):
             )
         if len(self.semantic_R_ha) != 9:
             raise ValueError(f"semantic_R_ha must contain 9 row-major floats, got {len(self.semantic_R_ha)}.")
+        if not isinstance(self.command_output, dict):
+            raise TypeError("command_output must be a dict with frame/axis/target fields.")
+        if self.command_output.get("frame", "h") not in ("h", "e"):
+            raise ValueError(f"command_output.frame must be 'h' or 'e', got {self.command_output.get('frame')!r}.")
+
+        axis_cfg = self.command_output.get("axis", {"mode": "auto"})
+        axis_mode = axis_cfg.get("mode", "auto") if isinstance(axis_cfg, dict) else axis_cfg
+        if axis_mode not in ("auto", "include", "omit"):
+            raise ValueError(f"command_output.axis mode must be auto/include/omit, got {axis_mode!r}.")
+
+        target_cfg = self.command_output.get("target", {})
+        if not isinstance(target_cfg, dict):
+            raise TypeError("command_output.target must be a dict.")
+        if target_cfg.get("kind", "relative") not in ("relative", "absolute"):
+            raise ValueError(f"command_output.target.kind must be relative/absolute, got {target_cfg.get('kind')!r}.")
+        if target_cfg.get("representation", "axis_angle") not in ("axis_angle", "quat", "rot6d", "matrix"):
+            raise ValueError(
+                "command_output.target.representation must be axis_angle/quat/rot6d/matrix, "
+                f"got {target_cfg.get('representation')!r}."
+            )

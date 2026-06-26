@@ -21,13 +21,14 @@ physical values，交给 `distill/models` 侧的 object token encoder 投影为 
   离线预计算）。
 
 DONE(object pose obs):
-    当前已经落地 object pose 的 hand-frame 版本：
+    当前已经落地 object pose 的可配置 frame / representation 版本：
 
-    - `object_pos_h`: object root 相对 hand semantic frame `{h}` 的位置 $p_o^h$，
+    - `object_pos`: object root 的位置，可选择 `{h}` / `{e}` 轴和 hand / env reference，
       单位 m；
-    - `object_rot6d_h`: object frame `{o}` 相对 hand semantic frame `{h}` 的旋转
-      $R_{ho}$ 前两列，按 Zhou 6D continuous rotation representation 拼成 6 维，
-      避免裸 quaternion 的 $q/-q$ 双覆盖，也避免 9D 矩阵冗余。
+    - `object_orientation`: object frame `{o}` 的姿态，可选择 `{h}` / `{e}` frame 与
+      `rot6d` / `quat` / `axis_angle` / `matrix` 表示。默认 `rot6d` 仍沿用 Zhou 6D
+      continuous rotation representation，避免裸 quaternion 的 $q/-q$ 双覆盖，也避免
+      9D 矩阵冗余。
 
 TODO(privileged physics obs): 物体物理属性属于 teacher-only 信息，sim2real 不可得。
 未来可从仿真器提取约 21 维 raw physical values：
@@ -49,7 +50,7 @@ TODO(privileged physics obs): 物体物理属性属于 teacher-only 信息，sim
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import isaaclab.utils.math as math_utils
 import torch
@@ -58,6 +59,11 @@ from isaaclab.managers import SceneEntityCfg
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+
+
+FrameName = Literal["h", "e"]
+PositionReference = Literal["hand", "env"]
+RotationRepresentation = Literal["rot6d", "quat", "axis_angle", "matrix"]
 
 
 def _semantic_R_ha_tensor(env: ManagerBasedRLEnv, semantic_R_ha: tuple[float, ...]) -> torch.Tensor:
@@ -75,19 +81,98 @@ def _semantic_R_ha_tensor(env: ManagerBasedRLEnv, semantic_R_ha: tuple[float, ..
     return torch.tensor(semantic_R_ha, dtype=torch.float32, device=env.device).reshape(3, 3)  # $R_{ha}$
 
 
-def object_pos_h(
+def _semantic_p_ha_tensor(env: ManagerBasedRLEnv, semantic_p_ha: tuple[float, float, float]) -> torch.Tensor:
+    r"""把配置层 $p_{ha}$ 转成 runtime row-vector tensor。
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env，用于确定 device。
+        semantic_p_ha (tuple[float, float, float]): raw asset/root 原点在 hand semantic frame `{h}`
+            下的坐标 $p_{ha}$，单位 m。
+
+    Returns:
+        torch.Tensor: 平移向量 $p_{ha}$，形状 `[3]`，位于 env device。
+    """
+
+    return torch.tensor(semantic_p_ha, dtype=torch.float32, device=env.device).reshape(3)  # $p_{ha}$，单位 m
+
+
+def _hand_origin_offset_a(R_ha: torch.Tensor, p_ha: torch.Tensor) -> torch.Tensor:
+    r"""由 $T_{ha}$ 反解 hand semantic origin 在 raw asset frame `{a}` 中的位置。
+
+    $T_{ha}$ 的列向量约定为：
+    $$
+    p^{\{h\}} = R_{ha}p^{\{a\}} + p_{ha}.
+    $$
+    hand semantic 原点满足 $p^{\{h\}}=0$，因此：
+    $$
+    p_{ah} = -R_{ha}^\top p_{ha}.
+    $$
+
+    Args:
+        R_ha (torch.Tensor): `{a}->{h}` 旋转矩阵，形状 `[3,3]`。
+        p_ha (torch.Tensor): raw asset/root 原点在 `{h}` 中的位置，形状 `[3]`，单位 m。
+
+    Returns:
+        torch.Tensor: hand semantic 原点在 `{a}` 中的位置，形状 `[3]`，单位 m。
+    """
+
+    return -(p_ha @ R_ha)  # row-vector 写法：$p_{ah}^\top=-p_{ha}^\top R_{ha}$
+
+
+def _rotation_representation(
+    rot: torch.Tensor,
+    representation: RotationRepresentation,
+    make_quat_unique: bool,
+) -> torch.Tensor:
+    r"""把旋转矩阵批量编码成 policy-facing orientation representation。
+
+    Args:
+        rot (torch.Tensor): 旋转矩阵，形状 `[B,3,3]`，列向量约定下表示 $R$。
+        representation (RotationRepresentation): 输出表示；`rot6d` 为 Zhou 6D，`quat` 为
+            IsaacLab `(w,x,y,z)`，`axis_angle` 为 $so(3)$ 向量，`matrix` 为 row-major 9D。
+        make_quat_unique (bool): 当输出或中间转换使用 quaternion 时，是否折叠到 $q_w\ge0$。
+
+    Returns:
+        torch.Tensor: 扁平 orientation 表示，第一维为 batch。
+    """
+
+    if representation == "rot6d":
+        return torch.cat((rot[:, :, 0], rot[:, :, 1]), dim=-1)  # `[B,6]`，按列拼 $R[:,0],R[:,1]$
+    if representation == "matrix":
+        return rot.reshape(rot.shape[0], 9)  # `[B,9]`，row-major 展平，保留完整 $SO(3)$ 信息
+
+    quat = math_utils.quat_from_matrix(rot)  # `[B,4]`，IsaacLab `(w,x,y,z)` quaternion
+    if make_quat_unique:
+        quat = math_utils.quat_unique(quat)  # 折叠 $q/-q$ 双覆盖，保证 policy-facing 符号一致性
+    if representation == "quat":
+        return quat  # `[B,4]`，absolute / relative quaternion 表示
+    if representation == "axis_angle":
+        return math_utils.axis_angle_from_quat(quat)  # `[B,3]`，$\log(R)\in\mathbb{R}^3$，单位 rad
+    raise ValueError(f"Unsupported rotation representation: {representation}.")
+
+
+def object_pos(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     semantic_R_ha: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+    semantic_p_ha: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    frame: FrameName = "h",
+    reference: PositionReference = "hand",
 ) -> torch.Tensor:
-    r"""读取 object root 在 hand semantic frame `{h}` 下的位置。
+    r"""读取 object root 位置，并按配置选择坐标 frame 与 reference origin。
 
-    该项描述“物体相对手在哪里”，而不是 world frame 中的绝对位置：
+    该项把旧的 hand-frame object position 推广为可配置表示。最常用的 hand-relative hand-frame
+    形式为：
     $$
-    p_o^h = R_{ha} R_{aw} (p_o^w - p_a^w),
+    p_o^{\{h\}} = p_{ha} + R_{ha} R_{aw} (p_o^{\{w\}} - p_a^{\{w\}}),
     $$
-    其中 `{a}` 是 hand raw asset/root frame，`{h}` 是 hand semantic frame。
+    其中 `{a}` 是 raw asset/root frame，`{h}` 是 hand semantic frame。
+    对 official LEAP 这类真实资产，$p_{ha}$ 约为厘米量级，不能继续假设为 0。
+
+    `frame="e"` 时保留 env/world 轴向；`reference="env"` 时不再减 hand origin，
+    得到 env-local absolute position。两者组合用于诊断“相对量是否让 RL 观测非平稳”。
+
     在当前 fixed hand anchor 的 single-asset 阶段，reset 后该项应接近标定台
     导出的 contact basin，例如 $(0.02, 0.08, 0.06)$。
 
@@ -96,57 +181,90 @@ def object_pos_h(
         object_cfg (SceneEntityCfg): object rigid body 配置。
         robot_cfg (SceneEntityCfg): hand articulation 配置。
         semantic_R_ha (tuple[float, ...]): $R_{ha}$，row-major 9 元组。
+        semantic_p_ha (tuple[float, float, float]): $p_{ha}$，单位 m。
+        frame (FrameName): 输出坐标轴，`"h"` 为 hand semantic 轴，`"e"` 为 env/world 轴。
+        reference (PositionReference): 输出原点，`"hand"` 减 hand semantic origin，`"env"` 减 env origin。
 
     Returns:
-        torch.Tensor: object 相对 hand 的位置，形状 `[num_envs, 3]`，单位 m。
+        torch.Tensor: object 位置表示，形状 `[num_envs, 3]`，单位 m。
     """
 
     object_asset: RigidObject = env.scene[object_cfg.name]  # object root pose 来源
     robot_asset: Articulation = env.scene[robot_cfg.name]  # hand root pose 来源
-    rel_pos_w = object_asset.data.root_pos_w - robot_asset.data.root_pos_w  # $p_o^w-p_a^w$，`[B,3]`
-    rel_pos_a = math_utils.quat_apply_inverse(robot_asset.data.root_quat_w, rel_pos_w)  # $R_{aw}(p_o^w-p_a^w)$
     R_ha = _semantic_R_ha_tensor(env, semantic_R_ha)  # `{a}->{h}` 语义对齐矩阵
-    return rel_pos_a @ R_ha.T  # row-vector 写法：$p_o^h = p_o^a R_{ha}^T$
+    p_ha = _semantic_p_ha_tensor(env, semantic_p_ha)  # $p_{ha}$，raw root 在 `{h}` 中的位置，单位 m
+
+    if reference == "hand":
+        rel_pos_w = object_asset.data.root_pos_w - robot_asset.data.root_pos_w  # $p_o^w-p_a^w$，`[B,3]`
+        rel_pos_a = math_utils.quat_apply_inverse(robot_asset.data.root_quat_w, rel_pos_w)  # $R_{aw}(p_o^w-p_a^w)$
+        if frame == "h":
+            return rel_pos_a @ R_ha.T + p_ha  # $p_o^h=p_{ha}+p_o^aR_{ha}^\top$，`[B,3]`
+        if frame == "e":
+            p_ah = _hand_origin_offset_a(R_ha, p_ha)  # $p_{ah}$，hand semantic origin 在 `{a}` 下的位置
+            p_ah_w = math_utils.quat_apply(robot_asset.data.root_quat_w, p_ah.repeat(env.num_envs, 1))  # $R_{wa}p_{ah}$
+            return object_asset.data.root_pos_w - (robot_asset.data.root_pos_w + p_ah_w)  # $p_o^e-p_h^e$，`[B,3]`
+        raise ValueError(f"Unsupported frame for object_pos: {frame}.")
+
+    if reference == "env":
+        pos_e = object_asset.data.root_pos_w - env.scene.env_origins  # $p_o^e$，env-local absolute position，`[B,3]`
+        if frame == "e":
+            return pos_e  # env-local axes 与 world axes 同向，直接返回 $p_o^e$
+        if frame == "h":
+            pos_a = math_utils.quat_apply_inverse(robot_asset.data.root_quat_w, pos_e)  # 把 env-origin 向量表达进 `{a}` 轴
+            return pos_a @ R_ha.T  # row-vector 写法：$p^h=R_{ha}p^a$
+        raise ValueError(f"Unsupported frame for object_pos: {frame}.")
+
+    raise ValueError(f"Unsupported position reference for object_pos: {reference}.")
 
 
-def object_rot6d_h(
+def object_orientation(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     semantic_R_ha: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+    frame: FrameName = "h",
+    representation: RotationRepresentation = "rot6d",
+    make_quat_unique: bool = False,
 ) -> torch.Tensor:
-    r"""读取 object orientation 在 hand semantic frame `{h}` 下的 6D 连续旋转表示。
+    r"""读取 object orientation，并按配置选择坐标 frame 与旋转表示。
 
-    返回的是 object body frame `{o}` 相对 hand semantic frame `{h}` 的姿态：
+    `frame="h"` 时返回 object body frame `{o}` 相对 hand semantic frame `{h}` 的姿态：
     $$
     R_{ho} = R_{ha} R_{aw} R_{wo}.
     $$
-    teacher policy 不直接读取裸 quaternion，而读取 Zhou 6D continuous rotation
-    representation：取 $R_{ho}$ 的前两列并按列拼接，
+    `frame="e"` 时返回 object body frame `{o}` 相对 env/world frame `{e}` 的姿态：
     $$
-    r^{6D}_{ho} = [R_{ho}[:,0],\ R_{ho}[:,1]] \in \mathbb{R}^6.
+    R_{eo} = R_{wo}.
     $$
-    第三列可由前两列正交化后叉乘恢复；对 policy 而言 6D 足以表达姿态，且比
-    9D rotation matrix 少 3 维冗余。
+
+    输出表示可选 `rot6d`、`quat`、`axis_angle` 或 `matrix`，用于快速诊断
+    “6D 是否优于 quaternion / axis-angle” 这类表征问题。
 
     Args:
         env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
         object_cfg (SceneEntityCfg): object rigid body 配置。
         robot_cfg (SceneEntityCfg): hand articulation 配置。
         semantic_R_ha (tuple[float, ...]): $R_{ha}$，row-major 9 元组。
+        frame (FrameName): 输出坐标系，`"h"` 或 `"e"`。
+        representation (RotationRepresentation): 输出旋转表示。
+        make_quat_unique (bool): 若输出 / 中间转换使用 quaternion，是否折叠 $q/-q$。
 
     Returns:
-        torch.Tensor: $R_{ho}$ 前两列的列向量拼接，形状 `[num_envs, 6]`。
+        torch.Tensor: object orientation 表示，形状随 `representation` 改变。
     """
 
     object_asset: RigidObject = env.scene[object_cfg.name]  # object orientation $R_{wo}$
-    robot_asset: Articulation = env.scene[robot_cfg.name]  # hand root orientation $R_{wa}$
-    R_ha = _semantic_R_ha_tensor(env, semantic_R_ha).unsqueeze(0)  # `[1,3,3]`，广播到所有 env
-    R_wa = math_utils.matrix_from_quat(robot_asset.data.root_quat_w)  # `[B,3,3]`，hand root `{a}->{w}`
-    R_aw = R_wa.transpose(-1, -2)  # `[B,3,3]`，world/env 到 hand raw asset `{a}`
     R_wo = math_utils.matrix_from_quat(object_asset.data.root_quat_w)  # `[B,3,3]`，object `{o}->{w}`
-    R_ho = R_ha @ R_aw @ R_wo  # `[B,3,3]`，object `{o}` 在 hand semantic `{h}` 中的姿态
-    return torch.cat((R_ho[:, :, 0], R_ho[:, :, 1]), dim=-1)  # `[B,6]`，列 0/1 按 Zhou 6D 拼接
+    if frame == "e":
+        return _rotation_representation(R_wo, representation, make_quat_unique)  # env/world frame 下的 $R_{eo}$
+    if frame == "h":
+        robot_asset: Articulation = env.scene[robot_cfg.name]  # hand root orientation $R_{wa}$
+        R_ha = _semantic_R_ha_tensor(env, semantic_R_ha).unsqueeze(0)  # `[1,3,3]`，广播到所有 env
+        R_wa = math_utils.matrix_from_quat(robot_asset.data.root_quat_w)  # `[B,3,3]`，hand root `{a}->{w}`
+        R_aw = R_wa.transpose(-1, -2)  # `[B,3,3]`，world/env 到 hand raw asset `{a}`
+        R_ho = R_ha @ R_aw @ R_wo  # `[B,3,3]`，object `{o}` 在 hand semantic `{h}` 中的姿态
+        return _rotation_representation(R_ho, representation, make_quat_unique)  # 编码为 policy-facing 表示
+    raise ValueError(f"Unsupported frame for object_orientation: {frame}.")
 
 
-__all__ = ["object_pos_h", "object_rot6d_h"]
+__all__ = ["object_orientation", "object_pos"]

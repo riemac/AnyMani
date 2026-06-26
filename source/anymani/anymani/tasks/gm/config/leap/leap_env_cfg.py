@@ -50,8 +50,13 @@ GM_LEAP_ROOT_POS_E = (0.0, 0.0, 0.5)
 GM_LEAP_ROOT_ROT_WXYZ = (0.5, 0.5, -0.5, 0.5)
 """Official LEAP root orientation: hand palm faces the object basin."""
 
-GM_LEAP_SEMANTIC_R_HA = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
-"""First LEAP ablation treats raw asset frame `{a}` as hand semantic frame `{h}`."""
+GM_LEAP_SEMANTIC_R_HA = (0.0, 1.0, 0.0,
+                         0.0, 0.0, 1.0,
+                         1.0, 0.0, 0.0)
+"""Official LEAP calibrated `{a}->{h}` rotation matrix $R_{ha}$, row-major."""
+
+GM_LEAP_SEMANTIC_P_HA = (-0.0098, 0.002, -0.011)
+"""Official LEAP calibrated raw-root position $p_{ha}$ in hand semantic frame `{h}`, unit m."""
 
 GM_LEAP_FINGER_LINK_CHAINS = (
     ("mcp_joint", "pip", "dip", "fingertip"),
@@ -192,28 +197,34 @@ class GmLeapObservationsCfg:
 
         joint_pos = ObsTerm(func=isaac_mdp.joint_pos_limit_normalized, params={"asset_cfg": SceneEntityCfg("robot")})
         last_action = ObsTerm(func=isaac_mdp.last_action)
-        fingertip_force_h = ObsTerm(
-            func=gm_mdp.fingertip_contact_force_h,
+        fingertip_force = ObsTerm(
+            func=gm_mdp.fingertip_contact_force,
             params={
                 "sensor_names": GM_LEAP_CONTACT_LAYOUT.fingertip_sensor_names,
                 "robot_cfg": SceneEntityCfg("robot"),
                 "semantic_R_ha": GM_LEAP_SEMANTIC_R_HA,
+                "frame": "h",
             },
         )
-        object_pos_h = ObsTerm(
-            func=gm_mdp.object_pos_h,
+        object_pos = ObsTerm(
+            func=gm_mdp.object_pos,
             params={
                 "object_cfg": SceneEntityCfg("object"),
                 "robot_cfg": SceneEntityCfg("robot"),
                 "semantic_R_ha": GM_LEAP_SEMANTIC_R_HA,
+                "semantic_p_ha": GM_LEAP_SEMANTIC_P_HA,
+                "frame": "h",
+                "reference": "hand",
             },
         )
-        object_rot6d_h = ObsTerm(
-            func=gm_mdp.object_rot6d_h,
+        object_orientation = ObsTerm(
+            func=gm_mdp.object_orientation,
             params={
                 "object_cfg": SceneEntityCfg("object"),
                 "robot_cfg": SceneEntityCfg("robot"),
                 "semantic_R_ha": GM_LEAP_SEMANTIC_R_HA,
+                "frame": "h",
+                "representation": "rot6d",
             },
         )
 
@@ -393,6 +404,7 @@ __all__ = [
     "GM_LEAP_GRASP_PRESET",
     "GM_LEAP_GRASP_PRESET_PATH",
     "GM_LEAP_HAND_CFG",
+    "GM_LEAP_SEMANTIC_P_HA",
     "GM_LEAP_SEMANTIC_R_HA",
     "GmLeapActionsCfg",
     "GmLeapCommandsCfg",

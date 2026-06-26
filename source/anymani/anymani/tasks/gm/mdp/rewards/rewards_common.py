@@ -27,7 +27,7 @@ def resolve_goal_quat_w(env: ManagerBasedRLEnv, command_name: str) -> torch.Tens
         torch.Tensor: 目标姿态四元数，形状 `[num_envs, 4]`，约定为 Isaac Lab 的 `(w,x,y,z)`。
 
     Raises:
-        RuntimeError: 当 command term 没有暴露目标四元数，且 command tensor 也不是 legacy pose-like 形式。
+        RuntimeError: 当 command term 没有显式暴露目标四元数时抛出。
     """
 
     # 优先读取 command term 的内部 buffer：这是 `gm` ReorientCommand 应兑现的契约。
@@ -37,15 +37,10 @@ def resolve_goal_quat_w(env: ManagerBasedRLEnv, command_name: str) -> torch.Tens
         if isinstance(goal_quat_w, torch.Tensor):
             return goal_quat_w
 
-    # 兼容 IsaacLab 官方 inhand 的 legacy command：command = `[pos_e, quat_w]`。
-    command = env.command_manager.get_command(command_name)
-    if isinstance(command, torch.Tensor) and command.shape[-1] >= 7:
-        return command[:, -4:]  # legacy pose command 的最后四维是目标 quaternion
-
     raise RuntimeError(
-        f"Command '{command_name}' must expose `goal_quat_w` / `quat_command_w`, "
-        "or return a legacy pose-like command tensor with final 4 quaternion dims. "
-        f"Got command shape: {getattr(command, 'shape', None)}."
+        f"Command '{command_name}' must expose `goal_quat_w` / `quat_command_w` as canonical goal state. "
+        "GM reward terms intentionally do not infer goal quaternion from the policy-facing command tensor, "
+        "because `command_output` may omit quaternion or reorder fields."
     )
 
 

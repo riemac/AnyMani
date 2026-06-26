@@ -85,18 +85,18 @@ def _fake_env_with_robot_quat(root_quat_w: torch.Tensor) -> SimpleNamespace:
     return SimpleNamespace(device="cpu", scene={"robot": robot})
 
 
-def test_fingertip_contact_force_h_identity_hand_matches_world_force() -> None:
+def test_fingertip_contact_force_identity_hand_matches_world_force() -> None:
     r"""identity hand frame 下，hand-frame contact force 应等于 world-frame force。"""
 
     module = _load_observations_contact_module({"tip": torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32)})
     env = _fake_env_with_robot_quat(torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32))
 
-    force_h = module.fingertip_contact_force_h(env, ("tip",))  # `[1,3]`，单位 N
+    force_h = module.fingertip_contact_force(env, ("tip",))  # `[1,3]`，默认 `frame="h"`，单位 N
 
     assert torch.allclose(force_h, torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32))
 
 
-def test_fingertip_contact_force_h_rotates_world_force_into_hand_frame() -> None:
+def test_fingertip_contact_force_rotates_world_force_into_hand_frame() -> None:
     r"""hand 绕 world z 轴 +90 度时，world x 方向力在 `{h}` 下应为负 y。"""
 
     half_sqrt2 = 0.70710678118  # $\sqrt{2}/2$，+90deg yaw quaternion 的 w/z 分量
@@ -104,6 +104,19 @@ def test_fingertip_contact_force_h_rotates_world_force_into_hand_frame() -> None
     module = _load_observations_contact_module({"tip": torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32)})
     env = _fake_env_with_robot_quat(root_quat_w)
 
-    force_h = module.fingertip_contact_force_h(env, ("tip",))  # $R_{aw}F^w$
+    force_h = module.fingertip_contact_force(env, ("tip",))  # $F^h=R_{ha}R_{aw}F^w$
 
     assert torch.allclose(force_h, torch.tensor([[0.0, -1.0, 0.0]], dtype=torch.float32), atol=1.0e-6)
+
+
+def test_fingertip_contact_force_e_keeps_env_frame_force() -> None:
+    r"""`frame="e"` 应保留 env/world 轴向，服务 hand-frame force 的对照消融。"""
+
+    half_sqrt2 = 0.70710678118  # $\sqrt{2}/2$，+90deg yaw quaternion 的 w/z 分量
+    root_quat_w = torch.tensor([[half_sqrt2, 0.0, 0.0, half_sqrt2]], dtype=torch.float32)  # $R_{wa}=R_z(90^\circ)$
+    module = _load_observations_contact_module({"tip": torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32)})
+    env = _fake_env_with_robot_quat(root_quat_w)
+
+    force_e = module.fingertip_contact_force(env, ("tip",), frame="e")  # `[B,3]`，不做 $R_{aw}$ 旋转
+
+    assert torch.allclose(force_e, torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32), atol=1.0e-6)

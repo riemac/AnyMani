@@ -28,6 +28,31 @@ class _SceneEntityCfgStub:
         self.name = name  # scene 字典 key，例如 `"object"` / `"robot"`
 
 
+class _FakeScene(dict):
+    r"""带 `env_origins` 属性的最小 scene stub。
+
+    `ManagerBasedRLEnv.scene` 运行时既支持 `scene["robot"]` 取 asset，也暴露
+    `scene.env_origins`。通用 `object_pos` 在 `reference="env"` 时会读取该字段，
+    因此测试 stub 也要保留这个 contract。
+    """
+
+    env_origins: torch.Tensor
+
+    def __init__(self, *args, env_origins: torch.Tensor):
+        r"""保存 asset 字典与 env origin buffer。"""
+
+        super().__init__(*args)  # 继承 dict 的 `scene[name]` 行为
+        self.env_origins = env_origins  # `[B,3]`，env-local origin 在 world 中的位置，单位 m
+
+
+def _quat_apply(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    r"""测试用 quaternion forward rotation，匹配 IsaacLab `(w,x,y,z)` 约定。"""
+
+    xyz = quat[:, 1:]  # `[B,3]`，四元数虚部
+    t = xyz.cross(vec, dim=-1) * 2.0  # IsaacLab `quat_apply` 的中间项
+    return vec + quat[:, 0:1] * t + xyz.cross(t, dim=-1)
+
+
 def _quat_apply_inverse(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     r"""测试用 quaternion inverse rotation，匹配 IsaacLab `(w,x,y,z)` 约定。"""
 
@@ -62,6 +87,7 @@ def _load_observations_priv_module() -> types.ModuleType:
     r"""加载 `observations_priv.py`，并用 stub 避免依赖真实 Isaac / USD binding。"""
 
     math_stub = types.ModuleType("isaaclab.utils.math")
+    math_stub.quat_apply = _quat_apply
     math_stub.quat_apply_inverse = _quat_apply_inverse
     math_stub.matrix_from_quat = _matrix_from_quat
 
@@ -129,27 +155,39 @@ def _fake_env_for_object_pose() -> SimpleNamespace:
             root_quat_w=_identity_quat(1),  # $R_{wo}=I$
         )
     )
-    return SimpleNamespace(device="cpu", scene={"robot": robot, "object": obj})
+    scene = _FakeScene({"robot": robot, "object": obj}, env_origins=torch.zeros(1, 3, dtype=torch.float32))
+    return SimpleNamespace(device="cpu", num_envs=1, scene=scene)
 
 
-def test_object_pos_h_matches_calibrated_contact_basin_under_identity_hand() -> None:
+def test_object_pos_matches_calibrated_contact_basin_under_identity_hand() -> None:
     r"""identity hand pose 下，world pose 应还原为标定台导出的 $p_o^h$。"""
 
     env = _fake_env_for_object_pose()
     module = _load_observations_priv_module()
 
-    pos_h = module.object_pos_h(env)  # `[1,3]`，单位 m
+    pos_h = module.object_pos(env)  # `[1,3]`，单位 m，默认 `frame="h", reference="hand"`
 
     assert torch.allclose(pos_h, torch.tensor([[0.02, 0.08, 0.06]], dtype=torch.float32))
 
 
-def test_object_rot6d_h_uses_first_two_rotation_columns() -> None:
+def test_object_pos_adds_nonzero_semantic_hand_translation() -> None:
+    r"""非零 $p_{ha}$ 必须平移 hand-frame object position，不能再隐式假设 `{a}` 原点等于 `{h}` 原点。"""
+
+    env = _fake_env_for_object_pose()
+    module = _load_observations_priv_module()
+
+    pos_h = module.object_pos(env, semantic_p_ha=(1.0, 2.0, 3.0))  # $p_o^h=p_{ha}+R_{ha}p_o^a$
+
+    assert torch.allclose(pos_h, torch.tensor([[1.02, 2.08, 3.06]], dtype=torch.float32))
+
+
+def test_object_orientation_rot6d_uses_first_two_rotation_columns() -> None:
     r"""identity object orientation 下，6D 表示应为 $[e_x,e_y]$ 的列向量拼接。"""
 
     env = _fake_env_for_object_pose()
     module = _load_observations_priv_module()
 
-    rot6d_h = module.object_rot6d_h(env)  # `[1,6]`，Zhou 6D: first two columns of $R_{ho}$
+    rot6d_h = module.object_orientation(env)  # `[1,6]`，默认 `frame="h", representation="rot6d"`
 
     expected = torch.tensor([[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
     assert torch.allclose(rot6d_h, expected)

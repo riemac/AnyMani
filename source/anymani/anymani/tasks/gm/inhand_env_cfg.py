@@ -216,8 +216,9 @@ class GmCommandsCfg:
     DONE:
         当前已切到 `gm_mdp.ReorientCommandCfg`，不再借用旧 `tasks/inhand` 的
         pose command 名字或 7D pose tensor 语义。policy-facing command 为
-        `[axis_h, error_so3_h]`；reward / termination / curriculum 读取 command
-        term 内部 buffer，例如 `goal_quat_w`、`axis_e`、`goal_success_count`。
+        `command_output` 指定的 policy-facing command；reward / termination /
+        curriculum 读取 command term 内部 buffer，例如 `goal_quat_w`、`axis_e`、
+        `goal_success_count`。
 
     NOTE:
         `theta_range` 默认 `[π/6, π/2]`，下限大于 success threshold，避免刚
@@ -310,20 +311,25 @@ class GmObservationsCfg:
             func=gm_mdp.fingertip_contact_binary,
             params={"sensor_names": GM_DEFAULT_CONTACT_LAYOUT.fingertip_sensor_names, "force_threshold": 0.2},
         )
-        object_pos_h = ObsTerm(
-            func=gm_mdp.object_pos_h,
+        object_pos = ObsTerm(
+            func=gm_mdp.object_pos,
             params={
                 "object_cfg": SceneEntityCfg("object"),
                 "robot_cfg": SceneEntityCfg("robot"),
                 "semantic_R_ha": DEFAULT_GM_HAND_SPAWN_CFG.frame.semantic_R_ha,
+                "semantic_p_ha": DEFAULT_GM_HAND_SPAWN_CFG.frame.semantic_p_ha,
+                "frame": "h",
+                "reference": "hand",
             },
         )
-        object_rot6d_h = ObsTerm(
-            func=gm_mdp.object_rot6d_h,
+        object_orientation = ObsTerm(
+            func=gm_mdp.object_orientation,
             params={
                 "object_cfg": SceneEntityCfg("object"),
                 "robot_cfg": SceneEntityCfg("robot"),
                 "semantic_R_ha": DEFAULT_GM_HAND_SPAWN_CFG.frame.semantic_R_ha,
+                "frame": "h",
+                "representation": "rot6d",
             },
         )
         command = ObsTerm(func=gm_mdp.reorient_command, params={"command_name": "goal_pose"})
@@ -341,12 +347,13 @@ class GmObservationsCfg:
         critic 继承 policy 的 hand-frame object pose；额外读取 hand-frame fingertip force。
         """
 
-        fingertip_force_h = ObsTerm(
-            func=gm_mdp.fingertip_contact_force_h,
+        fingertip_force = ObsTerm(
+            func=gm_mdp.fingertip_contact_force,
             params={
                 "sensor_names": GM_DEFAULT_CONTACT_LAYOUT.fingertip_sensor_names,
                 "robot_cfg": SceneEntityCfg("robot"),
                 "semantic_R_ha": DEFAULT_GM_HAND_SPAWN_CFG.frame.semantic_R_ha,
+                "frame": "h",
             },
         )
 

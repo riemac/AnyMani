@@ -18,7 +18,7 @@ $$
     - $\hat\omega^{\{h\}}$：hand semantic frame `{h}` 下的有向单位轴；
     - $\phi_e^{\{h\}}$：space error $\log(R_gR_o^{-1})$ 表达到 `{h}` 后的
       so(3) 向量；
-    - policy-facing command 只返回 `[axis_h, error_so3_h]`；
+    - policy-facing command 由 `cfg.command_output` 决定，默认可复现 `[axis_h, error_so3_h]`；
     - reward / termination / curriculum 读取 command term 内部 buffer。
 
 DONE(已合意的第一版设计):
@@ -72,14 +72,14 @@ DONE(debug visualization 语义):
 
 TODO(debug visualization):
     axis arrow marker 仍预留：它的 orientation 应把 marker 局部 +x 方向旋到当前
-    `axis_e`；该 axis 就是 `[axis_h, error_so3_h]` 中的 axis 经 `{h}->{e}` 变换后
+    `axis_e`；该 axis 就是 command output 中可选 axis 分量经 `{h}->{e}` 变换后
     的方向。第一版先补 LEAP 风格 goal object marker，避免为箭头姿态引入额外实现风险。
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 import isaaclab.utils.math as math_utils
 import torch
@@ -90,6 +90,11 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
     from .commands_cfg import ReorientCommandCfg
+
+
+FrameName = Literal["h", "e"]
+RotationRepresentation = Literal["axis_angle", "quat", "rot6d", "matrix"]
+CommandTargetKind = Literal["relative", "absolute"]
 
 
 class ReorientCommand(CommandTerm):
@@ -152,14 +157,188 @@ class ReorientCommand(CommandTerm):
 
     @property
     def command(self) -> torch.Tensor:
-        r"""返回 policy-facing command `[axis_h, error_so3_h]`。
+        r"""返回由 `cfg.command_output` 指定的 policy-facing command tensor。
+
+        `CommandManager.get_command(name)` 会读取该 property。历史版本固定返回
+        `[axis_h,error_so3_h]`，现在改为由配置决定，但只做**无副作用格式化**：
+        不更新 metrics、不重采样目标、不改变 reward/curriculum 的 canonical source。
 
         Returns:
-            torch.Tensor: command tensor，形状 `[num_envs, 6]`，前三维是 hand frame
-            有向单位轴，后三维是 hand frame SO(3) error rotvec，单位 rad。
+            torch.Tensor: command tensor，形状由 `cfg.command_output` 决定。
         """
 
-        return torch.cat((self.axis_h, self.error_so3_h), dim=-1)
+        return self.format_command(self.cfg.command_output)  # 只格式化 canonical buffers，不改变 command 状态
+
+    def format_command(self, output_spec: dict[str, Any] | None = None) -> torch.Tensor:
+        r"""按给定 spec 把 canonical command buffers 编码成扁平 tensor。
+
+        该函数服务两类入口：
+
+        1. `@property command` 使用 `cfg.command_output`，作为 IsaacLab
+           `CommandManager.get_command(...)` 的默认输出；
+        2. `observations_command.reorient_command(...)` 可传入 override spec，临时读取
+           另一种表示，而不改变 command term 内部状态。
+
+        Args:
+            output_spec (dict[str, Any] | None): command 输出 spec；`None` 表示使用 cfg 默认值。
+
+        Returns:
+            torch.Tensor: 拼接后的 policy-facing command tensor，形状 `[num_envs,D]`。
+        """
+
+        spec = self._normalize_output_spec(output_spec)  # 解析 frame / axis / target 表示，纯 Python dict
+        parts: list[torch.Tensor] = []  # 每个 component 形状 `[B,d_i]`，最后在特征维拼接
+
+        if spec["include_axis"]:
+            parts.append(self._axis_in_frame(spec["axis_frame"]))  # `[B,3]`，有向单位轴 $\hat\omega$
+        parts.append(
+            self._target_representation(
+                target_kind=spec["target_kind"],
+                frame=spec["target_frame"],
+                representation=spec["representation"],
+            )
+        )  # `[B,d]`，relative error 或 absolute goal orientation
+        return torch.cat(parts, dim=-1) if len(parts) > 1 else parts[0]  # `[B,\sum d_i]` 或单项 `[B,d]`
+
+    def _normalize_output_spec(self, output_spec: dict[str, Any] | None) -> dict[str, Any]:
+        r"""把用户配置的嵌套 dict 规范化为格式化函数使用的平坦 spec。
+
+        Args:
+            output_spec (dict[str, Any] | None): 用户在 cfg 或 ObsTerm params 中传入的 spec。
+
+        Returns:
+            dict[str, Any]: 解析后的字段，包括 axis 是否输出、axis frame、target kind、
+            target frame 与 rotation representation。
+        """
+
+        spec = self.cfg.command_output if output_spec is None else output_spec  # None 时使用 cfg 默认输出规格
+        frame = spec.get("frame", "h")  # 顶层 frame 默认同时约束 axis 与 target，避免无意混合坐标系
+        if frame not in ("h", "e"):
+            raise ValueError(f"command output frame must be 'h' or 'e', got {frame!r}.")
+
+        axis_cfg = spec.get("axis", {"mode": "auto"})  # axis 可写成字符串或嵌套 dict，兼容手工快速改 cfg
+        axis_mode = axis_cfg.get("mode", "auto") if isinstance(axis_cfg, dict) else axis_cfg
+        axis_frame = axis_cfg.get("frame", frame) if isinstance(axis_cfg, dict) else frame
+        if axis_mode not in ("auto", "include", "omit"):
+            raise ValueError(f"axis mode must be auto/include/omit, got {axis_mode!r}.")
+        if axis_frame not in ("h", "e"):
+            raise ValueError(f"axis frame must be 'h' or 'e', got {axis_frame!r}.")
+
+        target_cfg = spec.get("target", {})  # target 表达当前 subgoal 的 relative error 或 absolute goal
+        if not isinstance(target_cfg, dict):
+            raise TypeError("command output target must be a dict.")
+        target_kind = target_cfg.get("kind", "relative")  # `relative`: $R_gR_o^{-1}$；`absolute`: $R_g$
+        target_frame = target_cfg.get("frame", frame)  # 默认继承顶层 frame，允许显式 override 做高风险消融
+        representation = target_cfg.get("representation", "axis_angle")  # 默认复现历史 error so(3) 输出
+        if target_kind not in ("relative", "absolute"):
+            raise ValueError(f"target kind must be relative/absolute, got {target_kind!r}.")
+        if target_frame not in ("h", "e"):
+            raise ValueError(f"target frame must be 'h' or 'e', got {target_frame!r}.")
+        if representation not in ("axis_angle", "quat", "rot6d", "matrix"):
+            raise ValueError(f"unsupported command target representation: {representation!r}.")
+
+        include_axis = axis_mode == "include" or (axis_mode == "auto" and self.cfg.axis_mode == "random")
+        return {
+            "include_axis": include_axis,  # fixed-axis 默认省略常量轴，random-axis 默认提供目标轴
+            "axis_frame": axis_frame,  # axis 输出 frame，通常与 target frame 相同
+            "target_kind": target_kind,  # relative error 或 absolute goal
+            "target_frame": target_frame,  # target orientation 表达 frame
+            "representation": representation,  # axis_angle / quat / rot6d / matrix
+        }
+
+    def _axis_in_frame(self, frame: FrameName) -> torch.Tensor:
+        r"""读取当前 command axis，并选择 `{h}` 或 `{e}` 表达。
+
+        Args:
+            frame (FrameName): `"h"` 返回 `axis_h`，`"e"` 返回 `axis_e`。
+
+        Returns:
+            torch.Tensor: 有向单位轴，形状 `[num_envs,3]`。
+        """
+
+        if frame == "h":
+            return self.axis_h  # `[B,3]`，hand semantic frame 下的目标旋转轴
+        if frame == "e":
+            return self.axis_e  # `[B,3]`，env/world frame 下的目标旋转轴
+        raise ValueError(f"Unsupported command axis frame: {frame}.")
+
+    def _target_representation(
+        self,
+        target_kind: CommandTargetKind,
+        frame: FrameName,
+        representation: RotationRepresentation,
+    ) -> torch.Tensor:
+        r"""读取 relative error 或 absolute goal，并编码为指定旋转表示。
+
+        Args:
+            target_kind (CommandTargetKind): `"relative"` 表示 $R_gR_o^{-1}$，`"absolute"` 表示 $R_g$。
+            frame (FrameName): 输出 frame，`"h"` 或 `"e"`。
+            representation (RotationRepresentation): 输出旋转表示。
+
+        Returns:
+            torch.Tensor: 目标姿态或误差姿态的扁平表示。
+        """
+
+        if target_kind == "relative":
+            rotvec = self.error_so3_h if frame == "h" else self.error_so3_e  # `[B,3]`，$\log(R_gR_o^{-1})$
+            if representation == "axis_angle":
+                return rotvec  # 直接返回 $so(3)$ 向量，单位 rad
+            return self._rotation_representation(self._rotvec_to_matrix(rotvec), representation)  # relative $SO(3)$ 表示
+
+        if target_kind == "absolute":
+            goal_rot_e = math_utils.matrix_from_quat(self.goal_quat_w)  # `[B,3,3]`，目标 object `{g}->{e}` 姿态
+            if frame == "e":
+                return self._rotation_representation(goal_rot_e, representation)  # absolute goal in env/world frame
+            if frame == "h":
+                R_ha = self.semantic_R_ha.unsqueeze(0)  # `[1,3,3]`，静态 `{a}->{h}` 旋转
+                R_wa = math_utils.matrix_from_quat(self.robot.data.root_quat_w)  # `[B,3,3]`，hand root `{a}->{e}`
+                R_aw = R_wa.transpose(-1, -2)  # `[B,3,3]`，env/world 到 raw asset `{a}`
+                goal_rot_h = R_ha @ R_aw @ goal_rot_e  # `[B,3,3]`，目标姿态表达在 `{h}` 轴中
+                return self._rotation_representation(goal_rot_h, representation)  # absolute goal in hand semantic frame
+            raise ValueError(f"Unsupported command target frame: {frame}.")
+
+        raise ValueError(f"Unsupported command target kind: {target_kind}.")
+
+    def _rotvec_to_matrix(self, rotvec: torch.Tensor) -> torch.Tensor:
+        r"""把 $so(3)$ 向量批量转换为旋转矩阵。
+
+        Args:
+            rotvec (torch.Tensor): 旋转向量，形状 `[B,3]`，方向为轴、模长为角度 rad。
+
+        Returns:
+            torch.Tensor: 旋转矩阵，形状 `[B,3,3]`。
+        """
+
+        angle = torch.linalg.norm(rotvec, dim=-1)  # `[B]`，旋转角 $\theta=\|\phi\|$，单位 rad
+        axis = rotvec / (angle.unsqueeze(-1) + 1.0e-8)  # `[B,3]`，单位轴；零角时数值上给零轴即可
+        quat = math_utils.quat_from_angle_axis(angle, axis)  # `[B,4]`，$\exp(\hat\omega\theta)$ 的 quaternion
+        if self.cfg.make_quat_unique:
+            quat = math_utils.quat_unique(quat)  # policy-facing quaternion 表示遵循 per-command unique 开关
+        return math_utils.matrix_from_quat(quat)  # `[B,3,3]`，用于 rot6d/matrix 等表示
+
+    def _rotation_representation(self, rot: torch.Tensor, representation: RotationRepresentation) -> torch.Tensor:
+        r"""把旋转矩阵编码成 command output 指定的表示。
+
+        Args:
+            rot (torch.Tensor): 旋转矩阵，形状 `[B,3,3]`。
+            representation (RotationRepresentation): 输出表示名。
+
+        Returns:
+            torch.Tensor: 扁平 rotation representation。
+        """
+
+        if representation == "rot6d":
+            return torch.cat((rot[:, :, 0], rot[:, :, 1]), dim=-1)  # `[B,6]`，Zhou 6D 前两列
+        if representation == "matrix":
+            return rot.reshape(rot.shape[0], 9)  # `[B,9]`，row-major 完整旋转矩阵
+        quat = math_utils.quat_from_matrix(rot)  # `[B,4]`，IsaacLab `(w,x,y,z)` quaternion
+        if self.cfg.make_quat_unique:
+            quat = math_utils.quat_unique(quat)  # 若 cfg 要求，折叠 $q/-q$ 双覆盖
+        if representation == "quat":
+            return quat  # `[B,4]`，quaternion 表示
+        if representation == "axis_angle":
+            return math_utils.axis_angle_from_quat(quat)  # `[B,3]`，$\log(R)$，单位 rad
+        raise ValueError(f"Unsupported rotation representation: {representation}.")
 
     def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
         r"""按 episode 重置 success/progress 统计并采样初始 subgoal。

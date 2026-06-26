@@ -201,17 +201,21 @@ def test_single_asset_policy_uses_hand_frame_object_pose_obs() -> None:
     r"""teacher policy 应读取 `{h}` 下 object pose / contact force，而不是 world-frame 表征。"""
 
     source = _source()
-    object_pos_call = _class_assign_call("PolicyCfg", "object_pos_h")
-    object_rot_call = _class_assign_call("PolicyCfg", "object_rot6d_h")
-    force_call = _class_assign_call("PolicyCfg", "fingertip_force_h")
+    object_pos_call = _class_assign_call("PolicyCfg", "object_pos")
+    object_rot_call = _class_assign_call("PolicyCfg", "object_orientation")
+    force_call = _class_assign_call("PolicyCfg", "fingertip_force")
 
     assert _call_func_name(object_pos_call) == "ObsTerm"
     assert _call_func_name(object_rot_call) == "ObsTerm"
     assert _call_func_name(force_call) == "ObsTerm"
-    assert "func=gm_mdp.object_pos_h" in source
-    assert "func=gm_mdp.object_rot6d_h" in source
-    assert "func=gm_mdp.fingertip_contact_force_h" in source
+    assert "func=gm_mdp.object_pos" in source
+    assert "func=gm_mdp.object_orientation" in source
+    assert "func=gm_mdp.fingertip_contact_force" in source
     assert '"semantic_R_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_R_ha' in source
+    assert '"semantic_p_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_p_ha' in source
+    assert '"frame": "h"' in source
+    assert '"reference": "hand"' in source
+    assert '"representation": "rot6d"' in source
     assert "func=isaac_mdp.root_pos_w" not in source
     assert "func=isaac_mdp.root_quat_w" not in source
     assert "fingertip_contact_force_w" not in source
