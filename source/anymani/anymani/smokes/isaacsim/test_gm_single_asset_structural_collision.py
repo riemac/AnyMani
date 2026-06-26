@@ -37,8 +37,8 @@ import torch
 from isaaclab_tasks.utils import parse_env_cfg
 
 import anymani.tasks.gm  # noqa: F401  # 注册 `AnyMani-GM-SingleAsset-v0`，不依赖父包自动发现
+from anymani.tasks.gm.config.single_asset.single_asset_env_cfg import GM_SINGLE_ASSET_CONTACT_LAYOUT
 from anymani.tasks.gm.mdp.events import generated_structural_collision_filter_pairs
-from anymani.tasks.gm.single_asset_env_cfg import GM_SINGLE_ASSET_CONTACT_LAYOUT
 
 TASK_ID = "AnyMani-GM-SingleAsset-v0"
 r"""被验证的单资产 GM 环境；训练侧 MLP alias 复用同一个 env cfg，因此这里测 gm-owned task 即可。"""

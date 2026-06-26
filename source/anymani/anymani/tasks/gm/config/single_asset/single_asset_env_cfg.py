@@ -96,9 +96,10 @@ from anymani.robots.hand_spawn import (
     HandSpawnCfg,
     HandUrdfSpawnCfg,
 )
+from anymani.tools.grasp_preset import GraspPreset, asset_preset_path
 
-from . import mdp as gm_mdp
-from .contact_sensors import build_contact_sensor_layout_from_hand_spawn, install_contact_sensors
+from ... import mdp as gm_mdp
+from ...contact_sensors import build_contact_sensor_layout_from_hand_spawn, install_contact_sensors
 
 
 def _single_asset_bundle_path() -> str:
@@ -120,6 +121,16 @@ GM_SINGLE_ASSET_PREMADE_TOPOLOGY_PATH = (
 )
 r"""单资产 MLP probe 绑定的 pre-made mother topology bundle 路径。"""
 
+GM_SINGLE_ASSET_GRASP_PRESET_PATH = asset_preset_path("generated_asset", "right_t4_i4_m4_r4")
+r"""当前 generated mother asset 的人工 pre-grasp / contact-basin preset。"""
+
+GM_SINGLE_ASSET_GRASP_PRESET = GraspPreset.from_yaml(
+    GM_SINGLE_ASSET_GRASP_PRESET_PATH,
+    expected_hand_source="generated_bundle",
+    expected_hand_ref_contains="right_t4_i4_m4_r4",
+)
+r"""训练 reset 初态的唯一 YAML 来源；避免在 env cfg 中手写长 joint dict。"""
+
 GM_SINGLE_ASSET_HAND_SPAWN_CFG = HandSpawnCfg(
     bank=HandBankCfg(
         source_mode="post_mutate",
@@ -135,24 +146,7 @@ GM_SINGLE_ASSET_HAND_SPAWN_CFG = HandSpawnCfg(
         anchor_p_eh=DEFAULT_HAND_ANCHOR_POS_E,
     ),
     joint_init=HandJointInitCfg(
-        joint_pos={
-            "thumb_j0": 0.71999997,
-            "index_j0": -0.0,
-            "middle_j0": 0.0,
-            "ring_j0": 0.11,
-            "thumb_j1": 1.56999993,
-            "index_j1": -0.52999997,
-            "middle_j1": -0.12,
-            "ring_j1": 0.44999999,
-            "thumb_j2": 0.75999999,
-            "index_j2": 1.23000002,
-            "middle_j2": 1.13999999,
-            "ring_j2": 1.29999995,
-            "thumb_j3": 1.63,
-            "index_j3": 0.94999999,
-            "middle_j3": 0.91999996,
-            "ring_j3": 0.66999996,
-        }
+        joint_pos=GM_SINGLE_ASSET_GRASP_PRESET.joint_pos_rad,
     ),
     urdf=HandUrdfSpawnCfg(activate_contact_sensors=True),
     asset_routing="round_robin",
@@ -219,7 +213,10 @@ class GmSingleAssetSceneCfg(InteractiveSceneCfg):
             mass_props=sim_utils.MassPropertiesCfg(density=400.0),
             scale=(1.0, 1.0, 1.0),  # 与标定台 local cube 的“无额外缩放”语义对齐，先降低 contact-basin 迁移误差
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.02, 0.08, 0.56), rot=(1.0, 0.0, 0.0, 0.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=GM_SINGLE_ASSET_GRASP_PRESET.object_pos_cfg,
+            rot=GM_SINGLE_ASSET_GRASP_PRESET.object_rot_wxyz,
+        ),
     )
     """被操作物体；默认 GUI 初态对齐标定台导出的 contact basin，episode reset 仍由 events 接管。"""
 
@@ -267,9 +264,20 @@ class GmSingleAssetCommandsCfg:
 
 @configclass
 class GmSingleAssetActionsCfg:
-    r"""单资产动作配置：raw rad relative delta + soft-limit clamp。"""
+    r"""单资产动作配置：IsaacLab 官方 relative joint-position action 减法实验。
 
-    hand_joint_pos: gm_mdp.ClampedRelativeJointActionCfg = gm_mdp.ClampedRelativeJointActionCfg(
+    当前实验有意去掉 AnyMani 自定义 soft-limit clamp，只保留
+    $q^{target}_{t}=q_t+0.1a_t$ 的官方相对位置动作语义，用来判断前几组
+    `ClampedRelativeJointPositionAction` 是否过度约束或改变了探索动力学。
+    """
+    # hand_joint_pos = gm_mdp.ClampedRelativeJointActionCfg(
+    #     asset_name="robot",
+    #     joint_names=[".*"],
+    #     scale=0.1,
+    #     preserve_order=True,
+    # )
+
+    hand_joint_pos = isaac_mdp.RelativeJointPositionActionCfg(
         asset_name="robot",
         joint_names=[".*"],
         scale=0.1,
@@ -292,9 +300,11 @@ class GmSingleAssetObservationsCfg:
     class PolicyCfg(ObsGroup):
         r"""Actor-facing flat observation group。"""
 
-        joint_pos = ObsTerm(func=gm_mdp.joint_pos_raw, params={"asset_cfg": SceneEntityCfg("robot")})
-        joint_vel = ObsTerm(func=gm_mdp.joint_vel_raw, params={"asset_cfg": SceneEntityCfg("robot")})
-        last_action = ObsTerm(func=gm_mdp.last_processed_action, params={"action_name": "hand_joint_pos"})
+        # joint_pos = ObsTerm(func=gm_mdp.joint_pos_raw, params={"asset_cfg": SceneEntityCfg("robot")})
+        joint_pos = ObsTerm(func=isaac_mdp.joint_pos_limit_normalized,params={"asset_cfg": SceneEntityCfg("robot")})
+        # joint_vel = ObsTerm(func=gm_mdp.joint_vel_raw, params={"asset_cfg": SceneEntityCfg("robot")})
+        # last_action = ObsTerm(func=gm_mdp.last_processed_action, params={"action_name": "hand_joint_pos"})
+        last_action = ObsTerm(func=isaac_mdp.last_action)
         # joint_limits = ObsTerm(func=gm_mdp.joint_soft_pos_limits, params={"asset_cfg": SceneEntityCfg("robot")})
         fingertip_force_h = ObsTerm(
             func=gm_mdp.fingertip_contact_force_h,
@@ -304,7 +314,7 @@ class GmSingleAssetObservationsCfg:
                 "semantic_R_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_R_ha,
             },
         )
-        command = ObsTerm(func=gm_mdp.reorient_command, params={"command_name": "goal_pose"})
+        # command = ObsTerm(func=gm_mdp.reorient_command, params={"command_name": "goal_pose"})
         object_pos_h = ObsTerm(
             func=gm_mdp.object_pos_h,
             params={
@@ -434,7 +444,7 @@ class GmSingleAssetTerminationsCfg:
     r"""单资产 termination 配置：timeout + object out of hand。"""
 
     time_out = DoneTerm(func=isaac_mdp.time_out, time_out=True)
-    object_falling = DoneTerm(func=gm_mdp.object_out_of_hand, params={"fall_dist": 0.12})
+    object_falling = DoneTerm(func=gm_mdp.object_out_of_hand, params={"fall_dist": 0.06})
 
 
 @configclass
@@ -519,6 +529,8 @@ class GmSingleAssetEnvCfg_PLAY(GmSingleAssetEnvCfg):
 
 __all__ = [
     "GM_SINGLE_ASSET_CONTACT_LAYOUT",
+    "GM_SINGLE_ASSET_GRASP_PRESET",
+    "GM_SINGLE_ASSET_GRASP_PRESET_PATH",
     "GM_SINGLE_ASSET_HAND_SPAWN_CFG",
     "GM_SINGLE_ASSET_PREMADE_TOPOLOGY_PATH",
     "GmSingleAssetActionsCfg",

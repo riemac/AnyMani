@@ -1,7 +1,7 @@
 r"""AnyMani distill 的统一 RL 训练入口。
 
 本入口当前服务“单资产 MLP MDP probe”这一条正式训练主线。它不定义环境语义：
-`tasks/gm/single_asset_env_cfg.py` 仍然拥有 scene、obs、action、reward、reset、
+`tasks/gm/config/single_asset/single_asset_env_cfg.py` 仍然拥有 scene、obs、action、reward、reset、
 termination；这里仅负责启动 Isaac Sim、加载 distill registry 中的 rl_games YAML、
 固定本地 rl_games backend、写出训练复现实验目录并运行 PPO。
 

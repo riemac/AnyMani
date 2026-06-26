@@ -29,6 +29,14 @@ ManagerBasedRLEnv 本身就是一个高度声明式、配置驱动的环境框�
 
 在设计 MDP 项时，也可从算法第一性原理考虑哪些是可以从流程里拆下来、可配置的组建、超参，而不是写死在流程逻辑里。
 
+### Config 变体结构
+
+`config/<variant>/` 放具体实验构型：single asset、某个真实手、某组 generated hand bank，或后续异构并行训练 preset。每个 variant 可以自包含定义 scene / sim / command / action / observation / reward / reset / termination / curriculum group；不要为了“复用”牺牲当前实验文件的可读性。
+
+`inhand_env_cfg.py` 可以作为 GM in-hand manipulation 的参考 / base assembly surface，但不是强制继承对象。group 是实验组合面，不限定只能使用 `gm_mdp`；可以组合 IsaacLab 官方 `isaac_mdp`、AnyMani 自有 MDP，或未来从 LEAP / AnyRotate / 其他项目适配来的 term。外部参考逻辑一旦沉淀，应优先适配成 AnyMani 中命名清楚的 callable，并在配置注释中说明来源和实验语义。
+
+当前 single-asset 主线位于 `config/single_asset/`。根目录不再保留 `single_asset_env_cfg.py` 兼容壳，避免旧路径继续污染实验语义。
+
 ### 测试策略
 
 `gm` 的纯 MDP 逻辑应尽量 TDD：obs/action 量纲、SO(3) command、reward 曲线、termination anchor、reset event 拆分语义，都应能用 fake env / 小 tensor 做 contract test。需要 Isaac Sim 的 articulation loading、contact sensor、PhysX step、完整 reset/step，则用 headless smoke / integration test，不要求像纯函数一样严格 TDD。

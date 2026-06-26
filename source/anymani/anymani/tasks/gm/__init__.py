@@ -49,7 +49,7 @@ gym.register(
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.single_asset_env_cfg:GmSingleAssetEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.config.single_asset.single_asset_env_cfg:GmSingleAssetEnvCfg",
     },
 )
 
@@ -58,7 +58,25 @@ gym.register(
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.single_asset_env_cfg:GmSingleAssetEnvCfg_PLAY",
+        "env_cfg_entry_point": f"{__name__}.config.single_asset.single_asset_env_cfg:GmSingleAssetEnvCfg_PLAY",
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-Leap-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config.leap.leap_env_cfg:GmLeapEnvCfg",
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-Leap-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config.leap.leap_env_cfg:GmLeapEnvCfg_PLAY",
     },
 )
 
@@ -66,6 +84,9 @@ __all__ = [
     "GmInHandEnvCfg",
     "GmInHandEnvCfg_PLAY",
     "GmInHandSceneCfg",
+    "GmLeapEnvCfg",
+    "GmLeapEnvCfg_PLAY",
+    "GmLeapSceneCfg",
     "GmSingleAssetEnvCfg",
     "GmSingleAssetEnvCfg_PLAY",
     "GmSingleAssetSceneCfg",
@@ -88,13 +109,21 @@ def __getattr__(name: str) -> Any:
 
             return HeterogeneousHandTestEnvCfg
 
+        from .config.leap.leap_env_cfg import GmLeapEnvCfg, GmLeapEnvCfg_PLAY, GmLeapSceneCfg
+        from .config.single_asset.single_asset_env_cfg import (
+            GmSingleAssetEnvCfg,
+            GmSingleAssetEnvCfg_PLAY,
+            GmSingleAssetSceneCfg,
+        )
         from .inhand_env_cfg import GmInHandEnvCfg, GmInHandEnvCfg_PLAY, GmInHandSceneCfg
-        from .single_asset_env_cfg import GmSingleAssetEnvCfg, GmSingleAssetEnvCfg_PLAY, GmSingleAssetSceneCfg
 
         exports = {
             "GmInHandEnvCfg": GmInHandEnvCfg,
             "GmInHandEnvCfg_PLAY": GmInHandEnvCfg_PLAY,
             "GmInHandSceneCfg": GmInHandSceneCfg,
+            "GmLeapEnvCfg": GmLeapEnvCfg,
+            "GmLeapEnvCfg_PLAY": GmLeapEnvCfg_PLAY,
+            "GmLeapSceneCfg": GmLeapSceneCfg,
             "GmSingleAssetEnvCfg": GmSingleAssetEnvCfg,
             "GmSingleAssetEnvCfg_PLAY": GmSingleAssetEnvCfg_PLAY,
             "GmSingleAssetSceneCfg": GmSingleAssetSceneCfg,

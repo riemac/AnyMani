@@ -15,7 +15,7 @@ from pathlib import Path
 import anymani.tasks.gm  # noqa: F401  # 注册 tasks-owned Gym aliases，不导入 env cfg 文件
 import gymnasium as gym
 
-SINGLE_ASSET_ENV_CFG_PATH = Path(__file__).resolve().parents[1] / "single_asset_env_cfg.py"
+SINGLE_ASSET_ENV_CFG_PATH = Path(__file__).resolve().parents[1] / "config" / "single_asset" / "single_asset_env_cfg.py"
 r"""被测试的 single-asset env cfg 源文件路径；只做 AST 读取，不执行模块。"""
 
 
@@ -122,8 +122,22 @@ def test_single_asset_task_alias_points_to_single_asset_cfg() -> None:
     spec = gym.spec("AnyMani-GM-SingleAsset-v0")
     play_spec = gym.spec("AnyMani-GM-SingleAsset-Play-v0")
 
-    assert spec.kwargs["env_cfg_entry_point"].endswith("single_asset_env_cfg:GmSingleAssetEnvCfg")
-    assert play_spec.kwargs["env_cfg_entry_point"].endswith("single_asset_env_cfg:GmSingleAssetEnvCfg_PLAY")
+    assert spec.kwargs["env_cfg_entry_point"].endswith(
+        "config.single_asset.single_asset_env_cfg:GmSingleAssetEnvCfg"
+    )
+    assert play_spec.kwargs["env_cfg_entry_point"].endswith(
+        "config.single_asset.single_asset_env_cfg:GmSingleAssetEnvCfg_PLAY"
+    )
+
+
+def test_leap_task_alias_points_to_official_leap_cfg() -> None:
+    r"""official LEAP 消融 aliases 应指向 LEAP 专属 cfg，而不是 generated single-asset cfg。"""
+
+    spec = gym.spec("AnyMani-GM-Leap-v0")
+    play_spec = gym.spec("AnyMani-GM-Leap-Play-v0")
+
+    assert spec.kwargs["env_cfg_entry_point"].endswith("config.leap.leap_env_cfg:GmLeapEnvCfg")
+    assert play_spec.kwargs["env_cfg_entry_point"].endswith("config.leap.leap_env_cfg:GmLeapEnvCfg_PLAY")
 
 
 def test_single_asset_binds_premade_mother_bundle_with_explicit_selection() -> None:
@@ -143,8 +157,8 @@ def test_single_asset_binds_premade_mother_bundle_with_explicit_selection() -> N
     assert _keyword_literal(bank_call, "parse_visual_rgba", values) is True
 
 
-def test_single_asset_default_training_scale_and_object_init_are_declared() -> None:
-    r"""单资产 probe 默认应使用 2048 env 和标定台导出的 GUI/contact-basin 初态。"""
+def test_single_asset_default_training_scale_and_preset_init_are_declared() -> None:
+    r"""单资产 probe 应使用 asset-scoped preset 声明 pre-grasp 和 contact basin。"""
 
     values = _constant_values()
     source = _source()
@@ -152,34 +166,19 @@ def test_single_asset_default_training_scale_and_object_init_are_declared() -> N
     hand_spawn_call = _module_assign_call("GM_SINGLE_ASSET_HAND_SPAWN_CFG")
     object_call = _class_assign_call("GmSingleAssetSceneCfg", "object")
     spawn_call = _keyword_call(object_call, "spawn")
-    init_state_call = _keyword_call(object_call, "init_state")
     joint_init_call = _keyword_call(hand_spawn_call, "joint_init")
-    calibrated_joint_pos = {
-        "thumb_j0": 0.71999997,
-        "index_j0": -0.0,
-        "middle_j0": 0.0,
-        "ring_j0": 0.11,
-        "thumb_j1": 1.56999993,
-        "index_j1": -0.52999997,
-        "middle_j1": -0.12,
-        "ring_j1": 0.44999999,
-        "thumb_j2": 0.75999999,
-        "index_j2": 1.23000002,
-        "middle_j2": 1.13999999,
-        "ring_j2": 1.29999995,
-        "thumb_j3": 1.63,
-        "index_j3": 0.94999999,
-        "middle_j3": 0.91999996,
-        "ring_j3": 0.66999996,
-    }
 
     assert _keyword_literal(scene_call, "num_envs", values) == 2048
     assert _keyword_literal(scene_call, "replicate_physics", values) is False
     assert _keyword_literal(spawn_call, "scale", values) == (1.0, 1.0, 1.0)
     assert _call_func_name(joint_init_call) == "HandJointInitCfg"
-    for joint_name, joint_pos in calibrated_joint_pos.items():
-        assert f'"{joint_name}": {joint_pos}' in source
-    assert _keyword_literal(init_state_call, "pos", values) == (0.02, 0.08, 0.56)
+    assert 'GM_SINGLE_ASSET_GRASP_PRESET_PATH = asset_preset_path("generated_asset", "right_t4_i4_m4_r4")' in source
+    assert "GM_SINGLE_ASSET_GRASP_PRESET = GraspPreset.from_yaml(" in source
+    assert 'expected_hand_source="generated_bundle"' in source
+    assert 'expected_hand_ref_contains="right_t4_i4_m4_r4"' in source
+    assert "joint_pos=GM_SINGLE_ASSET_GRASP_PRESET.joint_pos_rad" in source
+    assert "pos=GM_SINGLE_ASSET_GRASP_PRESET.object_pos_cfg" in source
+    assert "rot=GM_SINGLE_ASSET_GRASP_PRESET.object_rot_wxyz" in source
     assert "self.episode_length_s = 10.0" in source
 
 

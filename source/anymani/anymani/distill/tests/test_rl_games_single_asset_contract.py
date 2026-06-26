@@ -36,7 +36,18 @@ def test_single_asset_mlp_task_alias_points_to_distill_agent() -> None:
 
     spec = gym.spec("AnyMani-GM-SingleAsset-MLP-v0")
 
-    assert spec.kwargs["env_cfg_entry_point"].endswith("single_asset_env_cfg:GmSingleAssetEnvCfg")
+    assert spec.kwargs["env_cfg_entry_point"].endswith(
+        "config.single_asset.single_asset_env_cfg:GmSingleAssetEnvCfg"
+    )
+    assert spec.kwargs["rl_games_cfg_entry_point"].endswith("agents:gm_single_asset_mlp_ppo.yaml")
+
+
+def test_leap_mlp_task_alias_reuses_distill_mlp_agent() -> None:
+    r"""official LEAP 消融应复用统一训练入口和 MLP PPO YAML。"""
+
+    spec = gym.spec("AnyMani-GM-Leap-MLP-v0")
+
+    assert spec.kwargs["env_cfg_entry_point"].endswith("config.leap.leap_env_cfg:GmLeapEnvCfg")
     assert spec.kwargs["rl_games_cfg_entry_point"].endswith("agents:gm_single_asset_mlp_ppo.yaml")
 
 
