@@ -66,6 +66,7 @@ params:
   # 训练配置
   config:
     name: leaphand_object_rot  # 任务名称
+    rsl_style_console: True     # 追加 RSL-RL 风格训练摘要打印，不改变 rl_games 算法
     env_name: rlgpu               # 使用GPU训练环境
     device: 'cuda:0'              # 使用第一块GPU
     device_name: 'cuda:0'         # 设备名称

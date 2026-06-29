@@ -1,0 +1,25 @@
+0.3.0 - 2026-06-29
+==================
+
+- 初始化 AnyMani 仓库级 `VERSION` / `CHANGELOG`，把此前仅存在于 git tag 中的版本面正式落盘到仓库根目录。
+- 在 `tasks/inhand` 中恢复 LEAP USD tactile 的 a51 历史黄金语义锚点：fixed z-axis continuous command、7D quaternion `goal_pose` observation、full non-tip tactile reward 与对应 Play/debug marker 路径。
+- 将 `AnyMani-LeapHand-Tactile-v0` 与 `AnyMani-LeapHand-Joint-v0` 重新语义分离：tactile 恢复为 a51 连续旋转基线，joint 保持当前 RelativeSO3 fixed-goal 对照任务，不再共享同一 command / observation 语义。
+- 建立 LEAP USD tactile a51 的 first-class baseline，并完成一次前 2000 epoch 的 `fall_penalty` 对照：无显式 fall penalty 的基线在后期 `reward / cumulative_rotation / consecutive_success / fingertip_contact` 上优于加入 official-style `fall_penalty=-10` 的变体。
+- 在 `Research/实验记录/inhand_tactile_a51/` 新增本地实验总览与 run card，沉淀 TensorBoard 对照、checkpoint、视频路径、人工回放观察与 URDF-only 下一步建议。
+
+0.2.1 - 2026-03-07
+==================
+
+- 回填历史 tag `v0.2.1` 的仓库级说明：该阶段围绕 inhand 任务持续迭代 command / observation / tactile 研究路线，并新增 finger gait 文献回顾与研究规划材料。
+- 该版本仍沿用“只打 tag、不落盘顶层 VERSION/CHANGELOG”的旧管理方式；当前条目为事后语义回填。
+
+0.2.0 - 2025-10-31
+==================
+
+- 完成 environment task 大重构：移除旧 v1/v2 变体，统一环境配置组织，重构 MDP 模块（observations / rewards / commands / terminations）。
+- 加入 PhysX contact 参数优化与 proprioception observation 配置，形成重构后的首个稳定 release。
+
+0.1.0 - 2025-09-20
+==================
+
+- 建立基于 `ManagerBasedRLEnv` 的任务架构，作为 AnyMani 早期环境系统的首个语义版本锚点。

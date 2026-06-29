@@ -10,21 +10,18 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-import torch
-
 import isaaclab.utils.math as math_utils
+import torch
 from isaaclab.managers import CommandTerm
 from isaaclab.markers.visualization_markers import VisualizationMarkers
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
-    from .commands_cfg import ContinuousRotationCommandCfg
-    from .commands_cfg import RelativeSO3CommandCfg
+    from .commands_cfg import ContinuousRotationCommandCfg, RelativeSO3CommandCfg
 
 
 # 预定义的世界坐标系旋转轴映射
@@ -57,8 +54,10 @@ class ContinuousRotationCommand(CommandTerm):
         self.object = env.scene[cfg.asset_name]
 
         # 在环境坐标系保留位置命令，保持与现有观察构建兼容
-        init_pos_offset = torch.tensor(cfg.init_pos_offset, dtype=torch.float, device=self.device) # 与手托起物体的设计有关
-        self.pos_command_e = self.object.data.default_root_state[:, :3] + init_pos_offset # 环境坐标系  
+        init_pos_offset = torch.tensor(
+            cfg.init_pos_offset, dtype=torch.float, device=self.device
+        )  # 与手托起物体的设计有关
+        self.pos_command_e = self.object.data.default_root_state[:, :3] + init_pos_offset  # 环境坐标系
         self.pos_command_w = self.pos_command_e + self._env.scene.env_origins
 
         # 目标姿态缓冲（世界坐标系四元数）
@@ -89,7 +88,9 @@ class ContinuousRotationCommand(CommandTerm):
     def command(self) -> torch.Tensor:
         """返回目标位姿 (pos_e, quat_w)。"""
 
-        return torch.cat((self.pos_command_e, self.quat_command_w), dim=-1)  # 位置是环境坐标系，姿态是世界坐标系，在命令项中返回的是该值
+        return torch.cat(
+            (self.pos_command_e, self.quat_command_w), dim=-1
+        )  # 位置是环境坐标系，姿态是世界坐标系，在命令项中返回的是该值
 
     def _update_metrics(self):
         """更新日志指标。"""
@@ -108,9 +109,7 @@ class ContinuousRotationCommand(CommandTerm):
 
         axis_key = self.cfg.rotation_axis.lower()
         if axis_key not in _AXIS_MAP:
-            raise ValueError(
-                f"不支持的旋转轴 '{self.cfg.rotation_axis}'. 支持项为: {sorted(set(_AXIS_MAP.keys()))}."
-            )
+            raise ValueError(f"不支持的旋转轴 '{self.cfg.rotation_axis}'. 支持项为: {sorted(set(_AXIS_MAP.keys()))}.")
 
         axis_vec = _AXIS_MAP[axis_key].to(self.device)
         self.rotation_axis_w[env_ids] = axis_vec
@@ -156,10 +155,29 @@ class ContinuousRotationCommand(CommandTerm):
         self.time_left[success_ids] = max_time
 
     def _set_debug_vis_impl(self, debug_vis: bool):
-        raise NotImplementedError("ContinuousRotationCommand 尚未实现调试可视化。")
+        """打开或关闭连续旋转目标姿态的调试 marker。"""
+
+        # Play 模式只需要显示目标姿态，不改变训练时的 command 更新公式。
+        if debug_vis:
+            if not hasattr(self, "goal_pose_visualizer"):
+                self.goal_pose_visualizer = VisualizationMarkers(self.cfg.goal_pose_visualizer_cfg)
+            self.goal_pose_visualizer.set_visibility(True)
+        else:
+            if hasattr(self, "goal_pose_visualizer"):
+                self.goal_pose_visualizer.set_visibility(False)
 
     def _debug_vis_callback(self, event):
-        raise NotImplementedError("ContinuousRotationCommand 尚未实现调试可视化。")
+        """把目标方块 marker 放到固定展示位置，并赋予当前目标四元数。"""
+
+        if not hasattr(self, "goal_pose_visualizer"):
+            return
+
+        # marker 位置仅用于展示，真实 reward/obs 的位置目标仍是 self.pos_command_e。
+        goal_pos_e = torch.tensor(self.cfg.goal_marker_pos_e, device=self.device, dtype=torch.float).unsqueeze(0)
+        marker_pos_w = self._env.scene.env_origins + goal_pos_e
+
+        # marker 姿态直接使用连续旋转命令维护的目标四元数 $Q_g^w$。
+        self.goal_pose_visualizer.visualize(translations=marker_pos_w, orientations=self.quat_command_w)
 
 
 class RelativeSO3Command(CommandTerm):
@@ -185,7 +203,7 @@ class RelativeSO3Command(CommandTerm):
 
     cfg: RelativeSO3CommandCfg
 
-    def __init__(self, cfg: RelativeSO3CommandCfg, env: "ManagerBasedRLEnv"):
+    def __init__(self, cfg: RelativeSO3CommandCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
 
         self.object = env.scene[cfg.asset_name]

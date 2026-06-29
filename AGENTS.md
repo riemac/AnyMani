@@ -61,7 +61,7 @@ timeout --kill-after=20s 240s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest 
 
 ### 5. 训练记录分析
 
-本项目 uv 环境内装了 tensorboard 等库，可供 agent 使用 bash 脚本命令来分析训练记录，给出合适建议。
+本项目 uv 环境内装了 tensorboard 等库，可供 agent 使用 bash 脚本命令来分析训练记录，给出合适建议。而相关实验日志记录维护和更新于 `AnyMani/Research/实验记录`。
 
 ## 常用操作
 

@@ -3,23 +3,33 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from dataclasses import MISSING
-
 import math
+from dataclasses import MISSING
 from pickle import NONE
 
 import isaaclab.sim as sim_utils
 from isaaclab.managers import CommandTermCfg
+from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-from isaaclab.markers import VisualizationMarkersCfg
 
 from .rotation_command import ContinuousRotationCommand, RelativeSO3Command
 
 
 @configclass
 class ContinuousRotationCommandCfg(CommandTermCfg):
-    """连续旋转命令配置。"""
+    r"""连续旋转命令配置。
+
+    该配置对应 a51c666 黄金 tactile 版的 command 语义：目标姿态不是从大范围随机采样，
+    而是在成功后沿固定世界轴小步推进：
+    $$
+    Q_g^{k+1}=R_{\text{axis}}(\Delta\theta)Q_g^k,
+    \qquad \Delta\theta=\pi/8\ \text{by default}.
+    $$
+
+    `command()` 输出 7D pose-like tensor `[p_g^e, Q_g^w]`，用于恢复历史 actor/critic
+    的 quaternion goal-pose 观测，而不是当前 SO(3) rotvec 指令。
+    """
 
     class_type: type = ContinuousRotationCommand
     resampling_time_range: tuple[float, float] = (1e6, 1e6)
@@ -44,7 +54,24 @@ class ContinuousRotationCommandCfg(CommandTermCfg):
 
     update_goal_on_success: bool = True
     """是否在成功达到目标后沿轴继续更新目标。"""
-    
+
+    # NOTE:
+    #   Play 模式会打开 debug_vis。历史 ContinuousRotationCommand 没有可视化实现，
+    #   这里补齐 marker 配置，使 tactile golden 训练/评估共用同一个 command 类。
+    goal_marker_pos_e: tuple[float, float, float] = (-0.2, -0.45, 0.68)
+    """目标姿态 marker 的固定显示位置（环境坐标系 {e}），只用于可视化。"""
+
+    goal_pose_visualizer_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
+        prim_path="/Visuals/Command/goal_marker",
+        markers={
+            "goal": sim_utils.UsdFileCfg(
+                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
+                scale=(1.2, 1.2, 1.2),
+            ),
+        },
+    )
+    """目标姿态可视化 marker 配置，外观对齐当前 RelativeSO3Command 的 marker。"""
+
     def __post_init__(self):
         """初始化后处理，根据 delta_angle 自动计算成功阈值（5%容差）"""
         # 如果未提供成功阈值，则根据 delta_angle 自动计算
@@ -131,9 +158,7 @@ class RelativeSO3CommandCfg(CommandTermCfg):
 
         mode = str(self.mode).lower()
         if mode not in {"fixed_goal", "rolling_goal"}:
-            raise ValueError(
-                f"RelativeSO3CommandCfg.mode must be 'fixed_goal' or 'rolling_goal', got: {self.mode}"
-            )
+            raise ValueError(f"RelativeSO3CommandCfg.mode must be 'fixed_goal' or 'rolling_goal', got: {self.mode}")
         self.mode = mode
 
         # default success threshold: keep consistent with existing tasks (0.2 rad)

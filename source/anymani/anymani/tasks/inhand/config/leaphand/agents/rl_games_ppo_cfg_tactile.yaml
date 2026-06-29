@@ -90,6 +90,7 @@ params:
     save_best_after: 200         # 100轮后开始保存最佳模型
     save_frequency: 200          # 每50轮保存一次
     print_stats: True            # 打印训练统计信息
+    rsl_style_console: True      # 追加 RSL-RL 风格控制台摘要，便于实时检查 reward / termination / command metrics
     grad_norm: 1.0               # 梯度裁剪范数
     entropy_coef: 0.002          # 熵正则化系数，用于鼓励探索
     truncate_grads: True         # 启用梯度裁剪

@@ -56,11 +56,13 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
-import gymnasium as gym
 import math
 import os
 import random
+import time
 from datetime import datetime
+
+import gymnasium as gym
 
 # ----------------------------------------------------------------------------
 # PyTorch 2.x: disable dynamo/inductor cudagraphs by default for Isaac Sim runs.
@@ -77,10 +79,9 @@ from datetime import datetime
 os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 os.environ.setdefault("TORCHINDUCTOR_CUDAGRAPHS", "0")
 
-from rl_games.common import env_configurations, vecenv
-from rl_games.common.algo_observer import IsaacAlgoObserver
-from rl_games.torch_runner import Runner
-
+import anymani.tasks  # noqa: F401
+import isaaclab_tasks  # noqa: F401
+import torch
 from isaaclab.envs import (
     DirectMARLEnv,
     DirectMARLEnvCfg,
@@ -91,15 +92,218 @@ from isaaclab.envs import (
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_yaml
-
 from isaaclab_rl.rl_games import MultiObserver, PbtAlgoObserver, RlGamesGpuEnv, RlGamesVecEnvWrapper
-
-import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
-
-import anymani.tasks  # noqa: F401
+from rl_games.algos_torch import torch_ext
+from rl_games.common import env_configurations, vecenv
+from rl_games.common.algo_observer import IsaacAlgoObserver
+from rl_games.torch_runner import Runner
 
 # PLACEHOLDER: Extension template (do not remove this comment)
+
+
+class RslStyleIsaacAlgoObserver(IsaacAlgoObserver):
+    r"""把 rl_games 统计追加打印成 RSL-RL 风格 summary block。
+
+    该 observer 只改变 console 可读性，不改 PPO 更新、TensorBoard scalar 或 env
+    step 语义。启用条件由 agent YAML 的 ``params.config.rsl_style_console`` 控制。
+    """
+
+    def after_init(self, algo):
+        r"""缓存 rl_games 每个 PPO epoch 写出的 loss / fps 统计。"""
+
+        super().after_init(algo)
+        self._last_train_stats = None
+        self._last_print_key = None
+        original_write_stats = algo.write_stats
+
+        def write_stats_with_cache(
+            total_time,
+            epoch_num,
+            step_time,
+            play_time,
+            update_time,
+            a_losses,
+            c_losses,
+            entropies,
+            kls,
+            last_lr,
+            lr_mul,
+            frame,
+            scaled_time,
+            scaled_play_time,
+            curr_frames,
+        ):
+            self._last_train_stats = {
+                "total_time": total_time,
+                "epoch_num": epoch_num,
+                "step_time": step_time,
+                "play_time": play_time,
+                "update_time": update_time,
+                "a_loss": self._mean_list(a_losses),
+                "c_loss": self._mean_list(c_losses),
+                "entropy": self._mean_list(entropies),
+                "kl": self._mean_list(kls),
+                "last_lr": last_lr,
+                "lr_mul": lr_mul,
+                "frame": frame,
+                "scaled_time": scaled_time,
+                "scaled_play_time": scaled_play_time,
+                "curr_frames": curr_frames,
+            }
+            return original_write_stats(
+                total_time,
+                epoch_num,
+                step_time,
+                play_time,
+                update_time,
+                a_losses,
+                c_losses,
+                entropies,
+                kls,
+                last_lr,
+                lr_mul,
+                frame,
+                scaled_time,
+                scaled_play_time,
+                curr_frames,
+            )
+
+        algo.write_stats = write_stats_with_cache
+
+    def after_print_stats(self, frame, epoch_num, total_time):
+        r"""在 rl_games 默认 stats 后追加一次 RSL-RL 风格面板。"""
+
+        print_key = (int(epoch_num), int(frame))
+        if self._last_print_key == print_key:
+            return
+        self._last_print_key = print_key
+
+        episode_summary = self._episode_summary()
+        super().after_print_stats(frame, epoch_num, total_time)
+
+        if self._last_train_stats is None:
+            return
+        self._print_rsl_style_summary(self._last_train_stats, episode_summary)
+
+    def _episode_summary(self) -> dict[str, float]:
+        r"""聚合 IsaacLab episode extras，例如 reward term、termination 和 command metrics。"""
+
+        summary = {}
+        if not self.ep_infos:
+            return summary
+        for key in self.ep_infos[0]:
+            values = []
+            for ep_info in self.ep_infos:
+                if key not in ep_info:
+                    continue
+                value = ep_info[key]
+                if not isinstance(value, torch.Tensor):
+                    value = torch.as_tensor([value], device=self.algo.device, dtype=torch.float32)
+                if value.ndim == 0:
+                    value = value.unsqueeze(0)
+                values.append(value.to(self.algo.device, dtype=torch.float32).flatten())
+            if values:
+                summary[key] = torch.cat(values).mean().item()
+        return summary
+
+    @staticmethod
+    def _mean_list(values) -> float | None:
+        r"""把 rl_games loss tensor list 聚合成 Python float。"""
+
+        if not values:
+            return None
+        return torch_ext.mean_list(values).item()
+
+    @staticmethod
+    def _scalar(value) -> float | None:
+        r"""把 tensor / number 统一转成 Python float。"""
+
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            return value.detach().float().mean().item()
+        return float(value)
+
+    def _mean_reward(self) -> float | None:
+        r"""读取 rl_games 当前 running mean episode reward。"""
+
+        if self.algo.game_rewards.current_size == 0:
+            return None
+        return self._scalar(self.algo.game_rewards.get_mean()[0])
+
+    def _mean_episode_length(self) -> float | None:
+        r"""读取 rl_games 当前 running mean episode length。"""
+
+        if self.algo.game_lengths.current_size == 0:
+            return None
+        return self._scalar(self.algo.game_lengths.get_mean())
+
+    def _mean_action_std(self) -> float | None:
+        r"""估计当前连续动作分布标准差。"""
+
+        model = getattr(self.algo, "model", None)
+        network = getattr(model, "a2c_network", None)
+        sigma = getattr(network, "sigma", None)
+        if sigma is None:
+            return None
+        with torch.no_grad():
+            sigma_value = sigma.detach().float()
+            if "LogStd" in type(model).__qualname__:
+                sigma_value = torch.exp(sigma_value)
+            return sigma_value.mean().item()
+
+    @staticmethod
+    def _line(label: str, value: str, pad: int = 40) -> str:
+        return f"{label + ':':>{pad}} {value}\n"
+
+    def _print_rsl_style_summary(self, stats: dict, episode_summary: dict[str, float], width: int = 80) -> None:
+        r"""打印单个 PPO epoch 的 RSL-RL 风格摘要。"""
+
+        epoch_num = int(stats["epoch_num"])
+        max_epochs = int(getattr(self.algo, "max_epochs", -1))
+        done_epochs = max(epoch_num, 1)
+        remaining_epochs = max(max_epochs - epoch_num, 0) if max_epochs > 0 else 0
+        total_time = float(stats["total_time"] or 0.0)
+        eta = total_time / done_epochs * remaining_epochs if remaining_epochs > 0 else 0.0
+        total_fps = float(stats["curr_frames"] or 0.0) / max(float(stats["scaled_time"] or 0.0), 1.0e-9)
+
+        log_string = f"{'#' * width}\n"
+        log_string += f"{f' Learning iteration {epoch_num}/{max_epochs} '.center(width)}\n\n"
+        log_string += self._line("Total steps", f"{int(stats['frame'] or 0)}")
+        log_string += self._line("Steps per second", f"{total_fps:.0f}")
+        log_string += self._line("Collection time", f"{float(stats['scaled_play_time'] or 0.0):.3f}s")
+        log_string += self._line("Learning time", f"{float(stats['update_time'] or 0.0):.3f}s")
+        if stats["c_loss"] is not None:
+            log_string += self._line("Mean value loss", f"{float(stats['c_loss']):.4f}")
+        if stats["a_loss"] is not None:
+            log_string += self._line("Mean surrogate loss", f"{float(stats['a_loss']):.4f}")
+        if stats["entropy"] is not None:
+            log_string += self._line("Mean entropy loss", f"{float(stats['entropy']):.4f}")
+        mean_reward = self._mean_reward()
+        if mean_reward is not None:
+            log_string += self._line("Mean reward", f"{mean_reward:.2f}")
+        mean_episode_length = self._mean_episode_length()
+        if mean_episode_length is not None:
+            log_string += self._line("Mean episode length", f"{mean_episode_length:.2f}")
+        mean_action_std = self._mean_action_std()
+        if mean_action_std is not None:
+            log_string += self._line("Mean action std", f"{mean_action_std:.2f}")
+        for key, value in episode_summary.items():
+            log_string += self._line(key, f"{value:.4f}")
+        log_string += f"{'-' * width}\n"
+        log_string += self._line("Iteration time", f"{float(stats['scaled_time'] or 0.0):.2f}s")
+        log_string += self._line("Time elapsed", time.strftime("%H:%M:%S", time.gmtime(total_time)))
+        log_string += self._line("ETA", time.strftime("%H:%M:%S", time.gmtime(eta)))
+        print(log_string)
+
+
+def make_isaac_algo_observer(agent_cfg: dict) -> IsaacAlgoObserver:
+    r"""Create the rl_games observer requested by the agent YAML."""
+
+    if agent_cfg["params"]["config"].get("rsl_style_console", False):
+        return RslStyleIsaacAlgoObserver()
+    return IsaacAlgoObserver()
 
 
 @hydra_task_config(args_cli.task, "rl_games_cfg_entry_point")
@@ -256,12 +460,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[WARN]: Failed to auto-adjust rl_games minibatch_size: {e}")
 
     # 使用 IsaacAlgoObserver 创建 runner（该 observer 为 rl-games 提供 Isaac/Sim 的统计回调）
+    isaac_observer = make_isaac_algo_observer(agent_cfg)
     if "pbt" in agent_cfg and agent_cfg["pbt"]["enabled"]:
-        observers = MultiObserver([IsaacAlgoObserver(), PbtAlgoObserver(agent_cfg, args_cli)])
+        observers = MultiObserver([isaac_observer, PbtAlgoObserver(agent_cfg, args_cli)])
         runner = Runner(observers)
     else:
-        runner = Runner(IsaacAlgoObserver())
-    
+        runner = Runner(isaac_observer)
+
     # 加载 agent 配置（包含算法、网络与训练超参等）
     runner.load(agent_cfg)
 

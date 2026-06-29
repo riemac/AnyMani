@@ -32,27 +32,22 @@ from __future__ import annotations
 
 import math
 
+import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, RigidObjectCfg, AssetBaseCfg
-from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
-from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim import PhysxCfg, SimulationCfg
-from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as Gnoise
-from isaaclab.sensors import ContactSensorCfg
 
-import isaaclab.envs.mdp as mdp
 from anymani.tasks.inhand import mdp as leap_mdp
-
 
 ##############################################################################
 # 全局超参数
@@ -71,10 +66,11 @@ DEFAULT_OBJECT_USD = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanc
 # 场景配置组件
 ##############################################################################
 
+
 @configclass
 class InHandObjectSceneCfg(InteractiveSceneCfg):
     """手内操作任务的基础场景配置
-    
+
     包含地面、物体、光照等共用场景元素。
     机器人（robot）由子类或具体手型配置指定。
     """
@@ -121,17 +117,18 @@ class InHandObjectSceneCfg(InteractiveSceneCfg):
 # 观测配置组件
 ##############################################################################
 
+
 @configclass
 class JointSpaceObsGroupCfg(ObsGroup):
     """关节空间观测组
-    
+
     适用于关节位置控制的任务，观测包括：
     - 关节位置（归一化到限位范围）
     - 物体位姿
     - so(3) 指令（3D rotvec）
     - 上一步动作
     """
-    
+
     # -- robot terms
     joint_pos = ObsTerm(
         func=mdp.joint_pos_limit_normalized,
@@ -174,10 +171,10 @@ class JointSpaceObsGroupCfg(ObsGroup):
 @configclass
 class ProprioceptionObsGroupCfg(JointSpaceObsGroupCfg):
     """本体感受观测组（无视觉/物体信息）
-    
+
     仅包含机器人自身可感知的信息，适用于 sim2real 场景。
     """
-    
+
     def __post_init__(self):
         super().__post_init__()
         # 移除需要外部感知的项
@@ -191,56 +188,146 @@ class ProprioceptionObsGroupCfg(JointSpaceObsGroupCfg):
 @configclass
 class JointSpaceObservationsCfg:
     """关节空间完整观测配置（Policy + Critic）"""
-    
+
     @configclass
     class PolicyCfg(ProprioceptionObsGroupCfg):
         """策略观测（可部署）：无物体绝对位姿"""
+
         pass
-    
+
     @configclass
     class CriticCfg(JointSpaceObsGroupCfg):
         """Critic 观测（特权信息）"""
+
         pass
-    
+
     policy: ObsGroup = PolicyCfg(history_length=1)
     critic: ObsGroup = CriticCfg(history_length=1)
+
+
+@configclass
+class ContinuousRotationObsGroupCfg(ObsGroup):
+    r"""a51c666 连续旋转任务的特权观测组。
+
+    该观测组刻意不同于当前 `JointSpaceObsGroupCfg` 的 so(3) rotvec command：
+    这里恢复历史黄金 tactile 版使用的 7D goal pose 观测，直接暴露
+    `ContinuousRotationCommand.command = [p_g^e, Q_g^w]`。
+
+    数学上，critic 看到的是：
+    $$
+    o_t^V = [\tilde q_t,\ p_o^w,\ Q_o^w,\ p_g^e,\ Q_g^w,\
+             Q_g^w \otimes (Q_o^w)^{-1},\ a_{t-1}].
+    $$
+
+    其中 $\tilde q_t$ 是关节限位归一化位置，$Q_g^w$ 是固定 z 轴连续推进的目标四元数。
+    该设计牺牲一部分 deployable purity，但恢复了历史训练成功时的 Markov 信息量。
+    """
+
+    # -- robot terms
+    joint_pos = ObsTerm(
+        func=mdp.joint_pos_limit_normalized,
+        params={"asset_cfg": SceneEntityCfg("robot")},
+    )
+
+    # -- object terms
+    object_pos = ObsTerm(
+        func=mdp.root_pos_w,
+        noise=Gnoise(std=0.002),
+        params={"asset_cfg": SceneEntityCfg("object")},
+    )
+    object_quat = ObsTerm(
+        func=mdp.root_quat_w,
+        params={"asset_cfg": SceneEntityCfg("object"), "make_quat_unique": False},
+    )
+
+    # -- command terms
+    goal_pose = ObsTerm(
+        func=mdp.generated_commands,
+        params={"command_name": "goal_pose"},
+    )
+    goal_quat_diff = ObsTerm(
+        func=leap_mdp.goal_quat_diff,
+        params={"asset_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "make_quat_unique": True},
+    )
+
+    # -- action terms
+    last_action = ObsTerm(func=mdp.last_action)
+
+    def __post_init__(self):
+        self.enable_corruption = True
+        self.concatenate_terms = True
+
+
+@configclass
+class ContinuousRotationProprioceptionObsGroupCfg(ContinuousRotationObsGroupCfg):
+    r"""a51c666 actor 观测组：本体感受 + 7D quaternion goal pose。
+
+    actor 不看物体绝对位姿，也不看 $Q_g \otimes Q_o^{-1}$ 这种仿真特权误差信息；
+    它只接收关节状态、连续旋转目标姿态和上一帧动作：
+    $$
+    o_t^\pi = [\tilde q_t,\ p_g^e,\ Q_g^w,\ a_{t-1}].
+    $$
+
+    tactile 子类会在该向量后追加四个指尖的二值接触信号 $b_t\in\{0,1\}^4$。
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        # 恢复 a51 tactile actor 的“本体 + 目标姿态”设定：不把物体绝对 pose 暴露给 policy。
+        self.object_pos = None
+        self.object_quat = None
+        self.goal_quat_diff = None
 
 
 ##############################################################################
 # 动作配置组件
 ##############################################################################
 
+
 @configclass
 class JointSpaceActionsCfg:
     """关节空间动作配置
-    
+
     使用相对关节位置控制，动作范围 [-1, 1] 映射到关节增量。
     """
+
     hand_joint_pos = mdp.RelativeJointPositionActionCfg(
         asset_name="robot",
         joint_names=[
-            "a_1", "a_0", "a_2", "a_3",      # 食指
-            "a_5", "a_4", "a_6", "a_7",      # 中指
-            "a_9", "a_8", "a_10", "a_11",    # 无名指
-            "a_12", "a_13", "a_14", "a_15",  # 拇指
+            "a_1",
+            "a_0",
+            "a_2",
+            "a_3",  # 食指
+            "a_5",
+            "a_4",
+            "a_6",
+            "a_7",  # 中指
+            "a_9",
+            "a_8",
+            "a_10",
+            "a_11",  # 无名指
+            "a_12",
+            "a_13",
+            "a_14",
+            "a_15",  # 拇指
         ],
         scale=1 / 10,
         preserve_order=True,
     )
 
 
-
 ##############################################################################
 # 奖励配置组件
 ##############################################################################
 
+
 @configclass
 class CommonRewardsCfg:
     """通用奖励配置
-    
+
     适用于大多数手内操作任务的基础奖励项。
     """
-    
+
     # ===== 任务奖励 =====
     track_orientation_inv_l2 = RewTerm(
         func=leap_mdp.track_orientation_inv_l2,
@@ -264,7 +351,7 @@ class CommonRewardsCfg:
             "command_name": "goal_pose",
         },
     )
-    
+
     success_bonus = RewTerm(
         func=leap_mdp.success_bonus,
         weight=250.0,
@@ -275,7 +362,7 @@ class CommonRewardsCfg:
             "position_threshold": 0.025,
         },
     )
-    
+
     # ===== 动作正则化 =====
     joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight=-2.5e-5)
     action_l2 = RewTerm(func=mdp.action_l2, weight=-0.0001)
@@ -287,13 +374,14 @@ class CommonRewardsCfg:
 # 事件配置组件
 ##############################################################################
 
+
 @configclass
 class CommonEventCfg:
     """通用域随机化配置
-    
+
     包含物体和机器人的常用随机化项。
     """
-    
+
     # ===== 物体随机化 =====
     randomized_object_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
@@ -429,6 +517,7 @@ class CommonEventCfg:
 # 终止条件组件
 ##############################################################################
 
+
 @configclass
 class CommonTerminationsCfg:
     """通用终止条件配置"""
@@ -444,6 +533,7 @@ class CommonTerminationsCfg:
 ##############################################################################
 # 命令配置组件
 ##############################################################################
+
 
 @configclass
 class ReorientationCommandsCfg:
@@ -465,13 +555,43 @@ class ReorientationCommandsCfg:
     )
 
 
+@configclass
+class ContinuousRotationCommandsCfg:
+    r"""a51c666 黄金 tactile 版的固定轴连续旋转命令。
+
+    该命令项把 hand-object 任务重新锚定为局部连续旋转，而不是当前 Joint-v0 使用的
+    随机 SO(3) fixed-goal reorientation。每个目标只推进一个小角度：
+    $$
+    Q_g^{k+1} = R_z(\Delta\theta) Q_g^k,\qquad \Delta\theta=\frac{\pi}{8}.
+    $$
+
+    这个小步长相当于内建 curriculum：策略每次只需要学习稳定抓握下的局部滚动原语，
+    成功后再把目标沿同一世界系 z 轴推进。`command()` 输出 7D `goal_pose`：
+    $$
+    c_t=[p_g^e, Q_g^w]\in\mathbb{R}^7.
+    $$
+    """
+
+    goal_pose = leap_mdp.ContinuousRotationCommandCfg(
+        asset_name="object",
+        resampling_time_range=(1e6, 1e6),
+        init_pos_offset=(0.0, 0.0, 0.0),
+        rotation_axis="z",
+        delta_angle=math.pi / 8.0,
+        make_quat_unique=True,
+        update_goal_on_success=True,
+    )
+
+
 ##############################################################################
 # 课程学习组件
 ##############################################################################
 
+
 @configclass
 class EmptyCurriculumCfg:
     """空课程学习配置（占位符）"""
+
     pass
 
 
@@ -491,10 +611,10 @@ TACTILE_G_MAX = 8.0
 @configclass
 class TactileSceneCfg(InHandObjectSceneCfg):
     """触觉增强场景配置
-    
+
     在基础场景上添加指尖和非指尖的接触传感器。
     """
-    
+
     # ===== 指尖触觉传感器 =====
     contact_index = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/fingertip",
@@ -507,7 +627,7 @@ class TactileSceneCfg(InHandObjectSceneCfg):
         force_threshold=0.125,
         debug_vis=True,
     )
-    
+
     contact_middle = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/fingertip_2",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
@@ -519,7 +639,7 @@ class TactileSceneCfg(InHandObjectSceneCfg):
         force_threshold=0.125,
         debug_vis=True,
     )
-    
+
     contact_ring = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/fingertip_3",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
@@ -531,7 +651,7 @@ class TactileSceneCfg(InHandObjectSceneCfg):
         force_threshold=0.125,
         debug_vis=True,
     )
-    
+
     contact_thumb = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/thumb_fingertip",
         filter_prim_paths_expr=["{ENV_REGEX_NS}/object"],
@@ -543,7 +663,7 @@ class TactileSceneCfg(InHandObjectSceneCfg):
         force_threshold=0.125,
         debug_vis=True,
     )
-    
+
     # ===== 手掌接触传感器（用于惩罚非期望接触）=====
     contact_palm = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base",
@@ -558,12 +678,12 @@ class TactileSceneCfg(InHandObjectSceneCfg):
 
 
 @configclass
-class TactileObsGroupCfg(ProprioceptionObsGroupCfg):
+class TactileObsGroupCfg(ContinuousRotationProprioceptionObsGroupCfg):
     """触觉增强观测组
-    
+
     在关节空间观测基础上添加二值化触觉信号。
     """
-    
+
     fingertip_contact_binary = ObsTerm(
         func=leap_mdp.fingertip_contact_data,
         params={
@@ -575,12 +695,12 @@ class TactileObsGroupCfg(ProprioceptionObsGroupCfg):
 
 
 @configclass
-class TactileCriticObsGroupCfg(JointSpaceObsGroupCfg):
+class TactileCriticObsGroupCfg(ContinuousRotationObsGroupCfg):
     """触觉 Critic 观测组
-    
+
     包含精确的力矢量信息用于 Teacher Policy。
     """
-    
+
     fingertip_contact_force = ObsTerm(
         func=leap_mdp.fingertip_contact_data,
         params={
@@ -615,23 +735,61 @@ class TactileObservationsCfg:
 @configclass
 class TactileRewardsCfg(CommonRewardsCfg):
     """触觉增强奖励配置
-    
+
     在通用奖励基础上添加接触相关奖励。
     """
-    
+
+    # a51c666 中位置项是主动约束，而不是当前 Joint-v0 的可选关闭项。
+    # 这里用历史名称保留 TensorBoard 语义：$r_p=-10\|p_o^e-p_g^e\|_2$。
+    track_pos_l2 = None
+    goal_position_distance = RewTerm(
+        func=leap_mdp.goal_position_distance,
+        weight=-10.0,
+        params={
+            "object_cfg": SceneEntityCfg("object"),
+            "command_name": "goal_pose",
+        },
+    )
+
+    # official LEAP 训练中显式加入了跌落惩罚：当物体相对目标位置漂移超过 7 cm 时，
+    # 除了触发 reset，还额外给一次负奖励，避免 policy 在早期通过“撞到一次 goal 然后掉落”获得净收益。
+    # 公式：$r_{fall}=-10\,\mathbf{1}[\|p_o^e-p_g^e\|_2 \ge 0.07]$。
+    fall_penalty = RewTerm(
+        func=leap_mdp.fall_penalty,
+        weight=-10.0,
+        params={
+            "object_cfg": SceneEntityCfg("object"),
+            "command_name": "goal_pose",
+            "fall_distance": 0.07,
+        },
+    )
+
     load_distribution = RewTerm(
         func=leap_mdp.load_distribution_reward,
         weight=1,
         params={
-            "fingertip_sensor_names": [
-                "contact_index", "contact_middle", "contact_ring", "contact_thumb"
+            "fingertip_sensor_names": ["contact_index", "contact_middle", "contact_ring", "contact_thumb"],
+            # a51c666 把所有非指尖 link 都放进分母，避免 policy 用关节/手掌“托住”物体骗过 load reward。
+            "palm_sensor_names": [
+                "contact_palm",
+                "contact_index_mcp",
+                "contact_index_pip",
+                "contact_index_dip",
+                "contact_middle_mcp",
+                "contact_middle_pip",
+                "contact_middle_dip",
+                "contact_ring_mcp",
+                "contact_ring_pip",
+                "contact_ring_dip",
+                "contact_thumb_base",
+                "contact_thumb_pip",
+                "contact_thumb_dip",
             ],
-            "palm_sensor_names": ["contact_palm"],
             "gravity_axis": 2,
             "epsilon": 1e-3,
         },
     )
-    
+
     good_fingertip_contact = RewTerm(
         func=leap_mdp.good_fingertip_contact,
         weight=1.0,
@@ -647,12 +805,26 @@ class TactileRewardsCfg(CommonRewardsCfg):
             "metric_key": TACTILE_CURRICULUM_METRIC_KEY,
         },
     )
-    
+
     bad_palm_contact = RewTerm(
         func=leap_mdp.bad_palm_contact,
         weight=-1.0,
         params={
-            "sensor_names": ["contact_palm"],
+            "sensor_names": [
+                "contact_palm",
+                "contact_index_mcp",
+                "contact_index_pip",
+                "contact_index_dip",
+                "contact_middle_mcp",
+                "contact_middle_pip",
+                "contact_middle_dip",
+                "contact_ring_mcp",
+                "contact_ring_pip",
+                "contact_ring_dip",
+                "contact_thumb_base",
+                "contact_thumb_pip",
+                "contact_thumb_dip",
+            ],
             "force_threshold": TACTILE_FORCE_THRESHOLD,
             "reward_type": TACTILE_CONTACT_REWARD_TYPE,
             "use_curriculum": TACTILE_USE_REWARD_CURRICULUM,
@@ -676,6 +848,8 @@ __all__ = [
     # 观测
     "ProprioceptionObsGroupCfg",
     "JointSpaceObservationsCfg",
+    "ContinuousRotationObsGroupCfg",
+    "ContinuousRotationProprioceptionObsGroupCfg",
     "TactileObsGroupCfg",
     "TactileCriticObsGroupCfg",
     "TactileObservationsCfg",
@@ -688,6 +862,7 @@ __all__ = [
     "CommonEventCfg",
     "CommonTerminationsCfg",
     "ReorientationCommandsCfg",
+    "ContinuousRotationCommandsCfg",
     "EmptyCurriculumCfg",
     # 触觉超参数
     "TACTILE_FORCE_THRESHOLD",

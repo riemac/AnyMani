@@ -22,72 +22,74 @@ Usage:
 
 from __future__ import annotations
 
-import math
-
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.envs.ui import ManagerBasedRLEnvWindow
 from isaaclab.envs.common import ViewerCfg
+from isaaclab.envs.ui import ManagerBasedRLEnvWindow
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
 
+from anymani.robots.leap import LEAP_HAND_CFG
+
 # 导入通用 MDP 组件
 from anymani.tasks.inhand.inhand_env_cfg import (
-    # 场景
-    InHandObjectSceneCfg,
-    TactileSceneCfg,
-    # 观测
-    JointSpaceObservationsCfg,
-    TactileObsGroupCfg,
-    TactileCriticObsGroupCfg,
-    TactileObservationsCfg,
-    # 动作
-    JointSpaceActionsCfg,
+    CommonEventCfg,
     # 奖励
     CommonRewardsCfg,
-    TactileRewardsCfg,
-    # 事件
-    CommonEventCfg,
     # 终止
     CommonTerminationsCfg,
     # 命令
-    ReorientationCommandsCfg,
+    ContinuousRotationCommandsCfg,
     # 课程
     EmptyCurriculumCfg,
-    # 触觉超参数
-    TACTILE_FORCE_THRESHOLD,
-    TACTILE_CONTACT_REWARD_TYPE,
-    TACTILE_USE_REWARD_CURRICULUM,
-    TACTILE_CURRICULUM_METRIC_KEY,
-    TACTILE_G_MIN,
-    TACTILE_G_MAX,
+    # 场景
+    InHandObjectSceneCfg,
+    # 动作
+    JointSpaceActionsCfg,
+    # 观测
+    JointSpaceObservationsCfg,
+    ReorientationCommandsCfg,
+    TactileObservationsCfg,
+    TactileRewardsCfg,
+    TactileSceneCfg,
 )
-from anymani.robots.leap import LEAP_HAND_CFG
-
 
 ##############################################################################
 # LeapHand 场景配置
 ##############################################################################
 
+
 @configclass
 class LeapHandSceneCfg(InHandObjectSceneCfg):
     """LeapHand 场景配置
-    
+
     继承通用场景，指定 LeapHand 机器人及其初始姿态。
     """
-    
+
     robot: ArticulationCfg = LEAP_HAND_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.5),
             rot=(0.5, 0.5, -0.5, 0.5),  # 手掌朝上
             joint_pos={
-                "a_1": 0.000, "a_12": 0.500, "a_5": 0.000, "a_9": 0.000,
-                "a_0": -0.750, "a_13": 1.300, "a_4": 0.000, "a_8": 0.750,
-                "a_2": 1.750, "a_14": 1.500, "a_6": 1.750, "a_10": 1.750,
-                "a_3": 0.000, "a_15": 1.000, "a_7": 0.000, "a_11": 0.000,
+                "a_1": 0.000,
+                "a_12": 0.500,
+                "a_5": 0.000,
+                "a_9": 0.000,
+                "a_0": -0.750,
+                "a_13": 1.300,
+                "a_4": 0.000,
+                "a_8": 0.750,
+                "a_2": 1.750,
+                "a_14": 1.500,
+                "a_6": 1.750,
+                "a_10": 1.750,
+                "a_3": 0.000,
+                "a_15": 1.000,
+                "a_7": 0.000,
+                "a_11": 0.000,
             },
             joint_vel={"a_.*": 0.0},
         ),
@@ -97,23 +99,35 @@ class LeapHandSceneCfg(InHandObjectSceneCfg):
 @configclass
 class LeapHandTactileSceneCfg(TactileSceneCfg):
     """LeapHand 触觉场景配置
-    
+
     在触觉场景基础上指定 LeapHand 机器人。
 
     注意：该场景只包含指尖 + 手掌的接触传感器（见 :class:`TactileSceneCfg`）。
     如需包含所有关节（非指尖）的接触传感器，请使用 :class:`LeapHandFullTactileSceneCfg`。
     """
-    
+
     robot: ArticulationCfg = LEAP_HAND_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.5),
             rot=(0.5, 0.5, -0.5, 0.5),
             joint_pos={
-                "a_1": 0.000, "a_12": 0.500, "a_5": 0.000, "a_9": 0.000,
-                "a_0": -0.750, "a_13": 1.300, "a_4": 0.000, "a_8": 0.750,
-                "a_2": 1.750, "a_14": 1.500, "a_6": 1.750, "a_10": 1.750,
-                "a_3": 0.000, "a_15": 1.000, "a_7": 0.000, "a_11": 0.000,
+                "a_1": 0.000,
+                "a_12": 0.500,
+                "a_5": 0.000,
+                "a_9": 0.000,
+                "a_0": -0.750,
+                "a_13": 1.300,
+                "a_4": 0.000,
+                "a_8": 0.750,
+                "a_2": 1.750,
+                "a_14": 1.500,
+                "a_6": 1.750,
+                "a_10": 1.750,
+                "a_3": 0.000,
+                "a_15": 1.000,
+                "a_7": 0.000,
+                "a_11": 0.000,
             },
             joint_vel={"a_.*": 0.0},
         ),
@@ -130,13 +144,13 @@ from isaaclab.sensors import ContactSensorCfg
 @configclass
 class LeapHandFullTactileSceneCfg(LeapHandTactileSceneCfg):
     """LeapHand 完整触觉场景配置
-    
+
     在基础触觉场景上添加所有关节的接触传感器，用于检测非期望接触。
     """
-    
+
     # 禁用物理复制以支持域随机化
     replicate_physics = False
-    
+
     # ===== 食指关节（非指尖）=====
     contact_index_mcp = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/mcp_joint",
@@ -165,7 +179,7 @@ class LeapHandFullTactileSceneCfg(LeapHandTactileSceneCfg):
         track_friction_forces=True,
         debug_vis=False,
     )
-    
+
     # ===== 中指关节（非指尖）=====
     contact_middle_mcp = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/mcp_joint_2",
@@ -194,7 +208,7 @@ class LeapHandFullTactileSceneCfg(LeapHandTactileSceneCfg):
         track_friction_forces=True,
         debug_vis=False,
     )
-    
+
     # ===== 无名指关节（非指尖）=====
     contact_ring_mcp = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/mcp_joint_3",
@@ -223,7 +237,7 @@ class LeapHandFullTactileSceneCfg(LeapHandTactileSceneCfg):
         track_friction_forces=True,
         debug_vis=False,
     )
-    
+
     # ===== 拇指关节（非指尖）=====
     contact_thumb_base = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/thumb_temp_base",
@@ -258,23 +272,22 @@ class LeapHandFullTactileSceneCfg(LeapHandTactileSceneCfg):
 # 环境配置类
 ##############################################################################
 
+
 @configclass
 class LeapHandJointEnvCfg(ManagerBasedRLEnvCfg):
     """LeapHand 关节空间环境配置（Baseline）
-    
+
     使用 16 维关节位置动作空间，适合作为基准对比。
-    
+
     动作空间: 16 维（4 根手指 × 4 关节）
     观测空间: 关节位置 + 物体位姿 + 目标位姿
     """
-    
+
     ui_window_class_type: type | None = ManagerBasedRLEnvWindow
     is_finite_horizon: bool = True
-    
+
     # 场景配置
-    scene: InteractiveSceneCfg = LeapHandSceneCfg(
-        num_envs=4096, env_spacing=0.75, replicate_physics=False
-    )
+    scene: InteractiveSceneCfg = LeapHandSceneCfg(num_envs=4096, env_spacing=0.75, replicate_physics=False)
     viewer: ViewerCfg = ViewerCfg()
     sim: SimulationCfg = SimulationCfg(
         physics_material=RigidBodyMaterialCfg(static_friction=0.5, dynamic_friction=0.5),
@@ -285,7 +298,7 @@ class LeapHandJointEnvCfg(ManagerBasedRLEnvCfg):
         ),
     )
     seed: int | None = 42
-    
+
     # MDP 配置
     observations: JointSpaceObservationsCfg = JointSpaceObservationsCfg()
     actions: JointSpaceActionsCfg = JointSpaceActionsCfg()
@@ -294,7 +307,7 @@ class LeapHandJointEnvCfg(ManagerBasedRLEnvCfg):
     terminations: CommonTerminationsCfg = CommonTerminationsCfg()
     events: CommonEventCfg = CommonEventCfg()
     curriculum: EmptyCurriculumCfg = EmptyCurriculumCfg()
-    
+
     def __post_init__(self):
         """后初始化"""
         super().__post_init__()
@@ -305,37 +318,44 @@ class LeapHandJointEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.eye = (2.0, 2.0, 2.0)
 
 
-
 @configclass
 class LeapHandTactileEnvCfg(LeapHandJointEnvCfg):
-    """LeapHand 触觉增强环境配置
-    
-    在关节空间基础上添加触觉观测和奖励。
-    
-    动作空间: 16 维
-    观测空间: 关节位置 + 触觉信号 + 物体位姿 + 目标位姿
+    r"""LeapHand 触觉增强环境配置，覆盖为 a51c666 黄金语义。
+
+    该类仍注册为 `AnyMani-LeapHand-Tactile-v0`，但只恢复 tactile 任务，
+    不改变 `LeapHandJointEnvCfg` 当前的随机 SO(3) fixed-goal 对照语义。
+
+    核心 MDP：
+    $$
+    Q_g^{k+1}=R_z(\pi/8)Q_g^k,
+    \qquad
+    q_t^{target}=q_t+0.1a_t.
+    $$
+
+    动作空间: 16 维 relative joint increment。
+    观测空间: actor 使用关节位置 + 7D quaternion goal pose + 上一步动作 + binary fingertip tactile；
+    critic 额外使用物体 pose、goal quaternion error 和 fingertip force。
     """
-    
-    scene: InteractiveSceneCfg = LeapHandTactileSceneCfg(
-        num_envs=4096, env_spacing=0.6, replicate_physics=False
-    )
+
+    # a51c666 的 tactile reward 依赖 full non-tip contact sensors：palm + MCP/PIP/DIP/thumb non-tip links。
+    scene: InteractiveSceneCfg = LeapHandFullTactileSceneCfg(num_envs=4096, env_spacing=0.6, replicate_physics=False)
+    commands: ContinuousRotationCommandsCfg = ContinuousRotationCommandsCfg()
     observations: TactileObservationsCfg = TactileObservationsCfg()
     rewards: TactileRewardsCfg = TactileRewardsCfg()
-    
+
     def __post_init__(self):
         super().__post_init__()
-
-
 
 
 ##############################################################################
 # Play 配置（用于可视化和评估）
 ##############################################################################
 
+
 @configclass
 class LeapHandJointEnvCfg_PLAY(LeapHandJointEnvCfg):
     """关节空间环境 Play 配置"""
-    
+
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 50
@@ -349,7 +369,7 @@ class LeapHandJointEnvCfg_PLAY(LeapHandJointEnvCfg):
 @configclass
 class LeapHandTactileEnvCfg_PLAY(LeapHandTactileEnvCfg):
     """触觉环境 Play 配置"""
-    
+
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 50
