@@ -125,7 +125,7 @@ class JointSpaceObsGroupCfg(ObsGroup):
     适用于关节位置控制的任务，观测包括：
     - 关节位置（归一化到限位范围）
     - 物体位姿
-    - so(3) 指令（3D rotvec）
+    - 目标姿态四元数（4D wxyz）
     - 上一步动作
     """
 
@@ -147,9 +147,9 @@ class JointSpaceObsGroupCfg(ObsGroup):
     )
 
     # -- command terms
-    so3_command = ObsTerm(
-        func=leap_mdp.so3_command,
-        params={"command_name": "goal_pose"},
+    quat_command = ObsTerm(
+        func=leap_mdp.quat_command,
+        params={"command_name": "goal_pose", "make_quat_unique": True},
     )
 
     # NOTE:
@@ -180,7 +180,7 @@ class ProprioceptionObsGroupCfg(JointSpaceObsGroupCfg):
         # 移除需要外部感知的项
         self.object_pos = None
         self.object_quat = None
-        # so3_command 是可部署指令输入，保留
+        # quat_command 是任务目标输入，保留；policy 不再消费旧的 3D rotvec 指令。
         # pos_command 属于特权信息（目标位置约束），仅在 Critic/特权观测中启用
         self.pos_command = None
 

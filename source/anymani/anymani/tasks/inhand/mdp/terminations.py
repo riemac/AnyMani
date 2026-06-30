@@ -7,11 +7,12 @@
 
 from __future__ import annotations
 
-import torch
 from typing import TYPE_CHECKING
 
+import torch
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils import math as math_utils
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -21,7 +22,7 @@ def object_falling_termination(
     env: ManagerBasedRLEnv,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     fall_dist: float = 0.12,
-    target_pos_offset: tuple[float, float, float] = (0.0, -0.1, 0.56)
+    target_pos_offset: tuple[float, float, float] = (0.0, -0.1, 0.56),
 ) -> torch.Tensor:
     """检查物体是否掉落（物体位置先相对于env_origins再与目标位置比较）
 
@@ -60,14 +61,13 @@ def object_falling_termination(
     object_pos = object_pos_world - env_origins
 
     # 目标位置直接使用相对于环境原点的偏移，扩展到每个env
-    target_pos_offset_tensor = torch.tensor(
-        target_pos_offset, device=env.device, dtype=object_pos.dtype
-    )
+    target_pos_offset_tensor = torch.tensor(target_pos_offset, device=env.device, dtype=object_pos.dtype)
     target_pos = target_pos_offset_tensor.unsqueeze(0).expand(env.num_envs, -1)
 
     # 计算欧氏距离并判断是否掉落
     object_dist = torch.norm(object_pos - target_pos, p=2, dim=-1)
     return object_dist >= fall_dist
+
 
 def object_away_from_robot(
     env: ManagerBasedRLEnv,
@@ -94,4 +94,65 @@ def object_away_from_robot(
     dist = torch.norm(robot.data.root_pos_w - object.data.root_pos_w, dim=1)
 
     return dist > threshold
-    
+
+
+def adr_randomized_time_out(env: ManagerBasedRLEnv) -> torch.Tensor:
+    r"""LEAP ADR 随机 horizon 的 timeout 终止项。
+
+    官方 LEAP 在每个 episode reset 时采样独立 horizon：
+    $$
+    T_i\sim U[20s,120s].
+    $$
+    ManagerBasedRLEnv 默认的 ``mdp.time_out`` 只支持统一 ``max_episode_length``，因此 ADR env
+    使用本函数读取 ``env.leap_adr_episode_lengths``。该 buffer 的单位是 policy steps，与
+    ``episode_length_buf`` 完全一致。
+    """
+
+    # 初始 reset 前若 buffer 尚未建立，退化为普通固定 horizon，避免初始化阶段误终止。
+    if not hasattr(env, "leap_adr_episode_lengths"):
+        return env.episode_length_buf >= env.max_episode_length - 1
+
+    # 逐 env 比较当前 episode 已走步数与 ADR 随机 horizon。
+    return env.episode_length_buf >= env.leap_adr_episode_lengths - 1
+
+
+def official_out_of_reach_or_flipped(
+    env: ManagerBasedRLEnv,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    command_name: str = "goal_pose",
+    fall_dist: float = 0.07,
+    target_pos_offset: tuple[float, float, float] = (0.0, -0.1, 0.57),
+    flipped_dot_threshold: float = 0.5,
+) -> torch.Tensor:
+    r"""官方 LEAP 的 episode 终止：掉出掌心或相对目标 z 轴翻转。
+
+    DirectRLEnv 官方 done 逻辑为：
+    $$
+    \text{out\_of\_reach} = \|p_o^e - p_{hand}^e\|_2 \ge 0.07,
+    $$
+    以及
+    $$
+    |\langle z(Q_o), z(Q_g) \rangle| < 0.5,
+    $$
+    其中第二项表示物体相对当前目标姿态已经翻转到明显错误的 z 轴半空间。
+    """
+
+    object_asset: RigidObject = env.scene[object_cfg.name]
+    object_pos_e = object_asset.data.root_pos_w - env.scene.env_origins
+    in_hand_pos_e = object_asset.data.default_root_state[:, 0:3].clone()
+    in_hand_pos_e[:, 2] += 0.01
+    goal_dist = torch.norm(object_pos_e - in_hand_pos_e, p=2, dim=-1)
+    out_of_reach = goal_dist >= fall_dist
+
+    term = env.command_manager.get_term(command_name)
+    goal_quat_w = getattr(term, "quat_command_w", None)
+    if not isinstance(goal_quat_w, torch.Tensor):
+        raise RuntimeError(
+            f"official_out_of_reach_or_flipped expects command '{command_name}' to expose quat_command_w"
+        )
+
+    object_z = math_utils.matrix_from_quat(object_asset.data.root_quat_w)[:, :, 2]
+    goal_z = math_utils.matrix_from_quat(goal_quat_w)[:, :, 2]
+    alignment = torch.sum(object_z * goal_z, dim=1)
+    flipped = torch.abs(alignment) < flipped_dot_threshold
+    return out_of_reach | flipped

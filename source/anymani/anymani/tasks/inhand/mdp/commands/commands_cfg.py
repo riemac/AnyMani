@@ -13,7 +13,7 @@ from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-from .rotation_command import ContinuousRotationCommand, RelativeSO3Command
+from .rotation_command import ContinuousRotationCommand, OfficialContinuousRotationCommand, RelativeSO3Command
 
 
 @configclass
@@ -164,3 +164,19 @@ class RelativeSO3CommandCfg(CommandTermCfg):
         # default success threshold: keep consistent with existing tasks (0.2 rad)
         if self.orientation_success_threshold == NONE:
             self.orientation_success_threshold = 0.2
+
+
+@configclass
+class OfficialContinuousRotationCommandCfg(ContinuousRotationCommandCfg):
+    r"""官方 LEAP 连续 z 轴重定向命令配置。
+
+    该配置在 `ContinuousRotationCommandCfg` 的基础上只补一件事：
+    当前小目标是否完成，不仅要求姿态误差足够小，还要求物体位置仍留在掌心附近。
+    官方阈值为：
+    $$
+    \|p_o^e - p_g^e\|_2 \le 0.025.
+    $$
+    """
+
+    class_type: type = OfficialContinuousRotationCommand
+    position_success_threshold: float = 0.025

@@ -21,7 +21,7 @@ from isaaclab.markers.visualization_markers import VisualizationMarkers
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
-    from .commands_cfg import ContinuousRotationCommandCfg, RelativeSO3CommandCfg
+    from .commands_cfg import ContinuousRotationCommandCfg, OfficialContinuousRotationCommandCfg, RelativeSO3CommandCfg
 
 
 # 预定义的世界坐标系旋转轴映射
@@ -180,6 +180,55 @@ class ContinuousRotationCommand(CommandTerm):
         self.goal_pose_visualizer.visualize(translations=marker_pos_w, orientations=self.quat_command_w)
 
 
+class OfficialContinuousRotationCommand(ContinuousRotationCommand):
+    r"""官方 LEAP 风格的连续 z 轴重定向命令项。
+
+    与 AnyMani 现有 `ContinuousRotationCommand` 相比，官方版本的关键差别不在目标更新公式，
+    而在 *何时* 允许推进目标：必须同时满足
+    $$
+    d_{rot}(Q_o, Q_g) \le 0.2,
+    \qquad
+    \|p_o^e - p_g^e\|_2 \le 0.025.
+    $$
+    只有姿态误差和位置误差都达标，当前小目标才算完成，随后目标沿固定世界系 z 轴推进
+    一个 $\Delta\theta=\pi/8$ 步长。
+    """
+
+    cfg: OfficialContinuousRotationCommandCfg
+
+    def __init__(self, cfg: OfficialContinuousRotationCommandCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self.metrics["goal_distance"] = torch.zeros(self.num_envs, device=self.device)
+
+    def _update_metrics(self):
+        super()._update_metrics()
+        object_pos_e = self.object.data.root_pos_w - self._env.scene.env_origins
+        self.metrics["goal_distance"] = torch.norm(object_pos_e - self.pos_command_e, dim=-1)
+
+    def _update_command(self):
+        if not self.cfg.update_goal_on_success:
+            return
+
+        orientation_ok = self.metrics["orientation_error"] < self.cfg.orientation_success_threshold
+        position_ok = self.metrics["goal_distance"] <= self.cfg.position_success_threshold
+        success_mask = orientation_ok & position_ok
+        success_ids = success_mask.nonzero(as_tuple=False).squeeze(-1)
+        if len(success_ids) == 0:
+            return
+
+        delta = torch.full((len(success_ids),), self.cfg.delta_angle, device=self.device)
+        delta_quat = math_utils.quat_from_angle_axis(delta, self.rotation_axis_w[success_ids])
+        updated = math_utils.quat_mul(delta_quat, self.quat_command_w[success_ids])
+        if self.cfg.make_quat_unique:
+            updated = math_utils.quat_unique(updated)
+        self.quat_command_w[success_ids] = updated
+
+        self.cumulative_rotation[success_ids] += self.cfg.delta_angle
+        self.success_counter[success_ids] += 1.0
+        self.command_counter[success_ids] += 1
+        self.time_left[success_ids] = self.cfg.resampling_time_range[1]
+
+
 class RelativeSO3Command(CommandTerm):
     """so(3) 相对增量指令命令项（rotvec）。
 
@@ -215,11 +264,12 @@ class RelativeSO3Command(CommandTerm):
         #   - 前 3 维 pos_command_e：环境系 {e} 下的位置目标，用于位置约束
         #   - 后 3 维 phi_ref_e：环境系 {e} 下的 so(3) 指令 rotvec，用于相对旋转
         #
-        #   但 policy 观测侧仍只应看到 3 维 so(3) 指令：通过 `so3_command` 观测项取后 3 维。
+        #   policy/critic 观测侧不再直接消费 3D rotvec；当前通用配置通过 `quat_command`
+        #   读取 `quat_command_w`，让任务目标以 $Q_g^w\in\mathbb{S}^3$ 的四元数形式进入网络。
         #
-        #   同时仍保留 quat_command_w 等 buffer 作为 *内部状态*：
+        #   因此 quat_command_w 不是可有可无的 debug cache，而是四元数版观测的主数据源：
         #   - fixed_goal 需要用冻结的目标姿态计算误差并触发成功重采样
-        #   - debug/metrics（以及后续可选的可视化）可能复用这些量
+        #   - debug/metrics/可视化复用同一目标姿态，避免 rotvec 与 quat 目标漂移
         init_pos_offset = torch.tensor(cfg.init_pos_offset, dtype=torch.float, device=self.device)
         self.pos_command_e = self.object.data.default_root_state[:, :3] + init_pos_offset
         self.pos_command_w = self.pos_command_e + self._env.scene.env_origins
@@ -228,7 +278,7 @@ class RelativeSO3Command(CommandTerm):
         # 目标姿态（世界系四元数）
         self.quat_command_w = torch.zeros(self.num_envs, 4, device=self.device)
         self.quat_command_w[:, 0] = 1.0
-        # so(3) 指令（环境系 rotvec）。注意：policy 观测直接读取该量。
+        # so(3) 指令（环境系 rotvec），作为采样/更新四元数目标的局部增量和诊断量。
         self.phi_ref_e = torch.zeros(self.num_envs, 3, device=self.device)
 
         # --- logging / metrics buffers ---
@@ -264,7 +314,7 @@ class RelativeSO3Command(CommandTerm):
         Note:
             - 前 3 维为目标位置 pos_command_e，用于约束物体位置
             - 后 3 维为 so(3) 指令 phi_ref_e，表示期望的相对旋转
-            - policy 观测侧通过 `so3_command` 观测项仅读取后 3 维
+            - 四元数版观测不要从这里截取后三维，而应通过 `quat_command` 读取 `quat_command_w`
         """
 
         return torch.cat((self.pos_command_e, self.phi_ref_e), dim=-1)
