@@ -86,8 +86,4 @@ datasets
 source/anymani/anymani/assets/doc/draft/
 source/anymani/anymani/assets/scripts/backup.sh
 source/anymani/anymani/assets/config/asset_gen_cfg.py
-source/anymani/anymani/tools/presets/latest.yaml
-source/anymani/anymani/tools/presets/single_asset_grasp_20260624_140651.yaml
-source/anymani/anymani/tools/presets/single_asset_grasp_20260625_203515.yaml
-source/anymani/anymani/tools/presets/generated_asset/right_t4_i4_m4_r4/latest.yaml
-source/anymani/anymani/tools/presets/official/leap/latest.yaml
+source/anymani/anymani/tools/presets/**

@@ -1,4 +1,0 @@
-# 人工 contact-basin / pre-grasp preset 的默认输出目录。
-#
-# 本目录中的 YAML 文件由 `single_asset_grasp_calibrator.py` 生成，属于人工标定 seed，
-# 不是经过物理验证的 `gm/grasp_cache` artifact。
