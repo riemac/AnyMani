@@ -27,6 +27,8 @@ __all__ = [
     "HandSpawnCfg",
     "HandUrdfSpawnCfg",
     "LEAP_HAND_CFG",
+    "LEAP_HAND_URDF_CFG",
+    "LEAP_HAND_URDF_PATH",
 ]
 
 
@@ -47,6 +49,10 @@ def __getattr__(name: str) -> Any:
         from .leap import LEAP_HAND_CFG
 
         return LEAP_HAND_CFG
+    if name in {"LEAP_HAND_URDF_CFG", "LEAP_HAND_URDF_PATH"}:
+        from . import leap_urdf
+
+        return getattr(leap_urdf, name)
     if name in {
         "DEFAULT_HAND_ANCHOR_POS_E",
         "HandActuatorSpawnCfg",
