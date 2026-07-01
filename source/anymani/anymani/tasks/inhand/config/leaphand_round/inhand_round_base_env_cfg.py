@@ -10,23 +10,20 @@
 """
 
 import math
-import torch
-from shlex import join
 
+import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, RigidObjectCfg
-from isaaclab.assets import AssetBaseCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
+from isaaclab.devices.openxr import XrCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
-
+from isaaclab.envs.common import ViewerCfg
+from isaaclab.envs.ui import ManagerBasedRLEnvWindow
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
-from isaaclab.managers import CurriculumTermCfg as CurrTerm
-from isaaclab.managers import RecorderManagerBaseCfg
-from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
@@ -34,15 +31,9 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveGaussianNoiseCfg as Gnoise
 
-from isaaclab.envs.ui import ManagerBasedRLEnvWindow
-from isaaclab.envs.common import ViewerCfg
-from isaaclab.devices.openxr import XrCfg
-
-import isaaclab.utils.math as math_utils
-
-import isaaclab.envs.mdp as mdp
 from anymani.robots.leap_round_tip import LEAP_HAND_CFG
 from anymani.tasks.inhand import mdp as leap_mdp
+from anymani.tasks.inhand.inhand_env_cfg import INHAND_CLEAR_SKY_LIGHT_INTENSITY, INHAND_CLEAR_SKY_TEXTURE_FILE
 
 # from anymani.tasks.inhand.mdp.actions import LinearDecayAlphaEMAJointPositionToLimitsActionCfg
 
@@ -86,63 +77,63 @@ class InHandSceneCfg(InteractiveSceneCfg):
     object: RigidObjectCfg = RigidObjectCfg(
         # USD场景路径：每个环境实例都有独立的物体
         prim_path="{ENV_REGEX_NS}/object",
-        
+
         # 生成配置：从USD文件加载立方体并设置物理属性
         spawn=sim_utils.UsdFileCfg(
             # USD资产路径：使用Isaac Nucleus中的可变形立方体
             usd_path=object_usd_path,
-            
+
             # 刚体物理属性配置
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 # 动力学模式：False = 动力学刚体，受物理力影响（重力、碰撞等）
                 # True = 运动学刚体，只能通过代码直接控制位置，不受物理力影响
                 kinematic_enabled=False,
-                
+
                 # 重力开关：False = 物体受重力影响，会自然掉落
                 # True = 禁用重力，物体悬浮在空中
                 disable_gravity=False,
-                
+
                 # 陀螺力：True = 启用陀螺效应，旋转物体时会产生陀螺力矩
                 # 这对旋转任务很重要，让物体的旋转行为更真实
                 enable_gyroscopic_forces=True,
-                
+
                 # 位置求解器迭代次数：控制碰撞检测和位置校正的精度
                 # 值越高精度越高但性能开销越大，8是手部操作任务的推荐值
                 solver_position_iteration_count=8,
-                
+
                 # 速度求解器迭代次数：控制速度约束的求解精度
                 # 0表示使用PhysX默认值，通常用于提高计算效率
                 solver_velocity_iteration_count=0,
-                
+
                 # 休眠阈值：当物体速度低于此值时进入休眠状态以节省计算
                 # 0.005 m/s是合理的阈值，避免微小振动浪费计算资源
                 sleep_threshold=0.005,
-                
+
                 # 稳定化阈值：用于防止小的穿透和抖动
                 # 较小的值让物体接触更稳定，特别重要对于精细操作
                 stabilization_threshold=0.0025,
-                
+
                 # 最大去穿透速度：防止物体在碰撞时以过高速度分离
                 # 1000.0是一个很高的值，允许快速的碰撞响应
                 max_depenetration_velocity=1000.0,
             ),
-            
+
             # 质量属性：通过密度自动计算物体质量
             # 400.0 kg/m³ 相当于轻木材的密度，适合手部操作
             mass_props=sim_utils.MassPropertiesCfg(density=400.0),
-            
+
             # 缩放系数：(1.2, 1.2, 1.2) 表示在XYZ三个方向都放大1.2倍
             # 让立方体稍大一些，更容易被手抓取和操作
             scale=(1, 1, 1),
         ),
-        
+
         # 初始状态配置：定义物体在环境重置时的初始位置和姿态
         init_state=RigidObjectCfg.InitialStateCfg(
             # 初始位置：(x=0.0, y=-0.1, z=0.56)
             # z=0.56是在LeapHand手部上方的合适高度
             # y=-0.1稍微偏离中心，给抓取提供更好的角度
             pos=object_pos,  # root_pos_w -0.05比-0.1稍微更偏近手掌中心，相对更容易抓取
-            
+
             # 初始旋转：(w=1.0, x=0.0, y=0.0, z=0.0)
             # 这是单位四元数，表示无旋转（立方体的标准朝向）
             rot=(1.0, 0.0, 0.0, 0.0),
@@ -159,11 +150,14 @@ class InHandSceneCfg(InteractiveSceneCfg):
 
     # 光照
     light = AssetBaseCfg(
-        prim_path="/World/light",
-        spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75)),
+        prim_path="/World/skyLight",
+        spawn=sim_utils.DomeLightCfg(
+            intensity=INHAND_CLEAR_SKY_LIGHT_INTENSITY,
+            texture_file=INHAND_CLEAR_SKY_TEXTURE_FILE,
+        ),
     )
- 
- 
+
+
 @configclass
 class CommandsCfg:
     """Commands specifications for the MDP."""
@@ -177,8 +171,8 @@ class CommandsCfg:
         update_goal_on_success=True,
         # orientation_success_threshold 将由 __post_init__ 自动计算为 delta_angle/20
     )
- 
- 
+
+
 @configclass
 class ActionsCfg:
     """动作配置 - 动作平滑"""
@@ -254,7 +248,7 @@ class ObservationsCfg:
 @configclass
 class EventCfg: #
     """域随机化配置 - 集成官方LeapHand的RL技巧"""
-    
+
     # -- object
     randomized_object_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
@@ -362,7 +356,7 @@ class EventCfg: #
             "distribution": "uniform",
         },
     )
-    
+
     # -- reset
     reset_object = EventTerm(
         func=mdp.reset_root_state_uniform,
@@ -374,7 +368,7 @@ class EventCfg: #
             "asset_cfg": SceneEntityCfg("object", body_names=".*"),
         },
     )
-    
+
     reset_robot_joints = EventTerm(
         func=mdp.reset_joints_by_offset,
         mode="reset",
@@ -481,7 +475,7 @@ class InHandObjectEnvCfg(ManagerBasedRLEnvCfg):
 
     # Recorder settings - 数据录制配置
     # 运行 rl_games play.py 时，RecorderManager 会自动触发数据记录
-    # 
+    #
     # 使用示例：启用BC数据录制
     # recorders: object = leap_mdp.LeapHandBCRecorderManagerCfg(
     #     finger_body_names=["fingertip", "fingertip_2", "fingertip_3", "thumb_fingertip"],

@@ -61,6 +61,14 @@ EPOCHS_NUM = 5
 # 默认物体 USD 资产路径
 DEFAULT_OBJECT_USD = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
 
+# 默认清天 HDR 天空贴图；与 GM scene 保持一致，只改视觉不改动力学。
+INHAND_CLEAR_SKY_TEXTURE_FILE = (
+    f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr"
+)
+
+# 默认天空光强度；沿用 GM scene 的数值锚点，避免纯灰 DomeLight 把地面/手色洗白。
+INHAND_CLEAR_SKY_LIGHT_INTENSITY = 750.0
+
 
 ##############################################################################
 # 场景配置组件
@@ -108,8 +116,11 @@ class InHandObjectSceneCfg(InteractiveSceneCfg):
 
     # ===== 光照 =====
     light = AssetBaseCfg(
-        prim_path="/World/light",
-        spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75)),
+        prim_path="/World/skyLight",
+        spawn=sim_utils.DomeLightCfg(
+            intensity=INHAND_CLEAR_SKY_LIGHT_INTENSITY,
+            texture_file=INHAND_CLEAR_SKY_TEXTURE_FILE,
+        ),
     )
 
 

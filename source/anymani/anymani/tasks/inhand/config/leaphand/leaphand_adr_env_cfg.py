@@ -43,6 +43,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from anymani.robots.leap import LEAP_HAND_CFG
 from anymani.tasks.inhand import mdp as leap_mdp
+from anymani.tasks.inhand.inhand_env_cfg import INHAND_CLEAR_SKY_LIGHT_INTENSITY, INHAND_CLEAR_SKY_TEXTURE_FILE
 
 # 官方 LEAP runtime 的 16 维 sim order 不是按 joint name 字典序，而是“关节层级交织”顺序。
 # 该顺序由官方 `override_default_joint_pos` 向量和 deployment 注释共同确定。
@@ -127,8 +128,11 @@ class LeapHandOfficialADRSceneCfg(InteractiveSceneCfg):
     )
 
     light = AssetBaseCfg(
-        prim_path="/World/light",
-        spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75)),
+        prim_path="/World/skyLight",
+        spawn=sim_utils.DomeLightCfg(
+            intensity=INHAND_CLEAR_SKY_LIGHT_INTENSITY,
+            texture_file=INHAND_CLEAR_SKY_TEXTURE_FILE,
+        ),
     )
 
 
