@@ -1,7 +1,7 @@
 r"""Official LEAP hand GM reorientation probe.
 
 This variant keeps the current GM MDP stack fixed and swaps only the hand asset
-to the project-maintained official LEAP USD. It is a clean ablation: if this
+to the project-maintained official LEAP URDF. It is a clean ablation: if this
 variant learns while the generated single asset does not, the failure likely
 belongs to generated asset physics/contact basin/joint mechanics rather than
 the reward/command/action stack itself.
@@ -13,7 +13,7 @@ import math
 
 import isaaclab.envs.mdp as isaac_mdp
 import isaaclab.sim as sim_utils
-from anymani.robots.leap import LEAP_HAND_CFG
+from anymani.robots.leap_urdf import LEAP_HAND_URDF_CFG
 from anymani.tools.grasp_preset import GraspPreset, asset_preset_path
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -97,7 +97,8 @@ GM_LEAP_CONTACT_LAYOUT = GmContactSensorLayout(
 )
 """Static contact layout for official LEAP, which has no AnyMani generated sidecar."""
 
-GM_LEAP_HAND_CFG = LEAP_HAND_CFG.replace(
+
+GM_LEAP_HAND_CFG = LEAP_HAND_URDF_CFG.replace(
     prim_path="{ENV_REGEX_NS}/Robot",
     init_state=ArticulationCfg.InitialStateCfg(
         pos=GM_LEAP_ROOT_POS_E,
@@ -106,7 +107,7 @@ GM_LEAP_HAND_CFG = LEAP_HAND_CFG.replace(
         joint_vel={"a_.*": 0.0},
     ),
 )
-"""Official LEAP articulation cfg with preset-provided reset joint pose."""
+"""Official LEAP URDF articulation cfg with preset-provided reset joint pose."""
 
 
 @configclass
@@ -131,7 +132,7 @@ class GmLeapSceneCfg(InteractiveSceneCfg):
                 max_depenetration_velocity=1000.0,
             ),
             mass_props=sim_utils.MassPropertiesCfg(density=400.0),
-            scale=(1.0, 1.0, 1.0),
+            scale=(1.2, 1.2, 1.2),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=GM_LEAP_GRASP_PRESET.object_pos_cfg,
@@ -167,11 +168,20 @@ class GmLeapCommandsCfg:
 
     goal_pose: gm_mdp.ReorientCommandCfg = gm_mdp.ReorientCommandCfg(
         asset_name="object",
+        debug_vis=True,
         robot_asset_name="robot",
+        theta_range=(math.pi / 6, math.pi / 2),
+        orientation_success_threshold=math.pi / 24,
         axis_mode="fixed",
         axis_resample_mode="episode",
         fixed_axis_h=(0.0, 0.0, 1.0),
         semantic_R_ha=GM_LEAP_SEMANTIC_R_HA,
+        make_quat_unique=True,
+        command_output={
+            "frame": "h",
+            "axis":{"mode": "omit"},
+            "target":{"kind": "absolute", "representation": "quat"},
+        }
     )
 
 
@@ -182,7 +192,7 @@ class GmLeapActionsCfg:
     hand_joint_pos = isaac_mdp.RelativeJointPositionActionCfg(
         asset_name="robot",
         joint_names=[".*"],
-        scale=0.1,
+        scale=1/24,
         preserve_order=True,
     )
 
@@ -195,8 +205,8 @@ class GmLeapObservationsCfg:
     class PolicyCfg(ObsGroup):
         r"""Actor-facing flat observation group."""
 
-        joint_pos = ObsTerm(func=isaac_mdp.joint_pos_limit_normalized, params={"asset_cfg": SceneEntityCfg("robot")})
-        last_action = ObsTerm(func=isaac_mdp.last_action)
+        joint_pos = ObsTerm(func=gm_mdp.joint_pos_limit_normalized, params={"asset_cfg": SceneEntityCfg("robot")})
+        last_action = ObsTerm(func=gm_mdp.last_action)
         fingertip_force = ObsTerm(
             func=gm_mdp.fingertip_contact_force,
             params={
@@ -224,7 +234,8 @@ class GmLeapObservationsCfg:
                 "robot_cfg": SceneEntityCfg("robot"),
                 "semantic_R_ha": GM_LEAP_SEMANTIC_R_HA,
                 "frame": "h",
-                "representation": "rot6d",
+                "representation": "quat",
+                "make_quat_unique": "True",
             },
         )
 
@@ -265,7 +276,7 @@ class GmLeapRewardsCfg:
         params={
             "sensor_names": GM_LEAP_CONTACT_LAYOUT.fingertip_sensor_names,
             "min_contacts": 2,
-            "force_threshold": 0.2,
+            "force_threshold": 0.1,
             "lambda_floor": 0.05,
         },
     )
@@ -274,7 +285,7 @@ class GmLeapRewardsCfg:
         weight=-0.2,
         params={
             "sensor_names": GM_LEAP_CONTACT_LAYOUT.non_tip_sensor_names,
-            "force_threshold": 0.2,
+            "force_threshold": 0.1,
             "lambda_floor": 0.0,
         },
     )

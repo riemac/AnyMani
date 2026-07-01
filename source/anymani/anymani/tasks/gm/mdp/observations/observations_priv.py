@@ -228,29 +228,58 @@ def object_orientation(
 ) -> torch.Tensor:
     r"""读取 object orientation，并按配置选择坐标 frame 与旋转表示。
 
+    `frame` 只决定**姿态矩阵左侧的参考坐标系**，也就是“object body axes 用哪套
+    外部坐标轴来表达”。它不涉及位置原点，因此不像 `object_pos` 那样还需要
+    `reference` 参数。这里始终读取 object body frame `{o}` 的朝向，只是在 `{h}`
+    或 `{e}` 中表达这组朝向。
+
     `frame="h"` 时返回 object body frame `{o}` 相对 hand semantic frame `{h}` 的姿态：
     $$
     R_{ho} = R_{ha} R_{aw} R_{wo}.
     $$
+    其中 $R_{wo}$ 来自 IsaacLab object root quaternion，$R_{aw}=R_{wa}^{\top}$
+    把 world/env 轴旋回 raw hand asset frame `{a}`，$R_{ha}$ 再把 `{a}` 对齐到
+    AnyMani hand semantic frame `{h}`。该模式适合手型泛化主线：同一个 object
+    朝向会随手的语义轴一起被表达。
+
     `frame="e"` 时返回 object body frame `{o}` 相对 env/world frame `{e}` 的姿态：
     $$
     R_{eo} = R_{wo}.
     $$
+    该模式不使用 hand pose 与 $R_{ha}$，适合诊断“hand-frame 表示是否引入额外非平稳性”
+    或与 IsaacLab / LEAP 官方 world-frame observation 做对照。
 
-    输出表示可选 `rot6d`、`quat`、`axis_angle` 或 `matrix`，用于快速诊断
-    “6D 是否优于 quaternion / axis-angle” 这类表征问题。
+    `representation` 决定把上面的旋转矩阵 $R\in SO(3)$ 编码成哪种 policy-facing
+    向量；目前完整选项为：
+
+    - `"rot6d"`: 输出 `[B,6]`，拼接旋转矩阵前两列
+      $[R_{:,0},R_{:,1}]$。这是默认值，来自 Zhou 6D continuous rotation
+      representation；它去掉第三列冗余，又避免 quaternion 的 $q/-q$ 双覆盖。
+    - `"quat"`: 输出 `[B,4]`，IsaacLab 约定的 quaternion `(w,x,y,z)`。该表示紧凑，
+      但同一旋转存在 $q$ 与 $-q$ 两个等价符号；若 `make_quat_unique=True`，则折叠到
+      IsaacLab `quat_unique` 选取的单侧符号。
+    - `"axis_angle"`: 输出 `[B,3]`，李代数向量 $\omega\theta=\log(R)$，单位 rad。
+      它适合表达局部姿态残差，但在 $\theta\approx\pi$ 附近存在分支不连续；若
+      `make_quat_unique=True`，会先规范化中间 quaternion 再转 axis-angle。
+    - `"matrix"`: 输出 `[B,9]`，按 row-major 展平完整 $3\times3$ 旋转矩阵。它最冗余，
+      但最接近 $SO(3)$ 原始几何对象，适合 debugging 或做表征消融。
 
     Args:
         env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
         object_cfg (SceneEntityCfg): object rigid body 配置。
         robot_cfg (SceneEntityCfg): hand articulation 配置。
-        semantic_R_ha (tuple[float, ...]): $R_{ha}$，row-major 9 元组。
-        frame (FrameName): 输出坐标系，`"h"` 或 `"e"`。
-        representation (RotationRepresentation): 输出旋转表示。
-        make_quat_unique (bool): 若输出 / 中间转换使用 quaternion，是否折叠 $q/-q$。
+        semantic_R_ha (tuple[float, ...]): $R_{ha}$，row-major 9 元组；仅在 `frame="h"`
+            时使用，语义为 $v^{\{h\}}=R_{ha}v^{\{a\}}$。
+        frame (FrameName): 输出参考坐标系；`"h"` 表示 hand semantic frame，`"e"`
+            表示 env/world frame。
+        representation (RotationRepresentation): 输出旋转表示，可选 `"rot6d"`、`"quat"`、
+            `"axis_angle"`、`"matrix"`，对应输出维度分别为 6、4、3、9。
+        make_quat_unique (bool): 若 `representation="quat"` 或 `"axis_angle"`，是否先通过
+            `quat_unique` 折叠 $q/-q$；对 `"rot6d"` 和 `"matrix"` 没有影响。
 
     Returns:
-        torch.Tensor: object orientation 表示，形状随 `representation` 改变。
+        torch.Tensor: object orientation 表示，batch 维为 `num_envs`；shape 为 `[B,6]`
+        (`rot6d`)、`[B,4]` (`quat`)、`[B,3]` (`axis_angle`) 或 `[B,9]` (`matrix`)。
     """
 
     object_asset: RigidObject = env.scene[object_cfg.name]  # object orientation $R_{wo}$

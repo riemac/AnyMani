@@ -6,9 +6,11 @@ DONE(state obs): 关节本体感受 (proprioception)，逐步变化的动态量�
 $q_i^{\min}, q_i^{\max}$ 为该关节的 soft 限位 (rad)；下标 $i$ 遍历 surviving revolute joints。
 坐标系语义见 `gm/AGENTS.md` 的 `{a} -> {h}` 约定。
 
-NOTE(设计决策，已与用户对齐): 关节位置统一采用 **raw rad 表征** $q_i$，
+NOTE(设计决策，已与用户对齐): 关节位置主线采用 **raw rad 表征** $q_i$，
 而非 IsaacLab 默认的 `joint_pos_limit_normalized`（即 $q_i^{\text{norm}}$）。
-该决策依据 `Research/总体/层次通才策略训练.md` 的 state obs 小组划分。
+该决策依据 `Research/总体/层次通才策略训练.md` 的 state obs 小组划分；
+同时本模块保留 `joint_pos_limit_normalized` 作为官方子集的等价 GM wrapper，
+用于 LEAP / single-asset 对照实验把外部 term 收敛到 `gm_mdp` 命名空间。
 
 其中归一化变换定义为（IsaacLab `scale_transform` 语义，本项目刻意不采用）：
 $$
@@ -29,6 +31,7 @@ $$
 本模块实现的 state obs：
 
 - `q_raw`: `asset.data.joint_pos[:, joint_ids]`，单位 rad；
+- `q_limit_norm`: `q_raw` 经 soft joint limits 线性缩放到 $[-1,1]$，无量纲；
 - `dq_raw`: `asset.data.joint_vel[:, joint_ids]`，单位 rad/s；
 - `last_action`: 上一步实际下发的 raw rad delta $\Delta_{t-1}$，单位 rad。
 
@@ -78,6 +81,40 @@ def joint_pos_raw(
     # `asset_cfg` 在 ObservationManager 初始化时会解析 joint_names → joint_ids；preserve_order=True 要求顺序一致。
     asset: Articulation = env.scene[asset_cfg.name]
     return asset.data.joint_pos[:, asset_cfg.joint_ids]  # $q_i$，raw rad，不随 limit 归一化
+
+
+def joint_pos_limit_normalized(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    r"""复刻 IsaacLab 官方 joint-limit normalized position observation。
+
+    该 term 是 `isaac_mdp.joint_pos_limit_normalized` 的 GM 命名空间等价物，
+    不是当前 AnyMani raw-rad 主线的替代。它服务于官方 LEAP / single-asset
+    交叉对照：在不改变张量语义的前提下，把配置层统一改成 `gm_mdp.*`。
+
+    对每个关节 $i$，soft limit 归一化定义为：
+    $$
+    q_i^{\mathrm{norm}}
+      = 2\,\frac{q_i-q_i^{\min}}{q_i^{\max}-q_i^{\min}} - 1.
+    $$
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
+        asset_cfg (SceneEntityCfg): robot articulation 与 joint 子集配置。
+
+    Returns:
+        torch.Tensor: limit-normalized joint position，形状 `[num_envs, num_joints]`，无量纲。
+    """
+
+    # 读取与 IsaacLab 官方 term 完全相同的 runtime soft limits；这些 limit 也是 action clamp 的物理边界。
+    asset: Articulation = env.scene[asset_cfg.name]
+    q = asset.data.joint_pos[:, asset_cfg.joint_ids]  # $q_i$，raw joint position，单位 rad
+    q_min = asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids, 0]  # $q_i^{\min}$，soft lower bound，单位 rad
+    q_max = asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids, 1]  # $q_i^{\max}$，soft upper bound，单位 rad
+
+    # 线性映射 $[q^{\min},q^{\max}]\mapsto[-1,1]$，公式等价于 IsaacLab `scale_transform`。
+    return 2.0 * (q - q_min) / (q_max - q_min) - 1.0  # $q_i^{\mathrm{norm}}$，无量纲
 
 
 def joint_vel_raw(
@@ -139,4 +176,35 @@ def last_processed_action(
     return processed_actions
 
 
-__all__ = ["joint_pos_raw", "joint_vel_raw", "last_processed_action"]
+def last_action(
+    env: ManagerBasedRLEnv,
+    action_name: str | None = None,
+) -> torch.Tensor:
+    r"""复刻 IsaacLab 官方 last raw action observation。
+
+    该 term 与 `last_processed_action` 故意并存，分别表达两种实验语义：
+
+    - `last_action`: policy 网络上一帧输出的 raw action，无量纲，复刻 IsaacLab 官方；
+    - `last_processed_action`: action term 经 scale / clip 后实际下发的 $\Delta q$，单位 rad。
+
+    因此 LEAP official-subset 对照可以等价替换 `isaac_mdp.last_action`，
+    而 raw-rad 主线仍可显式选择 `gm_mdp.last_processed_action`。
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
+        action_name (str | None): action term 名称；为 `None` 时返回完整 action tensor。
+
+    Returns:
+        torch.Tensor: raw action tensor，形状由 action manager / term 决定，无量纲。
+    """
+
+    # `action_name=None` 时保持 IsaacLab 官方语义：返回 manager 拼接后的整条 raw action。
+    if action_name is None:
+        return env.action_manager.action  # `[B,A]`，policy-facing raw action，通常无量纲
+
+    # 指定 term 时读取该 term 的 `raw_actions`，而不是 `processed_actions`，以保证官方等价替换。
+    action_term = env.action_manager.get_term(action_name)
+    return action_term.raw_actions  # `[B,A_term]`，该 action term 的 raw policy output
+
+
+__all__ = ["joint_pos_limit_normalized", "joint_pos_raw", "joint_vel_raw", "last_action", "last_processed_action"]
