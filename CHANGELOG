@@ -1,3 +1,13 @@
+0.4.0 - 2026-07-01
+==================
+
+- 新增 official LEAP raw URDF asset adapter，并将 raw URDF 关节命名对齐为 `a_0..a_15`，记录 USD/URDF 同名机械关节逐项对应事实。
+- 新增 `AnyMani-LeapHand-Tactile-ADR-URDF-v0` / Play 环境，在 N010 official-aligned ADR 的 observation、action、reward、termination、ADR 与 rl_games 配置不变时，仅替换 LEAP hand asset backend。
+- 新增 generated `right_t4_i4_m4_r4` official-ADR probe 环境与 contract tests，复用 N010 official 96D history observation、target-buffer action、reward/ADR/termination，并接入 generated structural collision filter。
+- 为 GM LEAP-URDF probe 增加 `gm_mdp.joint_pos_limit_normalized` 与 `gm_mdp.last_action` 等官方等价 observation wrapper，保留 raw-rad / processed-action 主线语义并补纯 tensor contract tests。
+- 将 inhand 家族视觉门面对齐 GM 风格 skyLight/HDR，并为 generated hand 打开 visual material restore；该改动只影响可视化，不改变训练 MDP 语义。
+- 将 `Research/` 与 `tools/presets/` 从 AnyMani 代码仓库追踪中移出：科研 vault 已迁移为独立 private repo，preset YAML 作为本地标定产物保留但不再污染代码 repo 状态。
+
 0.3.0 - 2026-06-29
 ==================
 
