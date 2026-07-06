@@ -1,3 +1,12 @@
+0.4.1 - 2026-07-06
+==================
+
+- 新增 generated `right_t4_i4_m4_r4` official-ADR 的 N031/N040/N041 消融入口：NoDtReward、RawDelta 与 EMAAbsolute，并保持独立 train/play Gym id。
+- 将 inhand official reward 收敛到新的 `mdp/rewards.py` 主线，保留 combined official reward 与拆分 reward terms，同时出清旧 `rewards_action.py` / `rewards_task.py`。
+- 在 `gm/mdp/actions` 中新增声明式 ADR joint action：relative raw-rad delta 与 joint-limit absolute EMA 共享 official action noise / latency contract，并让 N040 迁移到 `reference="current"` 的 relative cfg。
+- 新增 N041 EMAAbsolute action-law ablation：保持 N030 official obs/reward/ADR 不变，仅把 target-buffer raw-delta relative 改为 joint-limit absolute target EMA。
+- 新增 N031/N040/N041 contract tests 与 N041 IsaacSim smoke，验证注册、action runtime contract、96D policy obs 与 generated scene reset/step 闭环。
+
 0.4.0 - 2026-07-01
 ==================
 
