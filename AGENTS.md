@@ -55,9 +55,11 @@ IsaacSim smoke 必须小而硬：少量 env、少量 step、明确 assert 运行
 ```bash
 cd /home/hac/isaac/AnyMani
 source /home/hac/isaac/env_isaaclab/bin/activate
-timeout --kill-after=20s 240s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest \
+timeout --kill-after=20s 60s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest \
   source/anymani/anymani/smokes/isaacsim/test_gm_single_asset_structural_collision.py -q -s
 ```
+
+开发新的 smoke test 可在 `AnyMani/source/anymani/anymani/smokes` 下。
 
 ### 5. 训练记录分析
 

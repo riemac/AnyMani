@@ -341,7 +341,7 @@ class CommonRewardsCfg:
 
     # ===== 任务奖励 =====
     track_orientation_inv_l2 = RewTerm(
-        func=leap_mdp.track_orientation_inv_l2,
+        func=leap_mdp.official_orientation,
         weight=1.0,
         params={
             "object_cfg": SceneEntityCfg("object"),
@@ -355,7 +355,7 @@ class CommonRewardsCfg:
     #   - 该项度量物体位置与 pos_command_e 的 L2 距离（环境系 {e}）。
     #   - 若希望显式约束“物体别漂移”，将 weight 从 0.0 调整为负值（例如 -10.0）。
     track_pos_l2 = RewTerm(
-        func=leap_mdp.track_pos_l2,
+        func=leap_mdp.official_goal_distance,
         weight=0.0,
         params={
             "object_cfg": SceneEntityCfg("object"),
@@ -364,13 +364,13 @@ class CommonRewardsCfg:
     )
 
     success_bonus = RewTerm(
-        func=leap_mdp.success_bonus,
+        func=leap_mdp.official_success_bonus,
         weight=250.0,
         params={
             "object_cfg": SceneEntityCfg("object"),
             "command_name": "goal_pose",
-            "orientation_threshold": 0.2,
-            "position_threshold": 0.025,
+            "success_tolerance": 0.2,
+            "position_success_threshold": 0.025,
         },
     )
 
@@ -378,7 +378,7 @@ class CommonRewardsCfg:
     joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight=-2.5e-5)
     action_l2 = RewTerm(func=mdp.action_l2, weight=-0.0001)
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
-    torque_l2 = RewTerm(func=leap_mdp.torque_l2_penalty, weight=-1e-5)
+    torque_l2 = None
 
 
 ##############################################################################
@@ -405,14 +405,8 @@ class CommonEventCfg:
         },
     )
 
-    randomized_object_com = EventTerm(
-        func=leap_mdp.randomize_rigid_object_com,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("object"),
-            "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.01, 0.01)},
-        },
-    )
+    randomized_object_com = None
+    # 历史组件仓中的刚体 COM randomization 已出清；当前 inhand 主线不再维护这一路径。
 
     randomized_object_scale = EventTerm(
         func=mdp.randomize_rigid_body_scale,
@@ -548,19 +542,19 @@ class CommonTerminationsCfg:
 
 @configclass
 class ReorientationCommandsCfg:
-    """so(3) 相对增量指令命令配置。
+    """历史 reorientation 命令配置占位。
 
     NOTE:
-        这里保留类名以避免大范围重命名，但内部命令项已替换为 RelativeSO3Command。
+        `RelativeSO3CommandCfg` 已从 inhand 主线移除，因为相对增量 so(3) 对 RL 表现为明显非平稳。
+        这里暂保留历史类名，内部退化为 generic continuous rotation command，只为保持旧组件仓可编译。
     """
 
-    goal_pose = leap_mdp.RelativeSO3CommandCfg(
+    goal_pose = leap_mdp.ContinuousRotationCommandCfg(
         asset_name="object",
         resampling_time_range=(1e6, 1e6),
         init_pos_offset=(0.0, 0.0, 0.0),
-        theta_min=0.0,
-        theta_max=math.pi / 2.0,
-        mode="fixed_goal",
+        rotation_axis="z",
+        delta_angle=math.pi / 8.0,
         make_quat_unique=True,
         update_goal_on_success=True,
     )
@@ -754,7 +748,7 @@ class TactileRewardsCfg(CommonRewardsCfg):
     # 这里用历史名称保留 TensorBoard 语义：$r_p=-10\|p_o^e-p_g^e\|_2$。
     track_pos_l2 = None
     goal_position_distance = RewTerm(
-        func=leap_mdp.goal_position_distance,
+        func=leap_mdp.official_goal_distance,
         weight=-10.0,
         params={
             "object_cfg": SceneEntityCfg("object"),
@@ -766,12 +760,12 @@ class TactileRewardsCfg(CommonRewardsCfg):
     # 除了触发 reset，还额外给一次负奖励，避免 policy 在早期通过“撞到一次 goal 然后掉落”获得净收益。
     # 公式：$r_{fall}=-10\,\mathbf{1}[\|p_o^e-p_g^e\|_2 \ge 0.07]$。
     fall_penalty = RewTerm(
-        func=leap_mdp.fall_penalty,
+        func=leap_mdp.official_fall_penalty,
         weight=-10.0,
         params={
             "object_cfg": SceneEntityCfg("object"),
             "command_name": "goal_pose",
-            "fall_distance": 0.07,
+            "fall_dist": 0.07,
         },
     )
 

@@ -6,4 +6,4 @@
 """Sub-module containing command terms for rotation axis goals."""
 
 from .commands_cfg import *  # noqa: F401, F403
-from .rotation_command import ContinuousRotationCommand, OfficialContinuousRotationCommand, RelativeSO3Command
+from .rotation_command import ContinuousRotationCommand, OfficialContinuousRotationCommand

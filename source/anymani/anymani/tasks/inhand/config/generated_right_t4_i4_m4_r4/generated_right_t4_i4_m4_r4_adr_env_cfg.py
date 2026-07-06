@@ -37,6 +37,7 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
@@ -63,6 +64,7 @@ from anymani.tasks.inhand.config.leaphand.leaphand_adr_env_cfg import (
     LeapHandOfficialADRTerminationsCfg,
     LeapHandTactileADREnvCfg,
 )
+from anymani.tasks.inhand.mdp import rewards as official_rewards
 from anymani.tasks.inhand.inhand_env_cfg import INHAND_CLEAR_SKY_LIGHT_INTENSITY, INHAND_CLEAR_SKY_TEXTURE_FILE
 from anymani.tools.grasp_preset import GraspPreset, asset_preset_path
 
@@ -439,6 +441,49 @@ class GeneratedRightT4I4M4R4OfficialADREventCfg(LeapHandOfficialADREventCfg):
 
 
 @configclass
+class GeneratedRightT4I4M4R4OfficialADRNoDtRewardsCfg:
+    r"""N031 no-dt reward-scale ablation。
+
+    该配置只改变 `OfficialLeapReward` 的一个实验开关：
+
+    $$
+    \texttt{divide\_by\_step\_dt}: \texttt{True} \rightarrow \texttt{False}.
+    $$
+
+    因此相对 N030，scene / action / obs / command / termination / ADR 都保持一致。真正进入 PPO
+    的 reward 将变为：
+
+    $$
+    \Delta t\cdot r_t^{official},
+    $$
+
+    因为 `RewardManager` 仍会自动乘上 `env.step_dt`。
+    """
+
+    official_reward = RewTerm(
+        func=official_rewards.OfficialLeapReward,
+        weight=1.0,
+        params={
+            "action_term_name": "hand_joint_pos",
+            "command_name": "goal_pose",
+            "object_cfg": SceneEntityCfg("object"),
+            "dist_reward_scale": -10.0,
+            "rot_reward_scale": 1.0,
+            "rot_eps": 0.1,
+            "action_penalty_scale": -0.0002,
+            "pose_diff_penalty_scale": -0.3,
+            "success_tolerance": 0.2,
+            "position_success_threshold": 0.025,
+            "reach_goal_bonus": 250.0,
+            "fall_dist": 0.07,
+            "fall_penalty": -10.0,
+            "z_rotation_steps": 16,
+            "divide_by_step_dt": False,
+        },
+    )
+
+
+@configclass
 class LeapHandADRGeneratedRightT4I4M4R4EnvCfg(LeapHandTactileADREnvCfg):
     r"""Generated `right_t4_i4_m4_r4` official-ADR training env。
 
@@ -473,6 +518,25 @@ class LeapHandADRGeneratedRightT4I4M4R4EnvCfg_PLAY(LeapHandADRGeneratedRightT4I4
         self.commands.goal_pose.debug_vis = True
 
 
+@configclass
+class LeapHandADRGeneratedRightT4I4M4R4NoDtRewardEnvCfg(LeapHandADRGeneratedRightT4I4M4R4EnvCfg):
+    r"""N031 generated official-ADR env：仅取消 combined reward 的 `dt` 对齐。"""
+
+    rewards: GeneratedRightT4I4M4R4OfficialADRNoDtRewardsCfg = GeneratedRightT4I4M4R4OfficialADRNoDtRewardsCfg()
+
+
+@configclass
+class LeapHandADRGeneratedRightT4I4M4R4NoDtRewardEnvCfg_PLAY(LeapHandADRGeneratedRightT4I4M4R4NoDtRewardEnvCfg):
+    r"""N031 no-dt reward play/debug env。"""
+
+    def __post_init__(self) -> None:
+        r"""降低 env 数并打开 goal marker，便于 N031 与 N030 replay 对比。"""
+
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.commands.goal_pose.debug_vis = True
+
+
 __all__ = [
     "GENERATED_OFFICIAL_SLOT_JOINT_ORDER",
     "GENERATED_RIGHT_T4_I4_M4_R4_BUNDLE_ID",
@@ -484,10 +548,13 @@ __all__ = [
     "GENERATED_RIGHT_T4_I4_M4_R4_OBJECT_SOURCE",
     "GENERATED_RIGHT_T4_I4_M4_R4_PREGRASP_VECTOR",
     "GeneratedRightT4I4M4R4OfficialADRActionsCfg",
+    "GeneratedRightT4I4M4R4OfficialADRNoDtRewardsCfg",
     "GeneratedRightT4I4M4R4OfficialADREventCfg",
     "GeneratedRightT4I4M4R4OfficialADRObservationsCfg",
     "GeneratedRightT4I4M4R4OfficialADRSceneCfg",
     "LeapHandADRGeneratedRightT4I4M4R4EnvCfg",
     "LeapHandADRGeneratedRightT4I4M4R4EnvCfg_PLAY",
+    "LeapHandADRGeneratedRightT4I4M4R4NoDtRewardEnvCfg",
+    "LeapHandADRGeneratedRightT4I4M4R4NoDtRewardEnvCfg_PLAY",
     "build_generated_right_t4_i4_m4_r4_hand_articulation_cfg",
 ]

@@ -1,20 +1,36 @@
 r"""`gm` 任务的自定义动作空间模块。
 
-当前仅包含一个动作术语：
-    - `ClampedRelativeJointPositionAction`：相对关节位置动作，在 `apply_actions`
-      中显式 clamp 目标到 soft joint limits。
+本命名空间承载 generalized manipulation 中可跨 hand / task 复用的 action 原件。
+当前主线是声明式 ADR joint-position action：
 
-该模块的设计原则：
-    - 只覆写 IsaacLab 原生缺少的科研语义（joint limit clamp），其余解析逻辑复用基类。
-    - 不加 EMA（相对增量自带平滑），不 rescale 到 limits（保持 raw rad 量纲，
-      与 obs 侧 $q_i$ 同空间）。
+- `ADRRelativeJointPositionActionCfg`：relative raw-rad delta，支持 `reference="current"|"target"`；
+- `ADREMAJointPositionToLimitsActionCfg`：joint-limit absolute target + EMA，支持同一 reference 枚举；
+- `ClampedRelativeJointPositionAction`：早期 plain current-relative raw-delta scaffold，保留作历史对照。
 """
 
 from __future__ import annotations
 
+from .adr_joint_actions import (
+    ADREMAJointPositionToLimitsAction,
+    ADREMAJointPositionToLimitsActionCfg,
+    ADRJointAction,
+    ADRRelativeJointPositionAction,
+    ADRRelativeJointPositionActionCfg,
+    compute_ema_joint_command,
+    compute_leap_adr_latency_steps,
+    compute_relative_joint_command,
+)
 from .clamped_relative_action import ClampedRelativeJointActionCfg, ClampedRelativeJointPositionAction
 
 __all__ = [
+    "ADREMAJointPositionToLimitsAction",
+    "ADREMAJointPositionToLimitsActionCfg",
+    "ADRJointAction",
+    "ADRRelativeJointPositionAction",
+    "ADRRelativeJointPositionActionCfg",
     "ClampedRelativeJointActionCfg",
     "ClampedRelativeJointPositionAction",
+    "compute_ema_joint_command",
+    "compute_leap_adr_latency_steps",
+    "compute_relative_joint_command",
 ]

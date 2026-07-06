@@ -261,14 +261,8 @@ class EventCfg: #
         },
     )
 
-    randomized_object_com = EventTerm(
-        func=leap_mdp.randomize_rigid_object_com,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("object"),
-            "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.01, 0.01)},
-        },
-    )
+    randomized_object_com = None
+    # 历史 round 配置中的刚体 COM randomization 已出清；当前主线不再维护这一路径。
 
     randomized_object_scale = EventTerm(
         func=mdp.randomize_rigid_body_scale,
@@ -385,37 +379,38 @@ class RewardsCfg:
 
     # -- task
     track_orientation_inv_l2 = RewTerm(
-        func=leap_mdp.track_orientation_inv_l2,
+        func=leap_mdp.official_orientation,
         weight=1.0,
         params={"object_cfg": SceneEntityCfg("object"), "rot_eps": 0.1, "command_name": "goal_pose"},
     )
     goal_position_distance = RewTerm(
-        func=leap_mdp.goal_position_distance,
+        func=leap_mdp.official_goal_distance,
         weight=-10.0,
         params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose"},
     )
     success_bonus = RewTerm(
-        func=leap_mdp.success_bonus,
+        func=leap_mdp.official_success_bonus,
         weight=250.0,
         params={
             "object_cfg": SceneEntityCfg("object"),
             "command_name": "goal_pose",
-            "orientation_threshold": 0.2,
-            "position_threshold": 0.025,
+            "success_tolerance": 0.2,
+            "position_success_threshold": 0.025,
         },
     )
-    pose_diff = RewTerm(func=leap_mdp.pose_diff_penalty, weight=-0.3)
+    pose_diff = None
+    # 历史 round 配置中的 pose-diff 项已出清；当前 official 主线由 pregrasp_l2 等项承担相近语义。
     fall_penalty = RewTerm(
-        func=leap_mdp.fall_penalty,
+        func=leap_mdp.official_fall_penalty,
         weight=-10.0,
-        params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "fall_distance": 0.07},
+        params={"object_cfg": SceneEntityCfg("object"), "command_name": "goal_pose", "fall_dist": 0.07},
     )
 
     # -- action
     joint_vel_l2 = RewTerm(func=mdp.joint_vel_l2, weight=-2.5e-5)
     action_l2 = RewTerm(func=mdp.action_l2, weight=-0.0001)
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
-    torque_l2 = RewTerm(func=leap_mdp.torque_l2_penalty, weight=-1e-5)
+    torque_l2 = None
 
 @configclass
 class TerminationsCfg:

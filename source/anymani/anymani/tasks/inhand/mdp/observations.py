@@ -124,6 +124,46 @@ def fingertip_contact_data(
         return torch.stack(forces, dim=1)
 
 
+def goal_quat_diff(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    command_name: str = "goal_pose",
+    make_quat_unique: bool = True,
+) -> torch.Tensor:
+    r"""物体当前姿态与目标姿态的四元数差。
+
+    该项曾位于 `observations_privileged.py`，当前主线只保留这一项，因此直接并回 `observations.py`。
+    它的职责是为旧 critic / debug 路径提供一个四元数形式的方向误差观测：
+
+    $$
+    Q_{err}=Q_g^w\otimes (Q_o^w)^{-1}.
+    $$
+
+    其中 $Q_o^w$ 是物体当前姿态，$Q_g^w$ 是目标姿态。若 `make_quat_unique=True`，则再做
+    `quat_unique`，消除 $Q$ 与 $-Q$ 的双覆盖歧义。
+    """
+
+    obj = env.scene[asset_cfg.name]  # 物体刚体对象，用于读取当前 root quaternion。
+    current_quat = obj.data.root_quat_w  # 当前姿态 $Q_o^w$，形状 `[N,4]`。
+
+    term = env.command_manager.get_term(command_name)  # 命令项对象，优先读取内部目标四元数 buffer。
+    target_quat = getattr(term, "quat_command_w", None)  # 期望形状 `[N,4]`。
+    if not (isinstance(target_quat, torch.Tensor) and target_quat.shape[-1] == 4):
+        goal_pose = env.command_manager.get_command(command_name)  # legacy pose-like command fallback。
+        if not (isinstance(goal_pose, torch.Tensor) and goal_pose.shape[-1] >= 7):
+            raise RuntimeError(
+                f"goal_quat_diff expects command '{command_name}' to provide term.quat_command_w or a pose-like tensor. "
+                f"Got: {type(goal_pose)} {getattr(goal_pose, 'shape', None)}"
+            )
+        target_quat = goal_pose[:, -4:]  # legacy 7D command 的最后四维为目标四元数。
+
+    current_quat_inv = math_utils.quat_inv(current_quat)  # $(Q_o^w)^{-1}$。
+    quat_diff = math_utils.quat_mul(target_quat, current_quat_inv)  # $Q_g^w\otimes(Q_o^w)^{-1}$。
+    if make_quat_unique:
+        quat_diff = math_utils.quat_unique(quat_diff)  # 约定 $w\ge0$，保持观测表示连续。
+    return quat_diff
+
+
 def quat_command(env: ManagerBasedRLEnv, command_name: str, make_quat_unique: bool = True) -> torch.Tensor:
     r"""读取目标姿态四元数命令 $Q_g^w$。
 
@@ -239,3 +279,61 @@ def official_policy_frame(
     joint_pos_norm = math_utils.scale_transform(joint_pos, lower, upper)
     action_term = env.action_manager.get_term(action_term_name)
     return torch.cat((joint_pos_norm, action_term.current_targets), dim=-1).clone()
+
+
+def raw_policy_frame(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    action_term_name: str = "hand_joint_pos",
+    joint_scale_rad: float = torch.pi,
+) -> torch.Tensor:
+    r"""N040 / heterogeneous-ready actor 的单帧 32D raw observation。
+
+    当前设计目标是把 official actor 单帧观测
+
+    $$
+    o_t^{frame}=[\tilde q_t, q_t^{target}]\in\mathbb R^{32}
+    $$
+
+    迁移到 unit-scaled raw-rad 语义：
+
+    $$
+    o_t^{frame}=\left[\frac{q_t}{\pi},\frac{q_t^{cmd}}{\pi}\right]\in\mathbb R^{32}.
+    $$
+
+    其中：
+
+    - 前 16 维是当前实际关节角 $q_t$ 的 unit-scaled raw rad 表达；
+    - 后 16 维是动作项暴露的 `current_targets`，在 official target-buffer action 下它表示
+      $q_t^{target}$，在 N040 `ADRRelativeJointPositionAction(reference="current")` 下它表示本步 command target
+      $q_t^{cmd}$。
+
+    这样设计的目的不是让 official 与 N040 完全同义，而是让 N040 第一刀保持 PPO 输入维度
+    仍为 96D（history 3 帧后），同时把 per-joint-limit normalization 换成跨 variant 更稳定的
+    unit-scaled raw coordinates。
+
+    Args:
+        env: ManagerBasedRLEnv 运行时对象。
+        asset_cfg: 机器人资产配置，需解析出 actor 消费的关节槽位。
+        action_term_name: ActionManager 中暴露 `current_targets` 的动作项名称。
+        joint_scale_rad: raw rad 到无量纲输入的全局尺度，当前默认 $\pi$。
+
+    Returns:
+        torch.Tensor: 形状为 ``[N, 32]`` 的单帧观测。
+
+    Raises:
+        RuntimeError: 当动作项没有 `current_targets` 字段时抛出，避免静默退化成错误 obs。
+    """
+
+    robot: Articulation = env.scene[asset_cfg.name]  # 机器人 articulation，用于读取当前关节角 $q_t$。
+    joint_pos = robot.data.joint_pos[:, asset_cfg.joint_ids]  # 当前实际关节角，形状 `[N,16]`、单位 rad。
+    action_term = env.action_manager.get_term(action_term_name)  # 动作项；N040 需要它暴露 `current_targets`。
+
+    if not hasattr(action_term, "current_targets"):
+        raise RuntimeError(
+            f"raw_policy_frame expects action term '{action_term_name}' to expose current_targets for q_cmd/q_target."
+        )
+
+    q_obs = joint_pos / float(joint_scale_rad)  # $q_t/\pi$，跨 variant 共享的 unit-scaled raw rad 表达。
+    q_cmd_obs = action_term.current_targets / float(joint_scale_rad)  # $q_t^{cmd}/\pi$ 或 $q_t^{target}/\pi$。
+    return torch.cat((q_obs, q_cmd_obs), dim=-1).clone()  # 单帧 32D obs，history 由 ObservationTermCfg 负责。
