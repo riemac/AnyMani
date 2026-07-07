@@ -281,13 +281,69 @@ def official_policy_frame(
     return torch.cat((joint_pos_norm, action_term.current_targets), dim=-1).clone()
 
 
+def official_policy_frame_raw_rad(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    action_term_name: str = "hand_joint_pos",
+) -> torch.Tensor:
+    r"""N050 actor 的单帧 raw-rad official-target observation。
+
+    该函数服务 N050 observation-only ablation：保持 LEAP official target-buffer action、reward、ADR
+    与 history contract 不变，只把 official observation 中的 joint state 通道
+
+    $$
+    \tilde q_t = \frac{2q_t-q_{max}-q_{min}}{q_{max}-q_{min}}
+    $$
+
+    替换为真实关节角 $q_t$ 本身。target 通道继续沿用 official / N030 的 raw-rad controller
+    target $u_t$，因此单帧 observation 为：
+
+    $$
+    o_t^{frame}=[q_t,u_t]\in\mathbb R^{32}.
+    $$
+
+    从 RL transition 的角度，policy 在决策时刻 $t$ 看到的是当前物理状态 $q_t$ 与当前
+    controller buffer $u_t$。该 $u_t$ 是上一条 transition 已经写入的 PD target：
+
+    $$
+    u_t=\operatorname{clip}\left(u_{t-1}+\frac{1}{24}a_{t-1}^{exec},q_{min},q_{max}\right).
+    $$
+
+    Args:
+        env: ManagerBasedRLEnv 运行时对象。
+        asset_cfg: 机器人资产配置，需解析出 16 个 official action joint 槽位。
+        action_term_name: ActionManager 中 official target-buffer 动作项的名称。
+
+    Returns:
+        torch.Tensor: 形状为 ``[N, 32]`` 的单帧观测。前 16 维为 $q_t$，单位 rad；
+        后 16 维为 $u_t$，单位 rad。
+
+    Raises:
+        RuntimeError: 当动作项没有 `current_targets` 字段时抛出，避免把该 obs 误接到非 target-buffer action。
+    """
+
+    # 读取真实 articulation joint position，不做 joint-limit normalization，保留物理角度量纲。
+    robot: Articulation = env.scene[asset_cfg.name]  # generated hand articulation，提供 $q_t$。
+    joint_pos = robot.data.joint_pos[:, asset_cfg.joint_ids]  # $q_t$，形状 `[N,16]`，单位 rad。
+
+    # official target-buffer action term 暴露当前 PD target $u_t$，该 buffer 是 N050 必需的 Markov 状态。
+    action_term = env.action_manager.get_term(action_term_name)  # 唯一 hand action term，期望含 `current_targets`。
+    if not hasattr(action_term, "current_targets"):
+        raise RuntimeError(
+            f"official_policy_frame_raw_rad expects action term '{action_term_name}' to expose current_targets."
+        )
+
+    # 拼接 `[q_t,u_t]`；二者同为 rad 量纲，history 仍由 ObservationTermCfg 负责。
+    return torch.cat((joint_pos, action_term.current_targets), dim=-1).clone()  # `[N,32]`，raw-rad proprio-target obs。
+
+
 def raw_policy_frame(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     action_term_name: str = "hand_joint_pos",
     joint_scale_rad: float = torch.pi,
 ) -> torch.Tensor:
-    r"""N040 / heterogeneous-ready actor 的单帧 32D raw observation。
+    r"""N040 / N051 / heterogeneous-ready actor 的单帧 32D unit-scaled raw observation。
 
     当前设计目标是把 official actor 单帧观测
 
@@ -308,9 +364,9 @@ def raw_policy_frame(
       $q_t^{target}$，在 N040 `ADRRelativeJointPositionAction(reference="current")` 下它表示本步 command target
       $q_t^{cmd}$。
 
-    这样设计的目的不是让 official 与 N040 完全同义，而是让 N040 第一刀保持 PPO 输入维度
-    仍为 96D（history 3 帧后），同时把 per-joint-limit normalization 换成跨 variant 更稳定的
-    unit-scaled raw coordinates。
+    对 N040，该函数与 current-relative raw-delta action 同时出现；对 N051，该函数只作为
+    observation-only ablation，action law 仍保持 N030 target-buffer relative。两者共享这份实现，
+    使 `[q/\pi,u/\pi]` 表征可以在不同 action law 下被直接对照。
 
     Args:
         env: ManagerBasedRLEnv 运行时对象。

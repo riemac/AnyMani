@@ -18,9 +18,15 @@ GENERATED_EMA_ABSOLUTE_CFG = (
     / "source/anymani/anymani/tasks/inhand/config/generated_right_t4_i4_m4_r4/"
     / "generated_ema_absolute_env_cfg.py"
 )
+GENERATED_RAW_OBSERVATION_CFG = (
+    REPO_ROOT
+    / "source/anymani/anymani/tasks/inhand/config/generated_right_t4_i4_m4_r4/"
+    / "generated_raw_observation_env_cfg.py"
+)
 GENERATED_REGISTER = REPO_ROOT / "source/anymani/anymani/tasks/inhand/config/generated_right_t4_i4_m4_r4/__init__.py"
 REWARDS_FILE = REPO_ROOT / "source/anymani/anymani/tasks/inhand/mdp/rewards.py"
 GM_ACTION_FILE = REPO_ROOT / "source/anymani/anymani/tasks/gm/mdp/actions/adr_joint_actions.py"
+OBSERVATIONS_FILE = REPO_ROOT / "source/anymani/anymani/tasks/inhand/mdp/observations.py"
 
 
 def _read(path: Path) -> str:
@@ -139,3 +145,51 @@ def test_n041_cfg_replaces_only_action_law_and_keeps_official_obs() -> None:
     assert "LeapHandOfficialADRCommandsCfg" in source
     assert "LeapHandOfficialADRTerminationsCfg" in source
     assert "LeapHandOfficialADRCurriculumCfg" in source
+
+
+def test_n050_n051_register_observation_only_env_ids() -> None:
+    r"""N050/N051 must register explicit train/play ids next to N030/N040/N041."""
+
+    register_source = _read(GENERATED_REGISTER)
+
+    assert "AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-RawRadObs-v0" in register_source
+    assert "AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-RawRadObs-Play-v0" in register_source
+    assert "LeapHandADRGeneratedRightT4I4M4R4RawRadObsEnvCfg" in register_source
+    assert "LeapHandADRGeneratedRightT4I4M4R4RawRadObsEnvCfg_PLAY" in register_source
+
+    assert "AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-UnitRawObs-v0" in register_source
+    assert "AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-UnitRawObs-Play-v0" in register_source
+    assert "LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg" in register_source
+    assert "LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg_PLAY" in register_source
+
+
+def test_n050_n051_cfg_replaces_only_actor_obs_and_keeps_n030_action_mdp() -> None:
+    r"""N050/N051 should isolate observation scaling without changing N030 action/reward/ADR semantics."""
+
+    source = _read(GENERATED_RAW_OBSERVATION_CFG)
+
+    assert "official_policy_frame_raw_rad" in source
+    assert "raw_policy_frame" in source
+    assert "UNIT_RAW_OBS_JOINT_SCALE_RAD = 3.141592653589793" in source
+    assert "GeneratedRightT4I4M4R4OfficialADRActionsCfg" in source
+    assert "GeneratedRightT4I4M4R4OfficialADREventCfg" in source
+    assert "GeneratedRightT4I4M4R4OfficialADRSceneCfg" in source
+    assert "LeapHandOfficialADRRewardsCfg" in source
+    assert "LeapHandOfficialADRCommandsCfg" in source
+    assert "LeapHandOfficialADRTerminationsCfg" in source
+    assert "LeapHandOfficialADRCurriculumCfg" in source
+    assert "history_length=3" in source
+    assert "flatten_history_dim=True" in source
+    assert "ADRRelativeJointPositionActionCfg" not in source
+    assert "ADREMAJointPositionToLimitsActionCfg" not in source
+
+
+def test_n050_raw_rad_obs_term_keeps_target_buffer_in_rad_units() -> None:
+    r"""N050 raw-rad obs must keep official target buffer, not silently switch to last_action."""
+
+    source = _read(OBSERVATIONS_FILE)
+
+    assert "def official_policy_frame_raw_rad" in source
+    assert "torch.cat((joint_pos, action_term.current_targets), dim=-1).clone()" in source
+    assert "official_policy_frame_raw_rad expects action term" in source
+    assert "last_action" not in source[source.index("def official_policy_frame_raw_rad") : source.index("def raw_policy_frame")]

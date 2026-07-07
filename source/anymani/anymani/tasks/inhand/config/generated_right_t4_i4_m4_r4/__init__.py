@@ -6,19 +6,25 @@ import gymnasium as gym
 
 from anymani.tasks.inhand.config.leaphand import agents
 
-from .generated_right_t4_i4_m4_r4_adr_env_cfg import (
-    LeapHandADRGeneratedRightT4I4M4R4EnvCfg,
-    LeapHandADRGeneratedRightT4I4M4R4EnvCfg_PLAY,
-    LeapHandADRGeneratedRightT4I4M4R4NoDtRewardEnvCfg,
-    LeapHandADRGeneratedRightT4I4M4R4NoDtRewardEnvCfg_PLAY,
+from .generated_ema_absolute_env_cfg import (
+    LeapHandADRGeneratedRightT4I4M4R4EMAAbsoluteEnvCfg,
+    LeapHandADRGeneratedRightT4I4M4R4EMAAbsoluteEnvCfg_PLAY,
 )
 from .generated_raw_action_env_cfg import (
     LeapHandADRGeneratedRightT4I4M4R4RawDeltaEnvCfg,
     LeapHandADRGeneratedRightT4I4M4R4RawDeltaEnvCfg_PLAY,
 )
-from .generated_ema_absolute_env_cfg import (
-    LeapHandADRGeneratedRightT4I4M4R4EMAAbsoluteEnvCfg,
-    LeapHandADRGeneratedRightT4I4M4R4EMAAbsoluteEnvCfg_PLAY,
+from .generated_raw_observation_env_cfg import (
+    LeapHandADRGeneratedRightT4I4M4R4RawRadObsEnvCfg,
+    LeapHandADRGeneratedRightT4I4M4R4RawRadObsEnvCfg_PLAY,
+    LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg,
+    LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg_PLAY,
+)
+from .generated_right_t4_i4_m4_r4_adr_env_cfg import (
+    LeapHandADRGeneratedRightT4I4M4R4EnvCfg,
+    LeapHandADRGeneratedRightT4I4M4R4EnvCfg_PLAY,
+    LeapHandADRGeneratedRightT4I4M4R4NoDtRewardEnvCfg,
+    LeapHandADRGeneratedRightT4I4M4R4NoDtRewardEnvCfg_PLAY,
 )
 
 # 训练入口：沿 N010 official-ADR MDP 语义，只把 hand backend 换为 generated right_t4_i4_m4_r4。
@@ -117,6 +123,54 @@ gym.register(
     },
 )
 
+# N050 RawRadObs：继承 N030 generated official-ADR，只把 actor obs 改成 `[q_rad, u_rad]`。
+gym.register(
+    id="AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-RawRadObs-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.generated_raw_observation_env_cfg:"
+        "LeapHandADRGeneratedRightT4I4M4R4RawRadObsEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_official_adr.yaml",
+    },
+)
+
+# N050 Play：用于人工 replay 检查 raw-rad observation 不改变 scene/action/reward 主线。
+gym.register(
+    id="AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-RawRadObs-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.generated_raw_observation_env_cfg:"
+        "LeapHandADRGeneratedRightT4I4M4R4RawRadObsEnvCfg_PLAY",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_official_adr.yaml",
+    },
+)
+
+# N051 UnitRawObs：继承 N030 generated official-ADR，只把 actor obs 改成 `[q/pi, u/pi]`。
+gym.register(
+    id="AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-UnitRawObs-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.generated_raw_observation_env_cfg:"
+        "LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_official_adr.yaml",
+    },
+)
+
+# N051 Play：用于人工 replay 检查 unit-scaled raw observation 不改变 scene/action/reward 主线。
+gym.register(
+    id="AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-UnitRawObs-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.generated_raw_observation_env_cfg:"
+        "LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg_PLAY",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_official_adr.yaml",
+    },
+)
+
 
 __all__ = [
     "LeapHandADRGeneratedRightT4I4M4R4EnvCfg",
@@ -127,4 +181,8 @@ __all__ = [
     "LeapHandADRGeneratedRightT4I4M4R4RawDeltaEnvCfg_PLAY",
     "LeapHandADRGeneratedRightT4I4M4R4EMAAbsoluteEnvCfg",
     "LeapHandADRGeneratedRightT4I4M4R4EMAAbsoluteEnvCfg_PLAY",
+    "LeapHandADRGeneratedRightT4I4M4R4RawRadObsEnvCfg",
+    "LeapHandADRGeneratedRightT4I4M4R4RawRadObsEnvCfg_PLAY",
+    "LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg",
+    "LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg_PLAY",
 ]
