@@ -1,3 +1,11 @@
+0.4.2 - 2026-07-08
+==================
+
+- 新增 generated `right_t4_i4_m4_r4` official-ADR 的 N050/N051 observation ablations：RawRadObs 与 UnitRawObs，并保持独立 train/play Gym id。
+- 将 N050/N051 actor observation 与 N030 official observation 做受控对照：N050 使用 `[q_rad, u_rad]_{t-2:t}`，N051 使用 `[q/pi, u/pi]_{t-2:t}`，其余 action/reward/ADR/command/termination/reset basin 保持 N030 主线。
+- 完成 current-code full-budget N30 rerun，作为 N050/N051 的同代码版本 baseline；旧 N30 继续保留为 low-ADR high-score 与 contact-semantics 风险证据。
+- 基于 TensorBoard 全曲线与人工 replay，将 N051 记录为 accepted observation anchor：后段 reward/rotation 接近或略超 N30，明显优于 N50，但 gait/contact/sim2real 仍需后续 checkpoint sweep 与接触审计。
+
 0.4.1 - 2026-07-06
 ==================
 
