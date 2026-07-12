@@ -1,3 +1,11 @@
+0.4.3 - 2026-07-12
+==================
+
+- 新增 generated `right_t4_i4_m4_r4` 的 `PolicyStepTarget` train/play Gym IDs：继承 UnitRawObs 的 96D observation 与完整 MDP，只替换 target-buffer action lifecycle。
+- 新动作项在每个 policy step 的 `process_actions()` 中只执行一次 $u_{t+1}=\operatorname{clip}(u_t+a_t^{exec}/24)$，physics decimation 内的 `apply_actions()` 只幂等下发同一 target；既有四次累积 action 保留为 checkpoint-compatible 对照。
+- 增加纯 tensor/config contract 与 Isaac Sim lifecycle smoke，验证单次 target recurrence、重复 apply hold、partial reset、96D observation 和语义化注册接口。
+- 清理项目 AGENTS/README/GM overview 中过时的阶段描述与旋转表示教条：quaternion 可作为 Isaac Lab runtime state 或显式 policy feature，policy 表示改为按 frame、reference、符号/branch 与 Markov contract 选择。
+
 0.4.2 - 2026-07-08
 ==================
 
