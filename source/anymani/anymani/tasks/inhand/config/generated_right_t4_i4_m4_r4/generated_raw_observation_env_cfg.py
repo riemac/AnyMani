@@ -208,6 +208,11 @@ class LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg(LeapHandADRGeneratedRigh
 
     该节点回答的是 unit-scaled raw-rad coordinate 本身是否改变 PPO 学习动力学；它不改变
     target-buffer action，因此不同于 N040 current-relative raw-delta action 旁支。
+
+    NOTE：本环境是 `PolicyStepTarget` action-lifecycle 对照的冻结父节点。当前继承的
+    `OfficialADRTargetJointPositionAction` 会在 $d=4$ 次 `apply_actions()` 中累计四次
+    $\alpha a_t^{exec}$；这是既有 checkpoint 的基线语义。对照环境通过子类只覆盖 `actions`
+    group，不能原地修改本类或已有注册入口。
     """
 
     scene: InteractiveSceneCfg = GeneratedRightT4I4M4R4OfficialADRSceneCfg(

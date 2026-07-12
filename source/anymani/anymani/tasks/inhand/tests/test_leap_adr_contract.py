@@ -7,7 +7,10 @@ import torch
 
 pytest.importorskip("pxr", reason="inhand ADR contract imports IsaacLab modules that require USD pxr bindings")
 
-from anymani.tasks.inhand.mdp.actions.adr_relative_action import compute_leap_adr_latency_steps
+from anymani.tasks.inhand.mdp.actions.adr_relative_action import (
+    compute_leap_adr_latency_steps,
+    compute_official_target_update,
+)
 from anymani.tasks.inhand.mdp.curriculums import LeapADRGlobalScheduler, leap_adr_interpolate
 from anymani.tasks.inhand.mdp.events import resample_adr_material_buckets
 
@@ -172,3 +175,23 @@ def test_action_latency_index_matches_leap_formula():
     latency = compute_leap_adr_latency_steps(1.5, random_subtraction, max_latency=3)
 
     assert torch.equal(latency.squeeze(-1), torch.tensor([1, 0, 1, 0]))
+
+
+def test_target_buffer_single_update_matches_policy_step_recurrence_and_limits() -> None:
+    r"""一次 helper 调用必须只实现 $u_{t+1}=clip(u_t+a_t^{exec}/24)$。"""
+
+    previous_targets = torch.tensor([[0.0, 0.99, -0.99]])  # $u_t$，三关节 target，单位 rad。
+    executed_actions = torch.tensor([[0.5, 1.0, -1.0]])  # $a_t^{exec}$，规范化动作。
+    lower_limits = torch.full_like(previous_targets, -1.0)  # $q_{min}$，单位 rad。
+    upper_limits = torch.full_like(previous_targets, 1.0)  # $q_{max}$，单位 rad。
+
+    updated_targets = compute_official_target_update(
+        prev_targets=previous_targets,
+        executed_actions=executed_actions,
+        scale=1.0 / 24.0,
+        lower_limits=lower_limits,
+        upper_limits=upper_limits,
+    )
+
+    expected_targets = torch.tensor([[0.5 / 24.0, 1.0, -1.0]])  # 第一维未裁剪，后两维触及上下限。
+    torch.testing.assert_close(updated_targets, expected_targets, rtol=0.0, atol=1.0e-7)

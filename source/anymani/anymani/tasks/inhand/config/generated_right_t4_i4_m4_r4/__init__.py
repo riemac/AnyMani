@@ -10,6 +10,10 @@ from .generated_ema_absolute_env_cfg import (
     LeapHandADRGeneratedRightT4I4M4R4EMAAbsoluteEnvCfg,
     LeapHandADRGeneratedRightT4I4M4R4EMAAbsoluteEnvCfg_PLAY,
 )
+from .generated_policy_step_target_env_cfg import (
+    LeapHandADRGeneratedRightT4I4M4R4PolicyStepTargetEnvCfg,
+    LeapHandADRGeneratedRightT4I4M4R4PolicyStepTargetEnvCfg_PLAY,
+)
 from .generated_raw_action_env_cfg import (
     LeapHandADRGeneratedRightT4I4M4R4RawDeltaEnvCfg,
     LeapHandADRGeneratedRightT4I4M4R4RawDeltaEnvCfg_PLAY,
@@ -171,6 +175,30 @@ gym.register(
     },
 )
 
+# PolicyStepTarget：继承 UnitRawObs，只把 target-buffer 更新从 physics substep 移到 policy step。
+gym.register(
+    id="AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-PolicyStepTarget-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.generated_policy_step_target_env_cfg:"
+        "LeapHandADRGeneratedRightT4I4M4R4PolicyStepTargetEnvCfg",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_official_adr.yaml",
+    },
+)
+
+# PolicyStepTarget Play：同一 action lifecycle，只降低 env count 并打开 goal marker。
+gym.register(
+    id="AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-PolicyStepTarget-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.generated_policy_step_target_env_cfg:"
+        "LeapHandADRGeneratedRightT4I4M4R4PolicyStepTargetEnvCfg_PLAY",
+        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg_official_adr.yaml",
+    },
+)
+
 
 __all__ = [
     "LeapHandADRGeneratedRightT4I4M4R4EnvCfg",
@@ -185,4 +213,6 @@ __all__ = [
     "LeapHandADRGeneratedRightT4I4M4R4RawRadObsEnvCfg_PLAY",
     "LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg",
     "LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg_PLAY",
+    "LeapHandADRGeneratedRightT4I4M4R4PolicyStepTargetEnvCfg",
+    "LeapHandADRGeneratedRightT4I4M4R4PolicyStepTargetEnvCfg_PLAY",
 ]

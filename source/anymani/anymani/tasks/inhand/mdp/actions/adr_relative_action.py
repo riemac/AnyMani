@@ -22,6 +22,29 @@ $$
 ``last_action`` 仍保持 IsaacLab 语义：它记录 policy 输入 action $a_t$，而不是加噪/延迟后的
 执行 action $a_t^{exec}$。这样保持 `Tactile-ADR-v0` 的 observation dimension 与 N000 baseline
 一致，便于前 100 epoch 做公平对比。
+
+NOTE（target-buffer 生命周期）：当前 `OfficialADRTargetJointPositionAction` 保留的是既有
+N030/N051 与 LEAP IsaacLab demo 的兼容语义。`ManagerBasedRLEnv.step()` 每个 policy step
+只调用一次 `process_actions()`，却会在 decimation loop 中调用四次 `apply_actions()`；当前类又在
+`apply_actions()` 内同时更新 accumulator，因此一次 policy action 实际产生四次 target increment：
+
+$$
+u_{t,k+1}=\operatorname{clip}(u_{t,k}+\alpha a_t^{exec}),
+\qquad k=0,\ldots,d-1,\qquad d=4.
+$$
+
+这不同于原始 LEAP_Hand_Sim / IsaacGym 的控制周期语义。原实现每个 policy/control step 只更新一次：
+
+$$
+u_{t+1}=\operatorname{clip}(u_t+\alpha a_t^{exec}),
+$$
+
+随后在全部 physics substep 中重复下发同一个 $u_{t+1}$。
+
+`PolicyStepADRTargetJointPositionAction` 提供原始 LEAP_Hand_Sim 风格的 lifecycle 对照：新动作项在
+`process_actions()` 中完成一次且仅一次 noise/latency 处理与 target-buffer 更新；
+`apply_actions()` 只幂等地下发已经算好的 target，不再改变 `_previous_targets` / `_current_targets`。
+既有 `OfficialADRTargetJointPositionAction` 不原地修改，使已有 N030/N051 checkpoint 的行为保持可复现。
 """
 
 from __future__ import annotations
@@ -70,9 +93,9 @@ def compute_official_target_update(
     lower_limits: torch.Tensor,
     upper_limits: torch.Tensor,
 ) -> torch.Tensor:
-    r"""计算官方 LEAP 的 target-buffer 关节目标更新。
+    r"""计算一次 LEAP-style target-buffer 关节目标更新。
 
-    官方 DirectRLEnv 的 relative 控制不是 IsaacLab `RelativeJointPositionAction` 的
+    LEAP target-buffer relative 控制不是 IsaacLab `RelativeJointPositionAction` 的
     ``q_t + \Delta q`` 语义，而是维护一个内部 target buffer：
     $$
     q_t^{target}=
@@ -83,6 +106,10 @@ def compute_official_target_update(
     \right),
     \qquad \alpha=\frac{1}{24}.
     $$
+
+    本函数只定义**一次**离散递推，不拥有调用频率语义。调用者若在 decimation loop 中调用
+    $d$ 次，就会得到 $d$ 次累积；若要复刻原始 LEAP_Hand_Sim，应在每个 policy/control step
+    调用一次，并在 physics substep 中只重复下发结果。
 
     Args:
         prev_targets: 上一时刻的目标关节位置 $q_{t-1}^{target}$，形状 ``[N, J]``。
@@ -167,9 +194,9 @@ class ADRRelativeJointPositionActionCfg(actions_cfg.RelativeJointPositionActionC
 
 
 class OfficialADRTargetJointPositionAction(JointAction):
-    r"""官方 LEAP 风格的 target-buffer relative action。
+    r"""既有 N030/N051 使用的 LEAP IsaacLab-compatible target-buffer relative action。
 
-    该动作项复刻官方 DirectRLEnv 的两级语义：
+    该动作项复刻 LEAP IsaacLab demo 的两级语义：
 
     1. 先对 policy 输出的规范化动作加入 ADR action noise，并施加 episode-level latency；
     2. 再把执行动作解释为对内部 target buffer 的增量，而不是对当前关节位置的增量：
@@ -182,6 +209,12 @@ class OfficialADRTargetJointPositionAction(JointAction):
     q_t^{cmd}=q_t+\alpha a_t
     $$
     完全不同；官方 actor 观测中的 `cur_targets` 历史正是围绕这个内部 target buffer 构建的。
+
+    NOTE：本类在 `apply_actions()` 中更新 target accumulator。对当前 $d=4$ 的
+    `ManagerBasedRLEnv`，这意味着同一 $a_t^{exec}$ 每个 policy step 被积分四次。该行为必须保留为
+    N030/N051 已有 checkpoint 的实验基线，不能通过原地搬移代码静默改变。原始 LEAP_Hand_Sim
+    的“一次 policy-step 更新、多个 physics-step hold”语义应由新的
+    `PolicyStepADRTargetJointPositionAction` 实验分支承载。
     """
 
     cfg: OfficialADRTargetJointPositionActionCfg
@@ -277,9 +310,77 @@ class OfficialADRTargetJointPositionAction(JointAction):
 
 @configclass
 class OfficialADRTargetJointPositionActionCfg(actions_cfg.RelativeJointPositionActionCfg):
-    r"""官方 LEAP target-buffer relative action 配置。"""
+    r"""既有 LEAP IsaacLab-compatible target-buffer relative action 配置。
+
+    NOTE：该 cfg 绑定的 action class 会在每次 `apply_actions()` 时推进 target accumulator；它是
+    N030/N051 的兼容基线，不等价于原始 LEAP_Hand_Sim 的 policy-step target update。
+    """
 
     class_type: type[ActionTerm] = OfficialADRTargetJointPositionAction
     max_latency: int = 3
     latency_rand: int = 1
     pregrasp_joint_pos: tuple[float, ...] = ()
+
+
+class PolicyStepADRTargetJointPositionAction(OfficialADRTargetJointPositionAction):
+    r"""每个 policy step 只推进一次 target buffer 的 ADR relative action。
+
+    Isaac Lab 的 ManagerBased lifecycle 为每个 `env.step(a_t)` 调用一次 `process_actions()`，随后在
+    decimation loop 中调用 $d$ 次 `apply_actions()`。本类据此把离散状态转移固定在
+    `process_actions()`：
+
+    $$
+    u_{t+1}=\operatorname{clip}
+    \left(u_t+\alpha a_t^{exec},q_{min},q_{max}\right),
+    \qquad \alpha=\frac{1}{24},
+    $$
+
+    而每次 `apply_actions()` 只向 PD controller 重复下发同一 $u_{t+1}$。因此 target-buffer
+    递推与 physics decimation $d$ 解耦；改变 decimation 只改变 command hold 的 physics 采样数，
+    不会隐式改变一次 policy action 的 target increment。
+
+    Noise 与 latency 仍沿用父类语义，并且 history 每个 policy step 只推进一次。该类保留父类暴露的
+    `raw_actions`、`executed_actions`、`current_targets`、`previous_targets` 与 `pregrasp_targets`
+    runtime contract，使 observation/reward 不需要特殊分支。
+    """
+
+    cfg: PolicyStepADRTargetJointPositionActionCfg
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        r"""生成执行动作，并提交一次 policy-step target-buffer 状态转移。
+
+        Args:
+            actions (torch.Tensor): Policy 输出 $a_t$，形状 `[N_{env},N_a]`，规范化范围通常为
+                $[-1,1]$。
+        """
+
+        # 父类只负责 raw action、ADR noise、policy-step latency history 与 $a_t^{exec}$；不更新 target。
+        super().process_actions(actions)
+
+        # 每个 policy step 执行一次 $u_{t+1}=clip(u_t+\alpha a_t^{exec})$，与 decimation 无关。
+        next_targets = compute_official_target_update(
+            prev_targets=self._previous_targets,
+            executed_actions=self._executed_actions,
+            scale=self._scale,
+            lower_limits=self._joint_lower,
+            upper_limits=self._joint_upper,
+        )  # `[N_env,N_a]`，单位 rad，已投影到 soft joint limits。
+        self._current_targets[:] = next_targets  # 当前 policy interval 内 PD controller 持有的 $u_{t+1}$。
+        self._previous_targets[:] = next_targets  # 下一 policy step 的 accumulator 初值，不在 apply 阶段再推进。
+
+    def apply_actions(self) -> None:
+        r"""幂等地下发当前 target，不改变任何 action/target 状态。"""
+
+        # decimation loop 可重复调用本方法；每次都 hold 同一 $u_{t+1}$，不产生额外积分。
+        self._asset.set_joint_position_target(self._current_targets, joint_ids=self._joint_ids)
+
+
+@configclass
+class PolicyStepADRTargetJointPositionActionCfg(OfficialADRTargetJointPositionActionCfg):
+    r"""Policy-step target-buffer relative action 配置。
+
+    该配置继承 existing ADR noise、latency、joint ordering 与 pre-grasp 参数，只替换 action class 的
+    lifecycle：target update 在 `process_actions()` 中一次完成，`apply_actions()` 为幂等 hold。
+    """
+
+    class_type: type[ActionTerm] = PolicyStepADRTargetJointPositionAction

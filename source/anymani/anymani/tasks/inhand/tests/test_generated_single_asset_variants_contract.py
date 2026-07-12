@@ -1,3 +1,11 @@
+r"""Generated single-asset in-hand variants 的静态 contract tests。
+
+测试文件按稳定的环境/算法语义组织，而不按 N031/N040 等阶段性实验编号分类。实验编号只允许作为
+docstring 中的注释性 provenance；它不进入 AnyMani 的文件分类、公共符号、import 路径或运行时
+contract。函数名描述真正被证伪的 reward、action、observation 或注册语义，使下游实验记录可以引用
+AnyMani，而 AnyMani 本身不反向依赖实验记录目录。
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -23,9 +31,15 @@ GENERATED_RAW_OBSERVATION_CFG = (
     / "source/anymani/anymani/tasks/inhand/config/generated_right_t4_i4_m4_r4/"
     / "generated_raw_observation_env_cfg.py"
 )
+GENERATED_POLICY_STEP_TARGET_CFG = (
+    REPO_ROOT
+    / "source/anymani/anymani/tasks/inhand/config/generated_right_t4_i4_m4_r4/"
+    / "generated_policy_step_target_env_cfg.py"
+)
 GENERATED_REGISTER = REPO_ROOT / "source/anymani/anymani/tasks/inhand/config/generated_right_t4_i4_m4_r4/__init__.py"
 REWARDS_FILE = REPO_ROOT / "source/anymani/anymani/tasks/inhand/mdp/rewards.py"
 GM_ACTION_FILE = REPO_ROOT / "source/anymani/anymani/tasks/gm/mdp/actions/adr_joint_actions.py"
+INHAND_ACTION_FILE = REPO_ROOT / "source/anymani/anymani/tasks/inhand/mdp/actions/adr_relative_action.py"
 OBSERVATIONS_FILE = REPO_ROOT / "source/anymani/anymani/tasks/inhand/mdp/observations.py"
 
 
@@ -35,8 +49,8 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_n031_registers_train_and_play_env_ids() -> None:
-    r"""N031 must register explicit NoDtReward train/play ids next to N030 generated official-ADR."""
+def test_no_dt_reward_variant_registers_train_and_play_env_ids() -> None:
+    r"""NoDtReward（N031）必须在 generated baseline（N030）旁注册独立 train/play ids。"""
 
     register_source = _read(GENERATED_REGISTER)
 
@@ -46,8 +60,8 @@ def test_n031_registers_train_and_play_env_ids() -> None:
     assert "LeapHandADRGeneratedRightT4I4M4R4NoDtRewardEnvCfg_PLAY" in register_source
 
 
-def test_n031_cfg_only_switches_combined_reward_dt_alignment() -> None:
-    r"""N031 should keep N030 semantics and only flip OfficialLeapReward's dt switch."""
+def test_no_dt_reward_variant_only_switches_combined_reward_dt_alignment() -> None:
+    r"""NoDtReward（N031）应保持 N030 语义，只翻转 `OfficialLeapReward` 的 dt 开关。"""
 
     source = _read(GENERATED_ADR_CFG)
 
@@ -57,8 +71,8 @@ def test_n031_cfg_only_switches_combined_reward_dt_alignment() -> None:
     assert "LeapHandADRGeneratedRightT4I4M4R4NoDtRewardEnvCfg_PLAY" in source
 
 
-def test_n040_registers_train_and_play_env_ids() -> None:
-    r"""N040 must register explicit RawDelta train/play ids for direct comparison against N030/N031."""
+def test_raw_delta_variant_registers_train_and_play_env_ids() -> None:
+    r"""RawDelta（N040）必须注册独立 train/play ids，供 N030/N031 直接对照。"""
 
     register_source = _read(GENERATED_REGISTER)
 
@@ -68,8 +82,8 @@ def test_n040_registers_train_and_play_env_ids() -> None:
     assert "LeapHandADRGeneratedRightT4I4M4R4RawDeltaEnvCfg_PLAY" in register_source
 
 
-def test_n040_cfg_replaces_only_action_and_actor_obs_semantics() -> None:
-    r"""N040 should keep official reward/command/termination/ADR but switch to raw actor obs and raw-relative action."""
+def test_raw_delta_variant_replaces_only_action_and_actor_obs_semantics() -> None:
+    r"""RawDelta（N040）只切换 raw actor obs 与 current-relative action，其余 official MDP 保持不变。"""
 
     source = _read(GENERATED_RAW_CFG)
 
@@ -119,8 +133,8 @@ def test_gm_declarative_adr_actions_expose_shared_runtime_contract() -> None:
     assert "compute_ema_joint_command" in source
 
 
-def test_n041_registers_ema_absolute_train_and_play_env_ids() -> None:
-    r"""N041 must register explicit EMAAbsolute train/play ids next to N030/N040."""
+def test_ema_absolute_variant_registers_train_and_play_env_ids() -> None:
+    r"""EMAAbsolute（N041）必须在 N030/N040 旁注册独立 train/play ids。"""
 
     register_source = _read(GENERATED_REGISTER)
 
@@ -130,8 +144,8 @@ def test_n041_registers_ema_absolute_train_and_play_env_ids() -> None:
     assert "LeapHandADRGeneratedRightT4I4M4R4EMAAbsoluteEnvCfg_PLAY" in register_source
 
 
-def test_n041_cfg_replaces_only_action_law_and_keeps_official_obs() -> None:
-    r"""N041 should compare EMA absolute against N030 without introducing raw obs changes."""
+def test_ema_absolute_variant_replaces_only_action_law_and_keeps_official_obs() -> None:
+    r"""EMAAbsolute（N041）只替换 action law，不把 raw observation 混入 N030 对照。"""
 
     source = _read(GENERATED_EMA_ABSOLUTE_CFG)
 
@@ -147,8 +161,8 @@ def test_n041_cfg_replaces_only_action_law_and_keeps_official_obs() -> None:
     assert "LeapHandOfficialADRCurriculumCfg" in source
 
 
-def test_n050_n051_register_observation_only_env_ids() -> None:
-    r"""N050/N051 must register explicit train/play ids next to N030/N040/N041."""
+def test_raw_observation_variants_register_train_and_play_env_ids() -> None:
+    r"""RawRadObs（N050）与 UnitRawObs（N051）必须注册独立 train/play ids。"""
 
     register_source = _read(GENERATED_REGISTER)
 
@@ -163,8 +177,8 @@ def test_n050_n051_register_observation_only_env_ids() -> None:
     assert "LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg_PLAY" in register_source
 
 
-def test_n050_n051_cfg_replaces_only_actor_obs_and_keeps_n030_action_mdp() -> None:
-    r"""N050/N051 should isolate observation scaling without changing N030 action/reward/ADR semantics."""
+def test_raw_observation_variants_only_replace_actor_obs_and_keep_baseline_mdp() -> None:
+    r"""N050/N051 只隔离 observation scaling，不改变 N030 action/reward/ADR 语义。"""
 
     source = _read(GENERATED_RAW_OBSERVATION_CFG)
 
@@ -184,8 +198,8 @@ def test_n050_n051_cfg_replaces_only_actor_obs_and_keeps_n030_action_mdp() -> No
     assert "ADREMAJointPositionToLimitsActionCfg" not in source
 
 
-def test_n050_raw_rad_obs_term_keeps_target_buffer_in_rad_units() -> None:
-    r"""N050 raw-rad obs must keep official target buffer, not silently switch to last_action."""
+def test_raw_rad_observation_keeps_target_buffer_in_rad_units() -> None:
+    r"""RawRadObs（N050）必须保留 raw-rad target buffer，不能静默换成 `last_action`。"""
 
     source = _read(OBSERVATIONS_FILE)
 
@@ -193,3 +207,52 @@ def test_n050_raw_rad_obs_term_keeps_target_buffer_in_rad_units() -> None:
     assert "torch.cat((joint_pos, action_term.current_targets), dim=-1).clone()" in source
     assert "official_policy_frame_raw_rad expects action term" in source
     assert "last_action" not in source[source.index("def official_policy_frame_raw_rad") : source.index("def raw_policy_frame")]
+
+
+def test_policy_step_target_variant_registers_semantic_train_and_play_ids() -> None:
+    r"""PolicyStepTarget 必须使用语义化 public ids，Research 编号不能进入代码接口。"""
+
+    register_source = _read(GENERATED_REGISTER)
+
+    assert "AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-PolicyStepTarget-v0" in register_source
+    assert "AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-PolicyStepTarget-Play-v0" in register_source
+    assert "LeapHandADRGeneratedRightT4I4M4R4PolicyStepTargetEnvCfg" in register_source
+    assert "LeapHandADRGeneratedRightT4I4M4R4PolicyStepTargetEnvCfg_PLAY" in register_source
+    assert "N052" not in register_source
+
+
+def test_policy_step_target_variant_inherits_unit_raw_obs_and_only_overrides_actions() -> None:
+    r"""PolicyStepTarget 必须冻结 UnitRawObs 父 MDP，只替换 action group。"""
+
+    source = _read(GENERATED_POLICY_STEP_TARGET_CFG)
+
+    assert "LeapHandADRGeneratedRightT4I4M4R4UnitRawObsEnvCfg" in source
+    assert "PolicyStepADRTargetJointPositionActionCfg" in source
+    assert "POLICY_STEP_TARGET_SCALE_RAD = 1.0 / 24.0" in source
+    assert "actions: GeneratedRightT4I4M4R4PolicyStepTargetActionsCfg" in source
+    assert "LeapHandOfficialADRRewardsCfg" not in source
+    assert "LeapHandOfficialADRCommandsCfg" not in source
+    assert "LeapHandOfficialADRTerminationsCfg" not in source
+    assert "LeapHandOfficialADRCurriculumCfg" not in source
+    assert "N052" not in source
+
+
+def test_policy_step_action_updates_in_process_and_apply_is_idempotent_hold() -> None:
+    r"""Target recurrence 必须位于 `process_actions()`；`apply_actions()` 只能下发 target。"""
+
+    source = _read(INHAND_ACTION_FILE)
+    class_start = source.index("class PolicyStepADRTargetJointPositionAction(")
+    cfg_start = source.index("class PolicyStepADRTargetJointPositionActionCfg(")
+    class_source = source[class_start:cfg_start]
+    process_start = class_source.index("def process_actions")
+    apply_start = class_source.index("def apply_actions")
+    process_source = class_source[process_start:apply_start]
+    apply_source = class_source[apply_start:]
+
+    assert "compute_official_target_update" in process_source
+    assert "self._current_targets[:] = next_targets" in process_source
+    assert "self._previous_targets[:] = next_targets" in process_source
+    assert "set_joint_position_target" in apply_source
+    assert "compute_official_target_update" not in apply_source
+    assert "_previous_targets" not in apply_source
+    assert "_current_targets[:]" not in apply_source
