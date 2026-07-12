@@ -45,4 +45,11 @@
 
 ## 工程优化
 
-#TODO:包括GPU并行（pre-made也好，post-mutate也好，采样也好，apply也好，都尽可能的并行），Patch / Delta Merge / Deferred Execution 等规则和约定
+优化必须由 profile 证明瓶颈后再改变执行模型：
+
+- pre-made topology、Python object 组装、文件 I/O 通常是 CPU/branch-heavy，不因“GPU 更快”而强制搬运；
+- post-mutate 中的大批同形张量采样/数值计算可以评估 GPU/vectorized backend，但必须保留 deterministic seed
+  与 CPU reference contract；
+- Patch/Delta Merge/Deferred Execution 只有在 benchmark 同时证明吞吐收益、内存可控且错误定位不退化时
+  才进入主路径；
+- 任何并行化都要比较 wall time、峰值内存、accepted/output quota 与导出结果等价性，不以 kernel 数量代替收益。

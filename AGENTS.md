@@ -1,6 +1,7 @@
 # AGENTS.md
 
-本文件为 AnyMani 项目说明。它是基于 Isaac Lab 的灵巧操作研究框架，目前处于 embodiment branch，用于研究和开发 "手型泛化的手内操作" 科研任务。具体背景可见 `AnyMani/Research/总体/科研背景说明.md`。
+AnyMani 是基于 Isaac Lab 的灵巧操作研究框架，服务手型泛化的手内操作。本文只保存稳定的代码边界、
+测试规则和运行入口，不记录某一轮实验进度。
 
 
 ## 项目架构
@@ -23,6 +24,10 @@ assets -> robots -> tasks -> distill
 `robots` 定义“某个手如何被 Isaac Lab spawn”，`tasks` 定义“手在什么任务里交互”，
 `distill` 定义“如何训练跨手型策略”。`distill` 依赖于 `tasks` 定义的环境接口，
 `tasks` 通过 `robots` 消费 `assets` 导出的 asset bank，而不是直接拥有 spawn/importer 细节。
+
+`Research/` 是独立的下游证据与科研记录仓库：它可以引用 AnyMani 的 commit、配置、日志和公开任务接口，
+但 `source/anymani/` 不得 import、解析或要求 Research vault 存在。N052 等实验编号属于 Research，
+AnyMani 文件、公共符号与 Gym ID 使用稳定的算法/环境语义。
 
 ## 开发约定
 

@@ -1,145 +1,113 @@
-# AnyMani - Dexterous Manipulation Extension for Isaac Lab
+# AnyMani
 
-## Overview
+AnyMani is an Isaac Lab research framework for dexterous in-hand manipulation across hand morphologies. It separates
+asset generation, robot spawning, task semantics, and policy training so that each experimental change has an explicit
+contract.
 
-AnyMani is a dexterous manipulation extension for Isaac Lab, focused on in-hand object manipulation using various robotic hands (LeapHand, Allegro, etc.).
+## Architecture
 
-**Key Features:**
+```text
+assets -> robots -> tasks -> distill
+```
 
-- `In-hand Manipulation` Various action spaces: joint-space, SE(3), affine formation
-- `Multi-hand Support` Modular design supports different dexterous hands
-- `Reproducibility` Stable configuration snapshots for model reproducibility
-- `Extensibility` Easy to add new tasks, hands, and MDP components
+| Package | Responsibility |
+| --- | --- |
+| `source/anymani/anymani/assets/` | Generated-hand topology, mutation, validation, export, physics closure, and asset bank |
+| `source/anymani/anymani/robots/` | Lower generated or real hand assets into Isaac Lab robot configurations |
+| `source/anymani/anymani/tasks/` | Scene, observation, action, command, reward, reset, termination, and Gym registration |
+| `source/anymani/anymani/distill/` | RL/IL entrypoints and shared policy/model components |
 
-**Keywords:** dexterous, manipulation, isaaclab, reinforcement learning
+`Research/` is an independent downstream Obsidian vault for experiment evidence and scientific interpretation. Runtime
+code does not require it.
 
 ## Installation
 
-- Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
-  We recommend using the conda installation as it simplifies calling Python scripts from the terminal.
-
-- Clone or copy this project/repository separately from the Isaac Lab installation (i.e. outside the `IsaacLab` directory):
-
-- Using a python interpreter that has Isaac Lab installed, install the library in editable mode using:
-
-    ```bash
-    # use 'PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-    python -m pip install -e source/anymani
-
-- Verify that the extension is correctly installed by:
-
-    - Listing the available tasks:
-
-        ```bash
-        # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-        python scripts/list_envs.py
-        ```
-
-        Available environments include:
-        - `AnyMani-LeapHand-Joint-v0`: Joint-space action (baseline)
-        - `AnyMani-LeapHand-SE3-v0`: SE(3) action space
-        - `AnyMani-LeapHand-Tactile-v0`: With tactile sensors
-        - `AnyMani-LeapHand-RoundTip-v0`: Hemispherical fingertips
-
-    - Running a task:
-
-        ```bash
-        # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-        python scripts/<RL_LIBRARY>/train.py --task=<TASK_NAME>
-        ```
-
-    - Running a task with dummy agents:
-
-        These include dummy agents that output zero or random agents. They are useful to ensure that the environments are configured correctly.
-
-        - Zero-action agent
-
-            ```bash
-            # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-            python scripts/zero_agent.py --task=<TASK_NAME>
-            ```
-        - Random-action agent
-
-            ```bash
-            # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-            python scripts/random_agent.py --task=<TASK_NAME>
-            ```
-
-### Set up IDE (Optional)
-
-To setup the IDE, please follow these instructions:
-
-- Run VSCode Tasks, by pressing `Ctrl+Shift+P`, selecting `Tasks: Run Task` and running the `setup_python_env` in the drop down menu.
-  When running this task, you will be prompted to add the absolute path to your Isaac Sim installation.
-
-If everything executes correctly, it should create a file .python.env in the `.vscode` directory.
-The file contains the python paths to all the extensions provided by Isaac Sim and Omniverse.
-This helps in indexing all the python modules for intelligent suggestions while writing code.
-
-### Setup as Omniverse Extension (Optional)
-
-We provide an example UI extension that will load upon enabling your extension defined in `source/anymani/anymani/ui_extension_example.py`.
-
-To enable your extension, follow these steps:
-
-1. **Add the search path of this project/repository** to the extension manager:
-    - Navigate to the extension manager using `Window` -> `Extensions`.
-    - Click on the **Hamburger Icon**, then go to `Settings`.
-    - In the `Extension Search Paths`, enter the absolute path to the `source` directory of this project/repository.
-    - If not already present, in the `Extension Search Paths`, enter the path that leads to Isaac Lab's extension directory directory (`IsaacLab/source`)
-    - Click on the **Hamburger Icon**, then click `Refresh`.
-
-2. **Search and enable your extension**:
-    - Find your extension under the `Third Party` category.
-    - Toggle it to enable your extension.
-
-## Code formatting
-
-We have a pre-commit template to automatically format your code.
-To install pre-commit:
+Install Isaac Lab first, then install AnyMani into the same Python environment:
 
 ```bash
-pip install pre-commit
+source /home/hac/isaac/env_isaaclab/bin/activate
+python -m pip install -e source/anymani
 ```
 
-Then you can run pre-commit with:
+The project expects the local Isaac Lab checkout at `/home/hac/isaac/IsaacLab` for simulator-backed commands.
+
+## Discover Tasks
 
 ```bash
-pre-commit run --all-files
+source /home/hac/isaac/env_isaaclab/bin/activate
+python scripts/list_envs.py
 ```
 
-## Troubleshooting
+Current task families include:
 
-### Pylance Missing Indexing of Extensions
+- `AnyMani-LeapHand-*`: LEAP-style in-hand baselines and generated-hand controlled variants;
+- `AnyMani-GM-*`: generalized-manipulation generated-hand, single-asset, LEAP, and heterogeneous spawn environments;
+- `AnyMani-GM-*-MLP-v0`: GM task aliases with rl_games MLP training configuration.
 
-In some VsCode versions, the indexing of part of the extensions is missing.
-In this case, add the path to your extension in `.vscode/settings.json` under the key `"python.analysis.extraPaths"`.
+Treat `scripts/list_envs.py` as the source of truth for exact IDs; research node numbers are intentionally not part of
+AnyMani public names.
 
-```json
-{
-    "python.analysis.extraPaths": [
-        "<path-to-ext-repo>/source/leaphand"
-    ]
-}
+## Train and Play
+
+### In-hand rl_games tasks
+
+```bash
+python scripts/rl_games/train.py \
+  --task AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-PolicyStepTarget-v0 \
+  --num_envs 4096 \
+  --seed 42 \
+  --headless
 ```
 
-### Pylance Crash
-
-If you encounter a crash in `pylance`, it is probable that too many files are indexed and you run out of memory.
-A possible solution is to exclude some of omniverse packages that are not used in your project.
-To do so, modify `.vscode/settings.json` and comment out packages under the key `"python.analysis.extraPaths"`
-Some examples of packages that can likely be excluded are:
-
-```json
-"<path-to-isaac-sim>/extscache/omni.anim.*"         // Animation packages
-"<path-to-isaac-sim>/extscache/omni.kit.*"          // Kit UI tools
-"<path-to-isaac-sim>/extscache/omni.graph.*"        // Graph UI tools
-"<path-to-isaac-sim>/extscache/omni.services.*"     // Services tools
-...
+```bash
+python scripts/rl_games/play.py \
+  --task AnyMani-LeapHand-ADR-Generated-right_t4_i4_m4_r4-PolicyStepTarget-Play-v0 \
+  --num_envs 4 \
+  --checkpoint /absolute/path/to/checkpoint.pth \
+  --real-time
 ```
 
-## Documentation index
+### GM MLP tasks
 
-All project docs are consolidated under `source/leaphand/docs/`. Start here:
+```bash
+python -m anymani.distill.train \
+  --task AnyMani-GM-SingleAsset-MLP-v0 \
+  --num_envs 4096 \
+  --headless
+```
 
-- source/leaphand/docs/README.md
+```bash
+python -m anymani.distill.play \
+  --task AnyMani-GM-SingleAsset-MLP-v0 \
+  --checkpoint /absolute/path/to/checkpoint.pth
+```
+
+Use `scripts/random_agent.py` or `scripts/zero_agent.py` for lightweight task startup checks. These do not replace
+task-specific contract tests or Isaac Sim runtime smoke tests.
+
+## Tests
+
+Default pytest paths are contract-only and must not launch Isaac Sim:
+
+```bash
+source /home/hac/isaac/env_isaaclab/bin/activate
+pytest -q
+```
+
+Simulator-backed tests live under `source/anymani/anymani/smokes/isaacsim/` and must be invoked explicitly with a
+timeout. Example:
+
+```bash
+timeout --kill-after=20s 240s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest \
+  source/anymani/anymani/smokes/isaacsim/test_gm_single_asset_structural_collision.py -q -s
+```
+
+Code quality configuration is in `pyproject.toml`, `.pre-commit-config.yaml`, and `pytest.ini`.
+
+## Documentation
+
+- `AGENTS.md`: repository architecture, boundaries, and testing rules;
+- `source/anymani/docs/GM_TEACHER_IMPLEMENTATION_OVERVIEW.md`: current GM implementation surface and remaining gaps;
+- `source/anymani/docs/SINGLE_ASSET_COLLISION_FILTER_ABLATION.md`: generated single-asset collision-filter evidence;
+- `source/anymani/docs/ISAACLAB_GUI_DRIVER_TROUBLESHOOTING.md`: GUI/driver troubleshooting;
+- `source/anymani/anymani/assets/README`: generated asset subsystem contract and entrypoints.

@@ -30,11 +30,13 @@ assets -> robots -> tasks -> distill
 
 ## 训练入口边界
 
-当前 RL 入口统一为 `python -m anymani.distill.train` 与
-`python -m anymani.distill.play`。新增训练路线时优先新增 Gym task alias + agent YAML；
-只有当训练/回放编排本身发生变化时才扩展入口参数。不要为临时 debug/smoke 训练重新创建
-`train_mvp.py`、`train_xxx.py` 或 distill-owned env cfg wrapper；运行时 reset/step/PhysX
-验证放到 `source/anymani/anymani/smokes/` 显式 smoke。
+训练入口按 task family 区分，不宣称尚不存在的统一：
+
+- `tasks/inhand` 的 rl_games 路线使用 `scripts/rl_games/train.py` 与 `scripts/rl_games/play.py`；
+- GM MLP alias 使用 `python -m anymani.distill.train` 与 `python -m anymani.distill.play`。
+
+新增训练路线优先新增 Gym task alias + agent YAML；只有训练/回放编排本身变化时才扩展入口参数。不要为
+临时 debug 创建 `train_xxx.py` 或 distill-owned env cfg wrapper；reset/step/PhysX 验证放到显式 smoke。
 
 ## 模型规模与频率硬约束
 
@@ -50,11 +52,23 @@ RL teacher 的网络规模以 PPO 稳定性为第一约束，不以容量最大�
 
 ## 位姿与旋转的网络表示
 
-总纲沿用 `tasks/gm/AGENTS.md`〖数学偏好〗：矩阵为默认载体，需要线性 / 向量形式时用轴角 / 旋量，回避欧拉角与裸四元数。下面是这条主线落到**网络张量**上的补充，按角色区分，不必教条：
+网络张量不继承“矩阵 > 轴角 > 四元数”的统一排序。每个 feature group 必须先声明它表达的是群元素、
+局部误差、绝对姿态还是移动 reference 下的相对量：
 
-- **位姿 / 几何特征**（如相对位姿边特征 $E_{ij}=T_i^{-1}T_j$、frame 朝向）：作为网络张量优先用旋转矩阵，或其前两列构成的 6D 连续表示（Zhou et al. 2019）——它们连续、无双重覆盖，对学习友好。需要做线性差分（残差、增量、插值）时再取 $so(3)/se(3)$ 旋量。
-- **obs 输入**：表征偏好同上，但这里是“偏好”而非硬约束——网络非线性且容量足够时，连续表征之间（矩阵 / 6D / 单位四元数）对输入端的影响有限。真正的底线是**不要喂裸四元数（双重覆盖 $q\sim-q$）或欧拉角（gimbal 跳变）这类不连续 / 多值量**。command 当前以 $so(3)$ 轴（$k^{h}$）表达旋转轴，保留。
-- **动作输出**：当前 teacher 动作是**关节空间**逐关节 rad 增量标量，旋转表示不适用于动作本身，无需 SE(3) 化。
+- **几何计算**：$T_i^{-1}T_j$ 的 composition/inverse 先在 $SE(3)$ 语义中定义；送入网络时再按消融选择
+  matrix、rot6d、quaternion 或 local $se(3)$ coordinates。
+- **Relative log feature**：只有 reference/goal 对 policy 可观测或其更新律确定，且误差分布远离 $\pi$
+  branch 时，才直接使用 $\log(R_{ref}R^{-1})^{\vee}$。隐藏且移动的 reference 会引入部分可观测；
+  这不是“相对表示天然非平稳”，而是 observation contract 缺少 reference state。
+- **Absolute orientation feature**：不存在全局连续、无奇异的三维最小参数化。rot6d/full matrix 通常更适合
+  全姿态输入；quaternion 也允许使用，但必须固定 `(w,x,y,z)`、规范化和符号策略，并测试 $q\sim-q$。
+- **Quaternion runtime state**：可以直接消费 Isaac Lab canonical quaternion，不要求为遵守风格而立即转换。
+  `quat_unique` 只选择一个符号分支，并不会消除所有边界不连续；需要时间连续性时应显式做相邻帧符号对齐。
+- **Euler/RPY**：不作为匿名网络 feature；只有外部 schema 明确要求时使用，并记录顺序与 frame。
+- **动作输出**：当前 teacher 是关节空间标量，不因 orientation feature 选型而强制 SE(3) 化。
+
+Representation 是实验 contract。变更时至少测试 shape、frame/reference、符号/branch 边界以及 goal resample
+前后的 Markov 信息是否完整。
 
 ## 技术栈
 

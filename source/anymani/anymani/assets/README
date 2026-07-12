@@ -3,7 +3,7 @@ AnyMani Assets
 
 `source/anymani/anymani/assets/` 是 AnyMani 的手资产生成子项目。
 
-当前版本：`0.2.1`
+当前版本：`0.3.1`
 
 它负责的不是单一 URDF 导出，而是一整条可追溯的资产生产链：
 

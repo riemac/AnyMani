@@ -44,7 +44,8 @@
 
 ### 3. 自包含性
 
-资产生成相关实现、文档、版本记录保持在 `AnyMani/source/anymani/anymani/assets/` 内部，不把子项目知识散落到别处。
+资产生成 contract 的权威实现、README、VERSION 与 CHANGELOG 保持在本目录。下游 `robots/tasks/distill`
+可以引用导出的 URDF、sidecar、bank schema 与版本锚点，但不得复制或重新定义生成/验证/physics closure 逻辑。
 
 ### 4. 测试优先
 

@@ -4,13 +4,15 @@
 
 ## 边界
 
-`gm` 只定义环境语义：scene、obs、action、reward、reset、termination、command，以及少量 Gym 注册入口。
+`gm` 定义环境语义：scene、obs、action、reward、reset、termination、command，以及 Gym 注册入口。
 
-不要把训练算法、checkpoint、rollout dataset、asset-bank split、asset 采样策略、网络结构塞进这里。这些属于 `distill`。
+不要把训练算法、checkpoint、rollout dataset 或网络结构塞进这里。这些属于 `distill`。
 
 不要把资产生成、validator、mesh 物理闭包、post-mutate 逻辑塞进这里。这些属于 `assets`。
 
-`gm` 可以消费一个已经选好的 hand asset，并声明它对 `hand.urdf` / `hand.yaml` 的最低 contract；但不拥有整个 asset bank。
+环境 variant 可以声明可复现的 asset binding、subset、routing 与 same-schema 约束，因为这些参数决定 scene
+能否实例化。资产生成、bank 构建和 train/validation split 仍不属于 `gm`；不要把实验 split policy 隐藏在
+底层 MDP term 中。训练入口可以覆盖 task cfg 的默认 selection，但不能反向接管 scene/MDP 语义。
 
 reset 初始状态分布仍属 `gm` 任务语义：例如 hand joint reset、object pose reset、
 object reset anchor 记录、hand orientation reset scaffold。能直接复用 IsaacLab
@@ -21,7 +23,9 @@ object reset anchor 记录、hand orientation reset scaffold。能直接复用 I
 
 保持浅目录。任务差异优先通过 MDP 组件组合表达，不提前拆 `manipulation/`、`grasp/` 等深目录。
 
-当前主线是 same-topology post-mutated hand assets 的层次通才 RL 环境；跨拓扑 unified policy、mesh feature learning、teacher-student distillation 暂由 `distill` 后续承接。
+`gm` 与 `tasks/inhand` 是并列任务族：前者承载 generalized manipulation 组件与 generated-hand 组合面，
+后者承载 LEAP-style in-hand 对照。不要把某一时刻的实验主线写成永久目录所有权，也不要假设一方已经
+替代另一方。跨拓扑 unified policy、teacher-student distillation 和网络结构仍由 `distill` 承接。
 
 ### 声明式配置驱动
 
@@ -31,46 +35,42 @@ ManagerBasedRLEnv 本身就是一个高度声明式、配置驱动的环境框�
 
 ### Config 变体结构
 
-`config/<variant>/` 放具体实验构型：single asset、某个真实手、某组 generated hand bank，或后续异构并行训练 preset。每个 variant 可以自包含定义 scene / sim / command / action / observation / reward / reset / termination / curriculum group；不要为了“复用”牺牲当前实验文件的可读性。
+`config/<variant>/` 放具体环境构型：single asset、某个真实手、某组 generated hand bank 或异构并行
+preset。每个 variant 可以自包含定义 scene / sim / command / action / observation / reward / reset /
+termination / curriculum group；不要为了“复用”牺牲当前实验文件的可读性。
 
 `inhand_env_cfg.py` 可以作为 GM in-hand manipulation 的参考 / base assembly surface，但不是强制继承对象。group 是实验组合面，不限定只能使用 `gm_mdp`；可以组合 IsaacLab 官方 `isaac_mdp`、AnyMani 自有 MDP，或未来从 LEAP / AnyRotate / 其他项目适配来的 term。外部参考逻辑一旦沉淀，应优先适配成 AnyMani 中命名清楚的 callable，并在配置注释中说明来源和实验语义。
 
-当前 single-asset 主线位于 `config/single_asset/`。根目录不再保留 `single_asset_env_cfg.py` 兼容壳，避免旧路径继续污染实验语义。
+single-asset generated probe 位于 `config/single_asset/`；真实 LEAP 对照位于 `config/leap/`。根目录不保留
+旧式 variant 兼容壳，避免废弃路径继续污染实验语义。
 
-### 测试策略
+### 测试重点
 
-`gm` 的纯 MDP 逻辑应尽量 TDD：obs/action 量纲、SO(3) command、reward 曲线、termination anchor、reset event 拆分语义，都应能用 fake env / 小 tensor 做 contract test。需要 Isaac Sim 的 articulation loading、contact sensor、PhysX step、完整 reset/step，则用 headless smoke / integration test，不要求像纯函数一样严格 TDD。
-
-凡实现会改变 reset 初始状态分布、reward 成功判据或坐标系语义，至少补一个能失败的最小测试或 smoke 记录，避免训练跑很久才发现数学方向错了。
-
-GM 的测试应围绕“科研命题能在哪里被证伪”来选层级：配置组合、坐标系公式、reward 曲线和 reset 参数分布优先用 contract test；只在 Isaac Sim runtime 才存在的事实，例如 stage authoring、importer 结果、scene clone 后的实体、传感器读数、PhysX 初始化后的 handle 与 reset/step 生命周期，必须补 `source/anymani/anymani/smokes/isaacsim/` 下的显式 headless smoke。contract test 只能证明“我们声明了什么”，runtime smoke 才能证明“仿真实际看见了什么”。
-
-IsaacSim smoke 不放入 `tasks/gm/tests/`，也不加入默认 `pytest.ini testpaths`。运行时必须显式指定路径，并用 `timeout --kill-after` 防止 Kit 卡住。单资产 generated structural collision filter 的当前 smoke 是一个具体例子：
-
-```bash
-cd /home/hac/isaac/AnyMani
-source /home/hac/isaac/env_isaaclab/bin/activate
-timeout --kill-after=20s 240s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest \
-  source/anymani/anymani/smokes/isaacsim/test_gm_single_asset_structural_collision.py -q -s
-```
+仓库级 contract/runtime 分层遵守根 `AGENTS.md`，本文件只补充 GM 的高风险命题：frame algebra、command
+reference、rotation representation、reset anchor、contact filter 与 reward buffer ownership 优先用纯
+tensor/config contract；generated articulation、ContactSensor、USD collision pairs 和完整 reset/step 必须用
+`source/anymani/anymani/smokes/isaacsim/` 的显式 smoke。改变 reset 分布、success 判据或 frame 语义时，
+至少补一个能够直接证伪该变化的测试。
 
 ## 数学偏好
 
-机器人学相关的算法、脚本、变量与注释，统一仿照《Modern Robotics》的群 / 李代数体系表达，保持学术严谨，不要临时拼凑角度约定。
+机器人学算法、变量与注释使用明确的 $SO(3)/SE(3)$、frame 和 reference 语义，但**不存在脱离用途的
+统一表示优先级**。矩阵、rot6d、quaternion 与局部 log 各自解决不同问题：
 
-**表示优先级**：
+- **几何复合与标定**：用 $R\in SO(3)$、$T\in SE(3)$ 写清 composition、inverse 和 frame chain。
+  矩阵是群元素的自然实现，但其 9/16 个元素有约束且冗余，不能描述成无约束欧氏空间中的唯一双射。
+- **局部姿态残差**：可用 $\phi=\log(R)^{\vee}\in\mathbb R^3$，但必须写明 principal branch。
+  它只适合局部误差；接近 $\theta=\pi$ 时存在不可避免的分支不连续。
+- **Simulator/runtime state**：Isaac Lab 的 `(w,x,y,z)` quaternion 可以作为 canonical buffer，并可直接做
+  compose/inverse。不要因为旧偏好强制“读取后立即转走”。
+- **Policy observation / command**：rot6d、matrix、quaternion 或 local log 都是实验 contract。必须声明
+  frame、absolute/relative reference、reference 更新律、维度与连续性处理。Quaternion 进入网络时必须固定
+  `(w,x,y,z)`，说明 `quat_unique` 或时间连续符号策略，并测试 $q\sim -q$ 的符号边界。
+- **Markov 性**：相对量本身不天然非平稳；若 reference/goal 的移动状态对 policy 隐藏，才会造成部分可观测
+  或表观非平稳。使用 relative log 时必须让 reference 状态或其确定更新律可推断，并检查 goal jump。
+- **Euler/RPY**：只用于明确命名的 URDF、配置或 Isaac Lab API 字段；同时写明旋转顺序和参考 frame。
 
-1. **首选位姿矩阵 / 旋转矩阵**（$T \in SE(3)$、$R \in SO(3)$）。它们与群同构，完备、无奇异、是唯一无歧义的双射，应作为位姿存储、复合、求逆、传递的默认载体。
-2. **需要线性 / 向量形式时，优先轴角与旋量**（$\bm{\omega}\theta \in \mathbb{R}^3$、$\mathcal{S}\theta \in \mathbb{R}^6$，分别与 $so(3)$、$se(3)$ 同构）。它们是李代数上的线性量，便于做残差、插值、雅可比与特征；代价是 $\theta \to \pi$ 附近存在奇异，使用处须显式处理或回避。当前 command 即采用 axis + so(3) 形式。
-3. **回避欧拉角 / RPY 与裸四元数作为内部表示**。仅在与外部接口对接的边界上换算：URDF、可视化、以及 Isaac Lab 官方 API（查询 body 位姿时它必然返回四元数）——拿到后尽快换算回矩阵 / 旋量再进入自己的逻辑。
-
-记号示例，大小写区分向量与矩阵：
-- $\text{Log}: SO(3) \to so(3)$ — 大写，返回**矩阵**（skew-symmetric）
-- $\text{log}: SO(3) \to \mathbb{R}^3$ — 小写，返回**向量**
-
-反过来：
-- $\text{exp}: so(3) \to SO(3)$ — 矩阵指数
-- $\text{Exp}: \mathbb{R}^3 \to SO(3)$
+不要依赖全项目 `Log/log/Exp/exp` 大小写惯例；每个公式或函数在局部定义其输入、输出与 hat/vee 语义。
 
 ## Jargon
 
@@ -88,7 +88,9 @@ timeout --kill-after=20s 240s /home/hac/isaac/IsaacLab/isaaclab.sh -p -m pytest 
 
 ### Hand frame / orientation reset 约定
 
-配置层优先使用旋转矩阵和平移向量 $(R,p)$，实现层应组合为 $T\in SE(3)$ 进行复合、求逆和传递；只有在 Isaac Lab 边界（如 `ArticulationCfg.InitialStateCfg.rot` 或 `write_root_pose_to_sim`）才转换为 `(w,x,y,z)` 四元数。`so3` / 全 $SO(3)$ 随机采样实现时可以使用四元数算法，但文档和中间语义仍以 $SO(3)$ / $SE(3)$ 表达。
+配置和文档用 $(R,p)$ 或 $T\in SE(3)$ 写清 frame chain；实现可以在矩阵与 `(w,x,y,z)` quaternion
+之间选择最贴近当前 API 的 canonical state，只要组合方向和转换边界明确。全 $SO(3)$ 随机采样可使用
+quaternion 算法，科研语义仍应说明采样的是 Haar-uniform 群分布还是受限局部扰动。
 
 `robots.hand_spawn.HandFrameCfg` 是 generated-hand spawn 路径的静态装配锚点，记录：
 
@@ -109,13 +111,7 @@ $$
 
 反算给 MDP 配置消费，同时保持 official asset 文件本身不变。
 
-orientation domain randomization 的默认语义是 hand-frame body/right 扰动：从 anchor 出发右乘 $\Delta R_h$，即 $R'_{eh}=R_{eh}^{anchor}\Delta R_h$。默认 reference mode 应为 `anchor`，保证 reset 初态是 i.i.d. 分布；`current` 随机游走只作为未来 continual perturbation / curriculum 预留。
-
-## Progress
-
-当前正在进行单资产 MLP 训练，来排查资产合理性和核验 MDP 模块正确性，有两个成功案例值得当前对比和借鉴
-
-- LEAP_Hand_Isaac_Lab/source/LEAP_Isaaclab/LEAP_Isaaclab/tasks/leap_hand_reorient/reorientation_env.py
-  > LEAP Hand 官方的 IsaacLab 手内操作任务 demo，训练效果既快又好，只训练绕 z 轴的旋转
-- IsaacLab/source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/inhand/config/allegro_hand/allegro_env_cfg.py
-  > IsaacLab 官方的随机重定向任务，command 偏向当前我这版，训练效果也不错
+orientation domain randomization 目前只是 declarative scaffold，尚未由 active reset event 写入 sim。未来实现的
+默认语义是 hand-frame body/right 扰动：从 anchor 右乘 $\Delta R_h$，即
+$R'_{eh}=R_{eh}^{anchor}\Delta R_h$。`anchor` 表示 i.i.d. reset；`current` 只允许用于显式 continual
+perturbation/curriculum，不能静默变成 episode 间随机游走。
