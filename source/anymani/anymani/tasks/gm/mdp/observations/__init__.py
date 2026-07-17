@@ -5,65 +5,56 @@ IsaacLab RL 既然服务于层次通才专家训练阶段，用于训练 special
 命令、接触和特权信息。更复杂的 geometry tensor / token 表征仍由 `distill/` 接管；
 本 package 只提供 GM MDP 层需要的浅 observation terms。
 
-本 package 保持外部扁平 API：`anymani.tasks.gm.mdp.joint_pos_raw`、
-`gm_mdp.fingertip_contact_binary` 等调用不变。
+外部仍通过扁平 `gm_mdp.*` API 消费 terms；内部文件按 state、tactile、privileged、geometry
+与 command 语义分工，不按某个实验 route 复制 observation 实现。
 """
 
 from __future__ import annotations
 
 from .observations_command import reorient_command
-from .observations_contact import (
-    fingertip_contact_binary,
-    fingertip_contact_force,
-    tactile_finger_non_tip_bits,
-    tactile_palm_force_ema,
-    tactile_tip_contact_bits,
-    tactile_tip_force_ema,
-)
 from .observations_geometry import joint_soft_pos_limits
-from .observations_priv import object_orientation, object_pos
+from .observations_priv import (
+    adr_actual_state,
+    object_goal_task_state,
+    object_orientation,
+    object_pos,
+    reward_release_coefficient,
+)
 from .observations_state import (
     joint_pos_limit_normalized,
     joint_pos_raw,
+    joint_target,
     joint_vel_raw,
     last_action,
     last_processed_action,
 )
 from .observations_tactile import (
-    tactile_joint_position,
-    tactile_joint_target,
-    tactile_joint_velocity,
-    tactile_last_policy_action,
-    tactile_object_task_state,
-    tactile_reward_release_coefficient,
-    tactile_rotation_critic_state,
-    tactile_rotation_policy_frame,
-    tactile_rotation_privileged_task_state,
+    finger_non_tip_contact_bits_ema,
+    fingertip_contact_binary,
+    fingertip_contact_force,
+    palm_force_magnitude_ema,
+    tip_contact_bits_ema,
+    tip_force_magnitude_ema,
 )
 
 __all__ = [
+    "adr_actual_state",
+    "finger_non_tip_contact_bits_ema",
     "fingertip_contact_binary",
     "fingertip_contact_force",
     "joint_pos_limit_normalized",
     "joint_pos_raw",
     "joint_soft_pos_limits",
+    "joint_target",
     "joint_vel_raw",
     "last_action",
     "last_processed_action",
+    "object_goal_task_state",
     "object_orientation",
     "object_pos",
+    "palm_force_magnitude_ema",
     "reorient_command",
-    "tactile_finger_non_tip_bits",
-    "tactile_joint_position",
-    "tactile_joint_target",
-    "tactile_joint_velocity",
-    "tactile_last_policy_action",
-    "tactile_object_task_state",
-    "tactile_palm_force_ema",
-    "tactile_reward_release_coefficient",
-    "tactile_tip_contact_bits",
-    "tactile_tip_force_ema",
-    "tactile_rotation_critic_state",
-    "tactile_rotation_policy_frame",
-    "tactile_rotation_privileged_task_state",
+    "reward_release_coefficient",
+    "tip_contact_bits_ema",
+    "tip_force_magnitude_ema",
 ]

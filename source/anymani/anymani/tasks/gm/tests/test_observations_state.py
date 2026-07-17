@@ -87,6 +87,7 @@ def test_last_action_and_last_processed_action_remain_distinct_contracts() -> No
     action_term = SimpleNamespace(
         raw_actions=torch.tensor([[1.0, -1.0]], dtype=torch.float32),  # policy raw output，无量纲
         processed_actions=torch.tensor([[0.1, -0.1]], dtype=torch.float32),  # scale 后 $\Delta q$，单位 rad
+        current_targets=torch.tensor([[0.4, 0.8]], dtype=torch.float32),  # recurrent target $u_t$，单位 rad
     )
     action_manager = SimpleNamespace(
         action=torch.tensor([[1.0, -1.0, 0.5]], dtype=torch.float32),  # manager 拼接后的完整 raw action
@@ -97,3 +98,21 @@ def test_last_action_and_last_processed_action_remain_distinct_contracts() -> No
     assert torch.allclose(module.last_action(env), torch.tensor([[1.0, -1.0, 0.5]], dtype=torch.float32))
     assert torch.allclose(module.last_action(env, action_name="hand_joint_pos"), action_term.raw_actions)
     assert torch.allclose(module.last_processed_action(env, action_name="hand_joint_pos"), action_term.processed_actions)
+    assert torch.allclose(module.joint_target(env, action_name="hand_joint_pos"), action_term.current_targets)
+
+
+def test_raw_joint_state_terms_share_resolved_joint_order() -> None:
+    r"""$q$ 与 $\dot q$ 必须复用同一个 resolved joint subset/order。"""
+
+    module = _load_observations_state_module()
+    asset_cfg = _SceneEntityCfgStub("robot", joint_ids=[2, 0])
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            joint_pos=torch.tensor([[0.1, 0.2, 0.3]]),
+            joint_vel=torch.tensor([[1.0, 2.0, 3.0]]),
+        )
+    )
+    env = SimpleNamespace(scene={"robot": robot})
+
+    torch.testing.assert_close(module.joint_pos_raw(env, asset_cfg), torch.tensor([[0.3, 0.1]]))
+    torch.testing.assert_close(module.joint_vel_raw(env, asset_cfg), torch.tensor([[3.0, 1.0]]))

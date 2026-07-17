@@ -87,12 +87,6 @@ def get_gm_adr_state(env: Any, action_dim: int = 16) -> GmADRState:
     return state
 
 
-def gm_adr_state_observation(env: Any, action_dim: int = 16) -> torch.Tensor:
-    r"""返回 privileged critic 使用的 `[B,48]` actual ADR tensor。"""
-
-    return get_gm_adr_state(env, action_dim).values
-
-
 def _resolve_env_ids(
     env: Any,
     env_ids: Sequence[int] | torch.Tensor | slice | None,
@@ -106,4 +100,4 @@ def _resolve_env_ids(
     return torch.as_tensor(env_ids, dtype=torch.long, device=env.device)
 
 
-__all__ = ["ADR_STATE_DIM", "ADR_STATE_SLICES", "GmADRState", "get_gm_adr_state", "gm_adr_state_observation"]
+__all__ = ["ADR_STATE_DIM", "ADR_STATE_SLICES", "GmADRState", "get_gm_adr_state"]

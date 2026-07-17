@@ -766,20 +766,20 @@ class GmTactileRotationCurrentPolicyObsCfg(ObsGroup):
     r"""GRU route 的 `[B,52]` 当前 deployment frame，按字段声明顺序拼接。"""
 
     joint_pos = _policy_term(
-        gm_mdp.tactile_joint_position,
-        params={"robot_cfg": TACTILE_JOINT_CFG},
+        gm_mdp.joint_pos_raw,
+        params={"asset_cfg": TACTILE_JOINT_CFG},
         scale=1.0 / math.pi,
     )  # `[B,16]`，$q_t/\pi$
     joint_target = _policy_term(
-        gm_mdp.tactile_joint_target,
+        gm_mdp.joint_target,
         params={"action_name": "hand_joint_pos"},
         scale=1.0 / math.pi,
     )  # `[B,16]`，$u_t/\pi$
     last_policy_action = _policy_term(
-        gm_mdp.tactile_last_policy_action,
+        gm_mdp.last_action,
         params={"action_name": "hand_joint_pos"},
     )  # `[B,16]`，$a_{t-1}^{policy}$
-    tip_contact_bits = _policy_term(gm_mdp.tactile_tip_contact_bits, params=_contact_params())  # `[B,4]`
+    tip_contact_bits = _policy_term(gm_mdp.tip_contact_bits_ema, params=_contact_params())  # `[B,4]`
 
     def __post_init__(self):
         self.enable_corruption = False
@@ -791,27 +791,27 @@ class GmTactileRotationHistory30PolicyObsCfg(ObsGroup):
     r"""TCN route 的 `[B,30,52]` oldest-to-latest semantic-term histories。"""
 
     joint_pos = _policy_term(
-        gm_mdp.tactile_joint_position,
-        params={"robot_cfg": TACTILE_JOINT_CFG},
+        gm_mdp.joint_pos_raw,
+        params={"asset_cfg": TACTILE_JOINT_CFG},
         scale=1.0 / math.pi,
         history_length=30,
         flatten_history_dim=False,
     )
     joint_target = _policy_term(
-        gm_mdp.tactile_joint_target,
+        gm_mdp.joint_target,
         params={"action_name": "hand_joint_pos"},
         scale=1.0 / math.pi,
         history_length=30,
         flatten_history_dim=False,
     )
     last_policy_action = _policy_term(
-        gm_mdp.tactile_last_policy_action,
+        gm_mdp.last_action,
         params={"action_name": "hand_joint_pos"},
         history_length=30,
         flatten_history_dim=False,
     )
     tip_contact_bits = _policy_term(
-        gm_mdp.tactile_tip_contact_bits,
+        gm_mdp.tip_contact_bits_ema,
         params=_contact_params(),
         history_length=30,
         flatten_history_dim=False,
@@ -827,25 +827,25 @@ class GmTactileRotationCriticObsCfg(ObsGroup):
     r"""当前 152D central critic；shared fields 与 actor 采用完全相同的数值口径。"""
 
     joint_pos = ObsTerm(
-        func=gm_mdp.tactile_joint_position,
-        params={"robot_cfg": TACTILE_JOINT_CFG},
+        func=gm_mdp.joint_pos_raw,
+        params={"asset_cfg": TACTILE_JOINT_CFG},
         scale=1.0 / math.pi,
     )  # 16D $q_t/\pi$
     joint_velocity = ObsTerm(
-        func=gm_mdp.tactile_joint_velocity,
-        params={"robot_cfg": TACTILE_JOINT_CFG},
+        func=gm_mdp.joint_vel_raw,
+        params={"asset_cfg": TACTILE_JOINT_CFG},
     )  # 16D raw rad/s
     joint_target = ObsTerm(
-        func=gm_mdp.tactile_joint_target,
+        func=gm_mdp.joint_target,
         params={"action_name": "hand_joint_pos"},
         scale=1.0 / math.pi,
     )  # 16D $u_t/\pi$
     last_policy_action = ObsTerm(
-        func=gm_mdp.tactile_last_policy_action,
+        func=gm_mdp.last_action,
         params={"action_name": "hand_joint_pos"},
     )  # 16D
     object_task_state = ObsTerm(
-        func=gm_mdp.tactile_object_task_state,
+        func=gm_mdp.object_goal_task_state,
         params={
             "command_name": "goal_pose",
             "semantic_R_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_R_ha,
@@ -853,11 +853,11 @@ class GmTactileRotationCriticObsCfg(ObsGroup):
             "object_cfg": SceneEntityCfg("object"),
         },
     )  # 15D pose/velocity state
-    tip_force_ema = ObsTerm(func=gm_mdp.tactile_tip_force_ema, params=_contact_params())  # 4D N
-    palm_force_ema = ObsTerm(func=gm_mdp.tactile_palm_force_ema, params=_contact_params())  # 1D N
-    finger_non_tip_bits = ObsTerm(func=gm_mdp.tactile_finger_non_tip_bits, params=_contact_params())  # 19D
-    adr_actual = ObsTerm(func=gm_mdp.gm_adr_state_observation, params={"action_dim": 16})  # 48D
-    reward_release = ObsTerm(func=gm_mdp.tactile_reward_release_coefficient)  # 1D $\lambda_{rew}$
+    tip_force_ema = ObsTerm(func=gm_mdp.tip_force_magnitude_ema, params=_contact_params())  # 4D N
+    palm_force_ema = ObsTerm(func=gm_mdp.palm_force_magnitude_ema, params=_contact_params())  # 1D N
+    finger_non_tip_bits = ObsTerm(func=gm_mdp.finger_non_tip_contact_bits_ema, params=_contact_params())  # 19D
+    adr_actual = ObsTerm(func=gm_mdp.adr_actual_state, params={"action_dim": 16})  # 48D
+    reward_release = ObsTerm(func=gm_mdp.reward_release_coefficient)  # 1D $\lambda_{rew}$
 
     def __post_init__(self):
         self.enable_corruption = False

@@ -67,8 +67,9 @@ def test_history_variant_only_overrides_policy_observations() -> None:
     source = _source()
     assert "joint_pos = _policy_term(" in source
     assert "history_length=30" in source
-    assert "func=gm_mdp.tactile_joint_position" in source
-    assert "func=gm_mdp.tactile_object_task_state" in source
+    assert "func=gm_mdp.joint_pos_raw" in source
+    assert "func=gm_mdp.object_goal_task_state" in source
+    assert "gm_mdp.tip_contact_bits_ema" in source
     assert "scale=1.0 / math.pi" in source
 
 

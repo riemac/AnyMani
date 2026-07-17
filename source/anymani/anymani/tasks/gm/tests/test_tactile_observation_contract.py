@@ -1,4 +1,4 @@
-r"""52D actor / 103D privileged task / 152D central critic 的纯 tensor contracts。"""
+r"""Tactile rotation privileged terms 与 observation module ownership contracts。"""
 
 from __future__ import annotations
 
@@ -10,11 +10,14 @@ from types import SimpleNamespace
 
 import torch
 
+OBS_DIR = Path(__file__).resolve().parents[1] / "mdp" / "observations"
+r"""GM observation modules 目录；用于锁定 state/tactile/priv 三类语义所有权。"""
 
-def _load_observation_module():
-    r"""用最小 math/state stubs 加载 composite observation 文件。"""
 
-    module_path = Path(__file__).resolve().parents[1] / "mdp" / "observations" / "observations_tactile.py"
+def _load_privileged_observation_module() -> types.ModuleType:
+    r"""用最小 math/command/ADR stubs 加载 `observations_priv.py`。"""
+
+    module_path = OBS_DIR / "observations_priv.py"
     package_names = (
         "anymani",
         "anymani.tasks",
@@ -39,10 +42,8 @@ def _load_observation_module():
     managers_stub.SceneEntityCfg = lambda name, **kwargs: SimpleNamespace(name=name, **kwargs)
     command_stub = types.ModuleType("anymani.tasks.gm.mdp.commands.tactile_rotation_command")
     command_stub.ensure_post_physics_progress_updated = lambda env, _name: env.command
-    contact_stub = types.ModuleType("anymani.tasks.gm.mdp.tactile_contact_state")
-    contact_stub.get_tactile_contact_state = lambda env, *_args, **_kwargs: env.contact
     adr_stub = types.ModuleType("anymani.tasks.gm.mdp.adr_state")
-    adr_stub.gm_adr_state_observation = lambda env, action_dim=16: env.adr_state
+    adr_stub.get_gm_adr_state = lambda env, _action_dim=16: SimpleNamespace(values=env.adr_state)
     replacements.update(
         {
             "isaaclab": types.ModuleType("isaaclab"),
@@ -51,7 +52,6 @@ def _load_observation_module():
             "isaaclab.utils": types.ModuleType("isaaclab.utils"),
             "isaaclab.utils.math": math_stub,
             "anymani.tasks.gm.mdp.commands.tactile_rotation_command": command_stub,
-            "anymani.tasks.gm.mdp.tactile_contact_state": contact_stub,
             "anymani.tasks.gm.mdp.adr_state": adr_stub,
         }
     )
@@ -59,10 +59,10 @@ def _load_observation_module():
     try:
         sys.modules.update(replacements)
         spec = importlib.util.spec_from_file_location(
-            "anymani.tasks.gm.mdp.observations.observations_tactile_contract", module_path
+            "anymani.tasks.gm.mdp.observations.observations_priv_contract", module_path
         )
         if spec is None or spec.loader is None:
-            raise RuntimeError(f"Cannot load tactile observations from {module_path}")
+            raise RuntimeError(f"Cannot load privileged observations from {module_path}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
@@ -74,73 +74,14 @@ def _load_observation_module():
                 sys.modules[name] = old_module
 
 
-def _robot(batch: int) -> SimpleNamespace:
-    r"""构造 16-DOF fake articulation data。"""
+def test_object_goal_and_training_context_terms_have_exact_shapes() -> None:
+    r"""Privileged module 应独立提供 15D task、48D ADR 与 1D reward-release state。"""
 
-    return SimpleNamespace(
-        data=SimpleNamespace(
-            joint_pos=torch.arange(batch * 16, dtype=torch.float32).reshape(batch, 16),
-            joint_vel=torch.full((batch, 16), 2.0),
-            root_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(batch, 1),
-        )
-    )
-
-
-def _action_manager(batch: int) -> SimpleNamespace:
-    r"""构造暴露 target/raw policy action 的 fake action manager。"""
-
-    action_term = SimpleNamespace(
-        current_targets=torch.full((batch, 16), torch.pi),
-        raw_actions=torch.full((batch, 16), -0.5),
-    )
-    return SimpleNamespace(get_term=lambda _name: action_term)
-
-
-def _contact(batch: int) -> SimpleNamespace:
-    r"""构造 4 tip / 19 finger-non-tip / 1 palm 的共享 contact snapshot。"""
-
-    return SimpleNamespace(
-        tip_bits=torch.tensor([[True, False, True, False]]).repeat(batch, 1),
-        tip_force_ema=torch.arange(4, dtype=torch.float32).repeat(batch, 1),
-        palm_force_ema=torch.full((batch, 1), 7.0),
-        finger_non_tip_bits=torch.zeros(batch, 19, dtype=torch.bool),
-    )
-
-
-def test_actor_frame_is_52d_in_exact_order_and_needs_no_privileged_state() -> None:
-    r"""四个 semantic terms 应独立闭合，并按固定顺序组成 52D deployment frame。"""
-
-    module = _load_observation_module()
+    module = _load_privileged_observation_module()
     batch = 2
-    robot = _robot(batch)
-    env = SimpleNamespace(
-        num_envs=batch,
-        device="cpu",
-        scene={"robot": robot},  # 故意不提供 object
-        action_manager=_action_manager(batch),
-        contact=_contact(batch),
+    robot = SimpleNamespace(
+        data=SimpleNamespace(root_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(batch, 1))
     )
-    robot_cfg = SimpleNamespace(name="robot", joint_ids=list(range(16)))
-
-    joint_pos = module.tactile_joint_position(env, robot_cfg=robot_cfg) / torch.pi
-    joint_target = module.tactile_joint_target(env) / torch.pi
-    last_action = module.tactile_last_policy_action(env)
-    tip_bits = env.contact.tip_bits.float()  # atomic contact term 已由 tactile contact contract 单独覆盖
-    frame = torch.cat((joint_pos, joint_target, last_action, tip_bits), dim=-1)
-
-    assert frame.shape == (batch, 52)
-    assert torch.allclose(frame[:, :16], robot.data.joint_pos / torch.pi)
-    assert torch.allclose(frame[:, 16:32], torch.ones(batch, 16))  # target $u=\pi$ -> 1
-    assert torch.allclose(frame[:, 32:48], torch.full((batch, 16), -0.5))
-    assert torch.equal(frame[:, 48:].bool(), env.contact.tip_bits)
-
-
-def test_privileged_and_full_critic_shapes_are_103_and_152() -> None:
-    r"""Critic semantic terms 必须闭合为 103 task/contact + 48 ADR + 1 curriculum。"""
-
-    module = _load_observation_module()
-    batch = 2
-    robot = _robot(batch)
     object_asset = SimpleNamespace(
         data=SimpleNamespace(
             root_pos_w=torch.zeros(batch, 3),
@@ -153,33 +94,40 @@ def test_privileged_and_full_critic_shapes_are_103_and_152() -> None:
         num_envs=batch,
         device="cpu",
         scene={"robot": robot, "object": object_asset},
-        action_manager=_action_manager(batch),
-        contact=_contact(batch),
-        adr_state=torch.arange(batch * 48, dtype=torch.float32).reshape(batch, 48),
         command=SimpleNamespace(
             position_anchor_w=torch.zeros(batch, 3),
             goal_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).repeat(batch, 1),
         ),
+        adr_state=torch.arange(batch * 48, dtype=torch.float32).reshape(batch, 48),
         _gm_reward_curriculum_lambda=torch.tensor(0.75),
     )
-    robot_cfg = SimpleNamespace(name="robot", joint_ids=list(range(16)))
-    object_cfg = SimpleNamespace(name="object")
-    kwargs = {
-        "command_name": "goal_pose",
-        "fingertip_sensor_names": ("t0", "t1", "t2", "t3"),
-        "finger_non_tip_sensor_names": tuple(f"n{i}" for i in range(19)),
-        "palm_sensor_name": "palm",
-        "robot_cfg": robot_cfg,
-        "object_cfg": object_cfg,
-    }
 
-    task_state = module.tactile_rotation_privileged_task_state(env, **kwargs)
-    critic_state = module.tactile_rotation_critic_state(env, **kwargs)
+    task_state = module.object_goal_task_state(env, command_name="goal_pose")
+    adr_state = module.adr_actual_state(env)
+    reward_release = module.reward_release_coefficient(env)
 
-    assert task_state.shape == (batch, 103)
-    assert critic_state.shape == (batch, 152)
-    assert torch.allclose(critic_state[:, :103], task_state)
-    assert torch.allclose(task_state[:, :16], robot.data.joint_pos / torch.pi)  # shared $q/\pi$
-    assert torch.allclose(task_state[:, 32:48], torch.ones(batch, 16))  # shared $u/\pi$
-    assert torch.allclose(critic_state[:, 103:151], env.adr_state)
-    assert torch.allclose(critic_state[:, 151], torch.full((batch,), 0.75))
+    assert task_state.shape == (batch, 15)
+    assert adr_state.shape == (batch, 48)
+    assert reward_release.shape == (batch, 1)
+    torch.testing.assert_close(task_state[:, :3], torch.zeros(batch, 3))
+    torch.testing.assert_close(task_state[:, 3:9], torch.tensor([[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]]).repeat(batch, 1))
+    torch.testing.assert_close(task_state[:, 9:12], torch.full((batch, 3), 0.25))
+    torch.testing.assert_close(task_state[:, 12:15], torch.full((batch, 3), 0.5))
+    torch.testing.assert_close(adr_state, env.adr_state)
+    torch.testing.assert_close(reward_release, torch.full((batch, 1), 0.75))
+
+
+def test_observation_modules_follow_state_tactile_privileged_ownership() -> None:
+    r"""Contact 文件与 task-level composite helpers 均应出清，只保留语义模块。"""
+
+    assert not (OBS_DIR / "observations_contact.py").exists()
+    state_source = (OBS_DIR / "observations_state.py").read_text(encoding="utf-8")
+    tactile_source = (OBS_DIR / "observations_tactile.py").read_text(encoding="utf-8")
+    priv_source = (OBS_DIR / "observations_priv.py").read_text(encoding="utf-8")
+    all_source = state_source + tactile_source + priv_source
+
+    assert "def joint_target(" in state_source
+    assert "def tip_contact_bits_ema(" in tactile_source
+    assert "def object_goal_task_state(" in priv_source
+    assert "tactile_rotation_policy_frame" not in all_source
+    assert "tactile_rotation_critic_state" not in all_source

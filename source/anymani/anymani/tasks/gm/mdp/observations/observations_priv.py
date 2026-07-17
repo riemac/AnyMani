@@ -57,6 +57,9 @@ import torch
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 
+from ..adr_state import get_gm_adr_state
+from ..commands.tactile_rotation_command import ensure_post_physics_progress_updated
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -296,4 +299,72 @@ def object_orientation(
     raise ValueError(f"Unsupported frame for object_orientation: {frame}.")
 
 
-__all__ = ["object_orientation", "object_pos"]
+def object_goal_task_state(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    semantic_R_ha: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    r"""构造 central critic 使用的 15D object/goal task state。
+
+    顺序固定为 `[position_delta_h3, goal_relative_rot6d6, linear_velocity_h3,
+    angular_velocity_h3]`。位置相对 episode reset anchor，旋转为 $R_g^{-1}R_o$ 的前两列；
+    位置、线速度和角速度分别保留 m、m/s 与 rad/s。
+
+    Returns:
+        torch.Tensor: privileged task state，形状 `[B,15]`。
+    """
+
+    command = ensure_post_physics_progress_updated(env, command_name)  # 当前 post-physics goal/anchor snapshot
+    robot: Articulation = env.scene[robot_cfg.name]  # hand raw root orientation $R_{wa}$
+    object_asset: RigidObject = env.scene[object_cfg.name]  # object pose/velocity canonical source
+    R_ha = _semantic_R_ha_tensor(env, semantic_R_ha)  # raw asset `{a}` 到 hand semantic `{h}`
+
+    # 平移和速度先从 world 旋回 `{a}`，再经静态标定进入 `{h}`。
+    position_delta_w = object_asset.data.root_pos_w - command.position_anchor_w  # `[B,3]`，m
+    position_delta_a = math_utils.quat_apply_inverse(robot.data.root_quat_w, position_delta_w)  # $R_{aw}\Delta p^w$
+    position_delta_h = position_delta_a @ R_ha.T  # $R_{ha}R_{aw}\Delta p^w$，`[B,3]`
+    linear_velocity_a = math_utils.quat_apply_inverse(robot.data.root_quat_w, object_asset.data.root_lin_vel_w)
+    angular_velocity_a = math_utils.quat_apply_inverse(robot.data.root_quat_w, object_asset.data.root_ang_vel_w)
+    linear_velocity_h = linear_velocity_a @ R_ha.T  # object root linear velocity，`[B,3]`，m/s
+    angular_velocity_h = angular_velocity_a @ R_ha.T  # object root angular velocity，`[B,3]`，rad/s
+
+    # $R_{go}=R_{wg}^{T}R_{wo}$；前两列形成连续 6D orientation feature。
+    current_rot_w = math_utils.matrix_from_quat(object_asset.data.root_quat_w)  # $R_{wo}$，`[B,3,3]`
+    goal_rot_w = math_utils.matrix_from_quat(command.goal_quat_w)  # $R_{wg}$，`[B,3,3]`
+    relative_rot = goal_rot_w.transpose(-1, -2) @ current_rot_w  # $R_g^{-1}R_o$，`[B,3,3]`
+    relative_rot6d = torch.cat((relative_rot[:, :, 0], relative_rot[:, :, 1]), dim=-1)  # `[B,6]`
+    return torch.cat((position_delta_h, relative_rot6d, linear_velocity_h, angular_velocity_h), dim=-1)  # `[B,15]`
+
+
+def adr_actual_state(env: ManagerBasedRLEnv, action_dim: int = 16) -> torch.Tensor:
+    r"""返回每个 env 当前 episode 固化的 actual ADR state，形状 `[B,48]`。"""
+
+    return get_gm_adr_state(env, action_dim).values  # actual samples，不返回 curriculum endpoint/range
+
+
+def reward_release_coefficient(
+    env: ManagerBasedRLEnv,
+    reward_lambda_attr_name: str = "_gm_reward_curriculum_lambda",
+) -> torch.Tensor:
+    r"""返回 central critic 使用的 reward-release 系数 $\lambda_{rew}\in[0,1]$。
+
+    Returns:
+        torch.Tensor: per-env column，形状 `[B,1]`，无量纲。
+    """
+
+    reward_lambda = getattr(env, reward_lambda_attr_name, 0.0)  # global scalar 或显式 `[B]` state
+    coefficient = torch.as_tensor(reward_lambda, dtype=torch.float32, device=env.device)
+    if coefficient.ndim == 0:
+        coefficient = coefficient.expand(env.num_envs)  # global curriculum scalar -> per-env view
+    return coefficient.reshape(env.num_envs, 1)  # `[B,1]`
+
+
+__all__ = [
+    "adr_actual_state",
+    "object_goal_task_state",
+    "object_orientation",
+    "object_pos",
+    "reward_release_coefficient",
+]

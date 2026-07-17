@@ -1,48 +1,18 @@
-r"""State observation terms for GM in-hand manipulation.
+r"""GM robot/action 的时变 state observation terms。
 
-DONE(state obs): 关节本体感受 (proprioception)，逐步变化的动态量，属于 obs mdp。
+本模块只负责从 articulation 与 ActionManager 读取当前动态状态，不决定 policy 的最终数值尺度。
+例如 tactile rotation 在 config 中对 $q_t$ 与 target $u_t$ 施加 $1/\pi$，而其他对照环境可直接
+消费 raw rad。当前公开语义为：
 
-符号约定：$q_i$ 为第 $i$ 个关节角 (rad)，$\dot q_i$ 为关节角速度 (rad/s)，
-$q_i^{\min}, q_i^{\max}$ 为该关节的 soft 限位 (rad)；下标 $i$ 遍历 surviving revolute joints。
-坐标系语义见 `gm/AGENTS.md` 的 `{a} -> {h}` 约定。
+- `joint_pos_raw`: $q_t$，单位 rad；
+- `joint_pos_limit_normalized`: soft-limit 归一化位置，范围 $[-1,1]$；
+- `joint_vel_raw`: $\dot q_t$，单位 rad/s；
+- `joint_target`: action term 当前 recurrent target $u_t$，单位 rad；
+- `last_action`: 上一帧 raw policy output，无量纲；
+- `last_processed_action`: action term scale/clip 后的 processed action，单位由具体 action law 定义。
 
-NOTE(设计决策，已与用户对齐): 关节位置主线采用 **raw rad 表征** $q_i$，
-而非 IsaacLab 默认的 `joint_pos_limit_normalized`（即 $q_i^{\text{norm}}$）。
-该决策依据 `Research/总体/层次通才策略训练.md` 的 state obs 小组划分；
-同时本模块保留 `joint_pos_limit_normalized` 作为官方子集的等价 GM wrapper，
-用于 LEAP / single-asset 对照实验把外部 term 收敛到 `gm_mdp` 命名空间。
-
-其中归一化变换定义为（IsaacLab `scale_transform` 语义，本项目刻意不采用）：
-$$
-q_i^{\text{norm}} = \frac{2\,(q_i - q_i^{\min})}{q_i^{\max} - q_i^{\min}} - 1 \in [-1, 1]
-$$
-
-为何用 $q_i$ 而非 $q_i^{\text{norm}}$：
-
-1. 跨 variant 语义不变性：资产由同一建模约定生成，home position 近似共面；
-   同一关节 raw rad 在不同 post-mutate variant、乃至真实 leap/allegro URDF
-   对齐到 `{h}` 后语义一致。
-2. post-mutate 只变 joint limit $[q_i^{\min},q_i^{\max}]$，不变零位/轴向语义；
-   $q_i$ 是跨 variant / sim2sim 的不变量，归一化值会抹掉真实构型差异。
-3. 恢复代价非对称：若用 $q_i^{\text{norm}}$ 还原 $q_i$，需要网络拟合
-   $q_i^{\text{norm}}\cdot(q_i^{\max}-q_i^{\min})$ 这类乘性算子。
-4. 数值尺度友好：raw 关节角通常落在温和有界区间（约 $[-0.8,1.5]$ rad），适合 PPO。
-
-本模块实现的 state obs：
-
-- `q_raw`: `asset.data.joint_pos[:, joint_ids]`，单位 rad；
-- `q_limit_norm`: `q_raw` 经 soft joint limits 线性缩放到 $[-1,1]$，无量纲；
-- `dq_raw`: `asset.data.joint_vel[:, joint_ids]`，单位 rad/s；
-- `last_action`: 上一步实际下发的 raw rad delta $\Delta_{t-1}$，单位 rad。
-
-NOTE(last_action 与动作空间的耦合): 动作空间已确定为 raw rad delta（方案 C，
-`ClampedRelativeJointPositionAction`），故 last action 也应在 raw rad 空间。
-IsaacLab 内置 `isaac_mdp.last_action` 返回 `raw_actions`，即 policy NN 输出在
-scale/clip 前的值，不是实际下发的 `processed_actions`。因此本模块读取 action term 的
-`processed_actions`，使 last_action 与 $q_i$ 处于同物理量纲。
-
-边界：$q_i^{\min}/q_i^{\max}$ 是时间常量，属于形态 / geometry 量，不放入本 state
-模块，避免 history_length $H>1$ 时把静态量重复堆叠 $H$ 次。
+所有 joint tensors 都继承 `SceneEntityCfg.joint_ids` 的 resolved order。静态 joint limits 的独立
+geometry 表示仍由 `observations_geometry.py` 所有，避免在 temporal history 中重复静态形态量。
 """
 
 from __future__ import annotations
@@ -63,8 +33,7 @@ def joint_pos_raw(
 ) -> torch.Tensor:
     r"""读取 hand articulation 的 raw joint position $q$。
 
-    这是 `gm` teacher state obs 的主线关节位置项，刻意不使用 IsaacLab 的
-    `joint_pos_limit_normalized`。数学语义为：
+    数学语义为：
     $$
     \mathbf{q}_t = [q_{1,t},\dots,q_{n,t}] \in \mathbb{R}^{n},
     $$
@@ -87,11 +56,7 @@ def joint_pos_limit_normalized(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    r"""复刻 IsaacLab 官方 joint-limit normalized position observation。
-
-    该 term 是 `isaac_mdp.joint_pos_limit_normalized` 的 GM 命名空间等价物，
-    不是当前 AnyMani raw-rad 主线的替代。它服务于官方 LEAP / single-asset
-    交叉对照：在不改变张量语义的前提下，把配置层统一改成 `gm_mdp.*`。
+    r"""返回 IsaacLab soft-limit normalized joint position。
 
     对每个关节 $i$，soft limit 归一化定义为：
     $$
@@ -141,26 +106,45 @@ def joint_vel_raw(
     return asset.data.joint_vel[:, asset_cfg.joint_ids]  # $\dot q_i$，raw rad/s
 
 
+def joint_target(
+    env: ManagerBasedRLEnv,
+    action_name: str = "hand_joint_pos",
+) -> torch.Tensor:
+    r"""读取 action term 当前 recurrent joint target $u_t$。
+
+    对 policy-step target action，$u_t$ 是跨 physics decimation hold 的关节位置目标，单位 rad。
+    它不是 raw policy action，也不是本 step 的 target increment。
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
+        action_name (str): 暴露 `current_targets` 的 action term 名称。
+
+    Returns:
+        torch.Tensor: 当前 target，形状 `[B,N_j]`，单位 rad。
+
+    Raises:
+        RuntimeError: action term 不暴露 tensor `current_targets`。
+    """
+
+    action_term = env.action_manager.get_term(action_name)  # policy-step target state owner
+    current_targets = getattr(action_term, "current_targets", None)  # $u_t$，`[B,N_j]`，rad
+    if not isinstance(current_targets, torch.Tensor):
+        raise RuntimeError(f"Action term '{action_name}' must expose tensor current_targets for joint_target obs.")
+    return current_targets
+
+
 def last_processed_action(
     env: ManagerBasedRLEnv,
     action_name: str = "hand_joint_pos",
 ) -> torch.Tensor:
-    r"""读取上一帧实际下发的 raw rad delta action。
-
-    IsaacLab 内置 `last_action(action_name=...)` 返回 `raw_actions`，即 policy 网络输出
-    在 scale / clip 前的无量纲值。`gm` 的动作空间已经固定为 raw relative delta：
-    $$
-    \Delta_t = a_t^{\mathrm{raw}}\,s \quad (\mathrm{rad}),
-    $$
-    因此 state obs 中的 last action 必须读取 action term 的 `processed_actions`，
-    才与 $q$、$\dot q$ 和 soft limits 处在同一个物理量纲系统内。
+    r"""读取 action term scale/clip 后的 processed action。
 
     Args:
         env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
         action_name (str): `ActionManager` 中的 action term 名称，默认 `hand_joint_pos`。
 
     Returns:
-        torch.Tensor: 上一步 processed action，形状 `[num_envs, num_joints]`，单位 rad。
+        torch.Tensor: processed action，形状 `[B,A_{term}]`；单位由 action term 定义。
 
     Raises:
         RuntimeError: 若 action term 不暴露 `processed_actions`，说明 obs/action 合同不匹配。
@@ -180,9 +164,9 @@ def last_action(
     env: ManagerBasedRLEnv,
     action_name: str | None = None,
 ) -> torch.Tensor:
-    r"""复刻 IsaacLab 官方 last raw action observation。
+    r"""读取上一帧 raw policy action。
 
-    该 term 与 `last_processed_action` 故意并存，分别表达两种实验语义：
+    该 term 与 `last_processed_action` 分别表达两种实验语义：
 
     - `last_action`: policy 网络上一帧输出的 raw action，无量纲，复刻 IsaacLab 官方；
     - `last_processed_action`: action term 经 scale / clip 后实际下发的 $\Delta q$，单位 rad。
@@ -207,4 +191,11 @@ def last_action(
     return action_term.raw_actions  # `[B,A_term]`，该 action term 的 raw policy output
 
 
-__all__ = ["joint_pos_limit_normalized", "joint_pos_raw", "joint_vel_raw", "last_action", "last_processed_action"]
+__all__ = [
+    "joint_pos_limit_normalized",
+    "joint_pos_raw",
+    "joint_target",
+    "joint_vel_raw",
+    "last_action",
+    "last_processed_action",
+]

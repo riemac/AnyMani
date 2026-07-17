@@ -1,139 +1,112 @@
-r"""GM tactile rotation 的语义 observation terms 与固定 52D/152D wire contract。
+r"""GM tactile/contact sensor observation terms。
 
-ObservationGroup 按 config 声明顺序拼接独立物理块。Actor 只含 deployment-available
-proprioception、target、policy action 与 tip bits；object、goal、palm、finger non-tip、ADR
-和 reward curriculum 只进入 central critic。文件末尾保留 composite helpers，供 runtime smoke
-直接核对最终 wire；正式环境配置不再把整个 observation 藏在单一 MDP term 中。
+本模块按传感模态而非具体任务组织 observation：
+
+- `fingertip_contact_force` 与 `fingertip_contact_binary` 直接读取当前 ContactSensor snapshot；
+- `*_ema` terms 读取 `GmTactileContactState` 的 policy-rate shared snapshot，使 actor、critic、reward
+  和 diagnostics 在同一 policy step 使用完全相同的滤波后接触证据。
+
+瞬时 contact 与 EMA contact 是两种明确不同的测量语义，因此函数名显式携带 `ema`。力向量可表达在
+hand semantic frame `{h}` 或 env/world 轴 `{e}`；EMA terms 当前输出 force magnitude 或 threshold bits，
+不携带方向。传感器顺序继承 hand sidecar，不在 observation 内按名称重新排序。
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import isaaclab.utils.math as math_utils
 import torch
-from isaaclab.assets import Articulation, RigidObject
+from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 
-from ..adr_state import gm_adr_state_observation
-from ..commands.tactile_rotation_command import ensure_post_physics_progress_updated
-from ..tactile_contact_state import get_tactile_contact_state
+from ...contact_sensors import sensor_total_force_w
+from ..tactile_contact_state import GmTactileContactState, get_tactile_contact_state
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
-TACTILE_ACTOR_FRAME_DIM = 52
-TACTILE_PRIVILEGED_TASK_DIM = 103
-TACTILE_CRITIC_STATE_DIM = 152
+FrameName = Literal["h", "e"]
+r"""Contact force vector 的输出坐标轴：hand semantic `{h}` 或 env/world `{e}`。"""
 
 
-def tactile_joint_position(
+def _semantic_R_ha_tensor(env: ManagerBasedRLEnv, semantic_R_ha: tuple[float, ...]) -> torch.Tensor:
+    r"""把 row-major $R_{ha}$ 配置转换为 env-device `[3,3]` tensor。"""
+
+    return torch.tensor(semantic_R_ha, dtype=torch.float32, device=env.device).reshape(3, 3)  # $v^h=R_{ha}v^a$
+
+
+def fingertip_contact_force(
     env: ManagerBasedRLEnv,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=[".*"], preserve_order=True),
-) -> torch.Tensor:
-    r"""返回 canonical joint position $q_t$，形状 `[B,16]`，单位 rad。"""
-
-    robot: Articulation = env.scene[robot_cfg.name]  # generated articulation canonical source
-    return robot.data.joint_pos[:, robot_cfg.joint_ids]  # $q_t$，由 ObsTerm.scale 决定是否除以 $\pi$
-
-
-def tactile_joint_velocity(
-    env: ManagerBasedRLEnv,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=[".*"], preserve_order=True),
-) -> torch.Tensor:
-    r"""返回 canonical joint velocity $\dot q_t$，形状 `[B,16]`，单位 rad/s。"""
-
-    robot: Articulation = env.scene[robot_cfg.name]  # critic privileged proprioception source
-    return robot.data.joint_vel[:, robot_cfg.joint_ids]  # 保留真实单位，central RMS 再做统计标准化
-
-
-def tactile_joint_target(env: ManagerBasedRLEnv, action_name: str = "hand_joint_pos") -> torch.Tensor:
-    r"""返回 policy-step target buffer $u_t$，形状 `[B,16]`，单位 rad。"""
-
-    current_targets, _ = _action_term_tensors(env, action_name)
-    return current_targets  # actor/critic 共用同一 source；ObsTerm.scale 统一为 $1/\pi$
-
-
-def tactile_last_policy_action(env: ManagerBasedRLEnv, action_name: str = "hand_joint_pos") -> torch.Tensor:
-    r"""返回 wrapper-clamped raw policy action $a_{t-1}^{policy}$，形状 `[B,16]`。"""
-
-    _, raw_actions = _action_term_tensors(env, action_name)
-    return raw_actions  # 不读取 ADR noise/latency 后的 executed action，避免向 actor 泄漏 corruption
-
-
-def tactile_object_task_state(
-    env: ManagerBasedRLEnv,
-    command_name: str,
-    semantic_R_ha: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0),
+    sensor_names: tuple[str, ...],
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    semantic_R_ha: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+    frame: FrameName = "h",
 ) -> torch.Tensor:
-    r"""构造 15D object/goal privileged task state。
+    r"""读取各 fingertip 对 object 的瞬时总接触力。
 
-    顺序为 `[position_delta_h3, goal-relative-rot6d6, linear_velocity_h3,
-    angular_velocity_h3]`。位置单位 m，速度单位 m/s 与 rad/s；旋转使用
-    $R_g^{-1}R_o$ 的前两列 6D 表示。
+    `frame="h"` 时执行：
+    $$
+    F_k^h=R_{ha}R_{aw}F_k^w,
+    $$
+    得到固定在整只手上的语义轴，而不是随单根 fingertip link 快速旋转的 sensor-local 轴。
+    `frame="e"` 保留 world/env 轴向，用于坐标表征消融。
+
+    Args:
+        env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
+        sensor_names (tuple[str, ...]): fingertip sensors 的 canonical sidecar order。
+        robot_cfg (SceneEntityCfg): hand articulation root pose source。
+        semantic_R_ha (tuple[float, ...]): raw asset `{a}` 到 hand semantic `{h}` 的旋转矩阵。
+        frame (FrameName): 输出轴，`"h"` 或 `"e"`。
+
+    Returns:
+        torch.Tensor: 形状 `[B,3K]` 的 force vectors，单位 N。
     """
 
-    command = ensure_post_physics_progress_updated(env, command_name)  # 当前 post-physics command snapshot
-    robot: Articulation = env.scene[robot_cfg.name]  # `{a}->{w}` hand root pose
-    object_asset: RigidObject = env.scene[object_cfg.name]  # object canonical pose/velocity source
-    R_ha = torch.tensor(semantic_R_ha, dtype=torch.float32, device=env.device).reshape(3, 3)  # $R_{ha}$
-
-    # 先从 world 变换到 raw asset `{a}`，再应用静态语义标定得到 hand frame `{h}`。
-    position_delta_w = object_asset.data.root_pos_w - command.position_anchor_w  # `[B,3]`，m
-    position_delta_a = math_utils.quat_apply_inverse(robot.data.root_quat_w, position_delta_w)  # $R_{aw}\Delta p^w$
-    position_delta_h = position_delta_a @ R_ha.T  # row-vector form of $R_{ha}\Delta p^a$
-    linear_velocity_a = math_utils.quat_apply_inverse(robot.data.root_quat_w, object_asset.data.root_lin_vel_w)
-    angular_velocity_a = math_utils.quat_apply_inverse(robot.data.root_quat_w, object_asset.data.root_ang_vel_w)
-    linear_velocity_h = linear_velocity_a @ R_ha.T  # `[B,3]`，m/s
-    angular_velocity_h = angular_velocity_a @ R_ha.T  # `[B,3]`，rad/s
-
-    # $R_{go}=R_{wg}^{T}R_{wo}$；取前两列得到连续 6D orientation feature。
-    current_rot_w = math_utils.matrix_from_quat(object_asset.data.root_quat_w)  # `[B,3,3]`
-    goal_rot_w = math_utils.matrix_from_quat(command.goal_quat_w)  # `[B,3,3]`
-    relative_rot = goal_rot_w.transpose(-1, -2) @ current_rot_w  # $R_g^{-1}R_o$
-    relative_rot6d = torch.cat((relative_rot[:, :, 0], relative_rot[:, :, 1]), dim=-1)  # `[B,6]`
-    return torch.cat((position_delta_h, relative_rot6d, linear_velocity_h, angular_velocity_h), dim=-1)  # `[B,15]`
+    robot_asset: Articulation = env.scene[robot_cfg.name]  # hand root orientation $R_{wa}$
+    R_ha = _semantic_R_ha_tensor(env, semantic_R_ha)  # `{a}->{h}` 静态语义标定
+    forces = []  # 每个 sensor 一项 `[B,3]`，最终严格按 `sensor_names` 拼接
+    for sensor_name in sensor_names:
+        force_w = sensor_total_force_w(env, sensor_name)  # 瞬时 world-frame total force，`[B,3]`，N
+        if frame == "e":
+            forces.append(force_w)  # world/env 轴不做旋转
+            continue
+        if frame != "h":
+            raise ValueError(f"Unsupported frame for fingertip_contact_force: {frame}.")
+        force_a = math_utils.quat_apply_inverse(robot_asset.data.root_quat_w, force_w)  # $R_{aw}F^w$
+        forces.append(force_a @ R_ha.T)  # row-vector form of $F^h=R_{ha}F^a$
+    return torch.cat(forces, dim=-1)  # `[B,3K]`，单位 N
 
 
-def tactile_reward_release_coefficient(
+def fingertip_contact_binary(
     env: ManagerBasedRLEnv,
-    reward_lambda_attr_name: str = "_gm_reward_curriculum_lambda",
+    sensor_names: tuple[str, ...],
+    force_threshold: float = 0.2,
 ) -> torch.Tensor:
-    r"""返回每个 env 的 reward-release 系数 $\lambda_{rew}\in[0,1]$，形状 `[B,1]`。"""
+    r"""对瞬时 fingertip force magnitude 做 threshold，返回 `[B,K]` binary channels。
 
-    reward_lambda = getattr(env, reward_lambda_attr_name, 0.0)  # scalar 或 `[B]` runtime curriculum state
-    coefficient = torch.as_tensor(reward_lambda, dtype=torch.float32, device=env.device)
-    if coefficient.ndim == 0:
-        coefficient = coefficient.expand(env.num_envs)  # global curriculum scalar -> per-env view
-    return coefficient.reshape(env.num_envs, 1)  # `[B,1]`
+    该函数不使用 EMA；需要 policy-rate filtered bits 时应使用 `tip_contact_bits_ema`。
+    """
+
+    contact_bits = []  # 每个 fingertip 一列 `[B]`
+    for sensor_name in sensor_names:
+        force_w = sensor_total_force_w(env, sensor_name)  # `[B,3]`，N
+        contact_bits.append((torch.linalg.norm(force_w, dim=-1) > float(force_threshold)).float())
+    return torch.stack(contact_bits, dim=-1)  # `[B,K]`，无量纲 0/1
 
 
-def tactile_rotation_policy_frame(
+def _shared_contact_state(
     env: ManagerBasedRLEnv,
-    fingertip_sensor_names: Sequence[str],
-    finger_non_tip_sensor_names: Sequence[str],
+    fingertip_sensor_names: tuple[str, ...],
+    finger_non_tip_sensor_names: tuple[str, ...],
     palm_sensor_name: str,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=[".*"], preserve_order=True),
-    action_name: str = "hand_joint_pos",
-    ema_alpha: float = 0.5,
-    force_threshold: float = 0.25,
-) -> torch.Tensor:
-    r"""构造严格按 canonical joint/finger order 排列的单帧 52D actor observation。
+    ema_alpha: float,
+    force_threshold: float,
+) -> GmTactileContactState:
+    r"""取得当前 policy step 唯一的 shared EMA contact snapshot。"""
 
-    $$x_t=[q_t/\pi,\ u_t/\pi,\ a_{t-1}^{policy},\ c_t^{tip}].$$
-
-    `raw_actions` 是 wrapper clamp 后送入 ActionManager 的无量纲 policy command；不读取
-    `executed_actions` 或 `processed_actions`，因此 ADR noise/latency 不泄漏给 actor。
-    """
-
-    joint_pos = tactile_joint_position(env, robot_cfg) / torch.pi  # actor fixed physical scale
-    current_targets = tactile_joint_target(env, action_name) / torch.pi  # 与 critic shared field 同口径
-    raw_actions = tactile_last_policy_action(env, action_name)  # 无量纲 policy-facing action
-    contact = get_tactile_contact_state(
+    return get_tactile_contact_state(
         env,
         fingertip_sensor_names,
         finger_non_tip_sensor_names,
@@ -141,138 +114,77 @@ def tactile_rotation_policy_frame(
         ema_alpha,
         force_threshold,
     )
-    frame = torch.cat(
-        (joint_pos, current_targets, raw_actions, contact.tip_bits.float()), dim=-1
-    )
-    if frame.shape[-1] != TACTILE_ACTOR_FRAME_DIM:
-        raise RuntimeError(
-            "Tactile actor frame must be 52D = 16 q + 16 target + 16 last policy action + 4 tip bits; "
-            f"got shape {tuple(frame.shape)}."
-        )
-    return frame
 
 
-def tactile_rotation_privileged_task_state(
+def tip_contact_bits_ema(
     env: ManagerBasedRLEnv,
-    command_name: str,
-    fingertip_sensor_names: Sequence[str],
-    finger_non_tip_sensor_names: Sequence[str],
+    fingertip_sensor_names: tuple[str, ...],
+    finger_non_tip_sensor_names: tuple[str, ...],
     palm_sensor_name: str,
-    semantic_R_ha: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=[".*"], preserve_order=True),
-    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
-    action_name: str = "hand_joint_pos",
     ema_alpha: float = 0.5,
     force_threshold: float = 0.25,
 ) -> torch.Tensor:
-    r"""构造不含 ADR/curriculum 的 103D privileged task/contact state。
+    r"""返回 EMA force magnitude threshold 后的 fingertip bits，形状 `[B,K_{tip}]`。"""
 
-    顺序固定为 `[q16,dq16,u16,a16,pos3,goal-relative-rot6d-6,v_h3,omega_h3,
-    tip-force4,palm-force1,finger-non-tip-bits19]`。
-    """
-
-    joint_pos = tactile_joint_position(env, robot_cfg) / torch.pi  # shared actor/critic $q/\pi$
-    joint_velocity = tactile_joint_velocity(env, robot_cfg)  # privileged raw rad/s
-    current_targets = tactile_joint_target(env, action_name) / torch.pi  # shared actor/critic $u/\pi$
-    raw_actions = tactile_last_policy_action(env, action_name)  # shared raw policy action
-    object_task_state = tactile_object_task_state(
-        env,
-        command_name=command_name,
-        semantic_R_ha=semantic_R_ha,
-        robot_cfg=robot_cfg,
-        object_cfg=object_cfg,
-    )  # `[B,15]`
-
-    contact = get_tactile_contact_state(
-        env,
-        fingertip_sensor_names,
-        finger_non_tip_sensor_names,
-        palm_sensor_name,
-        ema_alpha,
-        force_threshold,
+    state = _shared_contact_state(
+        env, fingertip_sensor_names, finger_non_tip_sensor_names, palm_sensor_name, ema_alpha, force_threshold
     )
-    state = torch.cat(
-        (
-            joint_pos,
-            joint_velocity,
-            current_targets,
-            raw_actions,
-            object_task_state,
-            contact.tip_force_ema,
-            contact.palm_force_ema,
-            contact.finger_non_tip_bits.float(),
-        ),
-        dim=-1,
-    )
-    if state.shape[-1] != TACTILE_PRIVILEGED_TASK_DIM:
-        raise RuntimeError(
-            "Tactile privileged task state must be 103D; "
-            f"got shape {tuple(state.shape)}. Check 16-DOF/4-tip/19-finger-non-tip schema."
-        )
-    return state
+    return state.tip_bits.float()  # actor-facing 0/1 channels，canonical fingertip order
 
 
-def tactile_rotation_critic_state(
+def tip_force_magnitude_ema(
     env: ManagerBasedRLEnv,
-    command_name: str,
-    fingertip_sensor_names: Sequence[str],
-    finger_non_tip_sensor_names: Sequence[str],
+    fingertip_sensor_names: tuple[str, ...],
+    finger_non_tip_sensor_names: tuple[str, ...],
     palm_sensor_name: str,
-    semantic_R_ha: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=[".*"], preserve_order=True),
-    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
-    action_name: str = "hand_joint_pos",
     ema_alpha: float = 0.5,
     force_threshold: float = 0.25,
-    reward_lambda_attr_name: str = "_gm_reward_curriculum_lambda",
 ) -> torch.Tensor:
-    r"""拼接 103D task/contact、48D actual ADR 与 1D reward release，得到 152D `states`。"""
+    r"""返回各 fingertip 的 EMA force magnitude，形状 `[B,K_{tip}]`，单位 N。"""
 
-    task_state = tactile_rotation_privileged_task_state(
-        env=env,
-        command_name=command_name,
-        fingertip_sensor_names=fingertip_sensor_names,
-        finger_non_tip_sensor_names=finger_non_tip_sensor_names,
-        palm_sensor_name=palm_sensor_name,
-        semantic_R_ha=semantic_R_ha,
-        robot_cfg=robot_cfg,
-        object_cfg=object_cfg,
-        action_name=action_name,
-        ema_alpha=ema_alpha,
-        force_threshold=force_threshold,
+    state = _shared_contact_state(
+        env, fingertip_sensor_names, finger_non_tip_sensor_names, palm_sensor_name, ema_alpha, force_threshold
     )
-    adr_state = gm_adr_state_observation(env, action_dim=16)
-    reward_lambda_tensor = tactile_reward_release_coefficient(env, reward_lambda_attr_name)
-    critic_state = torch.cat((task_state, adr_state, reward_lambda_tensor), dim=-1)
-    if critic_state.shape[-1] != TACTILE_CRITIC_STATE_DIM:
-        raise RuntimeError(f"Tactile central critic state must be 152D, got shape {tuple(critic_state.shape)}.")
-    return critic_state
+    return state.tip_force_ema  # magnitude only，不包含 vector direction
 
 
-def _action_term_tensors(env: ManagerBasedRLEnv, action_name: str) -> tuple[torch.Tensor, torch.Tensor]:
-    r"""读取 action term 的 target/raw-policy tensors，并在 schema 不兼容时 fail fast。"""
+def palm_force_magnitude_ema(
+    env: ManagerBasedRLEnv,
+    fingertip_sensor_names: tuple[str, ...],
+    finger_non_tip_sensor_names: tuple[str, ...],
+    palm_sensor_name: str,
+    ema_alpha: float = 0.5,
+    force_threshold: float = 0.25,
+) -> torch.Tensor:
+    r"""返回 neutral palm support 的 EMA force magnitude，形状 `[B,1]`，单位 N。"""
 
-    action_term = env.action_manager.get_term(action_name)
-    current_targets = getattr(action_term, "current_targets", None)
-    raw_actions = getattr(action_term, "raw_actions", None)
-    if not isinstance(current_targets, torch.Tensor) or not isinstance(raw_actions, torch.Tensor):
-        raise RuntimeError(
-            f"Action term '{action_name}' must expose tensor current_targets/raw_actions for tactile observations."
-        )
-    return current_targets, raw_actions
+    state = _shared_contact_state(
+        env, fingertip_sensor_names, finger_non_tip_sensor_names, palm_sensor_name, ema_alpha, force_threshold
+    )
+    return state.palm_force_ema  # palm 是合法支撑 role，不进入 finger non-tip bad-contact bits
+
+
+def finger_non_tip_contact_bits_ema(
+    env: ManagerBasedRLEnv,
+    fingertip_sensor_names: tuple[str, ...],
+    finger_non_tip_sensor_names: tuple[str, ...],
+    palm_sensor_name: str,
+    ema_alpha: float = 0.5,
+    force_threshold: float = 0.25,
+) -> torch.Tensor:
+    r"""返回 finger non-tip EMA contact bits，形状 `[B,K_{non-tip}]`，显式排除 palm。"""
+
+    state = _shared_contact_state(
+        env, fingertip_sensor_names, finger_non_tip_sensor_names, palm_sensor_name, ema_alpha, force_threshold
+    )
+    return state.finger_non_tip_bits.float()  # 0/1 attribution channels，canonical non-tip order
 
 
 __all__ = [
-    "TACTILE_ACTOR_FRAME_DIM",
-    "TACTILE_CRITIC_STATE_DIM",
-    "TACTILE_PRIVILEGED_TASK_DIM",
-    "tactile_joint_position",
-    "tactile_joint_target",
-    "tactile_joint_velocity",
-    "tactile_last_policy_action",
-    "tactile_object_task_state",
-    "tactile_reward_release_coefficient",
-    "tactile_rotation_critic_state",
-    "tactile_rotation_policy_frame",
-    "tactile_rotation_privileged_task_state",
+    "finger_non_tip_contact_bits_ema",
+    "fingertip_contact_binary",
+    "fingertip_contact_force",
+    "palm_force_magnitude_ema",
+    "tip_contact_bits_ema",
+    "tip_force_magnitude_ema",
 ]

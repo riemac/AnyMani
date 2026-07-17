@@ -98,17 +98,39 @@ def _load_observations_priv_module() -> types.ModuleType:
     managers_stub = types.ModuleType("isaaclab.managers")
     managers_stub.SceneEntityCfg = _SceneEntityCfgStub
 
+    package_names = (
+        "anymani",
+        "anymani.tasks",
+        "anymani.tasks.gm",
+        "anymani.tasks.gm.mdp",
+        "anymani.tasks.gm.mdp.observations",
+        "anymani.tasks.gm.mdp.commands",
+    )
+    package_stubs = {}
+    for package_name in package_names:
+        package = types.ModuleType(package_name)
+        package.__path__ = []  # type: ignore[attr-defined]
+        package_stubs[package_name] = package
+    adr_stub = types.ModuleType("anymani.tasks.gm.mdp.adr_state")
+    adr_stub.get_gm_adr_state = lambda *_args, **_kwargs: None
+    command_stub = types.ModuleType("anymani.tasks.gm.mdp.commands.tactile_rotation_command")
+    command_stub.ensure_post_physics_progress_updated = lambda *_args, **_kwargs: None
     replacements = {
+        **package_stubs,
         "isaaclab": types.ModuleType("isaaclab"),
         "isaaclab.assets": assets_stub,
         "isaaclab.managers": managers_stub,
         "isaaclab.utils": types.ModuleType("isaaclab.utils"),
         "isaaclab.utils.math": math_stub,
+        "anymani.tasks.gm.mdp.adr_state": adr_stub,
+        "anymani.tasks.gm.mdp.commands.tactile_rotation_command": command_stub,
     }
     previous = {name: sys.modules.get(name) for name in replacements}  # 保存原模块，避免污染其他测试
     try:
         sys.modules.update(replacements)
-        spec = importlib.util.spec_from_file_location("_gm_observations_priv_for_test", OBS_PRIV_PATH)
+        spec = importlib.util.spec_from_file_location(
+            "anymani.tasks.gm.mdp.observations._priv_for_test", OBS_PRIV_PATH
+        )
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)

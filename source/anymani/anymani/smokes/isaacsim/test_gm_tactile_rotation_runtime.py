@@ -38,7 +38,7 @@ from anymani.tasks.gm.config.single_asset.tactile_rotation_env_cfg import (
     TACTILE_PALM_SENSOR_NAME,
     TACTILE_TIP_SENSOR_NAMES,
 )
-from anymani.tasks.gm.mdp.observations.observations_tactile import tactile_rotation_policy_frame
+from anymani.tasks.gm import mdp as gm_mdp
 
 CURRENT_TASK_ID = "AnyMani-GM-SingleAsset-TactileRotation-CurrentObs-v0"
 HISTORY_TASK_ID = "AnyMani-GM-SingleAsset-TactileRotation-History30Obs-v0"
@@ -97,13 +97,20 @@ def test_gm_tactile_rotation_runtime_contract() -> None:
 
         _assert_shared_state_lifecycle(runtime_env)
         _assert_diagnostics_runtime(runtime_env)
-        latest_frame = tactile_rotation_policy_frame(
-            runtime_env,
-            TACTILE_TIP_SENSOR_NAMES,
-            TACTILE_FINGER_NON_TIP_SENSOR_NAMES,
-            TACTILE_PALM_SENSOR_NAME,
-            robot_cfg=TACTILE_JOINT_CFG,
-        )
+        latest_frame = torch.cat(
+            (
+                gm_mdp.joint_pos_raw(runtime_env, TACTILE_JOINT_CFG) / torch.pi,
+                gm_mdp.joint_target(runtime_env, "hand_joint_pos") / torch.pi,
+                gm_mdp.last_action(runtime_env, "hand_joint_pos"),
+                gm_mdp.tip_contact_bits_ema(
+                    runtime_env,
+                    TACTILE_TIP_SENSOR_NAMES,
+                    TACTILE_FINGER_NON_TIP_SENSOR_NAMES,
+                    TACTILE_PALM_SENSOR_NAME,
+                ),
+            ),
+            dim=-1,
+        )  # `[B,52]`，与正式 semantic ObsTerms 的声明顺序一致
         observed_latest = obs["policy"] if TASK_ID == CURRENT_TASK_ID else obs["policy"][:, -1]
         torch.testing.assert_close(observed_latest, latest_frame, rtol=0.0, atol=1.0e-6)
 
