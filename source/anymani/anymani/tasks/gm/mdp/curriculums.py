@@ -78,7 +78,13 @@ import torch
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers import CurriculumTermCfg, ManagerTermBase
 
-from .adr_state import get_gm_adr_state
+from .adr_ranges import (
+    GM_ADR_HAND_MATERIAL_FINAL,
+    GM_ADR_HAND_MATERIAL_INITIAL,
+    GM_ADR_OBJECT_BODY_YAW_FINAL,
+    GM_ADR_OBJECT_MATERIAL_FINAL,
+    GM_ADR_OBJECT_MATERIAL_INITIAL,
+)
 from .commands.tactile_rotation_command import ensure_post_physics_progress_updated
 
 
@@ -384,9 +390,9 @@ class LeapADRByNetRotationRate(ManagerTermBase):
             "leap_adr_joint_vel_noise": leap_adr_interpolate(0.0, 0.01, fraction),
             "leap_adr_object_x_width": leap_adr_interpolate(0.0, 0.01, fraction),
             "leap_adr_object_y_width": leap_adr_interpolate(0.0, 0.01, fraction),
-            "leap_adr_object_x_rot": leap_adr_interpolate(0.0, 0.1, fraction),
-            "leap_adr_object_y_rot": leap_adr_interpolate(0.0, 0.1, fraction),
-            "leap_adr_object_z_rot": 0.0,
+            "leap_adr_object_x_rot": 0.0,
+            "leap_adr_object_y_rot": 0.0,
+            "leap_adr_object_body_yaw": leap_adr_interpolate(0.0, GM_ADR_OBJECT_BODY_YAW_FINAL, fraction),
             "leap_adr_action_noise": leap_adr_interpolate(0.1, 0.2, fraction),
             "leap_adr_action_latency": leap_adr_interpolate(0.0, 3.0, fraction),
             "leap_adr_max_linear_accel": leap_adr_interpolate(0.5, 5.0, fraction),
@@ -395,22 +401,18 @@ class LeapADRByNetRotationRate(ManagerTermBase):
             "leap_adr_stiffness_range": leap_adr_interpolate((3.0, 3.0), (2.5, 3.1), fraction),
             "leap_adr_damping_range": leap_adr_interpolate((0.1, 0.1), (0.05, 0.15), fraction),
             "leap_adr_robot_material_ranges": leap_adr_interpolate(
-                {"static": (1.0, 1.0), "dynamic": (1.0, 1.0), "restitution": (0.0, 0.0)},
-                {"static": (1.0, 1.0), "dynamic": (1.0, 1.0), "restitution": (0.0, 0.5)},
+                GM_ADR_HAND_MATERIAL_INITIAL.as_dict(),
+                GM_ADR_HAND_MATERIAL_FINAL.as_dict(),
                 fraction,
             ),
             "leap_adr_object_material_ranges": leap_adr_interpolate(
-                {"static": (1.0, 1.0), "dynamic": (1.0, 1.0), "restitution": (0.0, 0.0)},
-                {"static": (0.3, 1.5), "dynamic": (0.3, 1.5), "restitution": (0.0, 0.5)},
+                GM_ADR_OBJECT_MATERIAL_INITIAL.as_dict(),
+                GM_ADR_OBJECT_MATERIAL_FINAL.as_dict(),
                 fraction,
             ),
         }
         for name, value in published.items():
             setattr(env, name, value)
-        state = get_gm_adr_state(env)
-        state.set(env, "action_noise", float(published["leap_adr_action_noise"]))
-        state.set(env, "max_acceleration", float(published["leap_adr_max_linear_accel"]))
-        state.set(env, "fraction", fraction)
 
     def _state_dict(self, num_increments: int) -> dict[str, torch.Tensor | int | float]:
         r"""返回带明确 turns/s 单位名的 CurriculumManager 日志。"""

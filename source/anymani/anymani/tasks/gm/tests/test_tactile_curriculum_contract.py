@@ -24,6 +24,19 @@ def _load_curriculum_module():
 
     command_stub = types.ModuleType("anymani.tasks.gm.mdp.commands.tactile_rotation_command")
     command_stub.ensure_post_physics_progress_updated = lambda env, _name: env.command
+    adr_ranges_stub = types.ModuleType("anymani.tasks.gm.mdp.adr_ranges")
+    material_initial = SimpleNamespace(
+        as_dict=lambda: {"static": (1.0, 1.0), "dynamic": (1.0, 1.0), "restitution": (0.0, 0.0)}
+    )
+    adr_ranges_stub.GM_ADR_HAND_MATERIAL_INITIAL = material_initial
+    adr_ranges_stub.GM_ADR_OBJECT_MATERIAL_INITIAL = material_initial
+    adr_ranges_stub.GM_ADR_HAND_MATERIAL_FINAL = SimpleNamespace(
+        as_dict=lambda: {"static": (1.0, 1.0), "dynamic": (1.0, 1.0), "restitution": (0.0, 0.5)}
+    )
+    adr_ranges_stub.GM_ADR_OBJECT_MATERIAL_FINAL = SimpleNamespace(
+        as_dict=lambda: {"static": (0.3, 1.5), "dynamic": (0.3, 1.5), "restitution": (0.0, 0.5)}
+    )
+    adr_ranges_stub.GM_ADR_OBJECT_BODY_YAW_FINAL = torch.pi
     adr_state_stub = types.ModuleType("anymani.tasks.gm.mdp.adr_state")
     adr_state_stub.get_gm_adr_state = lambda _env: SimpleNamespace(set=lambda *_args, **_kwargs: None)
     envs_stub = types.ModuleType("isaaclab.envs")
@@ -34,6 +47,7 @@ def _load_curriculum_module():
     replacements.update(
         {
             "anymani.tasks.gm.mdp.commands.tactile_rotation_command": command_stub,
+            "anymani.tasks.gm.mdp.adr_ranges": adr_ranges_stub,
             "anymani.tasks.gm.mdp.adr_state": adr_state_stub,
             "isaaclab": types.ModuleType("isaaclab"),
             "isaaclab.envs": envs_stub,
@@ -113,6 +127,9 @@ def test_adr_level_zero_bootstraps_then_uses_cooldown_and_rate_threshold() -> No
     scheduler(env, torch.tensor([0, 1]), command_name="goal_pose")
     assert scheduler.increment == 1  # 无 competence 也只允许 0→1 bootstrap
     assert env.gm_adr_com_half_width == 0.01 / 25.0
+    assert env.leap_adr_object_x_rot == 0.0
+    assert env.leap_adr_object_y_rot == 0.0
+    assert env.leap_adr_object_body_yaw == torch.pi / 25.0  # 第 1 档为 $\pm7.2^\circ$
 
     scheduler.reset_checks_since_increase = 960
     env.command.net_rotation_turns[:] = 10.0  # alpha=1 时 10 turns / 100 s = 0.1 turns/s
@@ -125,3 +142,9 @@ def test_adr_level_zero_bootstraps_then_uses_cooldown_and_rate_threshold() -> No
     )
     assert scheduler.increment == 2
     assert scheduler.net_turns_ema.item() == 0.0  # promotion 后新档重新证明 competence
+    assert env.leap_adr_object_body_yaw == 2.0 * torch.pi / 25.0
+
+    scheduler.increment = 25
+    scheduler._publish_state(env)
+    assert env.leap_adr_object_x_rot == env.leap_adr_object_y_rot == 0.0
+    assert env.leap_adr_object_body_yaw == torch.pi  # 满档完整覆盖 $[-\pi,\pi]$

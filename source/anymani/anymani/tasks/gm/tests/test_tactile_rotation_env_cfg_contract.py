@@ -65,9 +65,11 @@ def test_history_variant_only_overrides_policy_observations() -> None:
     assert assigned_names == {"observations"}
 
     source = _source()
-    assert "frame = _policy_frame_term(history_length=30, flatten_history_dim=False)" in source
-    assert "func=gm_mdp.tactile_rotation_policy_frame" in source
-    assert "func=gm_mdp.tactile_rotation_critic_state" in source
+    assert "joint_pos = _policy_term(" in source
+    assert "history_length=30" in source
+    assert "func=gm_mdp.tactile_joint_position" in source
+    assert "func=gm_mdp.tactile_object_task_state" in source
+    assert "scale=1.0 / math.pi" in source
 
 
 def test_cfg_locks_physics_reward_contact_and_adr_contracts() -> None:
@@ -91,6 +93,8 @@ def test_cfg_locks_physics_reward_contact_and_adr_contracts() -> None:
     assert '"max_angle_deg": 45.0' in source
     assert '"threshold_turns_per_s": 0.08' in source
     assert '"min_reset_checks_for_increase": 960' in source
+    assert "reset_object_pose_from_adr = EventTerm(" in source
+    assert "reset_hand_joints_from_adr = EventTerm(" in source
     assert "anymani.tasks.inhand" not in source  # 用户选择 GM-owned action/ADR，无父包循环依赖
 
 

@@ -28,6 +28,7 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import pytest
 import torch
+import isaaclab.utils.math as math_utils
 from isaaclab_tasks.utils import parse_env_cfg
 
 import anymani.tasks.gm  # noqa: F401
@@ -65,9 +66,11 @@ def test_gm_tactile_rotation_runtime_contract() -> None:
         obs, _ = env.reset()
         _assert_observation_contract(obs, expect_reset_prefix=True)
         _assert_adr_runtime(runtime_env)
+        _assert_body_yaw_reset(runtime_env)
 
         action_term = runtime_env.action_manager.get_term("hand_joint_pos")
-        runtime_env.leap_adr_action_noise = 0.0  # smoke 隔离 target recurrence，不改变训练 cfg
+        runtime_env.leap_adr_action_noise = 1.0  # global curriculum 发布值故意与 ongoing episode actual 不同
+        runtime_env._gm_adr_state.values[:, 43] = 0.0  # ongoing episode $\sigma_a=0$；同时验证 action 读取 per-env state
         action_term._latency_steps.zero_()
         action_term._action_history.zero_()
         targets_before = action_term.current_targets.clone()
@@ -93,6 +96,7 @@ def test_gm_tactile_rotation_runtime_contract() -> None:
         torch.testing.assert_close(action_term.current_targets, held_targets, rtol=0.0, atol=0.0)
 
         _assert_shared_state_lifecycle(runtime_env)
+        _assert_diagnostics_runtime(runtime_env)
         latest_frame = tactile_rotation_policy_frame(
             runtime_env,
             TACTILE_TIP_SENSOR_NAMES,
@@ -102,6 +106,26 @@ def test_gm_tactile_rotation_runtime_contract() -> None:
         )
         observed_latest = obs["policy"] if TASK_ID == CURRENT_TASK_ID else obs["policy"][:, -1]
         torch.testing.assert_close(observed_latest, latest_frame, rtol=0.0, atol=1.0e-6)
+
+        if TASK_ID == HISTORY_TASK_ID:
+            # 只结束 env 0：其历史应重建 reset prefix，env 1 的 causal history 不得被 collateral reset。
+            runtime_env.episode_length_buf[0] = runtime_env.leap_adr_episode_lengths[0] - 2
+            runtime_env.episode_length_buf[1] = 0
+            partial_obs, _, partial_terminated, partial_truncated, partial_info = env.step(torch.zeros_like(actions))
+            assert partial_truncated.tolist() == [True, False]
+            assert not torch.any(partial_terminated)
+            env0_prefix = partial_obs["policy"][0, :1].expand_as(partial_obs["policy"][0])
+            torch.testing.assert_close(partial_obs["policy"][0], env0_prefix, rtol=0.0, atol=0.0)
+            assert not torch.allclose(
+                partial_obs["policy"][1], partial_obs["policy"][1, :1].expand_as(partial_obs["policy"][1])
+            )
+            _assert_episode_diagnostic_extras(partial_info)
+
+        # 把两个 env 推到各自 sampled horizon 前一帧；本 step 应统一 timeout、flush 并 reset。
+        runtime_env.episode_length_buf[:] = runtime_env.leap_adr_episode_lengths - 2
+        _, _, terminated, truncated, info = env.step(torch.zeros_like(actions))
+        assert torch.all(truncated) and not torch.any(terminated)
+        _assert_episode_diagnostic_extras(info)
     except BaseException:
         traceback.print_exc()  # SimulationApp.close 会提前终止 pytest reporter，先保留真实 failure stack
         raise
@@ -147,6 +171,27 @@ def _assert_adr_runtime(runtime_env) -> None:
     assert torch.all(torch.abs(state[:, 2:5]) <= 0.01 + 1.0e-7)
 
 
+def _assert_body_yaw_reset(runtime_env) -> None:
+    r"""验证 reset 是 default pose 的 object-body yaw 右乘，且支撑面法向与 hand `+z_h` 对齐。"""
+
+    object_asset = runtime_env.scene["object"]
+    current_quat_w = object_asset.data.root_quat_w
+    default_quat_w = object_asset.data.default_root_state[:, 3:7]
+    relative_body_quat = math_utils.quat_mul(math_utils.quat_inv(default_quat_w), current_quat_w)  # $q_0^{-1}q$
+    relative_rotvec = math_utils.axis_angle_from_quat(relative_body_quat)  # 应严格平行于 body $z_o$
+    torch.testing.assert_close(relative_rotvec[:, :2], torch.zeros_like(relative_rotvec[:, :2]), atol=1.0e-5, rtol=0.0)
+    assert torch.all(torch.abs(relative_rotvec[:, 2]) <= runtime_env.leap_adr_object_body_yaw + 1.0e-5)
+
+    object_z_w = math_utils.quat_apply(
+        current_quat_w,
+        torch.tensor([0.0, 0.0, 1.0], device=runtime_env.device).expand(SMOKE_NUM_ENVS, -1),
+    )
+    command = runtime_env.command_manager.get_term("goal_pose")
+    command.ensure_post_physics_progress_updated(runtime_env)
+    alignment = torch.sum(object_z_w * command.axis_w, dim=-1)  # $z_o^{w\mathsf T}z_h^w$
+    assert torch.all(alignment > 0.999), f"object/hand support normals are not aligned: {alignment.tolist()}"
+
+
 def _assert_shared_state_lifecycle(runtime_env) -> None:
     r"""Contact/command 在同 step 幂等；partial contact reset 当前 stamp 保持零。"""
 
@@ -165,3 +210,55 @@ def _assert_shared_state_lifecycle(runtime_env) -> None:
     contact.ensure_updated(runtime_env)
     assert torch.count_nonzero(contact.force_ema[0]) == 0  # 同 stamp 不从 stale ContactSensor 重填
     torch.testing.assert_close(contact.force_ema[1], contact_before[1], rtol=0.0, atol=0.0)
+
+
+def _assert_diagnostics_runtime(runtime_env) -> None:
+    r"""检查 diagnostics 已按当前 policy stamp 更新一次，且在线 summary 全部 finite。"""
+
+    command = runtime_env.command_manager.get_term("goal_pose")
+    diagnostics = command.diagnostics
+    assert diagnostics is not None
+    assert torch.all(diagnostics.step_count >= 1.0)
+    assert torch.all(diagnostics.last_update_step == runtime_env.common_step_counter)
+    for name, value in diagnostics.metrics.items():
+        assert torch.isfinite(value).all(), f"non-finite online diagnostic metric: {name}={value}"
+
+
+def _assert_episode_diagnostic_extras(info: Mapping[str, Any]) -> None:
+    r"""Forced timeout 必须一次性输出带单位的核心 episode metrics，且所有标量 finite。"""
+
+    assert "log" in info
+    episode_log = info["log"]
+    required_metric_suffixes = (
+        "rotation/axis_speed_mean_rad_s",
+        "rotation/axis_speed_abs_mean_rad_s",
+        "rotation/off_axis_ang_vel_rms_rad_s",
+        "pose/anchor_distance_mean_m",
+        "pose/anchor_distance_max_m",
+        "pose/orientation_keypoint_error_mean_m",
+        "action/policy_delta_rms_per_s",
+        "action/executed_delta_rms_per_s",
+        "action/target_delta_rms_rad_s",
+        "action/target_tracking_error_rms_rad",
+        "contact/tip_active_count_mean",
+        "contact/palm_occupancy_fraction",
+        "contact/finger_non_tip_occupancy_fraction",
+        "contact/tip_force_ema_mean_N",
+        "contact/palm_force_ema_mean_N",
+        "task/episode_duration_s",
+        "task/sampled_horizon_s",
+        "termination/time_out_fraction",
+        "adr/actual_object_mass_kg",
+        "adr/actual_com_offset_norm_m",
+        "adr/actual_joint_stiffness_mean",
+        "adr/actual_joint_damping_mean",
+        "adr/actual_action_noise_std",
+        "adr/actual_latency_steps_mean",
+        "adr/actual_wrench_gate_fraction",
+        "adr/actual_max_linear_acceleration_m_s2",
+    )
+    for suffix in required_metric_suffixes:
+        key = f"Metrics/goal_pose/{suffix}"
+        assert key in episode_log, f"missing episode diagnostic key: {key}"
+        assert torch.isfinite(torch.as_tensor(episode_log[key])).all(), f"non-finite episode diagnostic: {key}"
+    assert episode_log["Metrics/goal_pose/termination/time_out_fraction"] == 1.0

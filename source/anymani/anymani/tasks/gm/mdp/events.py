@@ -39,7 +39,7 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
 
-from .adr_state import get_gm_adr_state
+from .adr_state import ADR_STATE_SLICES, get_gm_adr_state
 from .tactile_contact_state import reset_tactile_contact_state
 
 GmHandOrientationMode = Literal["disabled", "roll", "pitch", "yaw", "so3"]
@@ -379,7 +379,7 @@ def reset_adr_episode_length(
     env_ids: torch.Tensor,
     min_episode_length_s: float = 20.0,
 ) -> None:
-    r"""为每个 reset env 采样 20--120 s full horizon，并保留 policy-step 单位 buffer。"""
+    r"""采样 full horizon，并冻结本 episode 的全局 ADR-level scalar actual values。"""
 
     ids = _resolve_event_env_ids(env, env_ids)
     episode_lengths = getattr(env, "leap_adr_episode_lengths", None)
@@ -396,6 +396,10 @@ def reset_adr_episode_length(
         dtype=torch.long,
         device=env.device,
     )
+    state = get_gm_adr_state(env)
+    state.set(env, "action_noise", float(getattr(env, "leap_adr_action_noise", 0.0)), ids)
+    state.set(env, "max_acceleration", float(getattr(env, "leap_adr_max_linear_accel", 0.5)), ids)
+    state.set(env, "fraction", float(getattr(env, "leap_adr_fraction", 0.0)), ids)
 
 
 def reset_adr_object_state(
@@ -403,7 +407,16 @@ def reset_adr_object_state(
     env_ids: torch.Tensor,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> None:
-    r"""用当前 GM ADR width 从 default object root state 采样位置与 roll/pitch reset。"""
+    r"""从 default root state 采样掌面内位置与 object-body yaw 初态。
+
+    旋转使用右乘：
+    $$
+    q_{wo}'=q_{wo,0}\otimes q_z^o(\psi),
+    \qquad \psi\sim U[-\psi_{max}(k),\psi_{max}(k)].
+    $$
+    因此 body 支撑面法向 $R_{wo}e_z$ 保持不变；满档
+    $\psi_{max}(25)=\pi$。当前任务不随机 roll/pitch，避免初态直接离开 palm-supported basin。
+    """
 
     ids = _resolve_event_env_ids(env, env_ids)
     if ids.numel() == 0:
@@ -417,21 +430,30 @@ def reset_adr_object_state(
         device=env.device,
     )
     root_state[:, :2] += math_utils.sample_uniform(-1.0, 1.0, (ids.numel(), 2), env.device) * widths_xy
-    widths_rpy = torch.tensor(
-        [
-            float(getattr(env, "leap_adr_object_x_rot", 0.0)),
-            float(getattr(env, "leap_adr_object_y_rot", 0.0)),
-            float(getattr(env, "leap_adr_object_z_rot", 0.0)),
-        ],
-        device=env.device,
-    )
-    rpy = math_utils.sample_uniform(-1.0, 1.0, (ids.numel(), 3), env.device) * widths_rpy
-    noise_quat = math_utils.quat_from_euler_xyz(rpy[:, 0], rpy[:, 1], rpy[:, 2])
-    root_state[:, 3:7] = math_utils.quat_mul(noise_quat, root_state[:, 3:7])
+    yaw_half_width = float(getattr(env, "leap_adr_object_body_yaw", 0.0))  # $\psi_{max}(k)$，单位 rad
+    yaw = math_utils.sample_uniform(-yaw_half_width, yaw_half_width, (ids.numel(),), env.device)  # `[K]`
+    root_state[:, 3:7] = compose_body_yaw_reset_quaternion(root_state[:, 3:7], yaw)  # 右乘 body $z_o$
     # Isaac Lab 5.1 stub 仍标作 `Sequence[int]`，但 PhysX torch frontend 实际要求 tensor 并调用 `.to()`。
     physx_ids = cast(Sequence[int], ids)  # 静态类型适配；runtime 对象仍是 contiguous CUDA tensor `[K]`
     object_asset.write_root_pose_to_sim(root_state[:, :7], physx_ids)  # 写入 $p_{wo},q_{wo}$
     object_asset.write_root_velocity_to_sim(root_state[:, 7:], physx_ids)  # `[K,6]`，同步清零线/角速度
+
+
+def compose_body_yaw_reset_quaternion(default_quat_w: torch.Tensor, yaw: torch.Tensor) -> torch.Tensor:
+    r"""把 object-local yaw 右乘到默认 `(w,x,y,z)` 姿态。
+
+    Args:
+        default_quat_w (torch.Tensor): 默认 $q_{wo,0}$，形状 `[K,4]`。
+        yaw (torch.Tensor): body yaw $\psi$，形状 `[K]`，单位 rad。
+
+    Returns:
+        torch.Tensor: $q_{wo,0}\otimes q_z^o(\psi)$，形状 `[K,4]`。
+    """
+
+    body_z = torch.zeros(yaw.shape[0], 3, dtype=default_quat_w.dtype, device=default_quat_w.device)  # `[K,3]`
+    body_z[:, 2] = 1.0  # object body 支撑面法向 $e_z^o$
+    yaw_quat = math_utils.quat_from_angle_axis(yaw, body_z)  # $q_z^o(\psi)$，`(w,x,y,z)`
+    return math_utils.quat_mul(default_quat_w, yaw_quat)  # 右乘定义 body-frame perturbation
 
 
 def reset_adr_robot_joints(
@@ -699,10 +721,11 @@ def apply_adr_object_wrench(
     ids = _resolve_event_env_ids(env, env_ids)
     object_asset: RigidObject = env.scene[asset_cfg.name]
     num_bodies = len(asset_cfg.body_ids) if isinstance(asset_cfg.body_ids, list) else object_asset.num_bodies
-    max_acceleration = float(getattr(env, "leap_adr_max_linear_accel", 0.5))
+    state = get_gm_adr_state(env)
+    max_acceleration = state.values[ids, ADR_STATE_SLICES["max_acceleration"]].squeeze(-1)  # `[K]`，m/s^2
     masses = object_asset.root_physx_view.get_masses().to(env.device)[ids]
-    max_force = (masses * max_acceleration).unsqueeze(-1)
-    max_torque = (masses * max_acceleration * float(torsional_radius)).unsqueeze(-1)
+    max_force = (masses * max_acceleration[:, None]).unsqueeze(-1)
+    max_torque = (masses * max_acceleration[:, None] * float(torsional_radius)).unsqueeze(-1)
     forces = max_force * math_utils.sample_uniform(-1.0, 1.0, (ids.numel(), num_bodies, 3), env.device)
     torques = max_torque * math_utils.sample_uniform(-1.0, 1.0, (ids.numel(), num_bodies, 3), env.device)
     gate = getattr(env, "leap_adr_apply_wrench", None)
@@ -718,7 +741,7 @@ def apply_adr_object_wrench(
         body_ids=resolved_body_ids,
         env_ids=ids,
     )
-    get_gm_adr_state(env).set(env, "max_acceleration", max_acceleration, ids)
+    state.set(env, "max_acceleration", max_acceleration, ids)
 
 
 def _resolve_event_env_ids(
@@ -740,6 +763,7 @@ __all__ = [
     "RandomizeActuatorGainsAndRecord",
     "RandomizeRigidBodyMassAndRecord",
     "RandomizeRigidBodyMaterialAndRecord",
+    "compose_body_yaw_reset_quaternion",
     "apply_adr_object_wrench",
     "apply_generated_structural_collision_filter",
     "generated_structural_collision_filter_pairs",

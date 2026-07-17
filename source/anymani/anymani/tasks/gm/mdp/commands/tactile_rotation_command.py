@@ -26,6 +26,7 @@ from isaaclab.managers import CommandTerm
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+    from ..tactile_diagnostics_state import GmTactileEpisodeDiagnostics
     from .commands_cfg import TactileRotationCommandCfg
 
 
@@ -129,6 +130,7 @@ class TactileRotationCommand(CommandTerm):
         self.goal_normal_alignment = torch.ones(self.num_envs, device=self.device)  # signed $z_o^Tz_g$
         self.goal_success_pulse = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.goal_success_count = torch.zeros(self.num_envs, device=self.device)
+        self.diagnostics: GmTactileEpisodeDiagnostics | None = None  # managers 完整构造后再解析 contact/termination
 
         self.metrics["delta_psi"] = self.delta_psi
         self.metrics["net_rotation_rad"] = self.net_rotation_rad
@@ -153,10 +155,15 @@ class TactileRotationCommand(CommandTerm):
     def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
         r"""记录刚结束 episode metrics，随后清 partial env 的 anchor/progress 并生成首个 goal。"""
 
-        extras = super().reset(env_ids)  # 先记录旧 episode metrics；内部会按当前 pose resample goal
         ids = self._as_env_id_tensor(slice(None) if env_ids is None else env_ids)
+        diagnostics = self._ensure_diagnostics_initialized()
+        if diagnostics is not None:
+            diagnostics.capture_terminal(self._env, ids)  # 必须先冻结 terminal causes，再由 super 取 subset mean
+        extras = super().reset(env_ids)  # 先记录旧 episode metrics；内部会按当前 pose resample goal
         self._capture_reset_state(ids)  # object reset event 已执行，此处读取本 episode 真实 reset pose
         self._refresh_goal_errors(_mask_from_ids(self.num_envs, ids, self.device))  # 新 anchor 下同步 success/termination 双门
+        if diagnostics is not None:
+            diagnostics.reset(self._env, ids)  # super 已清旧 metrics；此处写入新 episode actual ADR snapshot
         return extras
 
     def ensure_post_physics_progress_updated(self, env: ManagerBasedRLEnv | None = None) -> None:
@@ -191,6 +198,17 @@ class TactileRotationCommand(CommandTerm):
             (self.orientation_keypoint_error[update_mask] < float(self.cfg.orientation_keypoint_success_threshold))
             & (self.position_error[update_mask] < float(self.cfg.position_success_threshold))
         )
+        diagnostics = self._ensure_diagnostics_initialized()
+        if diagnostics is not None:
+            diagnostics.ensure_updated(
+                env,
+                axis_w=self.axis_w,
+                axis_speed=self.axis_speed,
+                object_ang_vel_w=self.object.data.root_ang_vel_w,
+                joint_position=self.robot.data.joint_pos,
+                position_error=self.position_error,
+                orientation_keypoint_error=self.orientation_keypoint_error,
+            )
         self.last_progress_step[update_mask] = step
 
     def _update_metrics(self) -> None:
@@ -280,6 +298,35 @@ class TactileRotationCommand(CommandTerm):
         if isinstance(env_ids, slice):
             return torch.arange(self.num_envs, dtype=torch.long, device=self.device)[env_ids]
         return torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+
+    def _ensure_diagnostics_initialized(self) -> GmTactileEpisodeDiagnostics | None:
+        r"""在所有 env managers 可用后初始化 episode diagnostics，并注册其 metric tensors。"""
+
+        diagnostics = getattr(self, "diagnostics", None)  # tensor-only command contracts 绕过正式 constructor
+        if diagnostics is not None:
+            return self.diagnostics
+        cfg = self.cfg
+        if not (
+            getattr(cfg, "diagnostics_fingertip_sensor_names", ())
+            and getattr(cfg, "diagnostics_finger_non_tip_sensor_names", ())
+            and getattr(cfg, "diagnostics_palm_sensor_name", "")
+        ):
+            return None
+        if not hasattr(self._env, "termination_manager") or not hasattr(self._env, "action_manager"):
+            return None  # CommandTerm constructor 阶段 managers 可能尚未完成装配
+        from ..tactile_diagnostics_state import GmTactileEpisodeDiagnostics
+
+        self.diagnostics = GmTactileEpisodeDiagnostics(
+            self._env,
+            fingertip_sensor_names=cfg.diagnostics_fingertip_sensor_names,
+            finger_non_tip_sensor_names=cfg.diagnostics_finger_non_tip_sensor_names,
+            palm_sensor_name=cfg.diagnostics_palm_sensor_name,
+            action_name=cfg.diagnostics_action_name,
+            ema_alpha=cfg.diagnostics_contact_ema_alpha,
+            force_threshold=cfg.diagnostics_contact_force_threshold,
+        )
+        self.metrics.update(self.diagnostics.metrics)  # CommandTermBase.reset 统一输出并清 partial env rows
+        return self.diagnostics
 
 
 def ensure_post_physics_progress_updated(env: ManagerBasedRLEnv, command_name: str) -> TactileRotationCommand:

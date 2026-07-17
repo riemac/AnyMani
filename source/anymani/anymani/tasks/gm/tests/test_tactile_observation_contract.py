@@ -108,7 +108,7 @@ def _contact(batch: int) -> SimpleNamespace:
 
 
 def test_actor_frame_is_52d_in_exact_order_and_needs_no_privileged_state() -> None:
-    r"""Actor 仅给 robot/action/tip snapshot 即可构造，证明没有隐式 object/ADR/goal 访问。"""
+    r"""四个 semantic terms 应独立闭合，并按固定顺序组成 52D deployment frame。"""
 
     module = _load_observation_module()
     batch = 2
@@ -122,13 +122,11 @@ def test_actor_frame_is_52d_in_exact_order_and_needs_no_privileged_state() -> No
     )
     robot_cfg = SimpleNamespace(name="robot", joint_ids=list(range(16)))
 
-    frame = module.tactile_rotation_policy_frame(
-        env,
-        fingertip_sensor_names=("t0", "t1", "t2", "t3"),
-        finger_non_tip_sensor_names=tuple(f"n{i}" for i in range(19)),
-        palm_sensor_name="palm",
-        robot_cfg=robot_cfg,
-    )
+    joint_pos = module.tactile_joint_position(env, robot_cfg=robot_cfg) / torch.pi
+    joint_target = module.tactile_joint_target(env) / torch.pi
+    last_action = module.tactile_last_policy_action(env)
+    tip_bits = env.contact.tip_bits.float()  # atomic contact term 已由 tactile contact contract 单独覆盖
+    frame = torch.cat((joint_pos, joint_target, last_action, tip_bits), dim=-1)
 
     assert frame.shape == (batch, 52)
     assert torch.allclose(frame[:, :16], robot.data.joint_pos / torch.pi)
@@ -138,7 +136,7 @@ def test_actor_frame_is_52d_in_exact_order_and_needs_no_privileged_state() -> No
 
 
 def test_privileged_and_full_critic_shapes_are_103_and_152() -> None:
-    r"""Critic schema 必须闭合为 103 task/contact + 48 ADR + 1 curriculum。"""
+    r"""Critic semantic terms 必须闭合为 103 task/contact + 48 ADR + 1 curriculum。"""
 
     module = _load_observation_module()
     batch = 2
@@ -181,5 +179,7 @@ def test_privileged_and_full_critic_shapes_are_103_and_152() -> None:
     assert task_state.shape == (batch, 103)
     assert critic_state.shape == (batch, 152)
     assert torch.allclose(critic_state[:, :103], task_state)
+    assert torch.allclose(task_state[:, :16], robot.data.joint_pos / torch.pi)  # shared $q/\pi$
+    assert torch.allclose(task_state[:, 32:48], torch.ones(batch, 16))  # shared $u/\pi$
     assert torch.allclose(critic_state[:, 103:151], env.adr_state)
     assert torch.allclose(critic_state[:, 151], torch.full((batch,), 0.75))

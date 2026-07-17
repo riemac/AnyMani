@@ -46,7 +46,7 @@ from isaaclab.envs.mdp.actions.joint_actions import JointAction
 from isaaclab.managers.action_manager import ActionTerm
 from isaaclab.utils import configclass
 
-from ..adr_state import get_gm_adr_state
+from ..adr_state import ADR_STATE_SLICES, get_gm_adr_state
 
 ActionReference = Literal["current", "target"]
 r"""动作参考点枚举。
@@ -319,8 +319,9 @@ class ADRJointAction(JointAction):
         self._raw_actions[:] = actions  # $a_t$，无量纲。
 
         if self._use_adr:
-            # action noise std 随 ADR 档位变化，由 curriculum 写入 env runtime 属性。
-            action_noise = float(getattr(self._env, "leap_adr_action_noise", 0.0))  # $\sigma_a(k)$。
+            # Curriculum 只发布下一 episode 的 level；每个 env 使用 reset 时冻结的 actual $\sigma_a$。
+            state = get_gm_adr_state(self._env, action_dim=self.action_dim)
+            action_noise = state.values[:, ADR_STATE_SLICES["action_noise"]]  # `[N,1]`，per-episode std
             noisy_actions = actions + torch.randn_like(actions) * action_noise  # $\tilde a_t=a_t+\eta_t$。
 
             # 历史窗口整体右移，index 0 始终保存当前 policy step 的 noisy action。

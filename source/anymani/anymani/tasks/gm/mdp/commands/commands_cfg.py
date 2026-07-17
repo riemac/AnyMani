@@ -313,6 +313,24 @@ class TactileRotationCommandCfg(CommandTermCfg):
     speed_ema_time_constant_s: float = 0.25
     """轴向速度 EMA 的连续时间常数，单位 s；离散 alpha 由运行时 `step_dt` 推导。"""
 
+    diagnostics_action_name: str = "hand_joint_pos"
+    """Episode action-rate diagnostics 读取的 policy-step target action term。"""
+
+    diagnostics_fingertip_sensor_names: tuple[str, ...] = ()
+    """Episode diagnostics 使用的 fingertip sensor canonical order；空 tuple 表示未配置。"""
+
+    diagnostics_finger_non_tip_sensor_names: tuple[str, ...] = ()
+    """Episode diagnostics 使用的 finger non-tip sensor canonical order；空 tuple 表示未配置。"""
+
+    diagnostics_palm_sensor_name: str = ""
+    """Episode diagnostics 使用的 neutral palm support sensor；空字符串表示未配置。"""
+
+    diagnostics_contact_ema_alpha: float = 0.5
+    """Episode diagnostics 复用 contact state 时的 EMA 系数，必须与 actor/reward contact contract 一致。"""
+
+    diagnostics_contact_force_threshold: float = 0.25
+    """Episode diagnostics 复用 contact state 时的激活阈值，单位 N。"""
+
     make_quat_unique: bool = False
     """只控制 goal quaternion buffer 的符号规范；progress 通过 rotation matrix 保持符号不变。"""
 
@@ -336,3 +354,14 @@ class TactileRotationCommandCfg(CommandTermCfg):
             raise ValueError("success thresholds must be positive.")
         if self.speed_ema_time_constant_s <= 0.0:
             raise ValueError(f"speed_ema_time_constant_s must be positive, got {self.speed_ema_time_constant_s}.")
+        diagnostics_fields = (
+            bool(self.diagnostics_fingertip_sensor_names),
+            bool(self.diagnostics_finger_non_tip_sensor_names),
+            bool(self.diagnostics_palm_sensor_name),
+        )
+        if any(diagnostics_fields) and not all(diagnostics_fields):
+            raise ValueError("Tactile diagnostics tip/non-tip/palm sensor fields must be configured together.")
+        if not 0.0 < self.diagnostics_contact_ema_alpha <= 1.0:
+            raise ValueError("diagnostics_contact_ema_alpha must lie in (0,1].")
+        if self.diagnostics_contact_force_threshold < 0.0:
+            raise ValueError("diagnostics_contact_force_threshold must be non-negative.")

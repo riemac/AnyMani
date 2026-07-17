@@ -17,6 +17,14 @@ from .actions import (
     PolicyStepADRTargetJointPositionAction,
     PolicyStepADRTargetJointPositionActionCfg,
 )
+from .adr_ranges import (
+    GM_ADR_HAND_MATERIAL_FINAL,
+    GM_ADR_HAND_MATERIAL_INITIAL,
+    GM_ADR_OBJECT_BODY_YAW_FINAL,
+    GM_ADR_OBJECT_MATERIAL_FINAL,
+    GM_ADR_OBJECT_MATERIAL_INITIAL,
+)
+from .adr_state import gm_adr_state_observation
 from .commands.commands_cfg import ReorientCommandCfg, TactileRotationCommandCfg
 from .commands.reorient_command import ReorientCommand
 from .commands.tactile_rotation_command import TactileRotationCommand, ensure_post_physics_progress_updated
@@ -27,6 +35,7 @@ from .events import (
     RandomizeRigidBodyMaterialAndRecord,
     apply_adr_object_wrench,
     apply_generated_structural_collision_filter,
+    compose_body_yaw_reset_quaternion,
     generated_structural_collision_filter_pairs,
     randomize_object_com_from_default_and_record,
     randomize_object_scale_and_record,
@@ -52,7 +61,13 @@ from .observations import (
     object_pos,
     reorient_command,
     tactile_finger_non_tip_bits,
+    tactile_joint_position,
+    tactile_joint_target,
+    tactile_joint_velocity,
+    tactile_last_policy_action,
+    tactile_object_task_state,
     tactile_palm_force_ema,
+    tactile_reward_release_coefficient,
     tactile_rotation_critic_state,
     tactile_rotation_policy_frame,
     tactile_rotation_privileged_task_state,
@@ -83,6 +98,7 @@ from .rewards import (
     termination_penalty_placeholder,
     torque_l2_curriculum,
 )
+from .tactile_diagnostics_state import GmTactileEpisodeDiagnostics
 from .terminations import (
     adr_randomized_time_out,
     object_falling_placeholder,
@@ -95,6 +111,12 @@ __all__ = [
     "AxisDeltaRotationReward",
     "ClampedRelativeJointActionCfg",
     "ClampedRelativeJointPositionAction",
+    "GM_ADR_HAND_MATERIAL_FINAL",
+    "GM_ADR_HAND_MATERIAL_INITIAL",
+    "GM_ADR_OBJECT_BODY_YAW_FINAL",
+    "GM_ADR_OBJECT_MATERIAL_FINAL",
+    "GM_ADR_OBJECT_MATERIAL_INITIAL",
+    "GmTactileEpisodeDiagnostics",
     "PolicyStepADRTargetJointPositionAction",
     "PolicyStepADRTargetJointPositionActionCfg",
     "LeapADRByNetRotationRate",
@@ -112,6 +134,7 @@ __all__ = [
     "adr_randomized_time_out",
     "apply_adr_object_wrench",
     "apply_generated_structural_collision_filter",
+    "compose_body_yaw_reset_quaternion",
     "bad_non_tip_contact",
     "fingertip_contact_binary",
     "fingertip_contact_force",
@@ -119,6 +142,7 @@ __all__ = [
     "failure_termination_impulse",
     "joint_pos_limit_normalized",
     "generated_structural_collision_filter_pairs",
+    "gm_adr_state_observation",
     "goal_success_bonus",
     "good_fingertip_contact",
     "last_action",
@@ -154,12 +178,18 @@ __all__ = [
     "tactile_axis_delta_rotation_rate",
     "tactile_bad_finger_non_tip_contact",
     "tactile_finger_non_tip_bits",
+    "tactile_joint_position",
+    "tactile_joint_target",
+    "tactile_joint_velocity",
+    "tactile_last_policy_action",
+    "tactile_object_task_state",
     "tactile_full_pose_keypoint_reward",
     "tactile_goal_axis_misaligned",
     "tactile_goal_success_impulse",
     "tactile_good_tip_contact",
     "tactile_object_out_of_anchor",
     "tactile_palm_force_ema",
+    "tactile_reward_release_coefficient",
     "tactile_rotation_critic_state",
     "tactile_rotation_policy_frame",
     "tactile_rotation_privileged_task_state",

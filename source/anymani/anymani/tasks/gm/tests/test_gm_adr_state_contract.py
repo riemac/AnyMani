@@ -45,12 +45,20 @@ def test_adr_state_partial_updates_preserve_other_envs_and_features() -> None:
     state.set(env, "com", torch.tensor([[0.01, -0.01, 0.005]]), env_ids=torch.tensor([1]))
     state.set(env, "stiffness", torch.arange(16, dtype=torch.float32), env_ids=torch.tensor([1, 2]))
     state.set(env, "latency_steps", torch.tensor([2.0, 3.0]), env_ids=torch.tensor([0, 2]))
+    state.set(env, "action_noise", torch.tensor([0.11, 0.17]), env_ids=torch.tensor([0, 2]))
+    state.set(env, "max_acceleration", torch.tensor([0.6, 1.2]), env_ids=torch.tensor([0, 2]))
+    state.set(env, "fraction", torch.tensor([0.04, 0.20]), env_ids=torch.tensor([0, 2]))
 
     assert state.values.shape == (3, 48)
     assert torch.allclose(state.values[1, module.ADR_STATE_SLICES["com"]], torch.tensor([0.01, -0.01, 0.005]))
     assert torch.count_nonzero(state.values[0, module.ADR_STATE_SLICES["com"]]) == 0
     assert torch.allclose(state.values[2, module.ADR_STATE_SLICES["stiffness"]], torch.arange(16).float())
     assert torch.allclose(state.values[:, module.ADR_STATE_SLICES["latency_steps"]].flatten(), torch.tensor([2.0, 0.0, 3.0]))
+    assert torch.allclose(state.values[:, module.ADR_STATE_SLICES["action_noise"]].flatten(), torch.tensor([0.11, 0.0, 0.17]))
+    assert torch.allclose(
+        state.values[:, module.ADR_STATE_SLICES["max_acceleration"]].flatten(), torch.tensor([0.6, 0.0, 1.2])
+    )
+    assert torch.allclose(state.values[:, module.ADR_STATE_SLICES["fraction"]].flatten(), torch.tensor([0.04, 0.0, 0.20]))
 
 
 def test_adr_state_rejects_non_16d_gain_vector() -> None:

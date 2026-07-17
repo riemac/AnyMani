@@ -628,6 +628,8 @@ config 的 minibatch 字段。
 
 from __future__ import annotations
 
+import math
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -715,6 +717,12 @@ class GmTactileRotationCommandsCfg:
         orientation_keypoint_success_threshold=0.005,
         position_success_threshold=0.025,
         speed_ema_time_constant_s=0.25,
+        diagnostics_action_name="hand_joint_pos",
+        diagnostics_fingertip_sensor_names=TACTILE_TIP_SENSOR_NAMES,
+        diagnostics_finger_non_tip_sensor_names=TACTILE_FINGER_NON_TIP_SENSOR_NAMES,
+        diagnostics_palm_sensor_name=TACTILE_PALM_SENSOR_NAME,
+        diagnostics_contact_ema_alpha=0.5,
+        diagnostics_contact_force_threshold=0.25,
         resampling_time_range=(1.0e6, 1.0e6),
     )
 
@@ -734,42 +742,44 @@ class GmTactileRotationActionsCfg:
     )
 
 
-def _policy_frame_term(*, history_length: int = 1, flatten_history_dim: bool = True) -> ObsTerm:
-    r"""构造 CurrentObs/History30Obs 唯一允许不同的 actor ObsTerm。"""
+def _policy_term(
+    func,
+    *,
+    params: dict[str, object] | None = None,
+    scale: float | None = None,
+    history_length: int = 1,
+    flatten_history_dim: bool = True,
+) -> ObsTerm:
+    r"""构造 actor semantic term，并让 Current/History routes 只改变统一 history 参数。"""
 
     return ObsTerm(
-        func=gm_mdp.tactile_rotation_policy_frame,
-        params={
-            **_contact_params(),
-            "robot_cfg": TACTILE_JOINT_CFG,
-            "action_name": "hand_joint_pos",
-        },
+        func=func,
+        params={} if params is None else params,
+        scale=scale,
         history_length=history_length,
         flatten_history_dim=flatten_history_dim,
     )
 
 
-def _critic_state_term() -> ObsTerm:
-    r"""构造两条 actor route 完全共享的 152D central critic ObsTerm。"""
-
-    return ObsTerm(
-        func=gm_mdp.tactile_rotation_critic_state,
-        params={
-            **_contact_params(),
-            "command_name": "goal_pose",
-            "semantic_R_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_R_ha,
-            "robot_cfg": TACTILE_JOINT_CFG,
-            "object_cfg": SceneEntityCfg("object"),
-            "action_name": "hand_joint_pos",
-        },
-    )
-
-
 @configclass
 class GmTactileRotationCurrentPolicyObsCfg(ObsGroup):
-    r"""GRU route 的 `[B,52]` 当前 deployment frame。"""
+    r"""GRU route 的 `[B,52]` 当前 deployment frame，按字段声明顺序拼接。"""
 
-    frame = _policy_frame_term()
+    joint_pos = _policy_term(
+        gm_mdp.tactile_joint_position,
+        params={"robot_cfg": TACTILE_JOINT_CFG},
+        scale=1.0 / math.pi,
+    )  # `[B,16]`，$q_t/\pi$
+    joint_target = _policy_term(
+        gm_mdp.tactile_joint_target,
+        params={"action_name": "hand_joint_pos"},
+        scale=1.0 / math.pi,
+    )  # `[B,16]`，$u_t/\pi$
+    last_policy_action = _policy_term(
+        gm_mdp.tactile_last_policy_action,
+        params={"action_name": "hand_joint_pos"},
+    )  # `[B,16]`，$a_{t-1}^{policy}$
+    tip_contact_bits = _policy_term(gm_mdp.tactile_tip_contact_bits, params=_contact_params())  # `[B,4]`
 
     def __post_init__(self):
         self.enable_corruption = False
@@ -778,9 +788,34 @@ class GmTactileRotationCurrentPolicyObsCfg(ObsGroup):
 
 @configclass
 class GmTactileRotationHistory30PolicyObsCfg(ObsGroup):
-    r"""TCN route 的 `[B,30,52]` oldest-to-latest causal history。"""
+    r"""TCN route 的 `[B,30,52]` oldest-to-latest semantic-term histories。"""
 
-    frame = _policy_frame_term(history_length=30, flatten_history_dim=False)
+    joint_pos = _policy_term(
+        gm_mdp.tactile_joint_position,
+        params={"robot_cfg": TACTILE_JOINT_CFG},
+        scale=1.0 / math.pi,
+        history_length=30,
+        flatten_history_dim=False,
+    )
+    joint_target = _policy_term(
+        gm_mdp.tactile_joint_target,
+        params={"action_name": "hand_joint_pos"},
+        scale=1.0 / math.pi,
+        history_length=30,
+        flatten_history_dim=False,
+    )
+    last_policy_action = _policy_term(
+        gm_mdp.tactile_last_policy_action,
+        params={"action_name": "hand_joint_pos"},
+        history_length=30,
+        flatten_history_dim=False,
+    )
+    tip_contact_bits = _policy_term(
+        gm_mdp.tactile_tip_contact_bits,
+        params=_contact_params(),
+        history_length=30,
+        flatten_history_dim=False,
+    )
 
     def __post_init__(self):
         self.enable_corruption = False
@@ -789,9 +824,40 @@ class GmTactileRotationHistory30PolicyObsCfg(ObsGroup):
 
 @configclass
 class GmTactileRotationCriticObsCfg(ObsGroup):
-    r"""Independent feed-forward central critic 的当前 152D privileged state。"""
+    r"""当前 152D central critic；shared fields 与 actor 采用完全相同的数值口径。"""
 
-    state = _critic_state_term()
+    joint_pos = ObsTerm(
+        func=gm_mdp.tactile_joint_position,
+        params={"robot_cfg": TACTILE_JOINT_CFG},
+        scale=1.0 / math.pi,
+    )  # 16D $q_t/\pi$
+    joint_velocity = ObsTerm(
+        func=gm_mdp.tactile_joint_velocity,
+        params={"robot_cfg": TACTILE_JOINT_CFG},
+    )  # 16D raw rad/s
+    joint_target = ObsTerm(
+        func=gm_mdp.tactile_joint_target,
+        params={"action_name": "hand_joint_pos"},
+        scale=1.0 / math.pi,
+    )  # 16D $u_t/\pi$
+    last_policy_action = ObsTerm(
+        func=gm_mdp.tactile_last_policy_action,
+        params={"action_name": "hand_joint_pos"},
+    )  # 16D
+    object_task_state = ObsTerm(
+        func=gm_mdp.tactile_object_task_state,
+        params={
+            "command_name": "goal_pose",
+            "semantic_R_ha": GM_SINGLE_ASSET_HAND_SPAWN_CFG.frame.semantic_R_ha,
+            "robot_cfg": TACTILE_JOINT_CFG,
+            "object_cfg": SceneEntityCfg("object"),
+        },
+    )  # 15D pose/velocity state
+    tip_force_ema = ObsTerm(func=gm_mdp.tactile_tip_force_ema, params=_contact_params())  # 4D N
+    palm_force_ema = ObsTerm(func=gm_mdp.tactile_palm_force_ema, params=_contact_params())  # 1D N
+    finger_non_tip_bits = ObsTerm(func=gm_mdp.tactile_finger_non_tip_bits, params=_contact_params())  # 19D
+    adr_actual = ObsTerm(func=gm_mdp.gm_adr_state_observation, params={"action_dim": 16})  # 48D
+    reward_release = ObsTerm(func=gm_mdp.tactile_reward_release_coefficient)  # 1D $\lambda_{rew}$
 
     def __post_init__(self):
         self.enable_corruption = False
@@ -816,7 +882,12 @@ class GmTactileRotationHistory30ObservationsCfg:
 
 @configclass
 class GmTactileRotationRewardsCfg:
-    r"""Rotation + curriculum-gated contact/stable + failure impulse reward。"""
+    r"""Rotation + curriculum-gated contact/stable + failure impulse reward。
+
+    Isaac Lab `Episode_Reward/*` tags 表示各 weighted term 的 episode integral，再除以配置的
+    `max_episode_length_s=120 s`；它不是 raw reward，也不是按实际提前终止时长归一化的 rate。
+    实际 episode duration 由 `Metrics/goal_pose/task/episode_duration_s` 单独记录。
+    """
 
     pose_keypoint = RewTerm(
         func=gm_mdp.tactile_full_pose_keypoint_reward,
@@ -924,27 +995,27 @@ class GmTactileRotationEventsCfg:
         mode="prestartup",
         params={"asset_cfg": SceneEntityCfg("object"), "scale_range": (1.1, 1.25)},
     )
-    randomized_object_material = EventTerm(  # NOTE：这里感觉是不是不太合理
+    initialize_object_material = EventTerm(
         func=gm_mdp.RandomizeRigidBodyMaterialAndRecord,  # pyright: ignore[reportArgumentType]  # class-term runtime contract
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("object", body_names=[".*"]),
-            "static_friction_range": (1.0, 1.0),
-            "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (0.0, 0.0),
+            "static_friction_range": gm_mdp.GM_ADR_OBJECT_MATERIAL_INITIAL.static,
+            "dynamic_friction_range": gm_mdp.GM_ADR_OBJECT_MATERIAL_INITIAL.dynamic,
+            "restitution_range": gm_mdp.GM_ADR_OBJECT_MATERIAL_INITIAL.restitution,
             "num_buckets": 250,
             "make_consistent": True,
             "adr_state_field": "object_material",
         },
     )
-    randomized_robot_material = EventTerm(  # NOTE：这里也是
+    initialize_hand_contact_material = EventTerm(
         func=gm_mdp.RandomizeRigidBodyMaterialAndRecord,  # pyright: ignore[reportArgumentType]  # class-term runtime contract
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=list(GM_SINGLE_ASSET_CONTACT_LAYOUT.all_link_names)),
-            "static_friction_range": (1.0, 1.0),
-            "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (0.0, 0.0),
+            "static_friction_range": gm_mdp.GM_ADR_HAND_MATERIAL_INITIAL.static,
+            "dynamic_friction_range": gm_mdp.GM_ADR_HAND_MATERIAL_INITIAL.dynamic,
+            "restitution_range": gm_mdp.GM_ADR_HAND_MATERIAL_INITIAL.restitution,
             "num_buckets": 250,
             "make_consistent": True,
             "adr_state_field": "hand_contact_material",
@@ -973,17 +1044,17 @@ class GmTactileRotationEventsCfg:
             "distribution": "uniform",
         },
     )
-    randomized_object_material_adr = EventTerm(
+    resample_object_material_from_adr = EventTerm(
         func=gm_mdp.resample_adr_material_buckets,
         mode="reset",
         min_step_count_between_reset=720,
-        params={"term_name": "randomized_object_material", "range_attr": "leap_adr_object_material_ranges"},
+        params={"term_name": "initialize_object_material", "range_attr": "leap_adr_object_material_ranges"},
     )
-    randomized_robot_material_adr = EventTerm(
+    resample_hand_contact_material_from_adr = EventTerm(
         func=gm_mdp.resample_adr_material_buckets,
         mode="reset",
         min_step_count_between_reset=720,
-        params={"term_name": "randomized_robot_material", "range_attr": "leap_adr_robot_material_ranges"},
+        params={"term_name": "initialize_hand_contact_material", "range_attr": "leap_adr_robot_material_ranges"},
     )
     randomized_object_com = EventTerm(
         func=gm_mdp.randomize_object_com_from_default_and_record,
@@ -995,12 +1066,12 @@ class GmTactileRotationEventsCfg:
         mode="reset",
         params={"min_episode_length_s": 20.0},
     )
-    reset_object = EventTerm(
+    reset_object_pose_from_adr = EventTerm(
         func=gm_mdp.reset_adr_object_state,
         mode="reset",
         params={"asset_cfg": SceneEntityCfg("object")},
     )
-    reset_robot_joints = EventTerm(
+    reset_hand_joints_from_adr = EventTerm(
         func=gm_mdp.reset_adr_robot_joints,
         mode="reset",
         params={"asset_cfg": TACTILE_JOINT_CFG},

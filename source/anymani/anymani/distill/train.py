@@ -89,6 +89,7 @@ from anymani.distill.rl.rl_games_backend import prefer_local_rl_games  # noqa: E
 backend_info = prefer_local_rl_games(strict=args_cli.rl_games_strict)
 
 import isaaclab_tasks  # noqa: F401, E402
+from anymani.distill.rl.observers import OneShotIsaacAlgoObserver, mean_policy_action_std  # noqa: E402
 from anymani.distill.rl.rl_games_networks import register_anymani_rl_games_networks  # noqa: E402
 from isaaclab.envs import (  # noqa: E402
     DirectMARLEnv,
@@ -104,7 +105,6 @@ from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper  # noqa: E4
 from isaaclab_tasks.utils.hydra import hydra_task_config  # noqa: E402
 from rl_games.algos_torch import torch_ext  # noqa: E402
 from rl_games.common import env_configurations, vecenv  # noqa: E402
-from rl_games.common.algo_observer import IsaacAlgoObserver  # noqa: E402
 from rl_games.torch_runner import Runner  # noqa: E402
 
 register_anymani_rl_games_networks()
@@ -190,7 +190,7 @@ def _configure_log_dir(agent_cfg: dict) -> tuple[str, str]:
     return log_root_path, log_dir
 
 
-class RslStyleIsaacAlgoObserver(IsaacAlgoObserver):
+class RslStyleIsaacAlgoObserver(OneShotIsaacAlgoObserver):
     r"""把 rl_games 训练统计追加打印成 RSL-RL 风格 summary block。
 
     rl_games 默认 console 主要输出：
@@ -348,16 +348,7 @@ class RslStyleIsaacAlgoObserver(IsaacAlgoObserver):
     def _mean_action_std(self) -> float | None:
         r"""估计当前策略 action std，帮助判断探索是否过强或过弱。"""
 
-        model = getattr(self.algo, "model", None)
-        network = getattr(model, "a2c_network", None)
-        sigma = getattr(network, "sigma", None)
-        if sigma is None:
-            return None
-        with torch.no_grad():
-            sigma_value = sigma.detach().float()
-            if "LogStd" in type(model).__qualname__:
-                sigma_value = torch.exp(sigma_value)  # logstd parameter -> std
-            return sigma_value.mean().item()
+        return mean_policy_action_std(self.algo)
 
     def _line(self, label: str, value: str, pad: int = 40) -> str:
         r"""生成 RSL-RL block 中右对齐的一行文本。"""
@@ -367,7 +358,7 @@ class RslStyleIsaacAlgoObserver(IsaacAlgoObserver):
     def _print_rsl_style_summary(self, stats: dict[str, float | int | None], episode_summary: dict[str, float], width: int = 80) -> None:
         r"""打印单个 PPO epoch 的 RSL-RL 风格摘要。"""
 
-        epoch_num = int(stats["epoch_num"])
+        epoch_num = int(stats.get("epoch_num") or 0)
         max_epochs = int(getattr(self.algo, "max_epochs", -1))
         done_epochs = max(epoch_num, 1)
         remaining_epochs = max(max_epochs - epoch_num, 0) if max_epochs > 0 else 0
@@ -382,7 +373,10 @@ class RslStyleIsaacAlgoObserver(IsaacAlgoObserver):
         log_string += self._line("Collection time", f"{float(stats['scaled_play_time'] or 0.0):.3f}s")
         log_string += self._line("Learning time", f"{float(stats['update_time'] or 0.0):.3f}s")
         if stats["c_loss"] is not None:
-            log_string += self._line("Mean value loss", f"{float(stats['c_loss']):.4f}")
+            if self.last_central_value_loss is None:
+                log_string += self._line("Mean actor value loss", f"{float(stats['c_loss']):.4f}")
+        if self.last_central_value_loss is not None:
+            log_string += self._line("Mean central value loss", f"{self.last_central_value_loss:.4f}")
         if stats["a_loss"] is not None:
             log_string += self._line("Mean surrogate loss", f"{float(stats['a_loss']):.4f}")
         if stats["entropy"] is not None:
@@ -405,12 +399,12 @@ class RslStyleIsaacAlgoObserver(IsaacAlgoObserver):
         print(log_string)
 
 
-def _make_isaac_algo_observer(agent_cfg: dict) -> IsaacAlgoObserver:
+def _make_isaac_algo_observer(agent_cfg: dict) -> OneShotIsaacAlgoObserver:
     r"""按 YAML 配置创建 rl_games observer。"""
 
     if agent_cfg["params"]["config"].get("rsl_style_console", False):
         return RslStyleIsaacAlgoObserver()
-    return IsaacAlgoObserver()
+    return OneShotIsaacAlgoObserver()
 
 
 @hydra_task_config(args_cli.task, "rl_games_cfg_entry_point")
