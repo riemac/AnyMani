@@ -1,3 +1,13 @@
+0.5.0 - 2026-07-17
+==================
+
+- 新增 GM single-asset palm-supported tactile rotation 的 CurrentObs/GRU 与 History30Obs/TCN 训练路线，保持 52D actor、30x52 temporal input 与独立 152D privileged central critic。
+- 将 object reset 改为随 25-level curriculum 从 0 展开到 $[-\pi,\pi]$ 的 object-body yaw 右乘，取消 roll/pitch 初态扰动，并统一 object/hand material nominal 与 endpoint 常量。
+- 将 actor/critic observation 拆成可审计的 semantic MDP terms；共享 joint position 与 target 均使用 $1/\pi$ 口径，privileged velocity、pose、contact 和 actual ADR 保留物理单位。
+- 增加 per-env、once-per-policy-step episode diagnostics，覆盖旋转、pose、action、contact、termination 与 actual ADR；ADR level scalar 在 reset 时固化，避免 ongoing episode 被 curriculum promotion 中途改写。
+- 修复 rl_games stale episode payload 重复消费和不等 reset-batch 加权，控制台显示真实 central-value loss，并同时支持 native `sigma` 与 custom TCN `logstd` 的 action standard deviation。
+- 该版本改变同一 Gym ID 下的 reset distribution 与 critic feature scale；0.4.x tactile checkpoints 仅作为冻结 baseline 回放，不得续训或与 0.5.0 runs 混用。
+
 0.4.3 - 2026-07-12
 ==================
 
