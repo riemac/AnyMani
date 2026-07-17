@@ -3,6 +3,38 @@ r"""Shared reward helpers for GM in-hand manipulation.
 这些 helper 承载 reward 项之间共享的 command buffer 解析、orientation keypoint 距离、
 以及 adaptive reward curriculum 系数。它们不是外部 MDP API，但需要集中维护，避免
 reorient/contact/stable 子模块各自复制 command / curriculum 语义。
+
+TODO(full-pose keypoint primitive):
+    tactile rotation baseline 的稠密 pose reward 需要在现有 orientation-only helper 之外增加
+    full-pose 六轴 keypoint distance：
+
+    $$
+    x_i^{\{h\}}
+    =
+    \left\|
+    p_o^{\{h\}}+R_{ho}r_i^{\{o\}}-
+    \left(p_{anchor}^{\{h\}}+R_{hg}r_i^{\{o\}}\right)
+    \right\|_2.
+    $$
+
+    normalized kernel 为：
+
+    $$
+    r_{kp}
+    =
+    \frac{1}{6}
+    \sum_i
+    \frac{4}
+    {\exp(50x_i^{\{h\}})+2+\exp(-50x_i^{\{h\}})}.
+    $$
+
+    full-pose helper 服务 dense reward；orientation-only helper 服务 success orientation gate。
+    二者不得合并成一个含糊的 `keypoint_distance`。
+
+TODO(reward time semantics):
+    helper 应显式区分持续 rate 与离散 impulse。RewardManager 会乘 `step_dt`：连续状态项直接
+    返回 rate；delta-rotation 返回 clipped angle 除以 `step_dt`；goal / termination impulse
+    返回 indicator 除以 `step_dt`。禁止在新组合式 reward 外层整体抵消 `dt`。
 """
 
 from __future__ import annotations
@@ -145,6 +177,65 @@ def orientation_keypoint_distance(
     return torch.linalg.norm(current_points - goal_points, dim=-1).mean(dim=-1)  # $d_{kp}$，形状 `[B]`
 
 
+def full_pose_keypoint_distances(
+    current_pos_w: torch.Tensor,
+    current_quat_w: torch.Tensor,
+    goal_pos_w: torch.Tensor,
+    goal_quat_w: torch.Tensor,
+    radius: float,
+) -> torch.Tensor:
+    r"""计算六个 object-local keypoints 的 full-pose 逐点距离。
+
+    虽然任务公式写在 `{h}`，同一刚体旋转同时作用于 current/goal points 时欧氏距离不变，
+    因此 runtime 可直接在 `{w}` 计算，避免重复 hand-frame 变换：
+
+    $$
+    x_i=\left\|p_o^w+R_{wo}r_i^o-(p_{anchor}^w+R_{wg}r_i^o)\right\|_2.
+    $$
+
+    Returns:
+        torch.Tensor: 六个逐点距离 `[B,6]`，单位 m；不在这里提前平均。
+    """
+
+    keypoints_o = six_axis_keypoints_o(current_quat_w.device, radius).to(dtype=current_quat_w.dtype)
+    current_rot_w = math_utils.matrix_from_quat(current_quat_w)
+    goal_rot_w = math_utils.matrix_from_quat(goal_quat_w)
+    current_points_w = current_pos_w[:, None, :] + torch.einsum("bij,kj->bki", current_rot_w, keypoints_o)
+    goal_points_w = goal_pos_w[:, None, :] + torch.einsum("bij,kj->bki", goal_rot_w, keypoints_o)
+    return torch.linalg.norm(current_points_w - goal_points_w, dim=-1)  # `[B,6]`
+
+
+def normalized_keypoint_kernel(
+    distances: torch.Tensor,
+    curve_sharpness: float = 50.0,
+    curve_bias: float = 2.0,
+) -> torch.Tensor:
+    r"""对逐 keypoint 距离应用归一化 AnyRotate logistic kernel 后求均值。
+
+    $$
+    r_{kp}=\frac1K\sum_i\frac{2+b}{\exp(ax_i)+b+\exp(-ax_i)}.
+    $$
+
+    baseline $b=2$，所以 numerator 为 4，确保所有距离为零时 reward 精确为 1。
+    """
+
+    x = torch.clamp(float(curve_sharpness) * distances, min=0.0, max=30.0)  # 防止大距离 exp overflow
+    per_keypoint = (2.0 + float(curve_bias)) / (torch.exp(x) + float(curve_bias) + torch.exp(-x))
+    return per_keypoint.mean(dim=-1)  # `[B]`，$(0,1]`
+
+
+def impulse_to_rate(value: torch.Tensor, step_dt: float) -> torch.Tensor:
+    r"""把离散 step impulse 转成 RewardManager 可积分的 rate。
+
+    RewardManager 最终乘 `step_dt`，所以返回 $I/\Delta t$ 可使一次事件的 episode integral
+    恒为 $I$，不随 20/30 Hz policy frequency 改变。
+    """
+
+    if float(step_dt) <= 0.0:
+        raise ValueError(f"step_dt must be positive, got {step_dt}.")
+    return value / float(step_dt)
+
+
 def curriculum_gain(
     env: ManagerBasedRLEnv,
     lambda_floor: float,
@@ -190,6 +281,9 @@ def curriculum_gain(
 
 __all__ = [
     "curriculum_gain",
+    "full_pose_keypoint_distances",
+    "impulse_to_rate",
+    "normalized_keypoint_kernel",
     "orientation_keypoint_distance",
     "resolve_axis_e",
     "resolve_goal_quat_w",

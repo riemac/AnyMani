@@ -15,6 +15,29 @@ r"""Contact sensor layout utilities for GM generated-hand tasks.
    `filter_prim_paths_expr=["{ENV_REGEX_NS}/object"]`。Isaac Lab filtered contact 的可靠语义是
    “一个 sensor body 对多个 filtered bodies”，不是“多个 robot bodies 聚合到一个 sensor 再过滤到
    一个 object”，因此这里不使用 regex aggregate sensor。
+
+TODO(tactile rotation baseline):
+    palm-supported tactile rotation 需要把当前 `non_tip` 集合拆成两个任务角色：
+
+    - palm：合法支撑，进入 privileged critic 与独立 support-force metric，不进入 bad-contact penalty；
+    - finger non-tip：19 个非指尖 finger links，进入 bad-contact penalty 与接触归因诊断。
+
+    这个拆分必须由 sidecar link role 推导，不能依赖 `non_tip_sensor_names[1:]` 之类的偶然顺序。
+    contact layout 仍只描述 topology，不拥有 EMA、reward curriculum 或 palm-supported 任务权重。
+
+TODO(shared contact state):
+    新基线需要一个 policy-rate、reset-aware 的 object-contact state owner。每个 sensor 先在
+    body/filter pair 上取最大力幅值，随后做：
+
+    $$
+    \bar f_t=0.5\bar f_{t-1}+0.5f_t,
+    \qquad
+    c_t=\mathbf{1}[\bar f_t>0.25\ \mathrm{N}].
+    $$
+
+    actor observation、good-tip reward 与 bad-finger-non-tip reward 必须读取同一 buffer，避免
+    同一个物理接触在不同 consumer 中得到互相矛盾的 0/1 判定。该 state 每个 policy step
+    更新一次；ContactSensor physics history 不能冒充 policy history。
 """
 
 from __future__ import annotations
@@ -43,9 +66,9 @@ class GmContactSensorLayout:
         finger_link_chains (tuple[tuple[str, ...], ...]): 每根 finger 的 child link 链；
             该字段服务 generated structural collision filter，不要求固定四指名称。
         fingertip_link_names (tuple[str, ...]): `is_tip=True` joint 的 child link，顺序沿 sidecar finger/joint 顺序。
-        non_tip_link_names (tuple[str, ...]): palm 加所有 `is_tip=False` joint child link，顺序沿运动链展开。
+        finger_non_tip_link_names (tuple[str, ...]): 所有 `is_tip=False` joint child link，顺序沿运动链展开。
         fingertip_sensor_names (tuple[str, ...]): 与 fingertip link 一一对应的 scene sensor 名称。
-        non_tip_sensor_names (tuple[str, ...]): 与 non-tip link 一一对应的 scene sensor 名称。
+        finger_non_tip_sensor_names (tuple[str, ...]): 与 finger non-tip link 一一对应的 scene sensor 名称。
     """
 
     source_asset_id: str
@@ -60,14 +83,40 @@ class GmContactSensorLayout:
     fingertip_link_names: tuple[str, ...]
     """所有 fingertip link 名称；`is_tip=True` 是 sidecar 中的显式语义标签。"""
 
-    non_tip_link_names: tuple[str, ...]
-    """所有非指尖接触 link 名称；包含 palm 与所有 `is_tip=False` child link。"""
+    finger_non_tip_link_names: tuple[str, ...]
+    """所有非指尖 finger child link；palm 不在该集合中，因此可直接用于 bad-contact penalty。"""
 
     fingertip_sensor_names: tuple[str, ...]
     """所有 fingertip sensor 名称；obs/reward 按该顺序拼接接触信号。"""
 
-    non_tip_sensor_names: tuple[str, ...]
-    """所有 non-tip sensor 名称；bad-contact reward 使用该集合做 OR 聚合。"""
+    finger_non_tip_sensor_names: tuple[str, ...]
+    """所有 finger non-tip sensor 名称；bad-contact reward 使用该集合做 OR 聚合。"""
+
+    @property
+    def palm_sensor_name(self) -> str:
+        r"""返回 palm object-filtered sensor 名称。
+
+        Palm 是 tactile-rotation 任务中的合法支撑面，必须能独立进入 privileged critic 和
+        support metric，不能通过 `non_tip_sensor_names[0]` 这类偶然位置恢复角色。
+        """
+
+        return _sensor_name_for_link(self.palm_link_name)  # 单一 palm role 对应单一 object-filtered sensor
+
+    @property
+    def non_tip_link_names(self) -> tuple[str, ...]:
+        r"""返回旧 GM probe 使用的 palm-first non-tip 聚合视图。
+
+        该 property 只维护已有环境的 contact contract；新 tactile rotation reward 必须使用
+        `finger_non_tip_link_names`，从而把 palm 接触保持为中性支撑。
+        """
+
+        return (self.palm_link_name, *self.finger_non_tip_link_names)  # palm + 纯 finger non-tip links
+
+    @property
+    def non_tip_sensor_names(self) -> tuple[str, ...]:
+        r"""返回与 `non_tip_link_names` 同序的旧聚合 sensor 视图。"""
+
+        return (self.palm_sensor_name, *self.finger_non_tip_sensor_names)  # 旧 reward 保持 palm-first 语义
 
     @property
     def all_sensor_names(self) -> tuple[str, ...]:
@@ -197,30 +246,30 @@ def build_contact_sensor_layout_from_sidecar(
     # 沿 sidecar finger/joint 顺序展开 child links；该顺序也就是当前 generated hand 的 semantic joint order。
     finger_link_chains = _finger_link_chains_from_hand_cfg(hand_cfg, asset_id=asset_id)  # 每根 finger 的 child link 链
     tip_links: list[str] = []  # `is_tip=True` 的 child links，服务 fingertip obs / good contact
-    non_tip_links: list[str] = [palm_link_name]  # palm 作为 non-tip 接触项的第一个 body，便于显式 bad-contact penalty
+    finger_non_tip_links: list[str] = []  # 只含 finger links；palm 是独立合法支撑角色
     for joint_cfg in _iter_joint_cfgs(hand_cfg, asset_id=asset_id):
         child_link = _require_nonempty_string(joint_cfg.get("child"), f"asset {asset_id!r} joint.child")
         if bool(joint_cfg.get("is_tip", False)):
             tip_links.append(child_link)  # 指尖 link：鼓励多指与 object 接触
         else:
-            non_tip_links.append(child_link)  # 非指尖 link：用于 palm/link 辅助接触惩罚
+            finger_non_tip_links.append(child_link)  # 非指尖 finger link：用于 bad-contact 与归因诊断
 
     tip_links = _dedupe_preserve_order(tip_links)  # 防御性去重；schema 本身也应保证 link 名唯一
-    non_tip_links = _dedupe_preserve_order(non_tip_links)  # palm + non-tip child links，保持 sidecar 顺序
+    finger_non_tip_links = _dedupe_preserve_order(finger_non_tip_links)  # 纯 finger non-tip links，保持 sidecar 顺序
     if not tip_links:
         raise ValueError(f"asset {asset_id!r} hand_cfg does not mark any joint with is_tip=True.")
 
     fingertip_sensor_names = tuple(_sensor_name_for_link(link_name) for link_name in tip_links)
-    non_tip_sensor_names = tuple(_sensor_name_for_link(link_name) for link_name in non_tip_links)
+    finger_non_tip_sensor_names = tuple(_sensor_name_for_link(link_name) for link_name in finger_non_tip_links)
 
     return GmContactSensorLayout(
         source_asset_id=str(asset_id),
         palm_link_name=palm_link_name,
         finger_link_chains=finger_link_chains,
         fingertip_link_names=tuple(tip_links),
-        non_tip_link_names=tuple(non_tip_links),
+        finger_non_tip_link_names=tuple(finger_non_tip_links),
         fingertip_sensor_names=fingertip_sensor_names,
-        non_tip_sensor_names=non_tip_sensor_names,
+        finger_non_tip_sensor_names=finger_non_tip_sensor_names,
     )
 
 
@@ -350,11 +399,28 @@ def sensor_contact_indicator(env: Any, sensor_name: str, force_threshold: float)
         torch.Tensor: bool tensor，形状 `[num_envs]`。
     """
 
+    return sensor_contact_magnitude(env, sensor_name) > float(force_threshold)  # `[B]`，二值有效接触指示
+
+
+def sensor_contact_magnitude(env: Any, sensor_name: str) -> torch.Tensor:
+    r"""读取单个 sensor 内最大的 body/filter-pair 接触力幅值。
+
+    二值触觉不能先把多个接触向量相加：若两个接触法向相反，向量和可能接近零，但两个
+    物理接触都真实存在。这里先对每个 pair 计算 $\|F\|_2$，再对非 batch 维取最大值。
+
+    Args:
+        env (Any): Isaac Lab manager-based env。
+        sensor_name (str): scene 中 object-filtered ContactSensor 名称。
+
+    Returns:
+        torch.Tensor: 每个 env 的最大 pair 力幅值，形状 `[num_envs]`，单位 N。
+    """
+
     total_force_w = _sensor_force_tensor_w(env, sensor_name)  # `[B,...,3]`，normal + tangential force
-    force_norm = torch.linalg.norm(total_force_w, dim=-1)  # `[B,...]`，力幅值 $\|F\|_2$
+    force_norm = torch.linalg.norm(total_force_w, dim=-1)  # `[B,...]`，逐 body/filter pair 的 $\|F\|_2$
     if force_norm.ndim > 1:
-        force_norm = force_norm.amax(dim=tuple(range(1, force_norm.ndim)))  # `[B]`，sensor 内最大 pair 力幅值
-    return force_norm > float(force_threshold)  # `[B]`，二值有效接触指示
+        force_norm = force_norm.amax(dim=tuple(range(1, force_norm.ndim)))  # `[B]`，不允许 pair 间方向抵消
+    return force_norm  # `[B]`，单位 N
 
 
 def _sensor_force_tensor_w(env: Any, sensor_name: str) -> torch.Tensor:
@@ -464,10 +530,17 @@ def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
     return deduped
 
 
-def _layout_signature(layout: GmContactSensorLayout) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...], tuple[str, ...]]:
+def _layout_signature(
+    layout: GmContactSensorLayout,
+) -> tuple[tuple[tuple[str, ...], ...], str, tuple[str, ...], tuple[str, ...]]:
     r"""提取用于 same-topology validation 的 contact / structural-collision 语义签名。"""
 
-    return layout.finger_link_chains, layout.fingertip_link_names, layout.non_tip_link_names
+    return (
+        layout.finger_link_chains,
+        layout.palm_link_name,
+        layout.fingertip_link_names,
+        layout.finger_non_tip_link_names,
+    )
 
 
 __all__ = [
@@ -477,6 +550,7 @@ __all__ = [
     "build_contact_sensor_layout_from_sidecar",
     "install_contact_sensors",
     "make_contact_sensor_cfg",
+    "sensor_contact_magnitude",
     "sensor_contact_indicator",
     "sensor_total_force_w",
 ]

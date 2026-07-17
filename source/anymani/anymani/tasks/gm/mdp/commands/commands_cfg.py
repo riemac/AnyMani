@@ -9,6 +9,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from .reorient_command import ReorientCommand
+from .tactile_rotation_command import TactileRotationCommand
 
 
 @configclass
@@ -272,3 +273,66 @@ class ReorientCommandCfg(CommandTermCfg):
                 "command_output.target.representation must be axis_angle/quat/rot6d/matrix, "
                 f"got {target_cfg.get('representation')!r}."
             )
+
+
+@configclass
+class TactileRotationCommandCfg(CommandTermCfg):
+    r"""Palm-supported continuous rotation 的 fixed-axis moving-subgoal 配置。"""
+
+    class_type: type = TactileRotationCommand
+    asset_name: str = "object"
+    robot_asset_name: str = "robot"
+    fixed_axis_h: tuple[float, float, float] = (0.0, 0.0, 1.0)
+    r"""有向目标轴，位于 hand semantic frame `{h}`；baseline 固定为掌面法向 `+z`。"""
+
+    semantic_R_ha: tuple[float, ...] = (
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    )
+    r"""row-major $R_{ha}$，满足 $v^h=R_{ha}v^a$。"""
+
+    subgoal_angle: float = math.pi / 6
+    """每次 success 后从当前 object pose 前推的角度，固定 30 degree。"""
+
+    keypoint_radius: float = 0.05
+    """六轴向 object keypoints 半径，单位 m。"""
+
+    orientation_keypoint_success_threshold: float = 0.005
+    """中心对齐 orientation-only keypoint distance 成功阈值，单位 m。"""
+
+    position_success_threshold: float = 0.025
+    """Object root 相对 episode reset anchor 的成功位置门，单位 m。"""
+
+    speed_ema_time_constant_s: float = 0.25
+    """轴向速度 EMA 的连续时间常数，单位 s；离散 alpha 由运行时 `step_dt` 推导。"""
+
+    make_quat_unique: bool = False
+    """只控制 goal quaternion buffer 的符号规范；progress 通过 rotation matrix 保持符号不变。"""
+
+    resampling_time_range: tuple[float, float] = (1.0e6, 1.0e6)
+    """禁用时间驱动重采样；goal 只由 reset 或 success 推进。"""
+
+    debug_vis: bool = False
+
+    def __post_init__(self):
+        r"""在启动仿真前拒绝不满足任务物理语义的阈值与轴配置。"""
+
+        if len(self.semantic_R_ha) != 9:
+            raise ValueError(f"semantic_R_ha must contain 9 row-major floats, got {len(self.semantic_R_ha)}.")
+        if math.sqrt(sum(component * component for component in self.fixed_axis_h)) < 1.0e-6:
+            raise ValueError("fixed_axis_h must be non-zero.")
+        if not (0.0 < self.subgoal_angle < math.pi):
+            raise ValueError(f"subgoal_angle must be in (0,pi), got {self.subgoal_angle}.")
+        if self.keypoint_radius <= 0.0:
+            raise ValueError(f"keypoint_radius must be positive, got {self.keypoint_radius}.")
+        if self.orientation_keypoint_success_threshold <= 0.0 or self.position_success_threshold <= 0.0:
+            raise ValueError("success thresholds must be positive.")
+        if self.speed_ema_time_constant_s <= 0.0:
+            raise ValueError(f"speed_ema_time_constant_s must be positive, got {self.speed_ema_time_constant_s}.")

@@ -70,7 +70,6 @@ GM_LEAP_FINGERTIP_LINK_NAMES = ("fingertip", "fingertip_2", "fingertip_3", "thum
 """Links treated as task fingertips for good-contact reward and force observations."""
 
 GM_LEAP_NON_TIP_LINK_NAMES = (
-    "palm_lower",
     "mcp_joint",
     "pip",
     "dip",
@@ -84,16 +83,16 @@ GM_LEAP_NON_TIP_LINK_NAMES = (
     "thumb_pip",
     "thumb_dip",
 )
-"""Palm and non-tip links penalized by bad non-tip contact."""
+"""Finger non-tip links penalized by bad non-tip contact; palm support is a separate role."""
 
 GM_LEAP_CONTACT_LAYOUT = GmContactSensorLayout(
     source_asset_id="official_leap",
     palm_link_name="palm_lower",
     finger_link_chains=GM_LEAP_FINGER_LINK_CHAINS,
     fingertip_link_names=GM_LEAP_FINGERTIP_LINK_NAMES,
-    non_tip_link_names=GM_LEAP_NON_TIP_LINK_NAMES,
+    finger_non_tip_link_names=GM_LEAP_NON_TIP_LINK_NAMES,
     fingertip_sensor_names=tuple(f"contact_{link_name}" for link_name in GM_LEAP_FINGERTIP_LINK_NAMES),
-    non_tip_sensor_names=tuple(f"contact_{link_name}" for link_name in GM_LEAP_NON_TIP_LINK_NAMES),
+    finger_non_tip_sensor_names=tuple(f"contact_{link_name}" for link_name in GM_LEAP_NON_TIP_LINK_NAMES),
 )
 """Static contact layout for official LEAP, which has no AnyMani generated sidecar."""
 

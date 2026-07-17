@@ -63,6 +63,50 @@ gym.register(
 )
 
 gym.register(
+    id="AnyMani-GM-SingleAsset-TactileRotation-CurrentObs-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.config.single_asset.tactile_rotation_env_cfg:GmTactileRotationCurrentEnvCfg"
+        ),
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-SingleAsset-TactileRotation-CurrentObs-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.config.single_asset.tactile_rotation_env_cfg:GmTactileRotationCurrentEnvCfg_PLAY"
+        ),
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-SingleAsset-TactileRotation-History30Obs-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.config.single_asset.tactile_rotation_env_cfg:GmTactileRotationHistory30EnvCfg"
+        ),
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-SingleAsset-TactileRotation-History30Obs-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.config.single_asset.tactile_rotation_env_cfg:GmTactileRotationHistory30EnvCfg_PLAY"
+        ),
+    },
+)
+
+gym.register(
     id="AnyMani-GM-Leap-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
@@ -90,6 +134,10 @@ __all__ = [
     "GmSingleAssetEnvCfg",
     "GmSingleAssetEnvCfg_PLAY",
     "GmSingleAssetSceneCfg",
+    "GmTactileRotationCurrentEnvCfg",
+    "GmTactileRotationCurrentEnvCfg_PLAY",
+    "GmTactileRotationHistory30EnvCfg",
+    "GmTactileRotationHistory30EnvCfg_PLAY",
     "HeterogeneousHandTestEnvCfg",
 ]
 
@@ -115,6 +163,12 @@ def __getattr__(name: str) -> Any:
             GmSingleAssetEnvCfg_PLAY,
             GmSingleAssetSceneCfg,
         )
+        from .config.single_asset.tactile_rotation_env_cfg import (
+            GmTactileRotationCurrentEnvCfg,
+            GmTactileRotationCurrentEnvCfg_PLAY,
+            GmTactileRotationHistory30EnvCfg,
+            GmTactileRotationHistory30EnvCfg_PLAY,
+        )
         from .inhand_env_cfg import GmInHandEnvCfg, GmInHandEnvCfg_PLAY, GmInHandSceneCfg
 
         exports = {
@@ -127,6 +181,10 @@ def __getattr__(name: str) -> Any:
             "GmSingleAssetEnvCfg": GmSingleAssetEnvCfg,
             "GmSingleAssetEnvCfg_PLAY": GmSingleAssetEnvCfg_PLAY,
             "GmSingleAssetSceneCfg": GmSingleAssetSceneCfg,
+            "GmTactileRotationCurrentEnvCfg": GmTactileRotationCurrentEnvCfg,
+            "GmTactileRotationCurrentEnvCfg_PLAY": GmTactileRotationCurrentEnvCfg_PLAY,
+            "GmTactileRotationHistory30EnvCfg": GmTactileRotationHistory30EnvCfg,
+            "GmTactileRotationHistory30EnvCfg_PLAY": GmTactileRotationHistory30EnvCfg_PLAY,
         }
         return exports[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

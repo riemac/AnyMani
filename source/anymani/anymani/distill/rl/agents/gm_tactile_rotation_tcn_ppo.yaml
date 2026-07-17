@@ -1,0 +1,103 @@
+# GM single-asset tactile rotation 的 causal TCN PPO 配置。
+# 环境直接输出 `[30,52]` oldest-to-latest history；custom builder 产生 64D temporal latent，
+# 再与当前 52D frame 拼给 `[512,256,128]` policy MLP。PPO/critic/采样预算与 GRU 完全一致。
+
+params:
+  seed: 42
+
+  env:
+    clip_observations: 10.0
+    clip_actions: 1.0
+
+  algo:
+    name: a2c_continuous
+
+  model:
+    name: continuous_a2c_logstd
+
+  network:
+    name: anymani_tactile_tcn
+
+    space:
+      continuous:
+        sigma_init:
+          val: -0.5  # fixed trainable log sigma，与 GRU 初始探索强度一致
+
+    tactile_tcn:
+      frame_dim: 52
+      latent_dim: 64
+      hidden_channels: [64, 64, 64]
+      kernels: [9, 5, 5]  # 由模型 contract 固定，YAML 保留为可复现元数据
+      strides: [2, 1, 1]
+      mlp_units: [512, 256, 128]
+      activation: elu
+
+  load_checkpoint: False
+  load_path: ''
+
+  config:
+    name: gm_tactile_rotation_tcn
+    env_name: rlgpu
+    device: 'cuda:0'
+    device_name: 'cuda:0'
+    multi_gpu: False
+    ppo: True
+    mixed_precision: False
+    normalize_input: False  # 与 GRU 共同使用物理归一后的 actor frame，不引入 temporal-position RMS
+    normalize_value: True
+    value_bootstrap: True
+    use_experimental_cv: False
+    torch_compile: False
+    rsl_style_console: True
+    num_actors: -1
+    reward_shaper:
+      scale_value: 1.0
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    learning_rate: 5e-4
+    lr_schedule: adaptive
+    schedule_type: standard
+    kl_threshold: 0.01
+    score_to_win: 100000
+    max_epochs: 10000
+    save_best_after: 200
+    save_frequency: 200
+    print_stats: True
+    grad_norm: 1.0
+    entropy_coef: 0.002
+    truncate_grads: True
+    e_clip: 0.2
+    horizon_length: 30
+    minibatch_size: 30720
+    mini_epochs: 5
+    critic_coef: 4.0
+    clip_value: True
+    clip_actions: False
+    seq_length: 1  # 30 帧来自 env observation；TCN 不是 rl_games RNN
+    bounds_loss_coef: 0.0001
+
+    central_value_config:
+      minibatch_size: 30720
+      mini_epochs: 5
+      learning_rate: 5e-4
+      clip_value: True
+      normalize_input: True
+      truncate_grads: True
+      grad_norm: 1.0
+      network:
+        name: actor_critic
+        central_value: True
+        mlp:
+          units: [512, 256, 128]
+          activation: elu
+          d2rl: False
+          initializer:
+            name: default
+          regularizer:
+            name: None
+
+    player:
+      deterministic: True
+      games_num: 64
+      print_stats: True

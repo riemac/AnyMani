@@ -564,8 +564,13 @@ def _validate_same_hand_schema(containers: tuple[HandContainer, ...]) -> None:
     r"""检查 MultiAssetSpawner 内所有 hands 是否共享 articulation schema。
 
     IsaacLab 的一个 batched `Articulation` 要求各 prototype 的 joint/body schema 兼容。
-    这里用 sidecar 中最直接的科研语义字段做 fail-fast：topology、DOF、slot 顺序和
-    每根手指的 revolute DOF。
+    这里用 sidecar 中最直接的科研语义字段做 fail-fast：topology、DOF、slot 顺序、
+    每根手指的 revolute DOF，以及完整有序 revolute-joint name sequence。
+
+    后一项是 action / observation schema 的必要条件。Isaac Lab 的
+    `joint_names=[".*"], preserve_order=True` 只保留 articulation importer 已有顺序，
+    不会把相同 joint-name 集合自动重排到 canonical 顺序。因此同拓扑资产一旦 joint
+    sequence 不同，就不能进入同一个 batched articulation。
     """
 
     if len(containers) == 0:
@@ -583,19 +588,86 @@ def _validate_same_hand_schema(containers: tuple[HandContainer, ...]) -> None:
 
 
 def _hand_schema_signature(container: HandContainer) -> tuple[object, ...]:
-    r"""从 `hand.yaml` sidecar 抽取 same-schema 轻量签名。"""
+    r"""从 `hand.yaml` sidecar 抽取 same-schema 有序签名。
+
+    Returns:
+        tuple[object, ...]: topology、DOF、slot、finger summary 和 ordered revolute
+        joint names。最后一项直接定义 batched action 第二维的关节语义。
+
+    Raises:
+        ValueError: `hand_cfg` 不完整、joint name 缺失，或解析到的 revolute joint
+        数量与顶层 `dof` 不一致时抛出。
+    """
 
     sidecar = container.sidecar  # generated hand sidecar，保持 dict 以兼容资产 schema 演化
     finger_signature = tuple(
         (finger.get("name"), finger.get("revolute_dof"))
         for finger in sidecar.get("fingers", [])
     )  # 有序 finger schema，避免同 DOF 但 finger routing 不同的资产混入
+    joint_sequence = _ordered_revolute_joint_names(sidecar, asset_id=container.asset_id)  # `[J]`，canonical joint order
     return (
         sidecar.get("topology_name"),
         sidecar.get("dof"),
         tuple(sidecar.get("surviving_slots", [])),
         finger_signature,
+        joint_sequence,
     )
+
+
+def _ordered_revolute_joint_names(sidecar: dict[str, object], *, asset_id: str) -> tuple[str, ...]:
+    r"""按 sidecar finger/joint 顺序提取 revolute articulation joint names。
+
+    Generated exporter 依次遍历 `hand_cfg.fingers` 与 `finger.joints` 写 URDF；这里沿用
+    同一顺序构造 canonical schema：
+
+    $$
+    \mathcal J=(j_0,j_1,\ldots,j_{J-1}),\qquad J=\texttt{sidecar.dof}.
+    $$
+
+    fixed joints 只改变 link hierarchy，不进入 policy action，因此从序列中排除。
+
+    Args:
+        sidecar (dict[str, object]): generated `hand.yaml` 内容。
+        asset_id (str): 当前资产 id，写入 fail-fast 错误消息。
+
+    Returns:
+        tuple[str, ...]: 有序 revolute joint 名称，长度 $J$。
+
+    Raises:
+        ValueError: sidecar 结构、joint 类型/名称或 DOF closure 不合法时抛出。
+    """
+
+    hand_cfg = sidecar.get("hand_cfg")  # 完整 generated hand schema；顶层 summary 不含 joint names
+    if not isinstance(hand_cfg, dict):
+        raise ValueError(f"asset {asset_id!r} sidecar must provide mapping hand_cfg for joint-order validation")
+    fingers = hand_cfg.get("fingers")  # 有序 finger 列表；顺序与 URDF exporter 一致
+    if not isinstance(fingers, list):
+        raise ValueError(f"asset {asset_id!r} sidecar hand_cfg.fingers must be a list")
+
+    joint_names: list[str] = []  # 只收集 policy 可控 revolute joints，保持 sidecar 遍历顺序
+    for finger_index, finger_cfg in enumerate(fingers):
+        if not isinstance(finger_cfg, dict) or not isinstance(finger_cfg.get("joints"), list):
+            raise ValueError(f"asset {asset_id!r} hand_cfg.fingers[{finger_index}].joints must be a list")
+        for joint_index, joint_cfg in enumerate(finger_cfg["joints"]):
+            if not isinstance(joint_cfg, dict):
+                raise ValueError(
+                    f"asset {asset_id!r} hand_cfg.fingers[{finger_index}].joints[{joint_index}] must be a mapping"
+                )
+            if joint_cfg.get("joint_type") != "revolute":
+                continue  # fixed joints 建立 link chain，但不占 action / observation slot
+            joint_name = joint_cfg.get("name")  # articulation joint name，必须与 URDF `<joint name=...>` 相同
+            if not isinstance(joint_name, str) or not joint_name:
+                raise ValueError(f"asset {asset_id!r} has a revolute joint without a non-empty name")
+            joint_names.append(joint_name)
+
+    expected_dof = sidecar.get("dof")  # 顶层 exporter summary 中的可控 DOF 数 $J$
+    if not isinstance(expected_dof, int) or len(joint_names) != expected_dof:
+        raise ValueError(
+            f"asset {asset_id!r} ordered revolute-joint count {len(joint_names)} does not match dof={expected_dof!r}"
+        )
+    if len(set(joint_names)) != len(joint_names):
+        raise ValueError(f"asset {asset_id!r} ordered revolute-joint sequence contains duplicate names: {joint_names!r}")
+    return tuple(joint_names)  # tuple 使 schema signature 可哈希、可直接精确比较
 
 
 def _spawn_urdf_with_restored_visual_materials(

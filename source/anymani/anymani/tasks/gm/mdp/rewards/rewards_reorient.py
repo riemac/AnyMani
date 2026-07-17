@@ -9,6 +9,27 @@ $$
 DONE(本轮已合意的 reward 语义): 第一版以 AnyRotate 风格的 keypoint distance reward
 为主，但 command / success 的数学语义默认仍采用 $SO(3)$ geodesic threshold；keypoints
 使用 object body frame `{o}` 下的 $\pm x,\pm y,\pm z$ 六个轴向点，半径默认 $5\,\text{cm}$。
+
+TODO(tactile rotation replacement semantics):
+    新 single-asset tactile rotation baseline 不再使用本文件当前的 orientation-only dense reward
+    作为主 pose 项。rotation group 应组合：
+
+    $$
+    r_{rotation}
+    =
+    \lambda_{kp}r_{kp}^{full-pose}
+    +
+    \lambda_{rot}r_{rot}^{axis-delta}
+    +
+    \lambda_{goal}r_{goal}.
+    $$
+
+    `r_kp` 替代旧 official 的独立 position/orientation dense terms；`r_rot` 读取 command-owned
+    actual delta angle，reward 内裁剪到 0.025 rad；`r_goal` 使用 orientation-only keypoint
+    threshold 5 mm 与 anchor position threshold 25 mm 的双门，第一版 impulse 权重为 10。
+
+    当前 `AxisDeltaRotationReward` 自己缓存上一姿态，与新 command-owned progress contract 冲突。
+    build 阶段应迁移 consumer 后出清该重复状态 owner，不得让两个版本长期并存。
 """
 
 from __future__ import annotations
@@ -23,7 +44,15 @@ from isaaclab.assets import RigidObject
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 
-from .rewards_common import orientation_keypoint_distance, resolve_axis_e, resolve_goal_quat_w
+from ..commands.tactile_rotation_command import ensure_post_physics_progress_updated
+from .rewards_common import (
+    full_pose_keypoint_distances,
+    impulse_to_rate,
+    normalized_keypoint_kernel,
+    orientation_keypoint_distance,
+    resolve_axis_e,
+    resolve_goal_quat_w,
+)
 
 
 def reorientation_reward_placeholder(env: ManagerBasedRLEnv) -> torch.Tensor:
@@ -124,10 +153,13 @@ def goal_success_bonus(
     # 若阈值未显式传入，则读取 command cfg；读取失败时使用 command cfg 中讨论过的 $\pi/12$ 默认值。
     command_term = env.command_manager.get_term(command_name)
     if orientation_success_threshold is None:
-        orientation_success_threshold = getattr(command_term.cfg, "orientation_success_threshold", math.pi / 12.0)
+        orientation_success_threshold = float(
+            getattr(command_term.cfg, "orientation_success_threshold", math.pi / 12.0)
+        )
+    resolved_orientation_threshold = float(orientation_success_threshold)  # 已排除 `None`，收窄给静态检查
 
     dtheta = math_utils.quat_error_magnitude(goal_quat_w, current_quat_w)  # $\theta_e$，形状 `[B]`
-    so3_success = dtheta <= float(orientation_success_threshold)  # `[B]`，SO(3) 成功指示
+    so3_success = dtheta <= resolved_orientation_threshold  # `[B]`，SO(3) 成功指示
     keypoint_distance = orientation_keypoint_distance(current_quat_w, goal_quat_w, radius=keypoint_radius)  # `[B]`，m
     keypoint_success = keypoint_distance <= float(keypoint_success_threshold)  # `[B]`，keypoint 成功指示
 
@@ -218,9 +250,53 @@ class AxisDeltaRotationReward(ManagerTermBase):
         return progress
 
 
+def tactile_full_pose_keypoint_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    keypoint_radius: float = 0.05,
+    curve_sharpness: float = 50.0,
+    curve_bias: float = 2.0,
+) -> torch.Tensor:
+    r"""返回 current object pose 到 `(anchor, moving goal)` 的 normalized dense reward。"""
+
+    command = ensure_post_physics_progress_updated(env, command_name)
+    object_asset: RigidObject = env.scene[object_cfg.name]
+    distances = full_pose_keypoint_distances(
+        current_pos_w=object_asset.data.root_pos_w,
+        current_quat_w=object_asset.data.root_quat_w,
+        goal_pos_w=command.position_anchor_w,
+        goal_quat_w=command.goal_quat_w,
+        radius=keypoint_radius,
+    )
+    return normalized_keypoint_kernel(distances, curve_sharpness, curve_bias)  # continuous bounded rate
+
+
+def tactile_axis_delta_rotation_rate(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    clip_value: float = 0.025,
+) -> torch.Tensor:
+    r"""把 command-owned signed delta 裁剪后转成 policy-frequency-invariant reward rate。"""
+
+    command = ensure_post_physics_progress_updated(env, command_name)
+    clipped_delta = torch.clamp(command.delta_psi, -float(clip_value), float(clip_value))  # reward-only clip
+    return impulse_to_rate(clipped_delta, env.step_dt)  # metric/curriculum 仍读取未裁剪 `net_rotation_rad`
+
+
+def tactile_goal_success_impulse(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
+    r"""返回 success 双门的一步 impulse rate；command hook 会在 reward 后推进 goal。"""
+
+    command = ensure_post_physics_progress_updated(env, command_name)
+    return impulse_to_rate(command.goal_success_pulse.float(), env.step_dt)
+
+
 __all__ = [
     "AxisDeltaRotationReward",
     "goal_success_bonus",
     "keypoint_reorientation_reward",
     "reorientation_reward_placeholder",
+    "tactile_axis_delta_rotation_rate",
+    "tactile_full_pose_keypoint_reward",
+    "tactile_goal_success_impulse",
 ]

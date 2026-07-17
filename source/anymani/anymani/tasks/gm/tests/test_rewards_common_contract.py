@@ -27,6 +27,28 @@ def _load_rewards_common_module() -> types.ModuleType:
 
     math_stub = types.ModuleType("isaaclab.utils.math")
 
+    def matrix_from_quat(quat: torch.Tensor) -> torch.Tensor:
+        r"""测试用 `(w,x,y,z)` quaternion 到 rotation matrix 转换。"""
+
+        quat = quat / torch.linalg.norm(quat, dim=-1, keepdim=True)
+        w, x, y, z = quat.unbind(dim=-1)
+        return torch.stack(
+            (
+                1 - 2 * (y * y + z * z),
+                2 * (x * y - w * z),
+                2 * (x * z + w * y),
+                2 * (x * y + w * z),
+                1 - 2 * (x * x + z * z),
+                2 * (y * z - w * x),
+                2 * (x * z - w * y),
+                2 * (y * z + w * x),
+                1 - 2 * (x * x + y * y),
+            ),
+            dim=-1,
+        ).reshape(-1, 3, 3)
+
+    math_stub.matrix_from_quat = matrix_from_quat
+
     envs_stub = types.ModuleType("isaaclab.envs")
     envs_stub.ManagerBasedRLEnv = object
 
@@ -84,3 +106,31 @@ def test_resolve_goal_quat_w_rejects_policy_tensor_fallback() -> None:
 
     with pytest.raises(RuntimeError, match="must expose `goal_quat_w` / `quat_command_w`"):
         module.resolve_goal_quat_w(env, "goal_pose")
+
+
+def test_full_pose_keypoint_reward_is_one_at_goal_and_monotonic_in_translation() -> None:
+    r"""归一化 full-pose kernel 在目标处为 1，并随纯平移误差严格下降。"""
+
+    module = _load_rewards_common_module()
+    identity = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    goal_pos = torch.zeros(1, 3)
+    rewards = []
+    for offset in (0.0, 0.01, 0.02):
+        current_pos = torch.tensor([[offset, 0.0, 0.0]])
+        distances = module.full_pose_keypoint_distances(current_pos, identity, goal_pos, identity, radius=0.05)
+        rewards.append(module.normalized_keypoint_kernel(distances).item())
+
+    assert rewards[0] == pytest.approx(1.0)
+    assert rewards[0] > rewards[1] > rewards[2]
+
+
+def test_impulse_rate_integrates_identically_at_20_and_30_hz() -> None:
+    r"""一次 rotation/goal/termination impulse 的积分不得依赖 policy frequency。"""
+
+    module = _load_rewards_common_module()
+    impulse = torch.tensor([0.025, 1.0])
+    rate_20_hz = module.impulse_to_rate(impulse, step_dt=0.05)
+    rate_30_hz = module.impulse_to_rate(impulse, step_dt=1.0 / 30.0)
+
+    assert torch.allclose(rate_20_hz * 0.05, impulse)
+    assert torch.allclose(rate_30_hz * (1.0 / 30.0), impulse)

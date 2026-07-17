@@ -14,6 +14,7 @@ import types
 from dataclasses import MISSING, Field
 from pathlib import Path
 
+import pytest
 from anymani.assets.bank.path_utils import resolve_anymani_root
 from anymani.assets.bank.urdf_utils import parse_urdf_visual_rgba_by_name
 
@@ -44,6 +45,38 @@ def _load_heterogeneous_cfg_module():
                 sys.modules[name] = previous
         _restore_modules(previous_modules)
     return module
+
+
+def _same_schema_sidecar(joint_names: tuple[str, ...]) -> dict[str, object]:
+    r"""构造 joint order 可控的同拓扑 sidecar。
+
+    顶层 topology / DOF / slot / finger summary 完全相同，唯一变量是 `hand_cfg` 中
+    revolute joint 的有序名称。这样测试能直接证伪“只比较 joint-name 集合或 DOF 即可”
+    这一不足以保证 batched action schema 的命题。
+
+    Args:
+        joint_names (tuple[str, ...]): articulation 预期采用的有序 revolute joint 名称。
+
+    Returns:
+        dict[str, object]: `HandContainer.sidecar` 的最小同拓扑替身。
+    """
+
+    return {
+        "topology_name": "right_t2",
+        "dof": 2,
+        "surviving_slots": ["thumb"],
+        "fingers": [{"name": "thumb", "revolute_dof": 2}],
+        "hand_cfg": {
+            "fingers": [
+                {
+                    "name": "thumb",
+                    "joints": [
+                        {"name": joint_name, "joint_type": "revolute"} for joint_name in joint_names
+                    ],
+                }
+            ]
+        },
+    }
 
 
 def _install_isaaclab_cfg_stubs() -> dict[str, types.ModuleType | None]:
@@ -249,6 +282,25 @@ def test_heterogeneous_spawn_cfg_resolves_three_round_robin_assets() -> None:
     assert robot_cfg.spawn.random_choice is False
     assert len(robot_cfg.spawn.assets_cfg) == 3
     assert [Path(child.asset_path).parent.name for child in robot_cfg.spawn.assets_cfg] == list(module.HETEROGENEOUS_HAND_IDS)
+
+
+def test_same_schema_validation_rejects_permuted_revolute_joint_sequence() -> None:
+    r"""相同 joint-name 集合的顺序置换仍必须被 same-schema validator 拒绝。
+
+    `joint_names=[".*"]` 只能保留 importer 已有顺序，不能自动产生 canonical mapping。
+    因此 batched hand selection 的 joint sequence 是 action / observation 第二维的物理语义，
+    不是可忽略的序列化细节。
+    """
+
+    module = _load_heterogeneous_cfg_module()  # 取得与生产路径相同的私有 schema validator
+    validator = module.HandSpawnAdapter.__init__.__globals__["_validate_same_hand_schema"]
+    containers = (
+        types.SimpleNamespace(asset_id="reference", sidecar=_same_schema_sidecar(("thumb_j0", "thumb_j1"))),
+        types.SimpleNamespace(asset_id="permuted", sidecar=_same_schema_sidecar(("thumb_j1", "thumb_j0"))),
+    )
+
+    with pytest.raises(ValueError, match="not same-schema"):
+        validator(containers)
 
 
 def test_restore_visual_materials_is_opt_in_on_urdf_child_cfg(tmp_path: Path) -> None:

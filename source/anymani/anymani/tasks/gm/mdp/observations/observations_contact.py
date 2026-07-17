@@ -33,6 +33,29 @@ $$
 其中接触点来自 IsaacLab 平均 `contact_pos_w`，先减 hand root position 再转到 `{h}`；
 力矢量从 `net_forces_w / force_matrix_w` 转到 `{h}`。该完整点-力 obs 暂后，当前
 只落总接触力向量。
+
+TODO(single-asset tactile rotation observation):
+    新 baseline 的 actor-facing contact 不是当前瞬时 `sensor_total_force_w` threshold，而是
+    shared contact-state owner 暴露的四个 policy-rate EMA bits。单帧部署 observation 为：
+
+    $$
+    x_t
+    =
+    \left[
+    q_t/\pi,
+    u_t/\pi,
+    a_{t-1}^{policy},
+    c_t^{tip}
+    \right]
+    \in\mathbb{R}^{52}.
+    $$
+
+    CurrentObs variant 不使用 ObservationTerm stack；GRU 的时间展开由 rl_games
+    `seq_length=30` 负责。History30Obs variant 使用 30 个 policy frames，shape 为
+    `[B,30,52]`；reset 前缀重复 reset 后当前 frame，不填全零伪状态。
+
+    `last_action` 表示上一步经 Isaac Lab wrapper 限幅并送入 ActionManager 的无量纲 policy
+    command。它不是 ADR-processed command、rad target increment、当前 target 或实际 joint motion。
 """
 
 from __future__ import annotations
@@ -45,6 +68,7 @@ from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 
 from ...contact_sensors import sensor_total_force_w
+from ..tactile_contact_state import get_tactile_contact_state
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -137,4 +161,99 @@ def fingertip_contact_binary(
     return torch.stack(contact_bits, dim=-1)  # `[B,K]`，K 个指尖接触位
 
 
-__all__ = ["fingertip_contact_binary", "fingertip_contact_force"]
+def tactile_tip_contact_bits(
+    env: ManagerBasedRLEnv,
+    fingertip_sensor_names: tuple[str, ...],
+    finger_non_tip_sensor_names: tuple[str, ...],
+    palm_sensor_name: str,
+    ema_alpha: float = 0.5,
+    force_threshold: float = 0.25,
+) -> torch.Tensor:
+    r"""返回 shared policy-rate EMA 产生的 actor-facing fingertip bits。
+
+    返回顺序严格继承 `fingertip_sensor_names` 的 sidecar finger order。该函数不拥有
+    EMA；多个 observation/reward consumer 会通过 step stamp 取得同一 singleton snapshot。
+    """
+
+    state = get_tactile_contact_state(
+        env,
+        fingertip_sensor_names,
+        finger_non_tip_sensor_names,
+        palm_sensor_name,
+        ema_alpha,
+        force_threshold,
+    )
+    return state.tip_bits.float()  # `[B,4]` baseline actor contact channels
+
+
+def tactile_tip_force_ema(
+    env: ManagerBasedRLEnv,
+    fingertip_sensor_names: tuple[str, ...],
+    finger_non_tip_sensor_names: tuple[str, ...],
+    palm_sensor_name: str,
+    ema_alpha: float = 0.5,
+    force_threshold: float = 0.25,
+) -> torch.Tensor:
+    r"""返回 privileged critic 使用的 tip EMA force magnitudes，单位 N。"""
+
+    state = get_tactile_contact_state(
+        env,
+        fingertip_sensor_names,
+        finger_non_tip_sensor_names,
+        palm_sensor_name,
+        ema_alpha,
+        force_threshold,
+    )
+    return state.tip_force_ema  # `[B,4]`，不包含 force vector 方向
+
+
+def tactile_palm_force_ema(
+    env: ManagerBasedRLEnv,
+    fingertip_sensor_names: tuple[str, ...],
+    finger_non_tip_sensor_names: tuple[str, ...],
+    palm_sensor_name: str,
+    ema_alpha: float = 0.5,
+    force_threshold: float = 0.25,
+) -> torch.Tensor:
+    r"""返回 privileged critic/metric 使用的 palm support EMA magnitude，单位 N。"""
+
+    state = get_tactile_contact_state(
+        env,
+        fingertip_sensor_names,
+        finger_non_tip_sensor_names,
+        palm_sensor_name,
+        ema_alpha,
+        force_threshold,
+    )
+    return state.palm_force_ema  # `[B,1]`，palm 合法中性，不进入 bad-contact bit 集合
+
+
+def tactile_finger_non_tip_bits(
+    env: ManagerBasedRLEnv,
+    fingertip_sensor_names: tuple[str, ...],
+    finger_non_tip_sensor_names: tuple[str, ...],
+    palm_sensor_name: str,
+    ema_alpha: float = 0.5,
+    force_threshold: float = 0.25,
+) -> torch.Tensor:
+    r"""返回 privileged critic 使用的 finger non-tip bits，显式排除 palm。"""
+
+    state = get_tactile_contact_state(
+        env,
+        fingertip_sensor_names,
+        finger_non_tip_sensor_names,
+        palm_sensor_name,
+        ema_alpha,
+        force_threshold,
+    )
+    return state.finger_non_tip_bits.float()  # `[B,19]` baseline bad-contact attribution channels
+
+
+__all__ = [
+    "fingertip_contact_binary",
+    "fingertip_contact_force",
+    "tactile_finger_non_tip_bits",
+    "tactile_palm_force_ema",
+    "tactile_tip_contact_bits",
+    "tactile_tip_force_ema",
+]

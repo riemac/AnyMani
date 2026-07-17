@@ -1,8 +1,18 @@
 r"""RL training registry for AnyMani distill.
 
 本包只注册 distill 侧的训练任务别名：环境语义仍由 `tasks/gm` 拥有，训练算法、
-agent YAML、checkpoint 和日志路径由 `distill` 拥有。当前正式主线是单资产 MLP
-MDP probe，用它先验证 generated asset、reset、reward、obs/action 与 PhysX 接触闭环。
+agent YAML、checkpoint 和日志路径由 `distill` 拥有。除单资产 MLP probe 外，本 registry
+也提供 tactile rotation 的 GRU/TCN 配对训练 alias。
+
+Tactile rotation paired aliases:
+    tasks 层注册 `CurrentObs` 与 `History30Obs` 两个环境语义 ID；本 registry 注册两个
+    训练 alias：GRU alias 绑定 CurrentObs + GRU YAML，TCN alias 绑定 History30Obs + TCN YAML。
+    `GRU` / `TCN` 名称不得进入 tasks 层 ID；环境不拥有网络结构。
+
+    两个 alias 必须共享 seed protocol、4096 env、central critic schema、PPO optimizer、
+    `horizon_length=30`、`minibatch_size=30720` 与 reward/ADR contract。YAML 分别维护，避免
+    Hydra override 隐藏 temporal encoder 差异。tasks contract tests 固化两个 observation space，
+    distill tensor tests 固化网络输入/输出。
 """
 
 from __future__ import annotations
@@ -28,6 +38,30 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": "anymani.tasks.gm.config.leap.leap_env_cfg:GmLeapEnvCfg",
         "rl_games_cfg_entry_point": f"{agents.__name__}:gm_single_asset_mlp_ppo.yaml",
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-SingleAsset-TactileRotation-GRU-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            "anymani.tasks.gm.config.single_asset.tactile_rotation_env_cfg:GmTactileRotationCurrentEnvCfg"
+        ),
+        "rl_games_cfg_entry_point": f"{agents.__name__}:gm_tactile_rotation_gru_ppo.yaml",
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-SingleAsset-TactileRotation-TCN-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            "anymani.tasks.gm.config.single_asset.tactile_rotation_env_cfg:GmTactileRotationHistory30EnvCfg"
+        ),
+        "rl_games_cfg_entry_point": f"{agents.__name__}:gm_tactile_rotation_tcn_ppo.yaml",
     },
 )
 

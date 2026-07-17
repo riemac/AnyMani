@@ -22,18 +22,39 @@ def _load_events_module() -> types.ModuleType:
     isaaclab = types.ModuleType("isaaclab")
     assets = types.ModuleType("isaaclab.assets")
     envs = types.ModuleType("isaaclab.envs")
+    env_mdp = types.ModuleType("isaaclab.envs.mdp")
     managers = types.ModuleType("isaaclab.managers")
+    utils = types.ModuleType("isaaclab.utils")
+    math_utils = types.ModuleType("isaaclab.utils.math")
+    adr_state = types.ModuleType("anymani.tasks.gm.mdp.adr_state")
+    tactile_state = types.ModuleType("anymani.tasks.gm.mdp.tactile_contact_state")
+    envs.__path__ = []  # type: ignore[attr-defined]  # 允许解析 `isaaclab.envs.mdp`
+    utils.__path__ = []  # type: ignore[attr-defined]
+    dummy_randomizer = type("DummyRandomizer", (), {})
+    env_mdp.randomize_rigid_body_mass = dummy_randomizer
+    env_mdp.randomize_actuator_gains = dummy_randomizer
+    env_mdp.randomize_rigid_body_material = dummy_randomizer
+    env_mdp.randomize_rigid_body_scale = lambda *_args, **_kwargs: None
+    assets.Articulation = object
     assets.RigidObject = object
     envs.ManagerBasedRLEnv = object
-    managers.SceneEntityCfg = lambda name: types.SimpleNamespace(name=name)
-    previous = {name: sys.modules.get(name) for name in ("isaaclab", "isaaclab.assets", "isaaclab.envs", "isaaclab.managers")}
+    managers.SceneEntityCfg = lambda name, **kwargs: types.SimpleNamespace(name=name, **kwargs)
+    adr_state.get_gm_adr_state = lambda *_args, **_kwargs: None
+    tactile_state.reset_tactile_contact_state = lambda *_args, **_kwargs: None
+    replacement_modules = {
+        "isaaclab": isaaclab,
+        "isaaclab.assets": assets,
+        "isaaclab.envs": envs,
+        "isaaclab.envs.mdp": env_mdp,
+        "isaaclab.managers": managers,
+        "isaaclab.utils": utils,
+        "isaaclab.utils.math": math_utils,
+        "anymani.tasks.gm.mdp.adr_state": adr_state,
+        "anymani.tasks.gm.mdp.tactile_contact_state": tactile_state,
+    }
+    previous = {name: sys.modules.get(name) for name in replacement_modules}
     sys.modules.update(
-        {
-            "isaaclab": isaaclab,
-            "isaaclab.assets": assets,
-            "isaaclab.envs": envs,
-            "isaaclab.managers": managers,
-        }
+        replacement_modules
     )
     try:
         spec = importlib.util.spec_from_file_location("anymani.tasks.gm.mdp.events_for_test", EVENTS_PATH)

@@ -137,11 +137,19 @@ def _fix_minibatch_size(agent_cfg: dict, num_envs: int) -> None:
     if minibatch_size > batch_size:
         print(f"[WARN] minibatch_size={minibatch_size} > batch_size={batch_size}; using {batch_size}.")
         cfg["minibatch_size"] = batch_size  # 最小 smoke 时一个 batch 只做一个 minibatch
-        return
-    if batch_size % minibatch_size != 0:
+    elif batch_size % minibatch_size != 0:
         fixed = math.gcd(batch_size, minibatch_size) or batch_size  # gcd 保证整除且尽量接近原配置
         print(f"[WARN] batch_size={batch_size} is not divisible by minibatch_size={minibatch_size}; using {fixed}.")
         cfg["minibatch_size"] = fixed
+
+    # asymmetric PPO 的 central critic 维护独立 PPODataset，不能假设它继承 actor minibatch。
+    central_cfg = cfg.get("central_value_config")  # 不启用 privileged critic 的旧 MLP route 返回 None
+    if isinstance(central_cfg, dict):
+        central_minibatch = int(central_cfg.get("minibatch_size", batch_size))  # critic 目标 minibatch
+        if central_minibatch > batch_size:
+            central_cfg["minibatch_size"] = batch_size  # debug route 用一个完整 rollout batch
+        elif batch_size % central_minibatch != 0:
+            central_cfg["minibatch_size"] = math.gcd(batch_size, central_minibatch) or batch_size
 
 
 def _resolve_seed(agent_cfg: dict) -> int:

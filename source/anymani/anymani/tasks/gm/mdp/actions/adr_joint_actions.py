@@ -38,14 +38,15 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Literal
 
-import torch
 import isaaclab.utils.math as math_utils
 import isaaclab.utils.string as string_utils
+import torch
 from isaaclab.envs.mdp.actions import actions_cfg
 from isaaclab.envs.mdp.actions.joint_actions import JointAction
 from isaaclab.managers.action_manager import ActionTerm
 from isaaclab.utils import configclass
 
+from ..adr_state import get_gm_adr_state
 
 ActionReference = Literal["current", "target"]
 r"""动作参考点枚举。
@@ -272,7 +273,8 @@ class ADRJointAction(JointAction):
         """
 
         if hasattr(self._env, "leap_official_reset_joint_pos"):
-            return self._env.leap_official_reset_joint_pos[env_ids].clone()  # reset event 记录的 $q_0$，形状 $[N,J]$。
+            reset_joint_pos = getattr(self._env, "leap_official_reset_joint_pos")  # `[N,J]`，动态 reset buffer。
+            return reset_joint_pos[env_ids].clone()  # reset event 记录的 $q_0$，形状 $[N,J]$。
         return self._asset.data.default_joint_pos[env_ids][:, self._joint_ids].clone()  # fallback 资产默认位姿。
 
     def _sample_latency_steps(self, env_ids: torch.Tensor) -> None:
@@ -280,6 +282,9 @@ class ADRJointAction(JointAction):
 
         if not self._use_adr:
             self._latency_steps[env_ids] = 0  # 非 ADR smoke / contract 下使用零延迟。
+            state = get_gm_adr_state(self._env, action_dim=self.action_dim)
+            state.set(self._env, "action_noise", 0.0, env_ids)
+            state.set(self._env, "latency_steps", 0.0, env_ids)
             return
 
         # 当前 ADR 档位的连续 latency 强度由 curriculum 写到 env runtime 属性上。
@@ -296,6 +301,9 @@ class ADRJointAction(JointAction):
         # 将标量 $h(k)$ 与随机减项投影到离散 history index，并扩展到所有 action joint。
         latency = compute_leap_adr_latency_steps(latency_float, random_sub, OFFICIAL_ADR_MAX_LATENCY)  # $[N,1]$。
         self._latency_steps[env_ids] = latency.expand(-1, self.action_dim)  # $[N,J]$。
+        state = get_gm_adr_state(self._env, action_dim=self.action_dim)
+        state.set(self._env, "action_noise", float(getattr(self._env, "leap_adr_action_noise", 0.0)), env_ids)
+        state.set(self._env, "latency_steps", latency[:, 0], env_ids)  # env-level actual integer delay，非上限 $h(k)$
 
     def _update_executed_actions(self, actions: torch.Tensor) -> torch.Tensor:
         r"""从 policy action 生成 official ADR 后的 executed action。
@@ -421,6 +429,42 @@ class ADRRelativeJointPositionAction(ADRJointAction):
         self._previous_targets[:] = self._current_targets  # $u_{t-1}\leftarrow u_t$，供下一帧 target reference 使用。
 
 
+class PolicyStepADRTargetJointPositionAction(ADRRelativeJointPositionAction):
+    r"""每个 policy step 推进一次、physics decimation 期间只 hold 的 LEAP target action。
+
+    `ManagerBasedRLEnv.step()` 只调用一次 `process_actions()`，随后调用 `decimation` 次
+    `apply_actions()`。本类据此把离散 target 状态转移放在 process 阶段：
+
+    $$
+    u_{t+1}=\operatorname{clip}
+    \left(u_t+\frac{1}{24}a_t^{exec},q_{min},q_{max}\right),
+    $$
+
+    apply 阶段不再写 `_previous_targets`，因此 6 个 120 Hz physics substeps 下发完全相同的
+    $u_{t+1}$。Noise/latency 与 `raw_actions` lifecycle 继续由 GM-owned `ADRJointAction` 唯一维护。
+    """
+
+    cfg: PolicyStepADRTargetJointPositionActionCfg
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        r"""生成 $a_t^{exec}$，并提交一次 policy-step target-buffer 状态转移。"""
+
+        super().process_actions(actions)  # 只生成 normalized executed action 与 raw-rad delta，尚未推进 target
+        next_targets = compute_relative_joint_command(
+            reference_positions=self._previous_targets,
+            processed_deltas=self._processed_actions,
+            lower_limits=self._joint_lower,
+            upper_limits=self._joint_upper,
+        )  # $u_{t+1}=clip(u_t+a_t^{exec}/24)$，一次且仅一次
+        self._current_targets[:] = next_targets
+        self._previous_targets[:] = next_targets  # 下一 policy step 的 accumulator 起点
+
+    def apply_actions(self) -> None:
+        r"""幂等下发当前 target；调用次数只决定 physics hold 次数，不改变 target。"""
+
+        self._asset.set_joint_position_target(self._current_targets, joint_ids=self._joint_ids)
+
+
 class ADREMAJointPositionToLimitsAction(ADRJointAction):
     r"""ADR-aware joint-limit absolute target EMA action。
 
@@ -534,6 +578,15 @@ class ADRRelativeJointPositionActionCfg(actions_cfg.RelativeJointPositionActionC
 
 
 @configclass
+class PolicyStepADRTargetJointPositionActionCfg(ADRRelativeJointPositionActionCfg):
+    r"""GM tactile baseline 的 target-reference、policy-step-once action cfg。"""
+
+    class_type: type[ActionTerm] = PolicyStepADRTargetJointPositionAction
+    reference: ActionReference = "target"  # $r_t=u_t$，而不是当前 measured $q_t$
+    scale: float | dict[str, float] = LEAP_ACTION_SCALE  # $1/24$ rad per normalized executed action
+
+
+@configclass
 class ADREMAJointPositionToLimitsActionCfg(actions_cfg.JointActionCfg):
     r"""ADR-aware joint-limit absolute EMA action cfg。
 
@@ -559,6 +612,8 @@ __all__ = [
     "LEAP_ACTION_SCALE",
     "OFFICIAL_ADR_LATENCY_RAND",
     "OFFICIAL_ADR_MAX_LATENCY",
+    "PolicyStepADRTargetJointPositionAction",
+    "PolicyStepADRTargetJointPositionActionCfg",
     "compute_ema_joint_command",
     "compute_leap_adr_latency_steps",
     "compute_relative_joint_command",

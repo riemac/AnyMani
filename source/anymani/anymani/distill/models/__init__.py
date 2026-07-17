@@ -40,13 +40,11 @@ mesh / 几何特征要分两件事，落点不同：
 - **几何特征编码**（原始张量 → token embedding）：把上述静态量编码进
   tip / joint token，是**可学习的网络部件**，归本包 `geometry/`。
 
-TOAGENT:
-    本包当前为**设计契约脚手架**：以重注释 docstring 写清职责、接口、shape
-    契约与设计意图，暂不写可执行 torch 代码。注释不可删，可重述、补充、润色，
-    并随实现进度把 TODO 更新为 DONE 或普通科研注释。
+当前实现状态：`temporal_encoder.py` 已提供 GM tactile rotation 的可运行 causal TCN；
+tokenizer / backbone / policy 等 joint-centric Transformer 模块仍处于设计契约阶段。新增实现时
+应逐文件把已兑现 TODO 迁移为稳定科研注释，不得用某个模块已落地来推断整个模型栈均已完成。
 """
 
-# NOTE: 暂不在此 re-export 具体符号。各模块仍为设计契约阶段，公开 API 尚未冻结；
-#       待 nn.Module 真实实现落地、forward 签名稳定后，再在此集中导出，
-#       避免过早暴露会频繁变动的接口。
+# NOTE: 暂不在此 re-export 具体符号。TCN 由 rl_games adapter 直接 import 模块路径；
+#       joint-centric 模型公共 API 尚未冻结，避免 package root 过早暴露会频繁变动的接口。
 __all__: list[str] = []

@@ -80,9 +80,11 @@ def test_contact_layout_parses_real_default_hand_cfg_tip_and_non_tip_links() -> 
     )
     assert layout.fingertip_link_names == ("index_tip", "middle_tip", "ring_tip", "thumb_tip")
     assert layout.fingertip_sensor_names == tuple(f"contact_{link_name}" for link_name in layout.fingertip_link_names)
-    assert layout.non_tip_link_names[0] == "palm"  # palm bad-contact sensor 必须显式存在
-    assert "index_mcp1" in layout.non_tip_link_names  # 非 tip revolute link 应进入 bad-contact 集合
-    assert "index_tip" not in layout.non_tip_link_names  # fingertip 不应同时被算作 non-tip penalty
+    assert layout.palm_sensor_name == "contact_palm"  # palm 是合法支撑角色，不再混入 finger bad-contact 集合
+    assert len(layout.finger_non_tip_link_names) == 19  # 四指 generated mother hand 有 19 个非指尖 finger links
+    assert "index_mcp1" in layout.finger_non_tip_link_names  # 非 tip revolute link 应进入 bad-contact 集合
+    assert "index_tip" not in layout.finger_non_tip_link_names  # fingertip 不应同时被算作 non-tip penalty
+    assert layout.non_tip_link_names == ("palm", *layout.finger_non_tip_link_names)  # 旧聚合视图保持 palm-first
 
 
 def test_contact_layout_accepts_noncanonical_finger_names_and_counts() -> None:
@@ -94,10 +96,13 @@ def test_contact_layout_accepts_noncanonical_finger_names_and_counts() -> None:
     )
 
     assert layout.palm_link_name == "central_palm"
+    assert layout.palm_sensor_name == "contact_central_palm"
     assert layout.finger_link_chains == (("root_link", "alpha_tip", "beta_tip"),)
     assert layout.fingertip_link_names == ("alpha_tip", "beta_tip")
+    assert layout.finger_non_tip_link_names == ("root_link",)
     assert layout.non_tip_link_names == ("central_palm", "root_link")
     assert layout.fingertip_sensor_names == ("contact_alpha_tip", "contact_beta_tip")
+    assert layout.finger_non_tip_sensor_names == ("contact_root_link",)
     assert layout.non_tip_sensor_names == ("contact_central_palm", "contact_root_link")
 
 

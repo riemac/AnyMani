@@ -74,6 +74,49 @@ TODO(debug visualization):
     axis arrow marker 仍预留：它的 orientation 应把 marker 局部 +x 方向旋到当前
     `axis_e`；该 axis 就是 command output 中可选 axis 分量经 `{h}->{e}` 变换后
     的方向。第一版先补 LEAP 风格 goal object marker，避免为箭头姿态引入额外实现风险。
+
+TODO(single-asset tactile rotation command):
+    新 GM tactile rotation baseline 需要一个 fixed-axis continuous-subgoal mode；当前 random-axis /
+    random-theta 行为不得被静默改写。该模式固定：
+
+    $$
+    \hat{k}^{\{h\}}=(0,0,1),
+    \qquad
+    \Delta\theta=\frac{\pi}{6}.
+    $$
+
+    每次 success 后从当前 object orientation 生成新 goal：
+
+    $$
+    R_{g,k+1}
+    =
+    \operatorname{Exp}
+    \left([\hat{k}]_\times\Delta\theta\right)
+    R_{o,t_k}.
+    $$
+
+    位置 anchor 在 reset 后记录并在整个 episode 内固定。success 使用 orientation-only keypoint
+    distance 与显式位置门，而不是现有 SO(3)-only 或 full-pose 单阈值。
+
+TODO(actual rotation ownership):
+    command 应成为相邻姿态有向进度的唯一 owner：
+
+    $$
+    \Delta\psi_t
+    =
+    \operatorname{Log}
+    \left(R_{wo,t}R_{wo,t-1}^{-1}\right)^{\vee\mathsf{T}}\hat{k}^{\{w\}}.
+    $$
+
+    它同时维护未裁剪 `net_rotation_rad`、`net_rotation_turns`、瞬时 axis speed 与 episode
+    metrics。rotation reward 可读取并裁剪 `delta_psi`；reward curriculum、ADR 和日志读取
+    未裁剪累计值。不得再让 stateful reward term、command 与 curriculum 各自缓存上一姿态。
+
+    ManagerBasedRLEnv 的 termination / reward 早于普通 command update。进度刷新必须按
+    `common_step_counter` 幂等：本 step 第一个 consumer 读取时刷新一次，后续 termination、
+    reward、command consumer 只能复用同一快照。curriculum 在 command partial reset 前读取
+    episode 累计值；command reset 随后清空指定 env。测试必须覆盖无一帧延迟、无重复累计和
+    partial reset 三个命题。
 """
 
 from __future__ import annotations

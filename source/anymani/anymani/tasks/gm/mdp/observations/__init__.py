@@ -12,7 +12,14 @@ IsaacLab RL 既然服务于层次通才专家训练阶段，用于训练 special
 from __future__ import annotations
 
 from .observations_command import reorient_command
-from .observations_contact import fingertip_contact_binary, fingertip_contact_force
+from .observations_contact import (
+    fingertip_contact_binary,
+    fingertip_contact_force,
+    tactile_finger_non_tip_bits,
+    tactile_palm_force_ema,
+    tactile_tip_contact_bits,
+    tactile_tip_force_ema,
+)
 from .observations_geometry import joint_soft_pos_limits
 from .observations_priv import object_orientation, object_pos
 from .observations_state import (
@@ -21,6 +28,11 @@ from .observations_state import (
     joint_vel_raw,
     last_action,
     last_processed_action,
+)
+from .observations_tactile import (
+    tactile_rotation_critic_state,
+    tactile_rotation_policy_frame,
+    tactile_rotation_privileged_task_state,
 )
 
 __all__ = [
@@ -35,4 +47,11 @@ __all__ = [
     "object_orientation",
     "object_pos",
     "reorient_command",
+    "tactile_finger_non_tip_bits",
+    "tactile_palm_force_ema",
+    "tactile_tip_contact_bits",
+    "tactile_tip_force_ema",
+    "tactile_rotation_critic_state",
+    "tactile_rotation_policy_frame",
+    "tactile_rotation_privileged_task_state",
 ]

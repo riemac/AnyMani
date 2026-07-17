@@ -50,6 +50,8 @@ def _load_observations_contact_module(force_by_sensor: dict[str, torch.Tensor]) 
 
     contact_sensors_stub = types.ModuleType("anymani.tasks.gm.contact_sensors")
     contact_sensors_stub.sensor_total_force_w = lambda _env, sensor_name: force_by_sensor[sensor_name]
+    tactile_state_stub = types.ModuleType("anymani.tasks.gm.mdp.tactile_contact_state")
+    tactile_state_stub.get_tactile_contact_state = lambda *_args, **_kwargs: None
 
     replacements = {
         "isaaclab": types.ModuleType("isaaclab"),
@@ -58,6 +60,7 @@ def _load_observations_contact_module(force_by_sensor: dict[str, torch.Tensor]) 
         "isaaclab.utils": types.ModuleType("isaaclab.utils"),
         "isaaclab.utils.math": math_stub,
         "anymani.tasks.gm.contact_sensors": contact_sensors_stub,
+        "anymani.tasks.gm.mdp.tactile_contact_state": tactile_state_stub,
     }
     previous = {name: sys.modules.get(name) for name in replacements}  # 保存原模块，避免污染其他测试
     try:

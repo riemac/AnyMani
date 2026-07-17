@@ -3,6 +3,25 @@ r"""Contact reward terms for GM in-hand manipulation.
 DONE(contact reward): good fingertip contact 使用二值 $n_{tip}\ge k$，默认 `min_contacts=2`；
 bad non-tip contact 通过 cfg 显式传入 sensor names，reward 不猜 asset schema。sensor names
 由 `gm.contact_sensors` 从 hand sidecar 自动生成。
+
+TODO(palm-supported tactile rotation):
+    新 baseline 允许 palm-object support，因此 bad-contact sensor 集合只包含 19 个 finger
+    non-tip links，不包含 palm。contact group 为：
+
+    $$
+    r_{contact}
+    =
+    0.1\mathbf{1}[n_{tip}\ge2]
+    -
+    0.2\mathbf{1}[n_{finger-non-tip}>0].
+    $$
+
+    两项都读取 shared policy-rate EMA bits，并共同乘 net-rotation reward curriculum 系数。
+    palm force 只进入 privileged critic 与 support metric。排除 palm 的 fingertip force share
+    单独作为诊断 metric，不作为第一版 reward。
+
+    当前函数直接读取 ContactSensor 并各自 threshold，不能直接满足 shared-state contract；
+    build 时应把 predicate ownership 上移，reward 只消费已计算的 contact state。
 """
 
 from __future__ import annotations
@@ -13,6 +32,7 @@ import torch
 from isaaclab.envs import ManagerBasedRLEnv
 
 from ...contact_sensors import sensor_contact_indicator
+from ..tactile_contact_state import get_tactile_contact_state
 from .rewards_common import curriculum_gain
 
 
@@ -101,4 +121,62 @@ def bad_non_tip_contact(
     return penalty
 
 
-__all__ = ["bad_non_tip_contact", "good_fingertip_contact"]
+def tactile_good_tip_contact(
+    env: ManagerBasedRLEnv,
+    fingertip_sensor_names: Sequence[str],
+    finger_non_tip_sensor_names: Sequence[str],
+    palm_sensor_name: str,
+    min_contacts: int = 2,
+    ema_alpha: float = 0.5,
+    force_threshold: float = 0.25,
+) -> torch.Tensor:
+    r"""共享 EMA snapshot 上的多指接触 indicator，并乘 net-rotation reward curriculum。
+
+    本函数返回 $\lambda_{rew}\mathbf 1[n_{tip}\ge2]$；`RewardTermCfg.weight=+0.1`
+    决定最终 weighted contribution。palm 不参与 tip count。
+    """
+
+    state = get_tactile_contact_state(
+        env,
+        fingertip_sensor_names,
+        finger_non_tip_sensor_names,
+        palm_sensor_name,
+        ema_alpha,
+        force_threshold,
+    )
+    indicator = (state.tip_bits.sum(dim=-1) >= int(min_contacts)).float()  # `[B]`，至少两个 tips
+    return indicator * curriculum_gain(env, lambda_floor=0.0, lambda_max=1.0)
+
+
+def tactile_bad_finger_non_tip_contact(
+    env: ManagerBasedRLEnv,
+    fingertip_sensor_names: Sequence[str],
+    finger_non_tip_sensor_names: Sequence[str],
+    palm_sensor_name: str,
+    ema_alpha: float = 0.5,
+    force_threshold: float = 0.25,
+) -> torch.Tensor:
+    r"""共享 EMA snapshot 上的 finger non-tip indicator；palm support 明确保持中性。
+
+    本函数返回正 penalty source $\lambda_{rew}\mathbf 1[n_{finger-non-tip}>0]$；
+    `RewardTermCfg.weight=-0.2` 才把它变成负贡献。
+    """
+
+    state = get_tactile_contact_state(
+        env,
+        fingertip_sensor_names,
+        finger_non_tip_sensor_names,
+        palm_sensor_name,
+        ema_alpha,
+        force_threshold,
+    )
+    indicator = torch.any(state.finger_non_tip_bits, dim=-1).float()  # `[B]`，不含 palm bit
+    return indicator * curriculum_gain(env, lambda_floor=0.0, lambda_max=1.0)
+
+
+__all__ = [
+    "bad_non_tip_contact",
+    "good_fingertip_contact",
+    "tactile_bad_finger_non_tip_contact",
+    "tactile_good_tip_contact",
+]

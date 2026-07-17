@@ -15,15 +15,33 @@ $$
 
 from __future__ import annotations
 
-from .rewards_contact import bad_non_tip_contact, good_fingertip_contact
+from .rewards_contact import (
+    bad_non_tip_contact,
+    good_fingertip_contact,
+    tactile_bad_finger_non_tip_contact,
+    tactile_good_tip_contact,
+)
 from .rewards_reorient import (
     AxisDeltaRotationReward,
     goal_success_bonus,
     keypoint_reorientation_reward,
     reorientation_reward_placeholder,
+    tactile_axis_delta_rotation_rate,
+    tactile_full_pose_keypoint_reward,
+    tactile_goal_success_impulse,
 )
-from .rewards_stable import action_l2_curriculum, action_rate_l2_curriculum, torque_l2_curriculum
-from .rewards_terminate import termination_penalty_placeholder
+from .rewards_stable import (
+    action_l2_curriculum,
+    action_rate_l2_curriculum,
+    joint_mechanical_power_curriculum,
+    joint_pose_anchor_l2_curriculum,
+    object_axis_speed_band_curriculum,
+    object_axis_speed_jitter_curriculum,
+    object_lin_vel_l2_curriculum,
+    object_off_axis_ang_vel_curriculum,
+    torque_l2_curriculum,
+)
+from .rewards_terminate import failure_termination_impulse, termination_penalty_placeholder
 
 __all__ = [
     "AxisDeltaRotationReward",
@@ -32,8 +50,20 @@ __all__ = [
     "bad_non_tip_contact",
     "goal_success_bonus",
     "good_fingertip_contact",
+    "failure_termination_impulse",
+    "joint_mechanical_power_curriculum",
+    "joint_pose_anchor_l2_curriculum",
     "keypoint_reorientation_reward",
+    "object_axis_speed_band_curriculum",
+    "object_axis_speed_jitter_curriculum",
+    "object_lin_vel_l2_curriculum",
+    "object_off_axis_ang_vel_curriculum",
     "reorientation_reward_placeholder",
     "termination_penalty_placeholder",
     "torque_l2_curriculum",
+    "tactile_bad_finger_non_tip_contact",
+    "tactile_good_tip_contact",
+    "tactile_axis_delta_rotation_rate",
+    "tactile_full_pose_keypoint_reward",
+    "tactile_goal_success_impulse",
 ]
