@@ -1,3 +1,9 @@
+0.5.1 - 2026-07-20
+==================
+
+- 补齐 official LEAP combined reward 的代码内公式与 CPU tensor contract，逐项验证七个 reward 分量、success/fall/z-spin 阈值边界、20/30 Hz `divide_by_step_dt` 语义，以及 split terms 对 combined reward 的精确重组。
+- 清理 `OfficialLeapReward` 构造器中未参与运行时计算的 reward 参数缓存；主线配置系数、DirectRLEnv 单步 reward 数值与 N031 dt-ablation 语义保持不变。
+
 0.5.0 - 2026-07-17
 ==================
 

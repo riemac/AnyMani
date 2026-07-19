@@ -158,7 +158,9 @@ def official_pregrasp_l2(
     r"""Official pregrasp 偏离项：$r_{pre}=\lVert q_t^{cmd}-q^{pregrasp}\rVert_2^2$。"""
 
     action_term = env.action_manager.get_term(action_term_name)  # 动作项；需暴露 current/pregrasp targets。
-    pregrasp_l2 = torch.sum((action_term.current_targets - action_term.pregrasp_targets) ** 2, dim=-1)  # $\|q^{cmd}-q^{pre}\|_2^2$。
+    pregrasp_l2 = torch.sum(
+        (action_term.current_targets - action_term.pregrasp_targets) ** 2, dim=-1
+    )  # $\|q^{cmd}-q^{pre}\|_2^2$。
     return _to_manager_term_scale(env, pregrasp_l2)  # direct-step semantic 的 pregrasp 偏离项。
 
 
@@ -176,7 +178,9 @@ def official_success_bonus(
     object_pos_e = object_asset.data.root_pos_w - env.scene.env_origins  # 当前物体环境系位置。
     goal_dist = torch.norm(object_pos_e - goal_pos_e, p=2, dim=-1)  # 位置误差。
     rot_dist = math_utils.quat_error_magnitude(goal_quat_w, object_asset.data.root_quat_w)  # 姿态误差。
-    success = (rot_dist <= float(success_tolerance)) & (goal_dist <= float(position_success_threshold))  # 小目标成功判据。
+    success = (rot_dist <= float(success_tolerance)) & (
+        goal_dist <= float(position_success_threshold)
+    )  # 小目标成功判据。
     return _to_manager_term_scale(env, success.float())  # 布尔成功 mask 转成 0/1 再对齐 direct-step 量纲。
 
 
@@ -214,6 +218,17 @@ def official_z_spin_bonus(
 class OfficialLeapReward(ManagerTermBase):
     r"""Combined official LEAP reward with optional `dt` alignment switch.
 
+    $$
+    r_t^{official}=
+    -10\lVert p_o^e-p_g^e\rVert_2
+    +\frac{1}{|\theta_t|+0.1}
+    -0.0002\lVert a_t^{exec}\rVert_2^2
+    -0.3\lVert q_t^{cmd}-q^{pregrasp}\rVert_2^2
+    +250\mathbf{1}_{success}
+    -10\mathbf{1}_{fall}
+    +\mathbf{1}_{0.25<\omega_z<1.5}.
+    $$
+
     本类服务两条用途：
 
     1. **N010/N020/N030 官方主线**：`divide_by_step_dt=True`，使 ManagerBased reward 数值与
@@ -226,23 +241,12 @@ class OfficialLeapReward(ManagerTermBase):
 
     def __init__(self, cfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
+
+        # RewardManager 每步把 cfg.params 直接传给 `__call__`；这里只缓存 reset-time diagnostics 真正依赖的状态。
         self._action_term_name = cfg.params.get("action_term_name", "hand_joint_pos")  # official action term 名称。
         self._command_name = cfg.params.get("command_name", "goal_pose")  # official command term 名称。
         self._object_cfg = cfg.params.get("object_cfg", SceneEntityCfg("object"))  # object selector。
-        self._dist_reward_scale = float(cfg.params.get("dist_reward_scale", -10.0))  # 位置项系数。
-        self._rot_reward_scale = float(cfg.params.get("rot_reward_scale", 1.0))  # 姿态项系数。
-        self._rot_eps = float(cfg.params.get("rot_eps", 0.1))  # 姿态项防止除零的小常数。
-        self._action_penalty_scale = float(cfg.params.get("action_penalty_scale", -0.0002))  # 动作正则系数。
-        self._pose_diff_penalty_scale = float(cfg.params.get("pose_diff_penalty_scale", -0.3))  # pregrasp 偏离系数。
-        self._success_tolerance = float(cfg.params.get("success_tolerance", 0.2))  # 小目标姿态成功阈值。
-        self._position_success_threshold = float(
-            cfg.params.get("position_success_threshold", 0.025)
-        )  # 小目标位置成功阈值。
-        self._reach_goal_bonus = float(cfg.params.get("reach_goal_bonus", 250.0))  # 成功稀疏奖励。
-        self._fall_dist = float(cfg.params.get("fall_dist", 0.07))  # 掉落阈值，单位 m。
-        self._fall_penalty = float(cfg.params.get("fall_penalty", -10.0))  # 掉落惩罚系数。
         self._z_rotation_steps = int(cfg.params.get("z_rotation_steps", 16))  # 16 个小目标为一整圈。
-        self._divide_by_step_dt = bool(cfg.params.get("divide_by_step_dt", True))  # N030/N031 的唯一实验开关。
 
     def __call__(
         self,
@@ -277,12 +281,16 @@ class OfficialLeapReward(ManagerTermBase):
         object_pos_e = object_asset.data.root_pos_w - env.scene.env_origins  # 把世界系位置变到环境系 `{e}`。
         goal_dist = torch.norm(object_pos_e - goal_pos_e, p=2, dim=-1)  # $\|p_o^e-p_g^e\|_2$。
         rot_dist = math_utils.quat_error_magnitude(goal_quat_w, object_asset.data.root_quat_w)  # $d_{SO(3)}$。
-        pregrasp_l2 = torch.sum((action_term.current_targets - action_term.pregrasp_targets) ** 2, dim=-1)  # $\|q^{cmd}-q^{pre}\|_2^2$。
+        pregrasp_l2 = torch.sum(
+            (action_term.current_targets - action_term.pregrasp_targets) ** 2, dim=-1
+        )  # $\|q^{cmd}-q^{pre}\|_2^2$。
         object_angvel_z = object_asset.data.root_ang_vel_w[:, 2]  # 世界系 z 轴角速度 $\omega_z$。
 
         dist_term = goal_dist * float(dist_reward_scale)  # $-10\|p_o^e-p_g^e\|_2$。
         rot_term = float(rot_reward_scale) / (torch.abs(rot_dist) + float(rot_eps))  # $1/(|\theta|+0.1)$。
-        action_term_penalty = torch.sum(action_term.executed_actions**2, dim=-1) * float(action_penalty_scale)  # $-0.0002\|a\|_2^2$。
+        action_term_penalty = torch.sum(action_term.executed_actions**2, dim=-1) * float(
+            action_penalty_scale
+        )  # $-0.0002\|a\|_2^2$。
         pregrasp_term = pregrasp_l2 * float(pose_diff_penalty_scale)  # $-0.3\|q^{cmd}-q^{pre}\|_2^2$。
 
         reward = dist_term + rot_term + action_term_penalty + pregrasp_term  # 稠密基础项之和。
@@ -310,8 +318,12 @@ class OfficialLeapReward(ManagerTermBase):
 
         object_asset: RigidObject = self._env.scene[self._object_cfg.name]  # 当前 object 刚体，用于线速度/角速度日志。
         command_term = self._env.command_manager.get_term(self._command_name)  # 读取连续小目标成功数。
-        action_term = self._env.action_manager.get_term(self._action_term_name)  # 当前动作项，用于读取 current/pregrasp target。
-        pregrasp_l2 = torch.sum((action_term.current_targets - action_term.pregrasp_targets) ** 2, dim=-1)  # reset 前最后一步的 pregrasp 偏离量。
+        action_term = self._env.action_manager.get_term(
+            self._action_term_name
+        )  # 当前动作项，用于读取 current/pregrasp target。
+        pregrasp_l2 = torch.sum(
+            (action_term.current_targets - action_term.pregrasp_targets) ** 2, dim=-1
+        )  # reset 前最后一步的 pregrasp 偏离量。
 
         log = getattr(self._env, "extras", {}).get("log")  # rl_games observer 消费的 reset-time 标量字典。
         if isinstance(log, dict):
@@ -326,7 +338,9 @@ class OfficialLeapReward(ManagerTermBase):
             log["num_adr_increases"] = float(getattr(self._env, "leap_adr_increment", 0))  # 当前 ADR 档位增量计数。
             log["adr_criteria"] = float(getattr(self._env, "leap_adr_criteria", 0.0))  # 当前 rotations/sec 升级判据。
             if hasattr(self._env, "leap_adr_episode_lengths"):
-                lengths_s = self._env.leap_adr_episode_lengths.float() * float(self._env.step_dt)  # per-env horizon 转秒数。
+                lengths_s = self._env.leap_adr_episode_lengths.float() * float(
+                    self._env.step_dt
+                )  # per-env horizon 转秒数。
                 log["avg_episode_length_s"] = lengths_s.mean().item()  # ADR 随机 horizon 的平均秒数。
                 log["min_episode_length_s"] = lengths_s.min().item()  # 最短 horizon。
                 log["max_episode_length_s"] = lengths_s.max().item()  # 最长 horizon。

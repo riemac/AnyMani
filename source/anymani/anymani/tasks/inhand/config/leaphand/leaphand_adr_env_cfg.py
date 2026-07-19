@@ -43,8 +43,8 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from anymani.robots.leap import LEAP_HAND_CFG
 from anymani.tasks.inhand import mdp as leap_mdp
-from anymani.tasks.inhand.mdp import rewards as official_rewards
 from anymani.tasks.inhand.inhand_env_cfg import INHAND_CLEAR_SKY_LIGHT_INTENSITY, INHAND_CLEAR_SKY_TEXTURE_FILE
+from anymani.tasks.inhand.mdp import rewards as official_rewards
 
 # 官方 LEAP runtime 的 16 维 sim order 不是按 joint name 字典序，而是“关节层级交织”顺序。
 # 该顺序由官方 `override_default_joint_pos` 向量和 deployment 注释共同确定。
@@ -202,7 +202,19 @@ class LeapHandOfficialADRCommandsCfg:
 
 @configclass
 class LeapHandOfficialADRRewardsCfg:
-    r"""官方 LEAP reward：单一 combined term，内部抵消 ManagerBased dt。"""
+    r"""官方 LEAP reward：单一 combined term，内部抵消 ManagerBased dt。
+
+    $$
+    r_t^{official}=
+    -10\lVert p_o^e-p_g^e\rVert_2
+    +\frac{1}{|\theta_t|+0.1}
+    -0.0002\lVert a_t^{exec}\rVert_2^2
+    -0.3\lVert q_t^{cmd}-q^{pregrasp}\rVert_2^2
+    +250\mathbf{1}_{success}
+    -10\mathbf{1}_{fall}
+    +\mathbf{1}_{0.25<\omega_z<1.5}.
+    $$
+    """
 
     official_reward = RewTerm(
         func=official_rewards.OfficialLeapReward,

@@ -38,6 +38,11 @@ GENERATED_POLICY_STEP_TARGET_CFG = (
 )
 GENERATED_REGISTER = REPO_ROOT / "source/anymani/anymani/tasks/inhand/config/generated_right_t4_i4_m4_r4/__init__.py"
 REWARDS_FILE = REPO_ROOT / "source/anymani/anymani/tasks/inhand/mdp/rewards.py"
+LEAPHAND_OFFICIAL_ADR_CFG = REPO_ROOT / "source/anymani/anymani/tasks/inhand/config/leaphand/leaphand_adr_env_cfg.py"
+LEGACY_REWARD_FILES = (
+    REPO_ROOT / "source/anymani/anymani/tasks/inhand/mdp/rewards_action.py",
+    REPO_ROOT / "source/anymani/anymani/tasks/inhand/mdp/rewards_task.py",
+)
 GM_ACTION_FILE = REPO_ROOT / "source/anymani/anymani/tasks/gm/mdp/actions/adr_joint_actions.py"
 INHAND_ACTION_FILE = REPO_ROOT / "source/anymani/anymani/tasks/inhand/mdp/actions/adr_relative_action.py"
 OBSERVATIONS_FILE = REPO_ROOT / "source/anymani/anymani/tasks/inhand/mdp/observations.py"
@@ -113,6 +118,31 @@ def test_rewards_file_exposes_combined_and_split_official_terms() -> None:
     assert "official_z_spin_bonus" in source
     assert "divide_by_step_dt" in source
     assert "OfficialRewardState" not in source
+
+
+def test_official_reward_cfg_pins_direct_step_formula_and_dt_alignment() -> None:
+    r"""Official ADR 主线必须显式固定七项系数，并抵消 RewardManager 的 policy-step dt。"""
+
+    source = _read(LEAPHAND_OFFICIAL_ADR_CFG)
+
+    assert "func=official_rewards.OfficialLeapReward" in source
+    assert '"dist_reward_scale": -10.0' in source
+    assert '"rot_reward_scale": 1.0' in source
+    assert '"rot_eps": 0.1' in source
+    assert '"action_penalty_scale": -0.0002' in source
+    assert '"pose_diff_penalty_scale": -0.3' in source
+    assert '"success_tolerance": 0.2' in source
+    assert '"position_success_threshold": 0.025' in source
+    assert '"reach_goal_bonus": 250.0' in source
+    assert '"fall_dist": 0.07' in source
+    assert '"fall_penalty": -10.0' in source
+    assert '"divide_by_step_dt": True' in source
+
+
+def test_legacy_reward_modules_remain_removed() -> None:
+    r"""旧 action/task reward 聚合模块不得重新进入主线，避免两套 official 公式并存。"""
+
+    assert all(not path.exists() for path in LEGACY_REWARD_FILES)
 
 
 def test_gm_declarative_adr_actions_expose_shared_runtime_contract() -> None:
@@ -206,7 +236,10 @@ def test_raw_rad_observation_keeps_target_buffer_in_rad_units() -> None:
     assert "def official_policy_frame_raw_rad" in source
     assert "torch.cat((joint_pos, action_term.current_targets), dim=-1).clone()" in source
     assert "official_policy_frame_raw_rad expects action term" in source
-    assert "last_action" not in source[source.index("def official_policy_frame_raw_rad") : source.index("def raw_policy_frame")]
+    assert (
+        "last_action"
+        not in source[source.index("def official_policy_frame_raw_rad") : source.index("def raw_policy_frame")]
+    )
 
 
 def test_policy_step_target_variant_registers_semantic_train_and_play_ids() -> None:
