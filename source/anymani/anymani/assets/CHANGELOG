@@ -1,3 +1,10 @@
+0.3.2 - 2026-08-11
+=================
+
+- 新增版本化 `geometry_semantics` sidecar schema，显式保存 `{a}->{h}`、完整 fixed/revolute chain、$q_{home}$、joint limits、PALM/JOINT/TIP owners、collision components、anchor seeds 与 SHA-256 内容哈希；generated legacy sidecar 可确定性迁移，official 缺人工核验语义时 fail closed。
+- exporter 在 `HandCfg` 真源仍在内存时写入静态几何语义；`HandBankCfg.require_geometry_semantics` 保持 tasks 默认轻量，并向 robots/distill 按需交付类型化语义。
+- `HandBank` 新增自包含 `pre_made` topology discovery 与显式跨 family `mixed` manifest，保留 `all` / 固定 seed 无放回 `sample` 的稳定选择合同。
+
 0.3.1 - 2026-06-16
 ==================
 

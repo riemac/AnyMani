@@ -1,0 +1,201 @@
+r"""多锚点条件隐式几何 SSL 的 retained/disposable 模型组装。
+
+该模块只组装已经各自拥有清晰职责的模型组件：
+
+```text
+retained after SSL
+  StaticGeometryEvidence + physical q
+    -> ImplicitGeometryEncoder
+    -> Z^(0) [B,G,D0] + Z^(1) [B,N_J,D1]
+
+training-only disposable
+  shared point-anchor query features
+    + Z^(0) -> ConditionalDensityDecoder -> rho [B,G,N_Q,L]
+    + Z^(1) -> DistanceSensitivityDecoder -> kappa [B,E]
+```
+
+query encoder 与 home-surface encoder 复用 ``ImplicitGeometryEncoder.point_anchor_encoder``，避免 decoder
+拥有第二套坐标系统。query stratum、最近点、distance、Jacobian 和 teacher labels 不在 forward 参数中；
+它们只进入 objective。导出 retained-only checkpoint 时只保存 ``encoder``，两个 decoder 整体删除。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field  # 模型配置与前向结果均冻结为类型化合同
+
+import torch  # retained/disposable 张量与 state_dict
+from torch import nn  # 模型组装基类
+
+from .decoders.representations.implicit_field import (  # SSL-only readers
+    ConditionalDensityDecoder,  # $\hat\rho_{g,\ell}(x;q)$
+    DistanceSensitivityDecoder,  # $\hat\kappa_{g,i}(x;q)$
+    ImplicitFieldDecoderConfig,  # 两头共享宽度合同
+)
+from .input_adapters.geometry import (  # 部署期 retained 路径
+    GeometryEncoderConfig,  # adapter/backbone/head 容量
+    GeometryLatents,  # $Z^{(0)},Z^{(1)}$
+    ImplicitGeometryEncoder,  # task-free hand conditioning encoder
+    StaticGeometryEvidence,  # anchors/home/screws/graph/masks
+)
+
+
+@dataclass(frozen=True)
+class GeometrySSLModelConfig:
+    r"""retained encoder 与 disposable decoder 的显式组装配置。
+
+    decoder 输入宽度只从 encoder 输出类型派生，禁止训练配置单独复制 $D_0/D_1/D_q$ 后发生漂移。
+    ``bandwidth_count=L`` 必须与 target 的物理带宽轴逐元素同序。
+    """
+
+    encoder: GeometryEncoderConfig = field(default_factory=GeometryEncoderConfig)  # retained 容量
+    decoder_hidden_width: int = 128  # training-only FiLM/κ reader 宽度
+    decoder_residual_blocks: int = 3  # density FiLM residual blocks
+    bandwidth_count: int = 4  # 必须与 target bandwidth 轴一致
+
+    def __post_init__(self) -> None:
+        r"""拒绝退化 decoder 容量、零 residual block 与空带宽轴。"""
+
+        if self.decoder_hidden_width < 1 or self.decoder_residual_blocks < 1 or self.bandwidth_count < 1:  # 域
+            raise ValueError("decoder width, residual blocks and bandwidth count must be positive")  # 闸门
+
+    def decoder_config(self) -> ImplicitFieldDecoderConfig:
+        r"""从 retained 类型宽度派生唯一 decoder 输入合同。
+
+        Returns:
+            ImplicitFieldDecoderConfig: $D_0,D_1,D_q,L$ 与 encoder/target 同轴的 SSL-only 配置。
+        """
+
+        return ImplicitFieldDecoderConfig(  # 不允许 caller 覆盖派生宽度
+            zero_order_width=self.encoder.zero_order_width,  # $D_0$
+            first_order_width=self.encoder.first_order_width,  # $D_1$
+            query_width=self.encoder.relation_width,  # $D_q$
+            hidden_width=self.decoder_hidden_width,  # disposable 内部宽度
+            bandwidth_count=self.bandwidth_count,  # $L$
+            residual_blocks=self.decoder_residual_blocks,  # density FiLM 深度
+        )
+
+
+@dataclass(frozen=True)
+class GeometrySSLForward:
+    r"""一次模型前向中保留表征与训练期预测的类型化结果。
+
+    ``latents`` 是 SSL 后迁入 PPO 的唯一 learned state；``query_features``、density 与 κ 都属于训练/诊断
+    生命周期。结果对象同时供 objective、NPZ logger 和受控 ablation 使用。
+    """
+
+    latents: GeometryLatents  # retained $Z^{(0)},Z^{(1)}$
+    query_features: torch.Tensor  # `[B,G,N_Q,D_q]`，共享点—锚点前端
+    density: torch.Tensor  # `[B,G,N_Q,L]`
+    kappa: torch.Tensor  # `[B,E]`
+
+
+class GeometrySSLModel(nn.Module):
+    r"""统一 encoder/query/decoder 调用，但保持 checkpoint 生命周期可分离。
+
+    模型不读取 distance、closest point、Jacobian、query stratum、joint limits、object 或 task state。
+    对物理 q 的 Sobolev 导数沿 ``encoder -> density_decoder`` 同一图计算；query 采样路径停止梯度。
+    """
+
+    def __init__(self, config: GeometrySSLModelConfig = GeometrySSLModelConfig()) -> None:
+        r"""构造 retained encoder 和两个 disposable decoder。
+
+        Args:
+            config (GeometrySSLModelConfig): 类型宽度、Transformer 容量与训练期 decoder 容量。
+        """
+
+        super().__init__()  # 注册 PyTorch parameter/module 生命周期
+        self.config = config  # resolved config 应随完整 checkpoint 保存
+        self.encoder = ImplicitGeometryEncoder(config.encoder)  # SSL 后迁入 PPO
+        decoder_config = config.decoder_config()  # 两个 decoder 共享类型宽度合同
+        self.density_decoder = ConditionalDensityDecoder(decoder_config)  # SSL-only
+        self.sensitivity_decoder = DistanceSensitivityDecoder(decoder_config)  # SSL-only
+
+    def forward(
+        self,
+        q: torch.Tensor,  # `[B,N_J]` 或 padding `[B,20]`，rad
+        evidence: StaticGeometryEvidence,  # 静态 hand evidence 与 masks
+        query_points_h: torch.Tensor,  # `[B,G,N_Q,3]`，`{h}`，m
+        owner_index: torch.Tensor,  # `[E]`/`[B,E]`
+        query_index: torch.Tensor,  # `[E]`/`[B,E]`
+        joint_index: torch.Tensor,  # `[E]`/`[B,E]`
+    ) -> GeometrySSLForward:
+        r"""完成 retained 编码和两个 training-only 预测头。
+
+        Args:
+            q (torch.Tensor): ``[B,N_J]`` 当前物理关节角，rad，保留模型 JVP 计算图。
+            evidence (StaticGeometryEvidence): 当前结构模式的静态可部署证据。
+            query_points_h (torch.Tensor): ``[B,G,N_Q,3]`` 固定 `{h}` queries，m，已停止采样梯度。
+            owner_index (torch.Tensor): ``[E]`` 或跨结构 ``[B,E]`` sampled owner selectors。
+            query_index (torch.Tensor): 与 owner selector 同形状的 query selectors。
+            joint_index (torch.Tensor): 与 owner selector 同形状的 JOINT selectors。
+
+        Returns:
+            GeometrySSLForward: 类型化 latents、共享 query features、density 与 κ 预测。
+        """
+
+        owner_count = evidence.entity_role.shape[-1]  # $G$；batched/unbatched role 都读尾轴
+        if query_points_h.ndim != 4 or query_points_h.shape[:2] != (q.shape[0], owner_count):  # `[B,G]`
+            raise ValueError("query_points_h must have shape [B,G,N_Q,3] matching q/evidence")  # 不广播
+        latents = self.encoder(q, evidence)  # retained path；q/π 链式因子保留在计算图
+        query_features = self.encoder.encode_points(query_points_h.detach(), evidence)  # 不反传到 sampler
+        entity_valid = evidence.entity_valid_mask  # `[B,G]`/`[G]` 或原生可变长时 None
+        if entity_valid is not None:  # padding container 才需要显式零化
+            if entity_valid.ndim == 1:  # 同结构 batch 共享实体 mask
+                entity_valid = entity_valid.unsqueeze(0).expand(q.shape[0], -1)  # `[B,G]` view
+            query_features = query_features * entity_valid.unsqueeze(-1).unsqueeze(-1)  # invalid owner 精确零
+        return self.decode_latents(  # 集中 disposable 路径供完整模型与 ablation 共用
+            latents,  # retained $Z^{(0)},Z^{(1)}$
+            query_features,  # `[B,G,N_Q,D_q]`
+            entity_valid_mask=entity_valid,  # padding owner mask
+            owner_index=owner_index,  # sampled owner
+            query_index=query_index,  # sampled query
+            joint_index=joint_index,  # sampled JOINT
+        )
+
+    def decode_latents(
+        self,
+        latents: GeometryLatents,  # 可为完整/zero/shuffled latent
+        query_features: torch.Tensor,  # 固定 query path
+        *,
+        entity_valid_mask: torch.Tensor | None,  # `[B,G]`
+        owner_index: torch.Tensor,  # `[E]`/`[B,E]`
+        query_index: torch.Tensor,  # `[E]`/`[B,E]`
+        joint_index: torch.Tensor,  # `[E]`/`[B,E]`
+    ) -> GeometrySSLForward:
+        r"""从显式 latent/query features 运行 disposable heads，供受控 ablation 复用。
+
+        density 预测为 $\hat\rho\in\mathbb R^{B\times G\times N_Q\times L}$；κ 只在 sampled edges
+        输出 $\hat\kappa\in\mathbb R^{B\times E}$。该函数不重新编码 q/evidence，因此 ablation 可以只干预
+        latent 而保持 decoder/query path 相同。
+        """
+
+        density = self.density_decoder(latents.zero_order, query_features)  # `[B,G,N_Q,L]`
+        if entity_valid_mask is not None:  # padding owner 不属于物理监督测度
+            density = density * entity_valid_mask.unsqueeze(-1).unsqueeze(-1)  # padding owner 不产生虚假场值
+        kappa = self.sensitivity_decoder(  # 读取 sampled `(g,r,i)`，不物化完整 $G\times N_Q\times N_J$
+            latents.zero_order,  # owner $z_g^{(0)}$
+            latents.first_order,  # JOINT $z_i^{(1)}$
+            query_features,  # query $u_{g,r}$
+            owner_index,  # edge owner $g$
+            query_index,  # edge query $r$
+            joint_index,  # edge JOINT $i$
+        )  # `[B,E]`，结构性 joint-sign 奇
+        return GeometrySSLForward(latents, query_features, density, kappa)  # 类型化 objective 输入
+
+    def retained_state_dict(self) -> dict[str, torch.Tensor]:
+        r"""返回只含部署 encoder 的 checkpoint 参数。
+
+        key 保留 ``encoder.`` 前缀，使完整与 retained-only checkpoint 可以用同一加载审计工具比较；
+        density/sensitivity decoder 参数绝不出现在返回值中。
+        """
+
+        return {  # 保留完整模型中的稳定 namespace
+            f"encoder.{key}": value for key, value in self.encoder.state_dict().items()  # 不含 decoder
+        }
+
+
+__all__ = [  # 模型层稳定公开面
+    "GeometrySSLForward",  # typed prediction
+    "GeometrySSLModel",  # retained+disposable assembly
+    "GeometrySSLModelConfig",  # assembly config
+]

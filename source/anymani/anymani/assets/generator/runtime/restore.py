@@ -23,7 +23,7 @@ from typing import Any
 import yaml
 
 from ...asset_base import HandCfg
-
+from ...asset_sidecar import restore_hand_cfg_snapshot
 
 _SIDECAR_FILENAME = "hand.yaml"
 _SIDECAR_SUMMARY_KEYS = {
@@ -100,7 +100,7 @@ def load_post_mutate_source(topology_dir: Path | str) -> PostMutateSource:
             "independent post-mutate requires a stable pre-made sample identifier."
         )
 
-    hand_cfg = _restore_hand_cfg(hand_cfg_raw)  # sidecar snapshot -> 运行时 dataclass
+    hand_cfg = restore_hand_cfg_snapshot(hand_cfg_raw)  # sidecar snapshot -> 运行时 dataclass
     metadata = {
         key: value
         for key, value in sidecar_doc.items()
@@ -120,74 +120,3 @@ def load_post_mutate_source(topology_dir: Path | str) -> PostMutateSource:
 
 
 __all__ = ["PostMutateSource", "load_post_mutate_source"]
-
-
-def _restore_hand_cfg(hand_cfg_raw: dict[str, Any]) -> HandCfg:
-    r"""把 sidecar 里的 `hand_cfg` 快照恢复成真正的 `HandCfg`。
-
-    # NOTE:
-    当前 `AssetCfgBase.to_dict()` 会把 dataclass 递归压平成原生容器，但像
-    `BoxGeometryCfg` / `CylinderGeometryCfg` 这样的 geometry 子类，其
-    `geometry_type` 是 `ClassVar`，不会自动出现在输出字典里。
-
-    因而 sidecar 中的几何快照常常长成：
-
-    ```yaml
-    geometry:
-      size: [0.1, 0.2, 0.3]
-    ```
-
-    而不是 schema loader 直接期望的：
-
-    ```yaml
-    geometry:
-      type: box
-      size: [0.1, 0.2, 0.3]
-    ```
-
-    这里做的恢复不是重新发明 schema，而只是把这些“缺失 type 的几何字典”
-    补成 loader 可识别的最小形状。
-    """
-
-    if not isinstance(hand_cfg_raw, dict):
-        raise TypeError(f"'hand_cfg' must be a mapping, got {type(hand_cfg_raw).__name__}")
-    normalized = _rehydrate_geometry_mappings(hand_cfg_raw)  # 先递归补 geometry type，再正式实例化
-    return HandCfg(**normalized)
-
-
-def _rehydrate_geometry_mappings(value: Any) -> Any:
-    r"""递归补全所有缺失 `type` 的 geometry 映射。"""
-
-    if isinstance(value, list):
-        return [_rehydrate_geometry_mappings(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_rehydrate_geometry_mappings(item) for item in value)
-    if not isinstance(value, dict):
-        return value
-
-    normalized = {key: _rehydrate_geometry_mappings(item) for key, item in value.items()}  # 先递归到底层节点
-    if "geometry" in normalized and isinstance(normalized["geometry"], dict):
-        normalized["geometry"] = _inject_geometry_type(normalized["geometry"])  # 子字段 `geometry` 是最常见缺 type 的位置
-    return _inject_geometry_type(normalized)
-
-
-def _inject_geometry_type(geometry_doc: dict[str, Any]) -> dict[str, Any]:
-    r"""按最小启发式为 geometry 映射补上 `type` 字段。"""
-
-    if "type" in geometry_doc or "kind" in geometry_doc:
-        return geometry_doc  # 已显式声明几何类型时不再篡改
-
-    normalized = dict(geometry_doc)
-    if any(key in normalized for key in ("file_path", "path", "mesh")):
-        normalized["type"] = "mesh"  # 有 mesh 路径时优先判成 mesh geometry
-        return normalized
-    if "size" in normalized:
-        normalized["type"] = "box"  # `size=[x,y,z]` 是 box 的最小特征
-        return normalized
-    if "radius" in normalized and "length" in normalized:
-        normalized["type"] = "cylinder"  # radius + length 对应圆柱
-        return normalized
-    if "radius" in normalized:
-        normalized["type"] = "sphere"  # 只有半径时退成球
-        return normalized
-    return normalized

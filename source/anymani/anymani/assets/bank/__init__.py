@@ -8,6 +8,7 @@ from anymani.assets.bank import HandBankCfg
 ```
 """
 
+from .geometry_semantics import HandAssetSourceKind
 from .hand_bank import (
     HandBank,
     HandBankCfg,
@@ -39,6 +40,7 @@ __all__ = [
     "HandSelection",
     "HandSelectionMode",
     "HandSourceMode",
+    "HandAssetSourceKind",
     "UrdfMeshRef",
     "UrdfRgba",
     "resolve_anymani_root",

@@ -321,9 +321,39 @@ def test_hand_container_rejects_virtual_mesh_path_conflict(tmp_path: Path) -> No
         HandContainer.from_cfg(HandContainerCfg(path="conflict"), source_root=run_root)
 
 
-@pytest.mark.parametrize("source_mode", ["pre_made", "mixed"])
-def test_unimplemented_source_modes_fail_explicitly(tmp_path: Path, source_mode: str) -> None:
-    r"""pre-made / mixed 接口先保留，但第一版 resolve 必须显式拒绝。"""
+def test_pre_made_discovers_only_self_contained_topology_bundles(tmp_path: Path) -> None:
+    r"""pre-made 上级 root 可发现多个母体，但不得误收共享 mesh 的 post-mutate leaf。"""
 
-    with pytest.raises(NotImplementedError, match=source_mode):
-        HandBank(HandBankCfg(source_mode=source_mode, post_mutate_path=tmp_path, selection_mode="all")).resolve()
+    first = _write_source_topology(tmp_path / "leap_topology", asset_id="leap_root", mesh_name="leap.stl")
+    second = _write_source_topology(tmp_path / "allegro_topology", asset_id="allegro_root", mesh_name="allegro.stl")
+    run_root = first / "post_mutate_run"
+    _write_sample(run_root, "variant", mesh_name="variant.stl")
+
+    selection = HandBank(
+        HandBankCfg(source_mode="pre_made", pre_made_path=tmp_path, selection_mode="all")
+    ).resolve()
+
+    assert [asset.asset_id for asset in selection.assets] == ["allegro_root", "leap_root"]
+    assert all(asset.real_path("hand.urdf").parent in {first, second} for asset in selection.assets)
+
+
+def test_mixed_uses_explicit_cross_family_manifest_and_stable_sampling(tmp_path: Path) -> None:
+    r"""mixed 不猜共同目录；任意 family bundle manifest 可 all 或固定 seed 无放回采样。"""
+
+    leap = _write_source_topology(tmp_path / "leap", asset_id="leap_root", mesh_name="leap.stl")
+    allegro = _write_source_topology(tmp_path / "allegro", asset_id="allegro_root", mesh_name="allegro.stl")
+    all_selection = HandBank(
+        HandBankCfg(source_mode="mixed", selection_mode="all", containers=(leap, allegro))
+    ).resolve()
+    sample_selection = HandBank(
+        HandBankCfg(
+            source_mode="mixed",
+            selection_mode="sample",
+            sample_count=1,
+            sample_seed=61,
+            containers=(leap, allegro),
+        )
+    ).resolve()
+
+    assert [asset.asset_id for asset in all_selection.assets] == ["allegro_root", "leap_root"]
+    assert sample_selection.assets[0].asset_id in {"allegro_root", "leap_root"}

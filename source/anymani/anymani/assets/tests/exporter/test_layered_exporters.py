@@ -55,7 +55,15 @@ def _build_simple_hand_for_sidecar() -> HandCfg:
 
     return HandCfg(
         name="sidecar_demo",
-        palm=PalmCfg(name="palm"),
+        palm=PalmCfg(
+            name="palm",
+            collisions=[
+                CollisionGeometryCfg(
+                    name="palm_col",
+                    geometry={"type": "box", "size": (0.08, 0.06, 0.02)},
+                )
+            ],
+        ),
         fingers=[
             FingerCfg(
                 name="index",
@@ -182,3 +190,5 @@ def test_sidecar_uses_real_axial_geometry_length_for_total_length_cm(tmp_path):
 
     assert doc["fingers"][0]["name"] == "index"
     assert doc["fingers"][0]["total_length_cm"] == 11.0
+    assert doc["geometry_semantics"]["schema_version"] == "1.0.0"
+    assert len(doc["geometry_semantics"]["components"]) == 4

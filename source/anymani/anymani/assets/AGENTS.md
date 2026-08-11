@@ -42,12 +42,18 @@
 尤其注意：**动力学闭包不要再塞回 builder、mutator 或 exporter**。  
 它现在有专门的落点：`assets/asset_physics.py`。
 
-### 3. 自包含性
+### 3. 几何语义交付
+
+`asset_schema_geometry.py` 定义版本化 `{a}->{h}`、完整 fixed/revolute 链、显式 $q_{home}$、limits、PALM/JOINT/TIP owner、collision component 与 anchor seed。exporter 在 `HandCfg` 真源仍在内存时写入 `hand.yaml.geometry_semantics`；bank 只在 `require_geometry_semantics=True` 时解析，新 generated sidecar 直接读取，旧 generated sidecar 确定性迁移，official 缺人工核验字段时严格拒绝。
+
+`HandBank` 是 tasks 与 distill 共用的资产集合/选择/交付入口。不要让下游重新处理 pre-made 根、post-mutate shared meshes 或 mixed-family 路径，也不要把 robots 的动态 FK/Jacobian 或 distill 的 field/query 放进 bank。
+
+### 4. 自包含性
 
 资产生成 contract 的权威实现、README、VERSION 与 CHANGELOG 保持在本目录。下游 `robots/tasks/distill`
 可以引用导出的 URDF、sidecar、bank schema 与版本锚点，但不得复制或重新定义生成/验证/physics closure 逻辑。
 
-### 4. 测试优先
+### 5. 测试优先
 
 `assets` 子项目已经形成较多测试。后续凡是改动 builder / mutator / validator / exporter / physics closure / sidecar schema，应优先补最小单元测试或回归测试，再改实现。测试重点是几何数值、拓扑顺序、导出 contract、mass / inertia 闭包与 validator 拒绝条件，而不是启动 Isaac Sim。
 

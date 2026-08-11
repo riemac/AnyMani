@@ -36,6 +36,8 @@ from typing import Any, TypeAlias
 
 import yaml
 
+from ..asset_schema_geometry import HandGeometrySemanticsCfg
+from .geometry_semantics import HandAssetSourceKind, resolve_hand_geometry_semantics
 from .path_utils import resolve_container_entry_path
 
 UrdfRgba = tuple[float, float, float, float]
@@ -92,6 +94,12 @@ class HandContainerCfg:
     sidecar_file: str = "hand.yaml"
     """当 `path` 指向目录时，目录内默认 sidecar 文件名。当前 generated contract 固定为 `hand.yaml`。"""
 
+    source_kind: HandAssetSourceKind = "generated"
+    """资产来源类型；official 缺人工核验的几何语义时不得使用 generated 迁移规则。"""
+
+    topology_key: str | None = None
+    """可选 morphology 身份；未提供时几何语义解析器读取 sidecar ``topology_name``。"""
+
 
 HandContainerLike: TypeAlias = str | Path | HandContainerCfg
 """用户可写的单 hand asset 入口；字符串 / Path 会规范化为 `HandContainerCfg(path=...)`。"""
@@ -135,6 +143,12 @@ class HandContainer:
     sidecar: dict[str, Any] = field(default_factory=dict)
     """解析后的 `hand.yaml` 内容。第一版先保持 `dict`，避免过早固化完整 schema。"""
 
+    source_kind: HandAssetSourceKind = "generated"
+    """当前 container 的资产来源类型。"""
+
+    geometry_semantics: HandGeometrySemanticsCfg | None = None
+    """按需解析的静态几何语义；tasks 默认不要求，distill 必须显式要求。"""
+
     mesh_refs: tuple[UrdfMeshRef, ...] = ()
     """从 URDF `<mesh filename=...>` 解析出的 mesh 路径引用表。"""
 
@@ -150,6 +164,7 @@ class HandContainer:
         require_sidecar: bool = True,
         validate_mesh_relpaths: bool = True,
         parse_visual_rgba: bool = True,
+        require_geometry_semantics: bool = False,
     ) -> HandContainer:
         r"""把单资产声明式入口解析为虚拟标准视图。
 
@@ -159,6 +174,7 @@ class HandContainer:
             require_sidecar (bool): 是否要求 `hand.yaml` 必须存在。
             validate_mesh_relpaths (bool): 是否要求 URDF mesh 引用全部闭合到真实文件。
             parse_visual_rgba (bool): 是否解析 named visual 的 RGBA debug color。
+            require_geometry_semantics (bool): 是否解析/迁移类型化几何语义；official 缺字段时严格拒绝。
 
         Returns:
             HandContainer: 下游中立的虚拟标准 bundle。
@@ -180,6 +196,16 @@ class HandContainer:
         mesh_refs = parse_urdf_mesh_refs(urdf_path, require_existing=validate_mesh_relpaths)
         visual_rgba_by_name = parse_urdf_visual_rgba_by_name(urdf_path) if parse_visual_rgba else {}
         asset_id = str(cfg.asset_id or sidecar.get("id") or urdf_path.parent.name)
+        geometry_semantics = (
+            resolve_hand_geometry_semantics(
+                sidecar,
+                source_kind=cfg.source_kind,
+                asset_id=asset_id,
+                topology_key=cfg.topology_key,
+            )
+            if require_geometry_semantics
+            else None
+        )
         virtual_to_real, real_to_virtual = _build_virtual_path_bijection(
             urdf_path=urdf_path,
             sidecar_path=sidecar_path if sidecar_path.is_file() else None,
@@ -190,6 +216,8 @@ class HandContainer:
             virtual_to_real=virtual_to_real,
             real_to_virtual=real_to_virtual,
             sidecar=sidecar,
+            source_kind=cfg.source_kind,
+            geometry_semantics=geometry_semantics,
             mesh_refs=mesh_refs,
             visual_rgba_by_name=visual_rgba_by_name,
         )

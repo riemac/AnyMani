@@ -43,9 +43,10 @@ post-mutate leaf 的 `../meshes/...` 按 run root 解析。下游 `tasks/gm` 和
 当前实现边界：
 
 - `source_mode="post_mutate"` 已落地，默认包含 source topology 母体；
-- `source_mode="pre_made"` / `"mixed"` 先保留接口，resolve 时显式报
-  `NotImplementedError`；其中 `mixed` 指 Leap / Allegro 等跨形态拓扑产物组织，
-  不表示“母体 + post-mutate variants”的同源 topology 内部拉平；
+- `source_mode="pre_made"` 发现自包含 topology bundles，不把引用外部 shared meshes 的 post-mutate leaf
+  误收入母体集合；
+- `source_mode="mixed"` 由显式 ``containers`` manifest 组合 Leap / Allegro 等跨 family bundles，
+  不猜测不存在的共同目录结构；
 - `selection_mode="explicit"` 服务验证阶段的手写 URDF / bundle 列表；
 - `selection_mode="sample"` 服务 teacher training 的固定 seed 随机子集；
 - `selection_mode="all"` 服务整批 smoke / 统计检查；
@@ -70,7 +71,7 @@ HandSourceMode = Literal["post_mutate", "pre_made", "mixed"]
 """手资产来源模式。
 
 `post_mutate` 对应当前 teacher specialist policy 的主线资产；`pre_made` 与
-`mixed` 暂作为未来扩展锚点保留。注意 `mixed` 是跨手型 / 跨 family 产物组织语义，
+`mixed` 使用显式 containers manifest。注意 `mixed` 是跨手型 / 跨 family 产物组织语义，
 不是“pre-made 母体 + post-mutate leaf”的集合包含关系。
 """
 
@@ -118,7 +119,7 @@ class HandBankCfg(AssetBankCfg):
     """关联的运行时类；默认在 `__post_init__` 中设为 `HandBank`。"""
 
     source_mode: HandSourceMode = "post_mutate"
-    """资产来源模式。当前只实现 `post_mutate`。"""
+    """资产来源模式：post-mutate flatten、pre-made discovery 或 mixed manifest。"""
 
     selection_mode: HandSelectionMode = "explicit"
     """资产选择模式：手写列表、固定 seed 随机采样、或全量选择。"""
@@ -179,6 +180,13 @@ class HandBankCfg(AssetBankCfg):
     parse_visual_rgba: bool = True
     """是否解析 URDF visual material color，供后续可视化 / material restore adapter 使用。"""
 
+    require_geometry_semantics: bool = False
+    r"""是否要求 bank 为每个资产交付类型化静态几何语义。
+
+    tasks 默认保持轻量；distill 应显式设为 ``True``。generated 旧 sidecar 会确定性迁移，
+    official 缺少人工核验字段时严格拒绝。
+    """
+
     def __post_init__(self) -> None:
         r"""只做无 IO 的 cfg 归一化。
 
@@ -198,24 +206,22 @@ class HandBank(AssetBank):
     虚拟视图构建、bundle 校验与 selection 记录。构造函数本身不做 IO。
     """
 
-    cfg: HandBankCfg
+    cfg: HandBankCfg  # 无 IO 的声明式集合/选择配置
 
     def __init__(self, cfg: HandBankCfg):
         r"""保存 cfg；不扫描目录、不读取文件。"""
 
-        super().__init__(cfg)
+        super().__init__(cfg)  # AssetBank 只保存 cfg，不提前扫描文件系统
 
     def resolve(self) -> HandSelection:
         r"""解析配置并返回 hand selection。
 
         Raises:
-            NotImplementedError: 当 `source_mode` 不是当前已实现的 `post_mutate` 时抛出。
+            ValueError: source mode 缺少所需 root/manifest 或未发现合法 bundle 时抛出。
         """
 
-        if self.cfg.source_mode != "post_mutate":
-            raise NotImplementedError(f"HandBank source_mode={self.cfg.source_mode!r} is not implemented yet")
-        candidates = self.discover()
-        return self.select(candidates)
+        candidates = self.discover()  # 执行 bundle/path/sidecar/mesh 合同解析
+        return self.select(candidates)  # explicit/all/sample 形成可复现选择记录
 
     def discover(self) -> tuple[HandContainer, ...]:
         r"""发现当前 source root 下的候选 hand containers。
@@ -233,35 +239,77 @@ class HandBank(AssetBank):
             FileNotFoundError: 当 post-mutate run root 或必需的 source topology bundle 不存在时抛出。
         """
 
-        source_root = self._resolve_optional_source_root()
-        if self.cfg.selection_mode == "explicit":
-            if not self.cfg.containers:
-                raise ValueError("selection_mode='explicit' requires at least one HandContainerCfg")
-            return tuple(self._container_from_cfg(container_cfg, source_root=source_root) for container_cfg in self.cfg.containers)
+        source_root = self._resolve_optional_source_root()  # post-mutate/pre-made root 或 mixed None
+        if self.cfg.selection_mode == "explicit":  # 精确 manifest 保持用户顺序
+            if not self.cfg.containers:  # explicit 空集合没有物理意义
+                raise ValueError("selection_mode='explicit' requires at least one HandContainerCfg")  # fail-fast
+            return tuple(  # 每项独立解析；绝对路径无需共同 root
+                self._container_from_cfg(container_cfg, source_root=source_root)  # bundle -> typed container
+                for container_cfg in self.cfg.containers  # 配置声明顺序
+            )
 
-        if source_root is None:
+        if self.cfg.source_mode == "pre_made":  # 自包含 topology discovery
+            return self._discover_pre_made(source_root)  # 明确排除 shared-mesh leaves
+        if self.cfg.source_mode == "mixed":  # 跨 family 无共同目录约定
+            if not self.cfg.containers:  # mixed 必须由显式 manifest 定义候选全集
+                raise ValueError("source_mode='mixed' requires an explicit cross-family containers manifest")
+            return tuple(  # all/sample 在 select 阶段继续处理这份候选池
+                self._container_from_cfg(container_cfg, source_root=None)  # 每项 absolute/self-resolving bundle
+                for container_cfg in self.cfg.containers  # 可含不同 family/DOF
+            )
+        if source_root is None:  # 剩余 source mode 为 post_mutate
             raise ValueError(f"selection_mode={self.cfg.selection_mode!r} requires a post_mutate source root")
-        if not source_root.is_dir():
-            raise FileNotFoundError(f"post-mutate source root does not exist: {source_root}")
-        candidates = []
-        if self.cfg.include_source_topology:
+        if not source_root.is_dir():  # collection root 必须先存在
+            raise FileNotFoundError(f"post-mutate source root does not exist: {source_root}")  # 明确路径
+        candidates: list[HandContainer] = []  # 母体 + leaf flat candidates
+        if self.cfg.include_source_topology:  # 默认把 pre-made mother 纳入同级候选
             # 母体 topology 与 run root 的 leaf samples 在虚拟视图中同级；这里只把它当作普通候选。
             source_topology_root = source_root.parent  # 母体 topology 根；其 `meshes/` 与 run root 分离
-            if not self._has_hand_bundle_contract(source_topology_root):
-                raise FileNotFoundError(
+            if not self._has_hand_bundle_contract(source_topology_root):  # parent 必须是真母体 bundle
+                raise FileNotFoundError(  # 不退回纯 leaf 旧语义
                     "include_source_topology=True requires a source topology bundle at "
                     f"post_mutate_path.parent: {source_topology_root / 'hand.urdf'}"
                 )
-            candidates.append(
-                self._container_from_cfg(HandContainerCfg(path=source_topology_root), source_root=None)
+            candidates.append(  # 母体 meshes 由 topology root 自己解析
+                self._container_from_cfg(  # 与 variants 相同 HandContainer 接口
+                    HandContainerCfg(path=source_topology_root), source_root=None  # 自包含 root
+                )
             )
         # run root 下的每个 sample 目录仍按 post-mutate leaf bundle 解析；它们共享 run root/meshes。
-        candidates.extend(
-            self._container_from_cfg(HandContainerCfg(path=child), source_root=None)
-            for child in source_root.iterdir()
-            if child.is_dir() and (child / "hand.urdf").is_file()
+        candidates.extend(  # flatten run root 的全部合法 leaf directories
+            self._container_from_cfg(HandContainerCfg(path=child), source_root=None)  # shared meshes URI 解析
+            for child in source_root.iterdir()  # 只看直接 sample children
+            if child.is_dir() and (child / "hand.urdf").is_file()  # 排除 meshes/summary 等
         )
-        return tuple(sorted(candidates, key=lambda container: container.asset_id))
+        return tuple(sorted(candidates, key=lambda container: container.asset_id))  # 文件系统顺序无关
+
+    def _discover_pre_made(self, source_root: Path | None) -> tuple[HandContainer, ...]:
+        r"""发现自包含 pre-made topology bundles，排除 shared-mesh post-mutate leaves。
+
+        pre-made 的可操作定义是：``hand.urdf``、sidecar 与 URDF 引用的全部 meshes 都位于 bundle root
+        内。post-mutate leaf 即使含 ``hand.urdf``，其 ``../meshes`` real path 位于 leaf 外，因此被排除。
+        """
+
+        if source_root is None or not source_root.is_dir():  # discovery 必须有现存 collection root
+            raise FileNotFoundError(f"pre-made source root does not exist: {source_root}")  # 明确 root
+        bundle_roots = (  # root 本身是 bundle 时不递归误收其内部 variants
+            (source_root,)  # 单 topology root
+            if self._has_hand_bundle_contract(source_root)  # 直接包含 hand.urdf
+            else tuple(sorted({path.parent for path in source_root.rglob("hand.urdf")}))  # 上级 collection
+        )
+        candidates: list[HandContainer] = []  # 最终只含自包含 mothers
+        for bundle_root in bundle_roots:  # 每个 hand.urdf parent
+            container = self._container_from_cfg(  # 先用统一 parser 验证 bundle/mesh refs
+                HandContainerCfg(path=bundle_root), source_root=None
+            )
+            resolved_bundle_root = bundle_root.resolve(strict=False)  # real-path containment 基准
+            if all(  # URDF/sidecar/全部 meshes 都必须位于 root 内
+                real_path.is_relative_to(resolved_bundle_root) for real_path in container.virtual_to_real.values()
+            ):
+                candidates.append(container)  # pre-made 必须连 meshes 一起自包含
+        if not candidates:  # 不能把全部 shared-mesh leaves 当作空成功
+            raise FileNotFoundError(f"no self-contained pre-made hand bundles found under: {source_root}")
+        return tuple(sorted(candidates, key=lambda container: container.asset_id))  # 稳定候选顺序
 
     def select(self, candidates: tuple[HandContainer, ...]) -> HandSelection:
         r"""从候选 containers 中执行 explicit / sample / all 选择。
@@ -273,75 +321,93 @@ class HandBank(AssetBank):
             ValueError: 当 `sample_count` 越界或 `selection_mode` 未知时抛出。
         """
 
-        source_root = self._resolve_optional_source_root()
-        if self.cfg.selection_mode == "explicit":
-            return HandSelection(
-                assets=candidates,
-                source_mode=self.cfg.source_mode,
-                selection_mode=self.cfg.selection_mode,
-                sample_seed=None,
-                source_root=source_root,
+        source_root = self._resolve_optional_source_root()  # 记录 collection provenance
+        if self.cfg.selection_mode == "explicit":  # 用户顺序即 routing 顺序
+            return HandSelection(  # 不重排、不抽样
+                assets=candidates,  # resolved containers
+                source_mode=self.cfg.source_mode,  # provenance
+                selection_mode=self.cfg.selection_mode,  # explicit
+                sample_seed=None,  # 未使用随机采样
+                source_root=source_root,  # 可为空
             )
-        if self.cfg.selection_mode == "all":
-            return HandSelection(
-                assets=tuple(sorted(candidates, key=lambda container: container.asset_id)),
-                source_mode=self.cfg.source_mode,
-                selection_mode=self.cfg.selection_mode,
-                sample_seed=None,
-                source_root=source_root,
+        if self.cfg.selection_mode == "all":  # 候选全集
+            return HandSelection(  # asset ID 排序消除 filesystem order
+                assets=tuple(sorted(candidates, key=lambda container: container.asset_id)),  # 稳定 routing
+                source_mode=self.cfg.source_mode,  # provenance
+                selection_mode=self.cfg.selection_mode,  # all
+                sample_seed=None,  # 未抽样
+                source_root=source_root,  # collection root
             )
-        if self.cfg.selection_mode == "sample":
-            if self.cfg.sample_count is None:
-                raise ValueError("selection_mode='sample' requires sample_count")
-            if self.cfg.sample_count < 0:
-                raise ValueError("sample_count must be non-negative")
-            sorted_candidates = tuple(sorted(candidates, key=lambda container: container.asset_id))
-            if self.cfg.sample_count > len(sorted_candidates):
-                raise ValueError(
+        if self.cfg.selection_mode == "sample":  # 固定 seed 无放回子集
+            if self.cfg.sample_count is None:  # 样本数必须显式
+                raise ValueError("selection_mode='sample' requires sample_count")  # 不猜全量
+            if self.cfg.sample_count < 0:  # 离散数量域
+                raise ValueError("sample_count must be non-negative")  # 允许 0 作为显式空诊断
+            sorted_candidates = tuple(  # 先排序再伪随机，消除 discovery 顺序影响
+                sorted(candidates, key=lambda container: container.asset_id)
+            )
+            if self.cfg.sample_count > len(sorted_candidates):  # 无放回容量上限
+                raise ValueError(  # 不重复资产填满请求
                     f"sample_count={self.cfg.sample_count} exceeds available hand assets={len(sorted_candidates)}"
                 )
-            selected = tuple(random.Random(self.cfg.sample_seed).sample(sorted_candidates, self.cfg.sample_count))
-            return HandSelection(
-                assets=selected,
-                source_mode=self.cfg.source_mode,
-                selection_mode=self.cfg.selection_mode,
-                sample_seed=self.cfg.sample_seed,
-                source_root=source_root,
+            selected = tuple(  # 局部 RNG 不污染全局 random state
+                random.Random(self.cfg.sample_seed).sample(sorted_candidates, self.cfg.sample_count)
             )
-        raise ValueError(f"unknown HandBank selection_mode: {self.cfg.selection_mode!r}")
+            return HandSelection(  # 保存复现采样所需 seed/root/mode
+                assets=selected,  # 无放回子集
+                source_mode=self.cfg.source_mode,  # provenance
+                selection_mode=self.cfg.selection_mode,  # sample
+                sample_seed=self.cfg.sample_seed,  # 复现锚点
+                source_root=source_root,  # collection root
+            )
+        raise ValueError(f"unknown HandBank selection_mode: {self.cfg.selection_mode!r}")  # 封闭枚举
 
     def _resolve_optional_source_root(self) -> Path | None:
-        r"""解析 post-mutate source root；explicit 绝对路径场景允许缺省。"""
+        r"""按 source mode 解析 collection root；mixed manifest 无共同 root。"""
 
-        try:
-            return resolve_post_mutate_root(self.cfg)
-        except ValueError:
-            if self.cfg.selection_mode == "explicit" and all(Path(cfg.path).expanduser().is_absolute() for cfg in self.cfg.containers):
-                return None
-            raise
+        if self.cfg.source_mode == "mixed":  # 跨 family manifest 不声明共同目录布局
+            return None  # 每个 container 自己解析 absolute/self-contained path
+        if self.cfg.source_mode == "pre_made":  # topology collection 或单 bundle root
+            if self.cfg.pre_made_path is None:  # explicit absolute paths 可不设 collection root
+                if self.cfg.selection_mode == "explicit" and all(  # 每项都能独立解析
+                    Path(cfg.path).expanduser().is_absolute() for cfg in self.cfg.containers  # absolute
+                ):
+                    return None  # selection provenance 无共同 root
+                raise ValueError("source_mode='pre_made' requires pre_made_path or absolute explicit containers")
+            return Path(self.cfg.pre_made_path).expanduser().resolve(strict=False)  # 规范 collection root
+
+        try:  # post-mutate root 可由 pre-made path + run name 组合
+            return resolve_post_mutate_root(self.cfg)  # 统一 path_utils 事实源
+        except ValueError:  # 没有 collection root 时仅 absolute explicit 合法
+            if self.cfg.selection_mode == "explicit" and all(  # 每项独立可解析
+                Path(cfg.path).expanduser().is_absolute() for cfg in self.cfg.containers  # absolute manifest
+            ):
+                return None  # 无共同 source root
+            raise  # all/sample 或 relative explicit 保留原始错误
 
     def _container_from_cfg(self, cfg: HandContainerCfg, *, source_root: Path | None) -> HandContainer:
         r"""按当前 bank 解析选项构造单个 `HandContainer`。"""
 
-        return HandContainer.from_cfg(
-            cfg,
-            source_root=source_root,
-            require_sidecar=self.cfg.require_sidecar,
-            validate_mesh_relpaths=self.cfg.validate_mesh_relpaths,
-            parse_visual_rgba=self.cfg.parse_visual_rgba,
+        return HandContainer.from_cfg(  # 单资产 bundle parser 唯一入口
+            cfg,  # path/ID/source kind/topology hint
+            source_root=source_root,  # relative leaf 路径基准
+            require_sidecar=self.cfg.require_sidecar,  # hand.yaml contract
+            validate_mesh_relpaths=self.cfg.validate_mesh_relpaths,  # URDF mesh closure
+            parse_visual_rgba=self.cfg.parse_visual_rgba,  # 可选 visual provenance
+            require_geometry_semantics=self.cfg.require_geometry_semantics,  # distill/robots 按需
         )
 
     @staticmethod
     def _has_hand_bundle_contract(candidate_root: Path) -> bool:
         r"""判断目录是否具备一个可作为 hand bundle 的最小 contract。"""
 
-        return (candidate_root / "hand.urdf").is_file()
+        return (candidate_root / "hand.urdf").is_file()  # 最小 bundle 入口；其余由 HandContainer 验证
 
 
-__all__ = [
-    "HandBank",
-    "HandBankCfg",
-    "HandSelection",
-    "HandSelectionMode",
-    "HandSourceMode",
+__all__ = [  # assets.bank 稳定公开面
+    "HandBank",  # runtime discovery/selection
+    "HandBankCfg",  # declarative config
+    "HandSelection",  # resolved result/provenance
+    "HandSelectionMode",  # explicit/sample/all
+    "HandSourceMode",  # post_mutate/pre_made/mixed
 ]

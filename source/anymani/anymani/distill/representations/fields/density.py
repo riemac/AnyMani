@@ -1,10 +1,9 @@
-r"""Continuous density field 的物理定义与纯张量实现。
+r"""连续邻近场的物理定义与纯张量实现。
 
 本模块保留“连续密度团”这一研究直觉，但不把所有平滑标量场混成同一语义。
 
-1. Surface KDE：在面积加权 surface samples $y_m^h(q)$ 上放置 kernel 并求和。它表示
-   surface mass 的平滑分布，结果会受 kernel bandwidth、surface area normalization 与
-   sampling quality 影响。
+1. 表面核密度估计：在面积加权表面样本 $y_m^h(q)$ 上放置核并求和。它表示表面测度的
+   平滑分布，结果会受核带宽、表面积归一化与采样质量影响。
 2. Gaussian distance shell：由 UDF 构造
 
    $$
@@ -14,10 +13,10 @@ r"""Continuous density field 的物理定义与纯张量实现。
    \in(0,1],
    $$
 
-   其中 $\sigma>0$ 是 m 制表面带宽。它在 surface 上取 1，向内外两侧衰减，是
-   surface shell，不是填满实体内部的 occupancy。
-3. Gaussian-smoothed occupancy：对实体 volume indicator 做 Gaussian convolution，
-   保留 inside/outside 与绝对 volume 语义。它需要可靠闭合体，不能由无符号点云标签
+   其中 $\sigma>0$ 是米制表面带宽。它在表面上取 1，向内外两侧衰减，是表面壳层，
+   不是填满实体内部的占据场。
+3. Gaussian 平滑占据场：对实体体积指示函数做 Gaussian 卷积，保留内外侧与绝对体积语义。
+   它需要可靠闭合体，不能由无符号点云标签
    直接冒充。
 
 当前阶段固定第 2 类逐归属体 Gaussian 邻近场，并同时使用多个物理带宽：
@@ -30,14 +29,13 @@ $$
 0<\sigma_1<\cdots<\sigma_L.
 $$
 
-小 $\sigma$ 监督 surface/contact boundary，中等 $\sigma$ 表达 geometry envelope，大
-$\sigma$ 为较远 workspace query 保留连续信号。PALM/JOINT/TIP owner 轴已经固定为
-$G=N_E$ 且与 entity/decoder axis 同索引；当前不训练独立 union head。$L$、带宽米制数值、
-query 分层与 loss weighting 尚未裁定。
+小 $\sigma$ 监督表面/接触边界，中等 $\sigma$ 表达几何包络，大 $\sigma$ 为较远工作空间查询点
+保留连续信号。PALM/JOINT/TIP 归属体轴固定为 $G=N_E$，并与实体/解码器轴同索引；当前不训练
+独立并集输出头。$L$、具体米制带宽、查询分层与损失权重由实验裁定。
 
-三类 field 都可接 fixed BPS 或 sampled queries，但当前主线使用 sampled conditional-implicit
-queries。是否归一化早期 KDE/volume baseline 的 surface/volume mass 尚未裁定；physical size 对 contact physics 有意义，
-因此默认不能无说明地把每个 embodiment/group 归一化到积分为 1。
+三类场都可接固定 BPS 或随机查询点，但当前主线使用抽样式条件隐式查询。早期核密度/体积基线
+是否归一化表面或体积测度仍待裁定；物理尺寸对接触物理有意义，因此不能无说明地把每个手型或
+归属体归一化到积分为 1。
 """
 
 from __future__ import annotations
@@ -56,8 +54,8 @@ def gaussian_density_from_distance(distance: torch.Tensor, bandwidths: torch.Ten
     \exp\left(-\frac{d_g(x;q)^2}{2\sigma_\ell^2}\right).
     $$
 
-    `distance` 的最后若干轴可自由表示 batch、owner 与 query；本函数只在末尾追加
-    bandwidth 轴。这里不 clamp 距离或带宽，因为 clamp 会静默改变 $d=0$ 和小带宽
+    `distance` 的前导轴可自由表示批次、归属体与查询点；本函数只在末尾追加带宽轴。
+    这里不截断距离或带宽，因为截断会静默改变 $d=0$ 和小带宽
     附近的解析导数。
 
     Args:

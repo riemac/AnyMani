@@ -1,3 +1,10 @@
+0.5.2 - 2026-08-11
+==================
+
+- 新增 task-free multi-anchor geometry SSL 完整路径：从版本化 hand geometry semantics、robots POE/owner union 与 Warp 在线 $d/\rho/\kappa/g$ teacher，到 retained encoder、跨结构 20-JOINT/26-owner padding、五项联合目标和真实 mother tiny-overfit。
+- 新增 `python -m anymani.distill.ssl.pretrain` Hydra 入口、generated 内容哈希 split、固定 validation bank、TensorBoard/JSONL/NPZ 记录、完整 resume checkpoint 与仅 `encoder.` namespace 的 PPO/IL transfer state。
+- 增加 query-only、latent-shuffle 与可选 Warp/Kaolin reference diagnostics；默认 contract suite 覆盖资产 lowering、运动学/Jacobian、owner geometry、GPU target、padding 数值/梯度等价和 checkpoint 生命周期。
+
 0.5.1 - 2026-07-20
 ==================
 

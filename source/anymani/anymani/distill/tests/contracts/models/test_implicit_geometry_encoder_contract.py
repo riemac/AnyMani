@@ -7,8 +7,11 @@ import pytest
 import torch
 from anymani.distill.models.input_adapters.geometry import (
     GeometryEncoderConfig,
+    GeometryPaddingCfg,
     ImplicitGeometryEncoder,
     StaticGeometryEvidence,
+    pad_static_geometry_evidence,
+    stack_static_geometry_evidence,
 )
 
 pytestmark = pytest.mark.contract
@@ -71,6 +74,39 @@ def _encoder() -> ImplicitGeometryEncoder:
         max_graph_distance=4,
     )
     return ImplicitGeometryEncoder(config).to(dtype=torch.float64)
+
+
+def _two_joint_static_evidence(*, dtype: torch.dtype = torch.float64) -> StaticGeometryEvidence:
+    """构造 PALM–JOINT–JOINT–TIP 四实体结构，验证跨长度 padding。"""
+
+    base = _static_evidence(dtype=dtype)
+    extra_surface = torch.tensor(
+        [[[0.09, -0.01, 0.014], [0.11, -0.01, 0.014], [0.09, 0.01, 0.014], [0.11, 0.01, 0.014]]],
+        dtype=dtype,
+    )
+    return StaticGeometryEvidence(
+        anchors=base.anchors,
+        home_surface_points=torch.cat((base.home_surface_points[:2], extra_surface, base.home_surface_points[2:]), dim=0),
+        home_surface_mask=torch.ones(4, 4, dtype=torch.bool),
+        palm_normal=base.palm_normal,
+        space_screws=torch.tensor(
+            [[0.0, 0.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0, -0.05, 0.0]],
+            dtype=dtype,
+        ),
+        q_home=torch.tensor([0.0, 0.08], dtype=dtype),
+        entity_role=torch.tensor([0, 1, 1, 2], dtype=torch.long),
+        entity_joint_index=torch.tensor([-1, 0, 1, -1], dtype=torch.long),
+        joint_entity_index=torch.tensor([1, 2], dtype=torch.long),
+        shortest_path=torch.tensor(
+            [[0, 1, 2, 3], [1, 0, 1, 2], [2, 1, 0, 1], [3, 2, 1, 0]], dtype=torch.long
+        ),
+        parent_direction=torch.tensor(
+            [[0, 4, 4, 4], [1, 0, 4, 4], [2, 1, 0, 4], [3, 2, 1, 0]], dtype=torch.long
+        ),
+        child_direction=torch.tensor(
+            [[0, 1, 2, 3], [4, 0, 1, 2], [4, 4, 0, 1], [4, 4, 4, 0]], dtype=torch.long
+        ),
+    )
 
 
 def _rotate_about_palm_normal(evidence: StaticGeometryEvidence, angle: float) -> StaticGeometryEvidence:
@@ -176,3 +212,81 @@ def test_paired_joint_sign_rewrite_makes_zero_order_even_and_first_order_odd() -
 
     torch.testing.assert_close(paired.zero_order, reference.zero_order, atol=1.0e-10, rtol=1.0e-10)
     torch.testing.assert_close(paired.first_order, -reference.first_order, atol=1.0e-10, rtol=1.0e-10)
+
+
+def test_same_structure_assets_share_one_forward_with_per_sample_static_evidence() -> None:
+    """同 topology 的不同形态可堆成一批，结果等于逐资产独立前向。"""
+
+    torch.manual_seed(19)
+    first = _static_evidence()
+    second = StaticGeometryEvidence(
+        anchors=first.anchors + torch.tensor([0.003, -0.002, 0.001], dtype=first.anchors.dtype),
+        home_surface_points=first.home_surface_points * 1.08,
+        home_surface_mask=first.home_surface_mask,
+        palm_normal=first.palm_normal,
+        space_screws=first.space_screws,
+        q_home=torch.tensor([0.11], dtype=first.q_home.dtype),
+        entity_role=first.entity_role,
+        entity_joint_index=first.entity_joint_index,
+        joint_entity_index=first.joint_entity_index,
+        shortest_path=first.shortest_path,
+        parent_direction=first.parent_direction,
+        child_direction=first.child_direction,
+    )
+    batched = stack_static_geometry_evidence((first, second))
+    q = torch.tensor([[0.27], [-0.31]], dtype=torch.float64)
+    encoder = _encoder().eval()
+
+    together = encoder(q, batched)
+    first_alone = encoder(q[:1], first)
+    second_alone = encoder(q[1:], second)
+
+    torch.testing.assert_close(together.zero_order[:1], first_alone.zero_order, atol=1.0e-10, rtol=1.0e-10)
+    torch.testing.assert_close(together.zero_order[1:], second_alone.zero_order, atol=1.0e-10, rtol=1.0e-10)
+    torch.testing.assert_close(together.first_order[:1], first_alone.first_order, atol=1.0e-10, rtol=1.0e-10)
+    torch.testing.assert_close(together.first_order[1:], second_alone.first_order, atol=1.0e-10, rtol=1.0e-10)
+
+
+def test_cross_structure_padding_matches_independent_variable_length_forwards() -> None:
+    """20-JOINT/26-entity padding 的有效输出必须等于网络原生可变长前向。"""
+
+    torch.manual_seed(29)
+    one_joint = _static_evidence()
+    two_joint = _two_joint_static_evidence()
+    padding = GeometryPaddingCfg(max_joint_count=20, max_tip_count=5, max_graph_distance=4)
+    evidence = pad_static_geometry_evidence((one_joint, two_joint), config=padding)
+    q = torch.zeros(2, padding.max_joint_count, dtype=torch.float64)
+    q[0, 0] = 0.21
+    q[1, :2] = torch.tensor([-0.17, 0.31], dtype=torch.float64)
+    encoder = _encoder().eval()
+
+    padded = encoder(q, evidence)
+    one_alone = encoder(q[:1, :1], one_joint)
+    two_alone = encoder(q[1:2, :2], two_joint)
+
+    torch.testing.assert_close(padded.zero_order[0, :3], one_alone.zero_order[0], atol=1.0e-10, rtol=1.0e-10)
+    torch.testing.assert_close(padded.zero_order[1, :4], two_alone.zero_order[0], atol=1.0e-10, rtol=1.0e-10)
+    torch.testing.assert_close(padded.first_order[0, :1], one_alone.first_order[0], atol=1.0e-10, rtol=1.0e-10)
+    torch.testing.assert_close(padded.first_order[1, :2], two_alone.first_order[0], atol=1.0e-10, rtol=1.0e-10)
+    assert torch.count_nonzero(padded.zero_order[0, 3:]) == 0
+    assert torch.count_nonzero(padded.first_order[0, 1:]) == 0
+    assert torch.count_nonzero(padded.zero_order[1, 4:]) == 0
+    assert torch.count_nonzero(padded.first_order[1, 2:]) == 0
+
+    parameters = tuple(encoder.parameters())
+    padded_valid_loss = (
+        padded.zero_order[0, :3].square().sum()
+        + padded.first_order[0, :1].square().sum()
+        + padded.zero_order[1, :4].square().sum()
+        + padded.first_order[1, :2].square().sum()
+    )
+    independent_valid_loss = (
+        one_alone.zero_order.square().sum()
+        + one_alone.first_order.square().sum()
+        + two_alone.zero_order.square().sum()
+        + two_alone.first_order.square().sum()
+    )
+    padded_gradients = torch.autograd.grad(padded_valid_loss, parameters, retain_graph=True)
+    independent_gradients = torch.autograd.grad(independent_valid_loss, parameters)
+    for padded_gradient, independent_gradient in zip(padded_gradients, independent_gradients):
+        torch.testing.assert_close(padded_gradient, independent_gradient, atol=1.0e-9, rtol=1.0e-9)

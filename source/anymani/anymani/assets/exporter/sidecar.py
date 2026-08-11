@@ -19,7 +19,7 @@ Sidecar 是每个导出产物目录里与 URDF 同级的一个 YAML 文件，记
 
 ### 与 RecipeLoader.dump() 的关系
 
-`RecipeLoader.dump()` 序列化的是生成器的**配置**（HandGeneratorCfg）；
+    `RecipeLoader.dump()` 序列化的是生成器的**配置**（HandGeneratorCfg）；
 `SidecarExporter` 记录的是这次生成的**产物描述**（HandCfg 结构摘要 + 上下文）
 并且额外保存完整 `hand_cfg` 快照。两者互补——前者让你知道"用什么设置生成的"，
 后者让你知道"生成出了什么"，并支持后续恢复。
@@ -44,21 +44,27 @@ Sidecar 是每个导出产物目录里与 URDF 同级的一个 YAML 文件，记
     provenance:
       recipe_hash: "d4e5f6..."
       seed: 42
-      experiment_tag: leap_variant_v1
+    experiment_tag: leap_variant_v1
+
+新 sidecar 还可以包含 `geometry_semantics`：它不是从 URDF 逆向猜测的摘要，而是 exporter 在
+`HandCfg` 真源仍在内存时写出的完整版本化 owner/kinematic/home/anchor 事实。这样 future
+pre-made、post-mutate 和其变体资产在落盘时就共享同一 schema；bank 只负责读取和选择，robots
+负责动态 lower，distill 不直接接触 exporter 内部对象。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import datetime as dt
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
 import yaml
 
 from ..asset_base import AssetCfgBase, HandCfg
+from ..asset_schema_geometry import derive_generated_geometry_semantics, geometry_semantics_to_dict
 from ..validator._finger_length import measure_finger_axial_lengths
 from ._base import ExporterBase, ExportResult
-
 
 # ============================================================================
 #  配置类
@@ -69,7 +75,7 @@ from ._base import ExporterBase, ExportResult
 class SidecarCfg(AssetCfgBase):
     r"""Sidecar YAML 导出器配置。"""
 
-    class_type: type["SidecarExporter"] | None = None
+    class_type: type[SidecarExporter] | None = None
     """关联的运行时类。"""
 
     filename: str = "hand.yaml"
@@ -86,6 +92,9 @@ class SidecarCfg(AssetCfgBase):
 
     overwrite: bool = True
     """若目标文件已存在，是否覆盖。``False`` 时记入 skipped 并跳过。"""
+
+    include_geometry_semantics: bool = True
+    """是否写入供 bank/robots/distill 消费的版本化 owner、运动学、home 与锚点种子语义。"""
 
     def __post_init__(self):
         if self.class_type is None:
@@ -130,7 +139,7 @@ class SidecarExporter(ExporterBase):
         consumed_keys = set()
         doc: dict[str, Any] = {
             "id": doc_extra.get("id", "<unknown>"),
-            "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "timestamp": dt.datetime.now(dt.UTC).isoformat(),
             "name": target.name,
             "family": target.family,
             "handedness": target.handedness,
@@ -168,6 +177,14 @@ class SidecarExporter(ExporterBase):
         for key, value in doc_extra.items():
             if key not in consumed_keys:
                 doc[key] = value
+
+        if self.cfg.include_geometry_semantics:
+            geometry_semantics = derive_generated_geometry_semantics(
+                target,
+                asset_id=str(doc["id"]),
+                topology_key=None if doc.get("topology_name") is None else str(doc["topology_name"]),
+            )
+            doc["geometry_semantics"] = geometry_semantics_to_dict(geometry_semantics)
 
         # 这里显式保留完整 `HandCfg` 快照，而不是再要求后续从 URDF 逆向提取。
         # 这样 independent post-mutate 可以直接从 `hand.yaml` 恢复内存对象。

@@ -17,7 +17,7 @@ EXTENSION_TOML_DATA = toml.load(os.path.join(EXTENSION_PATH, "config", "extensio
 
 # Minimum dependencies required prior to installation
 INSTALL_REQUIRES = [
-    # NOTE: Add dependencies
+    "manifold3d==3.5.2",  # 离线同 owner 严格 Boolean union；失败时不允许几何近似回退
     "psutil",
 ]
 
