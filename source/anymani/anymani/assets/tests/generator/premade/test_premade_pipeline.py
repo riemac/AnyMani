@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 
+import assets.generator.hand_generator as hand_generator_module
 import assets.generator.premade.batch as premade_batch_module
 import pytest
 import yaml
@@ -219,6 +220,25 @@ def _single_family_full_pool(hand_preset: str, family: str) -> dict[str, dict[st
     }
 
 
+def _single_family_low_dof_pool(hand_preset: str, family: str) -> dict[str, dict[str, list[str]]]:
+    r"""构造所有 non-thumb 均低于 3 revolute DOF 的确定性拒绝样本。
+
+    thumb 保留 full chain，避免引入无关的 thumb 规则；三根 non-thumb 都删除
+    ``j2/j3``，使每根只剩 2 revolute DOF，从而只命中
+    ``hand.non_thumb_revolute_dof_below_min``。
+    """
+
+    low_dof_recipe = f"{family}_non_thumb_drop_j2_j3"  # 每根 non-thumb 剩余 2 个 revolute DOF
+    return {
+        hand_preset: {
+            "thumb": [f"{family}_thumb_full"],
+            "index": [low_dof_recipe],
+            "middle": [low_dof_recipe],
+            "ring": [low_dof_recipe],
+        }
+    }
+
+
 def test_premade_generate_batch_parallelizes_sample_level_and_main_process_writes_summary(tmp_path):
     r"""pre-made 默认并行应保持“worker 产样本、主进程写 summary”的边界。
 
@@ -253,6 +273,104 @@ def test_premade_generate_batch_parallelizes_sample_level_and_main_process_write
     assert summary["stats"]["attempted"] == 2
     assert summary["stats"]["succeeded"] == 2
     assert summary["stats"]["rejected"] == 0
+
+
+@pytest.mark.parametrize(
+    ("premade_parallel", "handedness", "expected_rejections"),
+    ((False, "right", 1), (True, "all", 2)),
+)
+def test_premade_rejection_records_reason_and_removes_materialized_meshes(
+    tmp_path,
+    *,
+    premade_parallel: bool,
+    handedness: str,
+    expected_rejections: int,
+):
+    r"""串行和并行 pre-made rejection 都不得留下候选期 OBJ 或空目录。
+
+    canonical LEAP builder 会生成 procedural `cs` fingertip；因此这个测试真实经过
+    ``materialize -> physics closure -> validator rejection``，而不是用人工空文件
+    模拟。左右手并行时两个 worker 应各拒绝一次，主进程按同一稳定原因代码汇总。
+    """
+
+    cfg = HandGeneratorCfg(
+        mode="made",
+        artifact_level="bundle",
+        output_dir=tmp_path,
+        handedness=handedness,
+        hand_presets=["single_palm_leap"],
+        connectivity_presets=_single_family_low_dof_pool("single_palm_leap", "leap"),
+        mixed=False,
+        missing=False,
+        Validate=HandValidatorCfg(
+            pre_made=HandValidatorCfg.PreMadeCfg(
+                check_finger_spacing=False,
+                require_non_thumb_with_min_revolute_dof=3,
+            )
+        ),
+        premade_parallel=premade_parallel,
+        premade_parallel_workers=2 if premade_parallel else None,
+    )
+
+    results = list(HandGenerator(cfg).generate_batch())
+    run_root = next(path for path in tmp_path.iterdir() if path.is_dir())
+    summary = yaml.safe_load((run_root / "summary.yaml").read_text(encoding="utf-8"))
+
+    assert results == []
+    assert summary["stats"]["attempted"] == expected_rejections
+    assert summary["stats"]["rejected"] == expected_rejections
+    assert summary["stats"]["rejected_by_reason"] == {
+        "hand.non_thumb_revolute_dof_below_min": expected_rejections
+    }
+    assert list(run_root.rglob("*.obj")) == []
+    assert [path for path in run_root.rglob("*") if path.is_dir()] == []
+
+
+@pytest.mark.parametrize("failure_stage", ("physics", "validator", "export"))
+def test_premade_exception_rolls_back_new_materialized_meshes(monkeypatch, tmp_path, failure_stage: str):
+    r"""physics、validator 或 export 异常都必须回滚本候选新物化的 OBJ。
+
+    三个异常点覆盖 materialization 后的完整生命周期。异常本身继续向调用者传播，
+    这里只锁住文件事务：失败候选不能伪装成 generated asset，也不能留下空 topology
+    层级。
+    """
+
+    def _raise_synthetic_failure(*_args, **_kwargs):
+        raise RuntimeError(f"synthetic {failure_stage} failure")
+
+    def _write_partial_urdf_then_raise(_self, _result, output_dir, *_args, **_kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "hand.urdf").write_text("<robot name='partial'/>\n", encoding="utf-8")
+        raise RuntimeError("synthetic export failure")
+
+    if failure_stage == "physics":
+        monkeypatch.setattr(hand_generator_module, "close_hand_physics", _raise_synthetic_failure)
+    elif failure_stage == "validator":
+        monkeypatch.setattr(hand_generator_module.HandValidator, "validate_pre_made", _raise_synthetic_failure)
+    else:
+        monkeypatch.setattr(hand_generator_module.HandExporter, "export", _write_partial_urdf_then_raise)
+
+    cfg = HandGeneratorCfg(
+        mode="made",
+        artifact_level="bundle",
+        output_dir=tmp_path,
+        handedness="right",
+        hand_presets=["single_palm_leap"],
+        connectivity_presets=_single_family_full_pool("single_palm_leap", "leap"),
+        mixed=False,
+        missing=False,
+        Validate=HandValidatorCfg(
+            pre_made=HandValidatorCfg.PreMadeCfg(check_finger_spacing=False)
+        ),
+        premade_parallel=False,
+    )
+
+    with pytest.raises(RuntimeError, match=f"synthetic {failure_stage} failure"):
+        list(HandGenerator(cfg).generate_batch())
+
+    run_root = next(path for path in tmp_path.iterdir() if path.is_dir())
+    assert list(run_root.rglob("*.obj")) == []
+    assert [path for path in run_root.rglob("*") if path.is_dir()] == []
 
 
 def test_premade_parallel_failure_falls_back_to_serial(monkeypatch, tmp_path):

@@ -112,7 +112,7 @@ HANDEDNESS: Literal["left", "right", "all"] = "all"
 """默认同时枚举左右手，避免只在单侧上做 topology 统计。"""
 
 MIXED = True
-"""是否允许 mixed family topology。`True` 表示 thumb / non-thumb 可跨 family 组合。"""
+"""是否允许 mixed family topology。`True` 只混合 non-thumb；thumb 始终绑定 base palm family。"""
 
 MISSING = True
 """是否允许缺指 topology。`True` 表示 pre-made 离散空间包含 missing finger 变体。"""
@@ -165,7 +165,7 @@ PRE_MADE_CFG = HandGeneratorCfg(
     handedness=HANDEDNESS,  # 左右手枚举策略
     hand_presets=list(HAND_PRESETS),  # canonical base hand 候选集合
     connectivity_presets=CONNECTIVITY_PRESETS,  # 每个 base hand 允许搭配的 connectivity recipe
-    mixed=MIXED,  # 是否允许 mixed family topology
+    mixed=MIXED,  # 只允许 non-thumb 跨 family；thumb 绑定 base palm family
     missing=MISSING,  # 是否允许缺指 topology
     Validate=PRE_MADE_VALIDATOR_CFG,  # pre-made hand-level validator
     recolored=PRE_MADE_RECOLORED,  # 导出前的可视 recolor 方案

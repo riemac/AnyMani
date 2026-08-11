@@ -32,9 +32,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..asset_base import AssetCfgBase, FingerCfg
-from ._base import ValidatorBase, ValidationResult
-from .joint_rules import JointValidatorCfg, JointValidator
-
+from ._base import ValidationResult, ValidatorBase
+from .joint_rules import JointValidator, JointValidatorCfg
 
 # ============================================================================
 #  配置类
@@ -45,7 +44,7 @@ from .joint_rules import JointValidatorCfg, JointValidator
 class FingerValidatorCfg(AssetCfgBase):
     r"""手指级验证规则配置。"""
 
-    class_type: type["FingerValidator"] | None = None
+    class_type: type[FingerValidator] | None = None
     """关联的运行时类。"""
 
     min_revolute_dof: int = 1
@@ -103,8 +102,9 @@ class FingerValidator(ValidatorBase):
 
         revolute_count = sum(1 for joint in target.joints if joint.joint_type == "revolute")
         if revolute_count < self.cfg.min_revolute_dof:
-            result.errors.append(
-                f"finger '{target.name}': revolute dof {revolute_count} < min {self.cfg.min_revolute_dof}"
+            result.add_error(
+                f"finger '{target.name}': revolute dof {revolute_count} < min {self.cfg.min_revolute_dof}",
+                code="finger.revolute_dof_below_min",
             )
 
         if self.cfg.max_joint_depth is not None and len(target.joints) > self.cfg.max_joint_depth:

@@ -12,9 +12,9 @@
 
 from __future__ import annotations
 
+import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -35,13 +35,18 @@ class PremadeTask:
 
 @dataclass
 class PremadeWorkerResult:
-    r"""worker 返回给主进程的最小结果包。"""
+    r"""worker 返回给主进程的最小结果包。
+
+    worker 不能直接写 run-level summary，但必须把 rejection stage 与稳定规则代码
+    一并带回主进程，保证并行和串行生成具有相同的审计语义。
+    """
 
     result: HandGenerationResult | None
     rejection_stage: str | None = None
+    rejection_error_codes: tuple[str, ...] = ()
 
 
-def build_premade_tasks(generator: "HandGenerator") -> list[PremadeTask]:
+def build_premade_tasks(generator: HandGenerator) -> list[PremadeTask]:
     r"""从当前 `HandGenerator` 展开 pre-made 任务表。"""
 
     tasks: list[PremadeTask] = []
@@ -58,7 +63,7 @@ def build_premade_tasks(generator: "HandGenerator") -> list[PremadeTask]:
     return tasks
 
 
-def run_premade_serial(generator: "HandGenerator", *, tasks: list[PremadeTask]) -> list[HandGenerationResult]:
+def run_premade_serial(generator: HandGenerator, *, tasks: list[PremadeTask]) -> list[HandGenerationResult]:
     r"""沿用顺序路径执行 pre-made 任务表。"""
 
     results: list[HandGenerationResult] = []
@@ -76,7 +81,7 @@ def run_premade_serial(generator: "HandGenerator", *, tasks: list[PremadeTask]) 
     return results
 
 
-def run_premade_parallel(generator: "HandGenerator", *, tasks: list[PremadeTask]) -> list[HandGenerationResult]:
+def run_premade_parallel(generator: HandGenerator, *, tasks: list[PremadeTask]) -> list[HandGenerationResult]:
     r"""用进程池执行 pre-made 样本级并行。"""
 
     if not tasks:
@@ -122,7 +127,7 @@ def run_premade_parallel(generator: "HandGenerator", *, tasks: list[PremadeTask]
     return ordered_results
 
 
-def infer_premade_parallel_worker_count(cfg: "HandGeneratorCfg", *, task_count: int) -> int:
+def infer_premade_parallel_worker_count(cfg: HandGeneratorCfg, *, task_count: int) -> int:
     r"""计算 pre-made 样本级并行 worker 数。"""
 
     if task_count <= 0:
@@ -135,7 +140,7 @@ def infer_premade_parallel_worker_count(cfg: "HandGeneratorCfg", *, task_count: 
 
 
 def record_premade_worker_result(
-    generator: "HandGenerator",
+    generator: HandGenerator,
     worker_result: PremadeWorkerResult,
 ) -> HandGenerationResult | None:
     r"""把 worker 返回值并入主进程 summary。"""
@@ -145,13 +150,14 @@ def record_premade_worker_result(
         return worker_result.result
     generator._record_generation_rejection(
         stage=worker_result.rejection_stage or "premade_worker_rejected",
+        error_codes=worker_result.rejection_error_codes,
         write_summary=False,
     )
     return None
 
 
 def _generate_premade_worker(
-    cfg: "HandGeneratorCfg",
+    cfg: HandGeneratorCfg,
     run_root: Path | str,
     task: PremadeTask,
 ) -> PremadeWorkerResult:
@@ -167,7 +173,11 @@ def _generate_premade_worker(
         enumerated=task.enumerated,
         record_summary=False,
     )
-    return PremadeWorkerResult(result=result, rejection_stage=worker_context.last_rejection_stage)
+    return PremadeWorkerResult(
+        result=result,
+        rejection_stage=worker_context.last_rejection_stage,
+        rejection_error_codes=worker_context.last_rejection_error_codes,
+    )
 
 
 __all__ = [

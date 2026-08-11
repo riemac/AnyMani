@@ -42,6 +42,8 @@
 尤其注意：**动力学闭包不要再塞回 builder、mutator 或 exporter**。  
 它现在有专门的落点：`assets/asset_physics.py`。
 
+pre-made `mixed` topology 的装配边界固定为：thumb 与 base palm 共享 family，只有 non-thumb slot 可以跨 LEAP / Allegro family。程序化 mesh 虽然必须在 physics closure 与 validator 前物化，但此时仍属于候选期文件；拒绝或异常候选只能回滚本次新写文件，不能在 generated 资产树中留下 OBJ-only 半成品。
+
 ### 3. 几何语义交付
 
 `asset_schema_geometry.py` 定义版本化 `{a}->{h}`、完整 fixed/revolute 链、显式 $q_{home}$、limits、PALM/JOINT/TIP owner、collision component 与 anchor seed。exporter 在 `HandCfg` 真源仍在内存时写入 `hand.yaml.geometry_semantics`；bank 只在 `require_geometry_semantics=True` 时解析，新 generated sidecar 直接读取，旧 generated sidecar 确定性迁移，official 缺人工核验字段时严格拒绝。

@@ -37,11 +37,13 @@ class GenerationRunContext:
         root_dir: 当前 run 的根目录。
         summary: 当前 run 的 summary 文档内存态。
         last_rejection_stage: 最近一次被拒绝的阶段名；成功样本后会清空。
+        last_rejection_error_codes: 最近一次拒绝命中的稳定规则代码集合。
     """
 
     root_dir: Path
     summary: dict[str, Any]
     last_rejection_stage: str | None = None
+    last_rejection_error_codes: tuple[str, ...] = ()
 
     @classmethod
     def create(
@@ -49,7 +51,7 @@ class GenerationRunContext:
         cfg: Any,
         *,
         config_dump: dict[str, Any],
-    ) -> "GenerationRunContext":
+    ) -> GenerationRunContext:
         r"""按当前 `HandGeneratorCfg` 分配 run 根目录并初始化 summary。
 
         Args:
@@ -82,6 +84,7 @@ class GenerationRunContext:
                 "succeeded": 0,
                 "rejected": 0,
                 "rejected_by_stage": {},
+                "rejected_by_reason": {},
                 "by_topology": {},
             },
         }
@@ -100,16 +103,32 @@ class GenerationRunContext:
             encoding="utf-8",
         )
 
-    def record_rejection(self, *, stage: str, write_summary: bool = True) -> None:
-        r"""记录一次被拒绝的样本尝试。"""
+    def record_rejection(
+        self,
+        *,
+        stage: str,
+        error_codes: tuple[str, ...] = (),
+        write_summary: bool = True,
+    ) -> None:
+        r"""记录一次被拒绝的样本尝试及其稳定原因组合。
+
+        ``rejected_by_reason`` 统计的是 canonical 原因集合，而不是单个规则命中次数。
+        因此一个样本同时违反两条规则时只计入一个 ``code_a+code_b`` 键，所有键的
+        count 之和始终等于 ``stats.rejected``。
+        """
 
         self.last_rejection_stage = stage
+        self.last_rejection_error_codes = canonical_rejection_error_codes(error_codes)
         stats = self.summary["stats"]
         stats["attempted"] += 1
         stats["rejected"] += 1
         rejected_by_stage = dict(stats.get("rejected_by_stage") or {})
         rejected_by_stage[stage] = int(rejected_by_stage.get(stage, 0)) + 1
         stats["rejected_by_stage"] = rejected_by_stage
+        reason_key = rejection_reason_key(self.last_rejection_error_codes)
+        rejected_by_reason = dict(stats.get("rejected_by_reason") or {})
+        rejected_by_reason[reason_key] = int(rejected_by_reason.get(reason_key, 0)) + 1
+        stats["rejected_by_reason"] = rejected_by_reason
         if write_summary:
             self.write_summary()
 
@@ -117,6 +136,7 @@ class GenerationRunContext:
         r"""记录一次成功样本。"""
 
         self.last_rejection_stage = None
+        self.last_rejection_error_codes = ()
         stats = self.summary["stats"]
         stats["attempted"] += 1
         stats["succeeded"] += 1
@@ -142,6 +162,20 @@ def result_topology_key(result: HandGenerationResult) -> str:
     if topology_kind == "mixed":
         return f"mixed/{topology_group_name}/{topology_name}"
     return f"{topology_group_name}/{topology_name}"
+
+
+def canonical_rejection_error_codes(error_codes: tuple[str, ...]) -> tuple[str, ...]:
+    r"""把一次拒绝的规则代码规范成排序、去重后的稳定集合。"""
+
+    normalized = {str(code).strip() for code in error_codes if str(code).strip()}
+    return tuple(sorted(normalized))
+
+
+def rejection_reason_key(error_codes: tuple[str, ...]) -> str:
+    r"""把稳定规则代码集合编码成 summary 中可读、可加和的原因键。"""
+
+    canonical_codes = canonical_rejection_error_codes(error_codes)
+    return "+".join(canonical_codes) if canonical_codes else "unclassified"
 
 
 def _allocate_run_root(cfg: Any, *, timestamp: str) -> Path:
@@ -171,4 +205,9 @@ def _allocate_run_root(cfg: Any, *, timestamp: str) -> Path:
     return run_root
 
 
-__all__ = ["GenerationRunContext", "result_topology_key"]
+__all__ = [
+    "GenerationRunContext",
+    "canonical_rejection_error_codes",
+    "rejection_reason_key",
+    "result_topology_key",
+]

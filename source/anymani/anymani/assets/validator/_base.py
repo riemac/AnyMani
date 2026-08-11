@@ -52,6 +52,13 @@ class ValidationResult:
     errors: list[str] = field(default_factory=list)
     """必须拒绝的严重违规消息列表。"""
 
+    error_codes: list[str] = field(default_factory=list)
+    """与 ``errors`` 对齐的稳定规则代码。
+
+    人类可读消息可以携带 hand 名、阈值和几何测量值，因此不适合作为跨样本统计键；
+    ``error_codes`` 只表达命中的规则，例如 ``hand.palm_thumb_family_mismatch``。
+    """
+
     warnings: list[str] = field(default_factory=list)
     """潜在问题消息列表；默认放行，``strict`` 模式下升级为错误。"""
 
@@ -70,7 +77,19 @@ class ValidationResult:
     因而这里加一个轻量 `metadata` 字段，而不把几何证书硬编码进基础协议。
     """
 
-    def merge(self, other: "ValidationResult") -> "ValidationResult":
+    def add_error(self, message: str, *, code: str) -> None:
+        r"""追加一条人类错误消息及其稳定规则代码。
+
+        Args:
+            message (str): 携带样本名、阈值或测量证据的可读错误消息。
+            code (str): 不随样本变化的规则标识，用于 run-level rejection 统计。
+        """
+
+        self.errors.append(str(message))  # errors 保持既有面向研究者的可读接口
+        self.error_codes.append(str(code))  # code 与同位置的 error 一一对应，供 summary 聚合
+        self.passed = False
+
+    def merge(self, other: ValidationResult) -> ValidationResult:
         r"""把另一个验证结果并入自身（就地合并）。
 
         Args:
@@ -81,12 +100,13 @@ class ValidationResult:
         """
 
         self.errors.extend(other.errors)
+        self.error_codes.extend(other.error_codes)
         self.warnings.extend(other.warnings)
         self.metadata.update(other.metadata)
         self.passed = len(self.errors) == 0
         return self
 
-    def as_strict(self) -> "ValidationResult":
+    def as_strict(self) -> ValidationResult:
         r"""返回一个把 warnings 升级为 errors 的新结果（不修改自身）。
 
         Returns:
@@ -96,6 +116,7 @@ class ValidationResult:
         return ValidationResult(
             passed=len(self.errors) + len(self.warnings) == 0,
             errors=self.errors + self.warnings,
+            error_codes=self.error_codes + ["strict.warning_promoted"] * len(self.warnings),
             warnings=[],
             metadata=dict(self.metadata),
         )

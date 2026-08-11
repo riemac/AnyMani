@@ -31,8 +31,7 @@ import math
 from dataclasses import dataclass
 
 from ..asset_base import AssetCfgBase, JointCfg
-from ._base import ValidatorBase, ValidationResult
-
+from ._base import ValidationResult, ValidatorBase
 
 # ============================================================================
 #  配置类
@@ -43,7 +42,7 @@ from ._base import ValidatorBase, ValidationResult
 class JointValidatorCfg(AssetCfgBase):
     r"""关节级验证规则配置。"""
 
-    class_type: type["JointValidator"] | None = None
+    class_type: type[JointValidator] | None = None
     """关联的运行时类。"""
 
     check_limit_range: bool = True
@@ -96,7 +95,10 @@ class JointValidator(ValidatorBase):
 
         if target.joint_type == "revolute" and self.cfg.check_limit_range:
             if target.limit is None:
-                result.errors.append(f"joint '{target.name}': revolute joint is missing limits")
+                result.add_error(
+                    f"joint '{target.name}': revolute joint is missing limits",
+                    code="joint.revolute_missing_limits",
+                )
             else:
                 joint_range = target.limit.upper - target.limit.lower
                 if joint_range > self.cfg.limit_max_range:

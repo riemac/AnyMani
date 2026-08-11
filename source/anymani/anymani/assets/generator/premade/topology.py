@@ -11,7 +11,6 @@ from ...asset_builders import HandBuilder
 from ...presets.hand_presets import get_hand_builder_preset_data, make_human_like_builder_cfg_from_preset
 from ...presets.resolver import resolve_finger_builder_cfg
 
-
 _PREMADE_SLOT_ORDER: tuple[str, ...] = ("thumb", "index", "middle", "ring", "little")
 _PREMADE_NON_THUMB_SLOT_ORDER: tuple[str, ...] = tuple(slot for slot in _PREMADE_SLOT_ORDER if slot != "thumb")
 _PREMADE_FINGER_PRESET_BY_FAMILY_AND_KIND: dict[tuple[str, Literal["thumb", "non_thumb"]], str] = {
@@ -80,8 +79,10 @@ def requested_handednesses(cfg: Any) -> tuple[Literal["left", "right"], ...]:
     requested = str(getattr(cfg, "handedness", "all"))
     if requested == "all":
         return ("left", "right")
-    if requested in {"left", "right"}:
-        return (requested,)
+    if requested == "left":
+        return ("left",)
+    if requested == "right":
+        return ("right",)
     raise ValueError(f"Unsupported handedness request {requested!r}; expected 'left' / 'right' / 'all'.")
 
 
@@ -221,18 +222,33 @@ def _format_mixed_topology_name(
 
 
 def _build_mixed_topology_specs(base_topology: PremadeTopologySpec) -> tuple[PremadeTopologySpec, ...]:
-    r"""从 canonical topology 派生 mixed-family finger 组合。"""
+    r"""从 canonical topology 派生仅混合 non-thumb family 的组合。
+
+    `mixed` 的机械语义不是把所有 finger slot 任意换族。thumb mount 由 palm
+    family 的 canonical preset 定义，因此 thumb 与 palm 必须共享 family；只有
+    index / middle / ring / little 这类 non-thumb slot 参与 LEAP / Allegro
+    笛卡尔展开。这样 topology registry 本身只表达可装配结构，而不是先生成一个
+    已知错误的 palm-thumb 组合，再依赖 validator 事后拒绝。
+    """
 
     slot_order = base_topology.surviving_slots
-    if not slot_order:
+    mixed_slot_order = tuple(slot_name for slot_name in slot_order if slot_name != "thumb")
+    if not mixed_slot_order:
         return ()
 
     specs: list[PremadeTopologySpec] = []
-    for family_assignment in product(("allegro", "leap"), repeat=len(slot_order)):
-        slot_family_map = dict(zip(slot_order, family_assignment))
-        if all(current_family == base_topology.family for current_family in slot_family_map.values()):
+    for family_assignment in product(("allegro", "leap"), repeat=len(mixed_slot_order)):
+        # thumb family 是 palm mount 的结构边界；non-thumb family assignment 才是 mixed 自由度。
+        slot_family_map: dict[str, str] = dict(zip(mixed_slot_order, family_assignment))
+        if "thumb" in slot_order:
+            slot_family_map["thumb"] = base_topology.family
+
+        # 全部 non-thumb 都仍属于 base family 时就是 canonical single-family topology，不能重复注册。
+        if all(current_family == base_topology.family for current_family in family_assignment):
             continue
 
+        # 恢复 canonical slot 顺序，使 registry key、metadata 与导出目录保持确定性。
+        slot_family_map = {slot_name: slot_family_map[slot_name] for slot_name in slot_order}
         finger_preset_names = {
             slot_name: _PREMADE_FINGER_PRESET_BY_FAMILY_AND_KIND[(slot_family_map[slot_name], slot_finger_kind(slot_name))]
             for slot_name in slot_order

@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
+from assets.builder.hand_builders import HumanLikeHandBuilder
 from assets.builder.joint_builders_primitive import PrimJointBuilderCfg
 from assets.generator.premade.connectivity_lowering import JointDeleteCfg, JointDeleteMutator
 from assets.presets import get_finger_builder_preset, make_human_like_builder_cfg
@@ -173,6 +173,7 @@ def test_hand_validator_rejects_when_all_non_thumb_fingers_drop_below_three_revo
 
     assert result.passed is False
     assert any("at least one non-thumb finger" in error for error in result.errors)
+    assert "hand.non_thumb_revolute_dof_below_min" in result.error_codes
 
 
 def test_hand_validator_pre_made_rejects_palm_thumb_family_mismatch():
@@ -207,3 +208,4 @@ def test_hand_validator_pre_made_rejects_palm_thumb_family_mismatch():
 
     assert result.passed is False
     assert any("thumb family" in error for error in result.errors)
+    assert result.error_codes == ["hand.palm_thumb_family_mismatch"]

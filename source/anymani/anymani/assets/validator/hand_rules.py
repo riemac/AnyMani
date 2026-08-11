@@ -72,11 +72,10 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from ..asset_base import AssetCfgBase, HandCfg
-from ._base import ValidatorBase, ValidationResult
-from .finger_rules import FingerValidatorCfg, FingerValidator
+from ._base import ValidationResult, ValidatorBase
 from ._finger_length import FingerLengthConfig, evaluate_finger_axial_length
 from ._sdf_clearance import SdfClearanceConfig, evaluate_finger_sdf_clearance
-
+from .finger_rules import FingerValidator, FingerValidatorCfg
 
 # ============================================================================
 #  配置类
@@ -216,7 +215,7 @@ class HandValidatorCfg(AssetCfgBase):
     PreMadeCfg = HandValidatorPreMadeCfg
     PostMutateCfg = HandValidatorPostMutateCfg
 
-    class_type: type["HandValidator"] | None = None
+    class_type: type[HandValidator] | None = None
     """关联的运行时类。"""
 
     pre_made: HandValidatorPreMadeCfg = field(default_factory=HandValidatorPreMadeCfg)
@@ -303,41 +302,59 @@ class HandValidator(ValidatorBase):
         if stage_cfg.check_global_uniqueness:
             finger_names = [finger.name for finger in target.fingers]
             if len(finger_names) != len(set(finger_names)):
-                result.errors.append(f"hand '{target.name}'[{stage}]: duplicate finger names")
+                result.add_error(
+                    f"hand '{target.name}'[{stage}]: duplicate finger names",
+                    code="hand.duplicate_finger_names",
+                )
 
             joint_names = [joint.name for joint in target.iter_joints()]
             if len(joint_names) != len(set(joint_names)):
-                result.errors.append(f"hand '{target.name}'[{stage}]: duplicate joint names")
+                result.add_error(
+                    f"hand '{target.name}'[{stage}]: duplicate joint names",
+                    code="hand.duplicate_joint_names",
+                )
 
             link_names = [target.palm.name] + [joint.child for joint in target.iter_joints()]
             if len(link_names) != len(set(link_names)):
-                result.errors.append(f"hand '{target.name}'[{stage}]: duplicate link names")
+                result.add_error(
+                    f"hand '{target.name}'[{stage}]: duplicate link names",
+                    code="hand.duplicate_link_names",
+                )
 
         dof = target.dof_count
         if stage_cfg.dof_min is not None and dof < stage_cfg.dof_min:
-            result.errors.append(f"hand '{target.name}'[{stage}]: dof {dof} < min {stage_cfg.dof_min}")
+            result.add_error(
+                f"hand '{target.name}'[{stage}]: dof {dof} < min {stage_cfg.dof_min}",
+                code="hand.dof_below_min",
+            )
         if stage_cfg.dof_max is not None and dof > stage_cfg.dof_max:
             result.warnings.append(f"hand '{target.name}'[{stage}]: dof {dof} > max {stage_cfg.dof_max}")
 
         finger_count = len(target.fingers)
         if stage_cfg.finger_count_min is not None and finger_count < stage_cfg.finger_count_min:
-            result.errors.append(
-                f"hand '{target.name}'[{stage}]: finger count {finger_count} < min {stage_cfg.finger_count_min}"
+            result.add_error(
+                f"hand '{target.name}'[{stage}]: finger count {finger_count} < min {stage_cfg.finger_count_min}",
+                code="hand.finger_count_below_min",
             )
         if stage_cfg.finger_count_max is not None and finger_count > stage_cfg.finger_count_max:
-            result.errors.append(
-                f"hand '{target.name}'[{stage}]: finger count {finger_count} > max {stage_cfg.finger_count_max}"
+            result.add_error(
+                f"hand '{target.name}'[{stage}]: finger count {finger_count} > max {stage_cfg.finger_count_max}",
+                code="hand.finger_count_above_max",
             )
 
         thumb_finger = next((finger for finger in target.fingers if finger.name == "thumb"), None)
         if stage_cfg.require_thumb and thumb_finger is None:
-            result.errors.append(f"hand '{target.name}'[{stage}]: missing required thumb finger")
+            result.add_error(
+                f"hand '{target.name}'[{stage}]: missing required thumb finger",
+                code="hand.missing_required_thumb",
+            )
 
         if thumb_finger is not None and stage_cfg.thumb_min_revolute_dof is not None:
             thumb_dof = _revolute_dof_count(thumb_finger)
             if thumb_dof < stage_cfg.thumb_min_revolute_dof:
-                result.errors.append(
-                    f"hand '{target.name}'[{stage}]: thumb revolute dof {thumb_dof} < min {stage_cfg.thumb_min_revolute_dof}"
+                result.add_error(
+                    f"hand '{target.name}'[{stage}]: thumb revolute dof {thumb_dof} < min {stage_cfg.thumb_min_revolute_dof}",
+                    code="hand.thumb_revolute_dof_below_min",
                 )
 
         if stage_cfg.require_non_thumb_with_min_revolute_dof is not None:
@@ -348,16 +365,18 @@ class HandValidator(ValidatorBase):
                 if finger.name != "thumb"
             ]
             if not any(dof >= threshold for _, dof in non_thumb_dofs):
-                result.errors.append(
+                result.add_error(
                     f"hand '{target.name}'[{stage}]: expected at least one non-thumb finger with revolute dof >= {threshold}, "
-                    f"got {non_thumb_dofs!r}"
+                    f"got {non_thumb_dofs!r}",
+                    code="hand.non_thumb_revolute_dof_below_min",
                 )
 
         if stage_cfg.check_mount_consistency:
             for finger in target.fingers:
                 if finger.parent_link != target.palm.name:
-                    result.errors.append(
-                        f"finger '{finger.name}'[{stage}] parent_link '{finger.parent_link}' != palm '{target.palm.name}'"
+                    result.add_error(
+                        f"finger '{finger.name}'[{stage}] parent_link '{finger.parent_link}' != palm '{target.palm.name}'",
+                        code="hand.finger_mount_parent_mismatch",
                     )
 
         if stage_cfg.check_finger_spacing:
@@ -435,7 +454,10 @@ class HandValidator(ValidatorBase):
                 ),
             )
         except (RuntimeError, ValueError) as exc:
-            result.errors.append(f"finger spacing sdf[post_mutate]: {exc}")
+            result.add_error(
+                f"finger spacing sdf[post_mutate]: {exc}",
+                code="hand.finger_spacing_sdf_evaluation_failed",
+            )
             result.metadata["finger_spacing_certificate"] = {
                 "pose_scope": "post_mutate_home_pose",
                 "geometry_scope": "collision_geometry_only",
@@ -462,17 +484,19 @@ class HandValidator(ValidatorBase):
         certificate = clearance.certificate.to_dict()
         result.metadata["finger_spacing_certificate"] = certificate
         if not clearance.certificate.complete:
-            result.errors.append(
+            result.add_error(
                 "finger spacing sdf[post_mutate]: incomplete certificate; "
-                f"skipped_bodies={certificate.get('skipped_bodies', [])!r}"
+                f"skipped_bodies={certificate.get('skipped_bodies', [])!r}",
+                code="hand.finger_spacing_sdf_certificate_incomplete",
             )
 
         for pair in clearance.violations:
-            result.errors.append(
+            result.add_error(
                 f"finger spacing '{pair.finger_i}'-'{pair.finger_j}'[post_mutate, sdf_clearance]: "
                 f"{pair.clearance * 100.0:.2f} cm < min {stage_cfg.min_finger_spacing * 100.0:.2f} cm "
                 f"(i_to_j={pair.direction_i_to_j * 100.0:.2f} cm, "
-                f"j_to_i={pair.direction_j_to_i * 100.0:.2f} cm)"
+                f"j_to_i={pair.direction_j_to_i * 100.0:.2f} cm)",
+                code="hand.finger_spacing_sdf_below_min",
             )
 
     def _validate_post_mutate_finger_length(
@@ -501,7 +525,10 @@ class HandValidator(ValidatorBase):
                 ),
             )
         except (RuntimeError, ValueError) as exc:
-            result.errors.append(f"finger length[post_mutate]: {exc}")
+            result.add_error(
+                f"finger length[post_mutate]: {exc}",
+                code="hand.finger_length_evaluation_failed",
+            )
             result.metadata["finger_length_certificate"] = {
                 "pose_scope": "post_mutate_home_pose",
                 "geometry_scope": "collision_geometry_only",
@@ -525,17 +552,19 @@ class HandValidator(ValidatorBase):
         certificate = finger_length.certificate.to_dict()
         result.metadata["finger_length_certificate"] = certificate
         if not finger_length.certificate.complete:
-            result.errors.append(
+            result.add_error(
                 "finger length[post_mutate]: incomplete certificate; "
-                f"skipped_bodies={certificate.get('skipped_bodies', [])!r}"
+                f"skipped_bodies={certificate.get('skipped_bodies', [])!r}",
+                code="hand.finger_length_certificate_incomplete",
             )
 
         for measurement in finger_length.violations:
             threshold = measurement.threshold if measurement.threshold is not None else float("nan")
-            result.errors.append(
+            result.add_error(
                 f"finger '{measurement.finger_name}'[post_mutate, axial_length]: "
                 f"{measurement.axial_length * 100.0:.2f} cm > max {threshold * 100.0:.2f} cm "
-                f"(role={measurement.role}, axis_source={measurement.axis_source})"
+                f"(role={measurement.role}, axis_source={measurement.axis_source})",
+                code="hand.finger_axial_length_above_max",
             )
 
     def _validate_palm_thumb_binding(self, target: HandCfg, *, result: ValidationResult) -> None:
@@ -562,9 +591,10 @@ class HandValidator(ValidatorBase):
 
         palm_family = target.family
         if str(thumb_family) != str(palm_family):
-            result.errors.append(
+            result.add_error(
                 f"hand '{target.name}'[pre_made]: palm family {palm_family!r} requires thumb family to match, "
-                f"got thumb family {thumb_family!r}"
+                f"got thumb family {thumb_family!r}",
+                code="hand.palm_thumb_family_mismatch",
             )
 
 

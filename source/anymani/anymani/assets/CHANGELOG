@@ -4,6 +4,9 @@
 - 新增版本化 `geometry_semantics` sidecar schema，显式保存 `{a}->{h}`、完整 fixed/revolute chain、$q_{home}$、joint limits、PALM/JOINT/TIP owners、collision components、anchor seeds 与 SHA-256 内容哈希；generated legacy sidecar 可确定性迁移，official 缺人工核验语义时 fail closed。
 - exporter 在 `HandCfg` 真源仍在内存时写入静态几何语义；`HandBankCfg.require_geometry_semantics` 保持 tasks 默认轻量，并向 robots/distill 按需交付类型化语义。
 - `HandBank` 新增自包含 `pre_made` topology discovery 与显式跨 family `mixed` manifest，保留 `all` / 固定 seed 无放回 `sample` 的稳定选择合同。
+- 收紧 pre-made `mixed` contract：thumb 固定绑定 base palm family，仅 non-thumb 参与 LEAP / Allegro family 笛卡尔展开，默认离散任务空间由 5788 降为 3044。
+- validator 前物化的 procedural mesh 进入候选期事务；validation rejection 或 physics/export 异常只回滚本次新写文件，不再遗留 OBJ-only 资产目录。
+- `ValidationResult.error_codes`、并行 worker rejection 回传与 `summary.stats.rejected_by_reason` 提供稳定可加和的拒绝诊断；新增 generated run dry-run/apply 修补工具，用于审计并清理历史半成品。
 
 0.3.1 - 2026-06-16
 ==================

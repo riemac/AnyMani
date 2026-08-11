@@ -10,7 +10,10 @@
 
 from __future__ import annotations
 
+from assets.config.asset_gen_cfg import PRE_MADE_CFG
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
+from assets.generator.premade.batch import build_premade_tasks
+from assets.generator.premade.topology import build_premade_topology_registry
 from assets.validator.hand_rules import HandValidatorCfg
 
 
@@ -98,3 +101,27 @@ def test_generate_batch_builds_mixed_family_topologies_and_exports_under_mixed_r
     assert any(result.metadata["slot_family_map"]["index"] == "leap" for result in mixed_results)
     assert all(result.metadata["topology_anchor"] == "mixed" for result in mixed_results)
     assert len(list(tmp_path.glob("*/summary.yaml"))) == 1
+
+
+def test_default_mixed_registry_binds_thumb_to_palm_and_builds_3044_tasks():
+    r"""默认 mixed 空间只混合 non-thumb，任务总数应固定为 3044。
+
+    这里直接测试 registry 与 task table，而不是依赖 validator 过滤后的成功数：
+
+    - 每个 mixed spec 的 thumb family 必须等于 base palm family；
+    - 两个 palm、左右手、每手 $2^3-1=7$ 个 non-thumb mixed assignment，
+      因而共有 $2\times2\times7=28$ 个 handed mixed spec；
+    - 默认 connectivity 笛卡尔积在该 topology contract 下共有 3044 个候选任务。
+    """
+
+    registry = build_premade_topology_registry(PRE_MADE_CFG)
+    mixed_specs = [spec for spec in registry.values() if spec.topology_kind == "mixed"]
+    tasks = build_premade_tasks(HandGenerator(PRE_MADE_CFG))
+
+    assert len(mixed_specs) == 28
+    assert len(tasks) == 3044
+    assert all(spec.slot_family_map()["thumb"] == spec.family for spec in mixed_specs)
+    assert all(
+        any(family != spec.family for slot, family in spec.slot_family_map().items() if slot != "thumb")
+        for spec in mixed_specs
+    )

@@ -78,6 +78,7 @@ from .quota.accepted_mode import (
     mode_term_specs as _mode_term_specs,
 )
 from .result import HandGenerationResult
+from .runtime.artifact_lifecycle import rollback_created_directory, rollback_written_artifacts
 from .runtime.mutate_quota import run_mutate_batch_with_accepted_mode_quota
 from .runtime.restore import PostMutateSource, load_post_mutate_source
 from .runtime.run_context import GenerationRunContext
@@ -306,7 +307,12 @@ class HandGeneratorCfg(AssetCfgBase):
     """
 
     mixed: bool = True
-    """是否混合不同 family 的手指拓扑。如果为 True，则在 pre-made 阶段允许在同一只手上组合 leap/allegro 的手指变体；如果为 False，则默认每只手只能选一个 family 的 preset 进行派生。"""
+    """是否混合不同 family 的 non-thumb 手指拓扑。
+
+    为 ``True`` 时，index / middle / ring / little 可以跨 LEAP / Allegro family
+    组合；thumb 始终绑定 base palm family，因为 thumb mount 位姿属于 palm 的
+    canonical 装配语义。为 ``False`` 时，所有 surviving finger 都沿用 base family。
+    """
 
     missing: bool = True
     """是否把“缺失一根 non-thumb”的 topology 纳入 pre-made。
@@ -436,10 +442,20 @@ class HandGenerator:
             return
         self._run_context.write_summary()
 
-    def _record_generation_rejection(self, *, stage: str, write_summary: bool = True) -> None:
-        r"""把一次被拒绝的样本尝试写入 run summary。"""
+    def _record_generation_rejection(
+        self,
+        *,
+        stage: str,
+        error_codes: tuple[str, ...] = (),
+        write_summary: bool = True,
+    ) -> None:
+        r"""把一次被拒绝的样本尝试及规则代码写入 run summary。"""
 
-        self._ensure_run_context().record_rejection(stage=stage, write_summary=write_summary)
+        self._ensure_run_context().record_rejection(
+            stage=stage,
+            error_codes=error_codes,
+            write_summary=write_summary,
+        )
 
     def _record_generation_success(self, result: HandGenerationResult, *, write_summary: bool = True) -> None:
         r"""把一次成功样本写入 run summary。"""
@@ -452,7 +468,7 @@ class HandGenerator:
         *,
         stage: str,
         path_metadata: dict[str, Any] | None = None,
-    ) -> HandCfg:
+    ) -> tuple[HandCfg, tuple[Path, ...]]:
         r"""在 generator 主链中执行 mesh materialization 与可选物理闭包。
 
         这层 helper 故意保持很薄：
@@ -471,11 +487,17 @@ class HandGenerator:
             hand_cfg=hand_cfg,
             metadata=dict(path_metadata or {}),
         )  # 用当前阶段已知 provenance 解析 topology/run 级共享 mesh 根目录
-        materialized, _written_paths = materialize_hand_procedural_meshes(
+        materialized, written_paths = materialize_hand_procedural_meshes(
             hand_cfg,
             mesh_root_dir=self._resolve_mesh_root(result=path_probe),
         )  # procedural `cs` 与 legacy two-primitive `cs` 在这里统一迁移成真实 OBJ mesh
-        return close_hand_physics(materialized, self.cfg.Physics, stage=stage)
+        try:
+            closed = close_hand_physics(materialized, self.cfg.Physics, stage=stage)
+        except Exception:
+            # physics backend 已能看见 OBJ 后才可能失败；异常候选必须回滚本次新建 mesh。
+            rollback_written_artifacts(written_paths, boundary_dir=self._ensure_run_context().root_dir)
+            raise
+        return closed, tuple(written_paths)
 
     def _candidate_hand_preset_names(self) -> tuple[str, ...]:
         r"""返回当前 generator 可见的 premade topology registry key 集合。
@@ -627,6 +649,9 @@ class HandGenerator:
         validator = HandValidator(self.cfg.Validate) if self.cfg.Validate is not None else None
         validation_warnings: list[str] = []
         validation_metadata: dict[str, Any] = {}
+        written_mesh_paths: tuple[Path, ...] = ()  # 仅记录当前候选新写 mesh；成功后成为 bundle 的正式组成部分
+        candidate_export_root: Path | None = None  # pre-made topology 根由当前离散任务独占
+        candidate_export_root_preexisted = False  # 只有本候选新建的目录才允许在 export 异常时整体回滚
 
         if self.cfg.mode == "mutate":
             mutate_source = self._load_mutate_source()
@@ -643,7 +668,10 @@ class HandGenerator:
                     connectivity_preset_name=connectivity_preset_name,
                     hand_preset_name=hand_preset_name,
                 )
-            hand_cfg = self._close_physics_if_enabled(
+            path_probe = HandGenerationResult(hand_cfg=hand_cfg, metadata=dict(premade_metadata))
+            candidate_export_root = self._resolve_export_root(result=path_probe)
+            candidate_export_root_preexisted = candidate_export_root.exists()
+            hand_cfg, written_mesh_paths = self._close_physics_if_enabled(
                 hand_cfg,
                 stage="pre_made",
                 path_metadata=premade_metadata,
@@ -653,14 +681,30 @@ class HandGenerator:
             # - `Validate is None`：完全跳过 hand-level validator；
             # - 否则：在 connectivity lower 之后、mutate / export 之前执行。
             if validator is not None:
-                pre_made_validation = validator.validate_pre_made(hand_cfg)
+                try:
+                    pre_made_validation = validator.validate_pre_made(hand_cfg)
+                except Exception:
+                    rollback_written_artifacts(
+                        written_mesh_paths,
+                        boundary_dir=self._ensure_run_context().root_dir,
+                    )
+                    raise
                 if not pre_made_validation:
                     self._last_rejection_detail = {
                         "stage": "pre_made_validate",
                         "errors": list(pre_made_validation.errors),
+                        "error_codes": list(pre_made_validation.error_codes),
                         "metadata": dict(pre_made_validation.metadata),
                     }
-                    self._record_generation_rejection(stage="pre_made_validate", write_summary=record_summary)
+                    rollback_written_artifacts(
+                        written_mesh_paths,
+                        boundary_dir=self._ensure_run_context().root_dir,
+                    )
+                    self._record_generation_rejection(
+                        stage="pre_made_validate",
+                        error_codes=tuple(pre_made_validation.error_codes),
+                        write_summary=record_summary,
+                    )
                     return None  # pre-made 结构闸门拒绝后，不再允许继续进入 mutate / export
                 validation_warnings.extend(pre_made_validation.warnings)
                 validation_metadata["pre_made"] = dict(pre_made_validation.metadata)
@@ -676,23 +720,48 @@ class HandGenerator:
             sampled_terms = sampled_mutation_terms or _sample_mutation_terms(mutator, hand_cfg)
             hand_cfg = mutator.mutate(hand_cfg, sampled_params=sampled_terms)
             if hand_cfg is None:
-                self._last_rejection_detail = {"stage": "mutate", "errors": ["mutator returned None"], "metadata": {}}
-                self._record_generation_rejection(stage="mutate", write_summary=record_summary)
+                self._last_rejection_detail = {
+                    "stage": "mutate",
+                    "errors": ["mutator returned None"],
+                    "error_codes": ["mutate.returned_none"],
+                    "metadata": {},
+                }
+                self._record_generation_rejection(
+                    stage="mutate",
+                    error_codes=("mutate.returned_none",),
+                    write_summary=record_summary,
+                )
                 return None  # 变异被拒绝；拒绝语义统一表现为“本次样本无结果”
-            hand_cfg = self._close_physics_if_enabled(
+            hand_cfg, written_mesh_paths = self._close_physics_if_enabled(
                 hand_cfg,
                 stage="post_mutate",
                 path_metadata=premade_metadata,
             )
             if validator is not None:
-                post_mutate_validation = validator.validate_post_mutate(hand_cfg)
+                try:
+                    post_mutate_validation = validator.validate_post_mutate(hand_cfg)
+                except Exception:
+                    rollback_written_artifacts(
+                        written_mesh_paths,
+                        boundary_dir=self._ensure_run_context().root_dir,
+                    )
+                    raise
                 if not post_mutate_validation:
                     self._last_rejection_detail = {
                         "stage": "post_mutate_validate",
                         "errors": list(post_mutate_validation.errors),
+                        "error_codes": list(post_mutate_validation.error_codes),
                         "metadata": dict(post_mutate_validation.metadata),
                     }
-                    self._record_generation_rejection(stage="post_mutate_validate", write_summary=record_summary)
+                    rollback_written_artifacts(
+                        written_mesh_paths,
+                        boundary_dir=self._ensure_run_context().root_dir,
+                    )
+                    self._record_generation_rejection(
+                        stage="post_mutate_validate",
+                        error_codes=tuple(post_mutate_validation.error_codes),
+                        write_summary=record_summary,
+                    )
                     return None
                 validation_warnings.extend(post_mutate_validation.warnings)
                 validation_metadata["post_mutate"] = dict(post_mutate_validation.metadata)
@@ -740,12 +809,25 @@ class HandGenerator:
                 ),
             )
             exporter = HandExporter(export_cfg)  # 导出器负责 URDF / sidecar / tree 文件
-            exporter.export(
-                result,
-                output_dir=self._resolve_export_root(result=result),  # pre-made 直写 topology 根；mutate-only 写到 mutate run 根
-                nest_sample_dir=self.cfg.mode == "mutate",  # 只有 mutate-only 仍需要 `<hash>/` 这一层
-                mesh_root_dir=self._resolve_mesh_root(result=result),
-            )
+            try:
+                exporter.export(
+                    result,
+                    output_dir=self._resolve_export_root(result=result),  # pre-made 直写 topology 根；mutate-only 写到 mutate run 根
+                    nest_sample_dir=self.cfg.mode == "mutate",  # 只有 mutate-only 仍需要 `<hash>/` 这一层
+                    mesh_root_dir=self._resolve_mesh_root(result=result),
+                )
+            except Exception:
+                run_root = self._ensure_run_context().root_dir
+                if (
+                    self.cfg.mode != "mutate"
+                    and candidate_export_root is not None
+                    and not candidate_export_root_preexisted
+                ):
+                    # exporter 可能已写出 URDF 后才在 sidecar/tree 阶段失败；新 topology 根应整体撤销。
+                    rollback_created_directory(candidate_export_root, boundary_dir=run_root)
+                else:
+                    rollback_written_artifacts(written_mesh_paths, boundary_dir=run_root)
+                raise
 
         self._record_generation_success(result, write_summary=record_summary)
         self._last_rejection_detail = None

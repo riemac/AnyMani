@@ -3,7 +3,7 @@ AnyMani Assets
 
 `source/anymani/anymani/assets/` 是 AnyMani 的手资产生成子项目。
 
-当前版本：`0.3.1`
+当前版本：`0.3.2`
 
 它负责的不是单一 URDF 导出，而是一整条可追溯的资产生产链：
 
@@ -24,6 +24,9 @@ AnyMani Assets
 6. custom tip mesh 当前默认使用 `trimesh` 真实体积分；non-uniform mesh scale 显式 fail-hard。
 7. 默认 recolor palette 为 `anatomy_soft_v1`：`*_tip` 统一 warm ivory，`*_dip` 使用紫色，以区分接触皮肤和 distal link。
 8. post-mutate finger length 使用 home pose 下 collision geometry 沿 nominal distal axis 的真实轴向长度，而不是旧式 joint-origin 链长近似。
+9. `mixed=True` 只展开 non-thumb 的 LEAP / Allegro family 组合；thumb 始终与 base palm family 绑定，因为其 mount 位姿属于 palm 的 canonical 装配语义。
+10. validator 前物化的 procedural mesh 是候选期产物；候选被拒绝或闭包/导出异常时，只回滚本次新写文件，不在 generated asset 树中保留 OBJ-only 半成品。
+11. `summary.stats.rejected_by_reason` 按稳定 validator error-code 集合计数；多规则同时命中的样本只占一个组合键，因此原因计数总和等于 `rejected`。
 
 常看入口
 --------
