@@ -1,3 +1,12 @@
+0.3.3 - 2026-08-12
+==================
+
+- generated hand 改为从 canonical right 关于 palm YZ 平面做完整 handedness lowering；palm、全部 finger mounts、joint origin/axis、collision/visual/inertial 与非对称 STL/OBJ mesh 统一满足严格镜像，左右共享 joint identity、limits 和相同 $q$ 功能语义。
+- sidecar 新增版本化 `handedness_contract`，明确 `canonical_handedness=right`、`reflection_plane=palm_yz`、`same_q=true` 与 `physical_lowering_complete=true`；`HandBank` 和 mutate-only restore 默认拒绝缺少有效证书的历史 generated left，显式 override 仅用于旧资产审计。
+- procedural/custom mesh 在 physics closure 前统一物化；普通 STL/OBJ 反射同步翻转三角形 winding，缓存发布与候选回滚保持原子性，轴对称 `cs` mesh 则安全复用左右缓存。
+- 新增左右 paired mutation/connectivity、非零构型 FK、mesh 质量属性和 Isaac Lab/PhysX runtime smoke，验证 policy joint mapping 不引入动作反号，same target 产生 same-$q$ 且 body trajectory 严格镜像。
+- 使用 `asset_gen_cfg.py::PRE_MADE_CFG` 生产正式 run `2026-08-12_18-16-48`：完整枚举 3044 个候选，成功导出 2768 个自包含 bundle，276 个低 DOF 候选由 validator 拒绝且未留下半成品；1384 对左右资产的 URDF、mesh 引用、证书、joint order/limits/origin/axis 已全量审计闭合。
+
 0.3.2 - 2026-08-11
 =================
 

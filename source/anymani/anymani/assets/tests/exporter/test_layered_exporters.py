@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 import yaml
 from assets.asset_schema_core import CollisionGeometryCfg, PoseCfg
 from assets.asset_schema_embodiment import FingerCfg, HandCfg, JointCfg, PalmCfg
+from assets.builder.hand_builders import HumanLikeHandBuilder
 from assets.builder.palm_builders import ComPalmBuilder, ComPalmBuilderCfg
 from assets.exporter import (
     FingerExporter,
@@ -31,7 +32,7 @@ from assets.exporter import (
     SidecarCfg,
     SidecarExporter,
 )
-from assets.presets import get_finger_builder_preset
+from assets.presets import get_finger_builder_preset, make_human_like_builder_cfg_from_preset
 
 
 def _build_allegro_finger():
@@ -192,3 +193,38 @@ def test_sidecar_uses_real_axial_geometry_length_for_total_length_cm(tmp_path):
     assert doc["fingers"][0]["total_length_cm"] == 11.0
     assert doc["geometry_semantics"]["schema_version"] == "1.0.0"
     assert len(doc["geometry_semantics"]["components"]) == 4
+
+
+def test_sidecar_exports_strict_handedness_contract_at_top_level(tmp_path):
+    r"""新 generated left 的严格镜像证书必须位于 sidecar 顶层。
+
+    ``HandBank`` 在默认轻量路径中不会恢复完整 ``hand_cfg`` 或解析
+    ``geometry_semantics``，因此安全门需要直接读取顶层证书。顶层字段必须与
+    ``hand_cfg.metadata`` 中的同一证书一致，避免 provenance 与物理快照分叉。
+    """
+
+    cfg = make_human_like_builder_cfg_from_preset(
+        "single_palm_allegro",
+        name="strict_left_sidecar",
+        handedness="left",
+    )  # 真实 builder 路径负责写入完整物理 lowering 证书
+    hand = HumanLikeHandBuilder(cfg).build()
+
+    result = SidecarExporter(
+        SidecarCfg(
+            include_finger_stats=False,
+            include_geometry_semantics=False,
+        )
+    ).export(hand, tmp_path)  # 本测试只隔离顶层 handedness contract，不绕过 generator 检查未物化 mesh
+    doc = yaml.safe_load(result.written[0].read_text(encoding="utf-8"))
+
+    assert doc["handedness"] == "left"
+    assert doc["handedness_contract"] == {
+        "version": "1.0",
+        "canonical_handedness": "right",
+        "target_handedness": "left",
+        "reflection_plane": "palm_yz",
+        "same_q": True,
+        "physical_lowering_complete": True,
+    }
+    assert doc["handedness_contract"] == doc["hand_cfg"]["metadata"]["handedness_contract"]

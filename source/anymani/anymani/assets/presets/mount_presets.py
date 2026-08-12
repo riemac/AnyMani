@@ -7,14 +7,9 @@
 都可以引用同一份 mount 语义，而不会再制造“某个 builder 私藏一份挂载字典”的耦合。
 
 # NOTE:
-当前这里保存的统一是“canonical right-hand anchor”：
-
-- preset 文件负责保存一套离散数值锚点；
-- 真正的左/右手 thumb 镜像，不再在这里做；
-- handedness 相关的唯一映射，统一交给 `HumanLikeHandBuilder`。
-
-这样做是为了让 mount preset 本体保持“纯数据表”角色，而把几何语义变换
-收口到 hand 装配层，符合用户对 builder 职责边界的最新要求。
+当前这里统一保存 canonical right-hand anchors。hand builder 先用这份数据装配
+完整右手，再对目标 left 执行整手严格反射；全部 finger mounts 使用同一数学合同，
+mount preset 本体继续保持纯数据表角色。
 """
 
 from __future__ import annotations
@@ -23,7 +18,6 @@ import math
 
 from ..asset_schema_core import PoseCfg
 from ..units import cm, deg, m, rad
-
 
 ALLEGRO_MOUNT_PRESET: dict[str, PoseCfg] = {
     "index": PoseCfg(pos=(m(0.0), m(0.0435), m(-0.001542)), rpy=(rad(-0.0873), 0.0, 0.0)),
@@ -95,9 +89,8 @@ def get_mount_preset(name: str, *, handedness: str | None = None) -> dict[str, P
 
     Args:
         name (str): 已注册的 mount preset 名。
-        handedness (str | None): 兼容旧调用点而保留的形参；当前不再在此处执行
-            handedness 修正。真正的左/右手 thumb 唯一映射由 `HumanLikeHandBuilder`
-            在 hand 装配阶段完成。
+        handedness (str | None): 兼容 palm preview 调用签名；preset 始终返回
+            canonical right-hand anchors，目标 handedness 由完整 hand lowering 解释。
 
     Returns:
         dict[str, PoseCfg]: canonical right-hand 语义下的 mount 字典副本。
@@ -111,7 +104,7 @@ def get_mount_preset(name: str, *, handedness: str | None = None) -> dict[str, P
     except KeyError as exc:
         raise KeyError(f"Unknown mount preset: {name!r}") from exc
 
-    _ = handedness  # 仅为兼容旧调用签名保留；当前实际 handedness 映射已移交给 hand builder
+    _ = handedness  # mount 数据表不单独执行 handedness 变换
     return {finger: pose.copy() for finger, pose in preset.items()}  # 返回副本，避免调用方污染注册表
 
 

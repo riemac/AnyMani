@@ -165,6 +165,7 @@ class HandContainer:
         validate_mesh_relpaths: bool = True,
         parse_visual_rgba: bool = True,
         require_geometry_semantics: bool = False,
+        allow_legacy_left_handedness: bool = False,
     ) -> HandContainer:
         r"""把单资产声明式入口解析为虚拟标准视图。
 
@@ -175,6 +176,8 @@ class HandContainer:
             validate_mesh_relpaths (bool): 是否要求 URDF mesh 引用全部闭合到真实文件。
             parse_visual_rgba (bool): 是否解析 named visual 的 RGBA debug color。
             require_geometry_semantics (bool): 是否解析/迁移类型化几何语义；official 缺字段时严格拒绝。
+            allow_legacy_left_handedness (bool): 是否显式允许缺少严格镜像证书的
+                generated left；默认 ``False``，只供历史审计。
 
         Returns:
             HandContainer: 下游中立的虚拟标准 bundle。
@@ -189,6 +192,11 @@ class HandContainer:
         if not urdf_path.is_file():
             raise FileNotFoundError(f"hand URDF does not exist: {urdf_path}")
         sidecar = _load_sidecar(sidecar_path, require_sidecar=require_sidecar)
+        _validate_generated_handedness_contract(
+            sidecar,
+            source_kind=cfg.source_kind,
+            allow_legacy_left_handedness=allow_legacy_left_handedness,
+        )  # 在解析 mesh/geometry 前 fail-fast，避免无效 left bundle进入下游容器
 
         # 延迟导入，避免 `urdf_utils` 与本模块的类型定义形成 import-time 循环。
         from .urdf_utils import parse_urdf_mesh_refs, parse_urdf_visual_rgba_by_name
@@ -221,6 +229,7 @@ class HandContainer:
             mesh_refs=mesh_refs,
             visual_rgba_by_name=visual_rgba_by_name,
         )
+
 
     @property
     def urdf_path(self) -> Path:
@@ -259,6 +268,42 @@ class HandContainer:
             return self.real_to_virtual[key]
         except KeyError as exc:
             raise KeyError(f"real path {key} is not part of hand asset {self.asset_id!r}") from exc
+
+
+def _validate_generated_handedness_contract(
+    sidecar: dict[str, Any],
+    *,
+    source_kind: HandAssetSourceKind,
+    allow_legacy_left_handedness: bool,
+) -> None:
+    r"""拒绝缺少严格整手镜像证书的 generated left bundle。
+
+    安全门只作用于 ``source_kind="generated"`` 且顶层 ``handedness="left"``。
+    新合同要求：
+
+    - ``version == HANDEDNESS_CONTRACT_VERSION``；
+    - canonical 真源为 ``right``，目标为 ``left``；
+    - 反射平面为 ``palm_yz``；
+    - ``same_q`` 与 ``physical_lowering_complete`` 均为真。
+
+    Args:
+        sidecar: 已解析的 ``hand.yaml`` 顶层 mapping。
+        source_kind: ``generated`` 或 ``official`` 的权威来源边界。
+        allow_legacy_left_handedness: 历史审计用显式 override。
+
+    Raises:
+        ValueError: generated left 缺少或伪造/损坏严格合同，且未显式 override。
+    """
+
+    if source_kind != "generated":
+        return  # official 资产由自身人工合同管理，不套用 generated lowering 规则
+
+    from ..handedness import validate_generated_handedness_contract  # 延迟导入，保持 bank 初始化轻量
+
+    validate_generated_handedness_contract(
+        sidecar,
+        allow_legacy_left_handedness=allow_legacy_left_handedness,
+    )  # Bank 与 mutate-only restore 共享版本/字段真源
 
 
 def _resolve_urdf_and_sidecar_paths(entry_path: Path, *, urdf_file: str, sidecar_file: str) -> tuple[Path, Path]:

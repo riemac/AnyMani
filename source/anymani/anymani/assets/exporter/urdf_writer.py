@@ -103,6 +103,7 @@ from ..asset_schema_core import (
     PoseCfg,
     VisualGeometryCfg,
 )
+from ..handedness import compose_poses
 from ..procedural_meshes import (
     is_procedural_cs_tip_uri,
     materialize_procedural_cs_tip_mesh,
@@ -330,29 +331,13 @@ def _copy_joint_with_mount(finger, joint):
     导出语义。对 Allegro 非拇指，这通常是 `index_j0` / `middle_j0` 一类根关节；
     对 LEAP non-thumb，则可能是那段真实存在的 `root_fixed` 根部段。
 
-    # NOTE:
-    项目当前的 pose 组合仍沿用既有近似：
-
-    - 平移：逐分量相加；
-    - 姿态：RPY 逐分量相加。
-
-    这与 builder / preset 侧当前的局部建模约定一致，也正是用户要求恢复的
-    “first joint origin 表达挂载位姿”语义。
+    mount 与 first-joint origin 都是有限刚体位姿，必须按
+    $T_{PJ}=T_{PM}T_{MJ}$ 做严格 SE(3) 复合。逐分量相加只在零旋转或特定小角度
+    情况下成立，会破坏左右手的 $T_L=ST_RS$ 镜像合同。
     """
 
-    mount = finger.mount or PoseCfg()  # finger 若未显式给 mount，则退化为零位姿，不改变原 joint origin
-    origin = PoseCfg(
-        pos=(
-            mount.pos[0] + joint.origin.pos[0],  # ${}^{palm}x_{j_0} = x_{mount} + x_{local}$
-            mount.pos[1] + joint.origin.pos[1],  # ${}^{palm}y_{j_0} = y_{mount} + y_{local}$
-            mount.pos[2] + joint.origin.pos[2],  # ${}^{palm}z_{j_0} = z_{mount} + z_{local}$
-        ),
-        rpy=(
-            mount.rpy[0] + joint.origin.rpy[0],  # roll 分量直接叠加
-            mount.rpy[1] + joint.origin.rpy[1],  # pitch 分量直接叠加
-            mount.rpy[2] + joint.origin.rpy[2],  # yaw 分量直接叠加
-        ),
-    )
+    mount = finger.mount or PoseCfg()  # finger 未显式给 mount 时使用单位变换 $I_{SE(3)}$
+    origin = compose_poses(mount, joint.origin)  # $T_{PJ}=T_{PM}T_{MJ}$
     return joint.replace(origin=origin)
 
 
@@ -496,6 +481,11 @@ def _build_geometry_elem(geom, cfg: UrdfWriterCfg, *, mesh_state: _MeshExportSta
     elif kind == "sphere":
         ET.SubElement(geometry_elem, "sphere", attrib={"radius": _fmt_scalar(geom.radius)})
     elif kind == "mesh":
+        if isinstance(geom, MeshGeometryCfg) and geom.reflected_about_yz:
+            raise ValueError(
+                "URDF export received reflected_about_yz=True; materialize strict handedness meshes "
+                "before physics/validator/exporter"
+            )  # 禁止 direct exporter 把 canonical right mesh 静默写入物理 left URDF
         filename = _materialize_mesh_geometry(geom, mesh_state=mesh_state)
         if cfg.mesh_package_prefix and not filename.startswith(("package://", "/")):
             filename = f"{cfg.mesh_package_prefix.rstrip('/')}/{filename.lstrip('./')}"

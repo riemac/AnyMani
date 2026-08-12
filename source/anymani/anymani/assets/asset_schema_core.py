@@ -16,10 +16,10 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
-import math
 from pathlib import Path
 from typing import Any, ClassVar, Literal, cast, overload
 
@@ -478,7 +478,13 @@ class SphereGeometryCfg(GeometryCfg):
 
 @dataclass
 class MeshGeometryCfg(GeometryCfg):
-    r"""网格几何。"""
+    r"""网格几何。
+
+    ``reflected_about_yz`` 表示该实例需要使用 canonical mesh 关于局部
+    $y$-$z$ 平面的反射版本。该字段不使用负 ``scale`` 代替，原因是负尺度会把
+    handedness、面绕序和质量属性隐藏在 importer 行为中；显式标记允许
+    materializer 在 physics closure 前烘焙顶点并修正 triangle winding。
+    """
 
     geometry_type: ClassVar[str] = "mesh"
     file_path: str
@@ -487,6 +493,9 @@ class MeshGeometryCfg(GeometryCfg):
     scale: Vector3 = (1.0, 1.0, 1.0)
     """网格局部缩放 $(s_x, s_y, s_z)$。"""
 
+    reflected_about_yz: bool = False
+    r"""是否使用局部 $x\mapsto-x$ 且面绕序修正后的镜像 mesh。"""
+
     def __post_init__(self):
         if not isinstance(self.file_path, str) or not self.file_path.strip():
             raise ValueError("mesh.file_path must be a non-empty string")
@@ -494,6 +503,7 @@ class MeshGeometryCfg(GeometryCfg):
         self.scale = _ensure_tuple(self.scale, length=3, field_name="mesh.scale")
         if any(scale <= 0.0 for scale in self.scale):
             raise ValueError(f"mesh.scale must be positive, got {self.scale}")
+        self.reflected_about_yz = bool(self.reflected_about_yz)  # sidecar 恢复时统一收敛到显式布尔语义
 
     @property
     def suffix(self) -> str:
@@ -545,7 +555,11 @@ def make_geometry_cfg(value: GeometryValue) -> GeometryCfg:
         return SphereGeometryCfg(radius=value["radius"])
     if geometry_type == "mesh":
         file_path = value.get("file_path", value.get("path", value.get("mesh")))
-        return MeshGeometryCfg(file_path=file_path, scale=value.get("scale", (1.0, 1.0, 1.0)))
+        return MeshGeometryCfg(
+            file_path=file_path,
+            scale=value.get("scale", (1.0, 1.0, 1.0)),
+            reflected_about_yz=value.get("reflected_about_yz", False),
+        )
 
     raise ValueError(f"Unsupported geometry type: {geometry_type}")
 
@@ -1016,7 +1030,7 @@ def _make_collision_cfg(value: Any) -> CollisionGeometryCfg:
 
     if isinstance(value, CollisionGeometryCfg):
         return value.copy()
-    if isinstance(value, GeometryCfg) or isinstance(value, str):
+    if isinstance(value, GeometryCfg | str):
         return CollisionGeometryCfg(geometry=make_geometry_cfg(value))
     if not isinstance(value, Mapping):
         raise TypeError(f"Unsupported collision geometry value: {value!r}")
@@ -1045,7 +1059,7 @@ def _make_visual_cfg(value: Any) -> VisualGeometryCfg:
 
     if isinstance(value, VisualGeometryCfg):
         return value.copy()
-    if isinstance(value, GeometryCfg) or isinstance(value, str):
+    if isinstance(value, GeometryCfg | str):
         return VisualGeometryCfg(geometry=make_geometry_cfg(value))
     if not isinstance(value, Mapping):
         raise TypeError(f"Unsupported visual geometry value: {value!r}")

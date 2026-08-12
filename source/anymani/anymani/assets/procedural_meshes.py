@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -179,17 +181,42 @@ def materialize_hand_procedural_meshes(
     mesh_root_dir: Path,
     write_enabled: bool = True,
 ) -> tuple[HandCfg, list[Path]]:
-    r"""扫描并物化 `HandCfg` 中所有 procedural / legacy `cs` fingertip mesh。
+    r"""扫描并物化 ``HandCfg`` 中所有 procedural 与 handedness mesh。
 
     这一步必须在 physics closure 之前执行，因为 `asset_physics.py` 的 `trimesh`
     backend 需要读取真实 mesh 文件，而不是读取 builder 阶段的 procedural URI。
 
-    同时这里会迁移历史 sidecar 中的 two-primitive `cs` tip，使 post-mutate 从旧
-    topology 根恢复时，也能进入新的 single-mesh schema。
+    同时这里会：
+
+    1. 迁移历史 sidecar 中的 two-primitive ``cs`` tip；
+    2. 对 ``reflected_about_yz=True`` 的普通 custom mesh 烘焙顶点反射与面绕序；
+    3. 让 palm、collision、visual 和 joint child-link 在 physics/validator/exporter
+       前共同引用同一份最终物理 mesh。
     """
 
-    materialized = hand.copy()
-    written_paths: list[Path] = []
+    materialized = hand.copy()  # 不修改 builder/mutator 输入真源
+    written_paths: list[Path] = []  # 只记录本次首次发布的新文件，供候选期回滚
+
+    # 当前 palm 主要是 primitive box，但严格整手合同允许未来 custom palm；
+    # 因而在同一 physics 前边界处理 palm mesh，不把 handedness 逻辑锁死在 tip。
+    palm_collisions, palm_collision_written = _materialize_reflected_mesh_elements(
+        materialized.palm.collisions,
+        mesh_root_dir=mesh_root_dir,
+        write_enabled=write_enabled,
+    )
+    palm_visuals, palm_visual_written = _materialize_reflected_mesh_elements(
+        materialized.palm.visuals,
+        mesh_root_dir=mesh_root_dir,
+        write_enabled=write_enabled,
+    )
+    if palm_collisions != materialized.palm.collisions or palm_visuals != materialized.palm.visuals:
+        materialized.palm = materialized.palm.replace(
+            collisions=palm_collisions,
+            visuals=palm_visuals,
+        )  # palm collision/visual 引用同一物理 handedness 下的最终 mesh
+    written_paths.extend(palm_collision_written)
+    written_paths.extend(palm_visual_written)
+
     for finger_index, finger in enumerate(materialized.fingers):
         joints: list[JointCfg] = []
         finger_changed = False
@@ -207,9 +234,9 @@ def materialize_hand_procedural_meshes(
     if written_paths:
         metadata = dict(materialized.metadata)
         metadata["procedural_mesh_materialization"] = {
-            "cs_tip_mesh_count": len({str(path) for path in written_paths}),
+            "written_mesh_count": len({str(path) for path in written_paths}),
             "mesh_root_dir": str(Path(mesh_root_dir)),
-        }
+        }  # provenance 描述所有 physics 前 mesh，不把 handedness mesh 误称为 cs tip
         materialized.metadata = metadata
     return materialized.replace(fingers=materialized.fingers, metadata=dict(materialized.metadata)), written_paths
 
@@ -220,7 +247,7 @@ def materialize_joint_procedural_meshes(
     mesh_root_dir: Path,
     write_enabled: bool = True,
 ) -> tuple[JointCfg, list[Path]]:
-    r"""物化单个 joint child-link 上的 procedural `cs` mesh。
+    r"""物化单个 joint child-link 上的 procedural 与 handedness mesh。
 
     返回原 `joint` 对象表示没有修改；返回新 `JointCfg` 表示该 joint 的 collision /
     visual schema 已经从 procedural URI 或 legacy two-primitive schema 迁移到真实 mesh。
@@ -235,7 +262,34 @@ def materialize_joint_procedural_meshes(
         spec, origin = legacy
         return _materialize_legacy_cs_joint(joint, spec, origin, mesh_root_dir=mesh_root_dir, write_enabled=write_enabled)
 
-    return joint, []
+    collisions, collision_written = _materialize_reflected_mesh_elements(
+        joint.collisions,
+        mesh_root_dir=mesh_root_dir,
+        write_enabled=write_enabled,
+    )
+    visuals, visual_written = _materialize_reflected_mesh_elements(
+        joint.visuals,
+        mesh_root_dir=mesh_root_dir,
+        write_enabled=write_enabled,
+    )
+    written = [*collision_written, *visual_written]  # collision/visual 同源时第二次命中稳定缓存
+    if collisions == joint.collisions and visuals == joint.visuals:
+        return joint, written  # 当前 joint 没有待物化 handedness mesh
+
+    metadata = dict(joint.metadata)
+    metadata["handedness_mesh_materialization"] = {
+        "reflection_plane": "local_yz",
+        "schema": "vertex_x_negate_reverse_winding_v1",
+    }  # sidecar 保留 mesh 手性证书，便于审计最终路径的来源
+    return (
+        joint.replace(
+            collisions=collisions,
+            visuals=visuals,
+            inertial=None,  # mesh 改变后必须由紧随其后的 physics closure 重建惯量
+            metadata=metadata,
+        ),
+        written,
+    )
 
 
 def cs_tip_mesh_filename(spec: ProceduralCsTipSpec) -> str:
@@ -338,9 +392,175 @@ def _replace_procedural_mesh_element(element, *, mesh_path: Path):
     geometry = element.geometry
     if isinstance(geometry, MeshGeometryCfg) and is_procedural_cs_tip_uri(geometry.file_path):
         return element.replace(
-            geometry={"type": "mesh", "file_path": str(mesh_path), "scale": (1.0, 1.0, 1.0)}
+            geometry={
+                "type": "mesh",
+                "file_path": str(mesh_path),
+                "scale": (1.0, 1.0, 1.0),
+                "reflected_about_yz": False,
+            }
         )
     return element.copy()
+
+
+def _materialize_reflected_mesh_elements(
+    elements: list[Any],
+    *,
+    mesh_root_dir: Path,
+    write_enabled: bool,
+) -> tuple[list[Any], list[Path]]:
+    r"""把 geometry elements 中待反射的 custom mesh 替换为最终文件。
+
+    Args:
+        elements: 同一 palm/joint 下的 collision 或 visual elements。
+        mesh_root_dir: 当前 topology/run 共享 ``meshes/`` 根。
+        write_enabled: ``False`` 时只解析稳定目标路径。
+
+    Returns:
+        tuple[list[Any], list[Path]]: 替换后的 elements 与本次首次发布文件。
+    """
+
+    materialized: list[Any] = []  # 保持 element 顺序，避免 owner/index 语义漂移
+    written_paths: list[Path] = []  # 同一内容 hash 只会有一次首次发布
+    for element in elements:
+        geometry = element.geometry
+        if not isinstance(geometry, MeshGeometryCfg) or not geometry.reflected_about_yz:
+            materialized.append(element.copy())  # primitive/已物化 mesh 保持物理含义
+            continue
+        if is_procedural_cs_tip_uri(geometry.file_path):
+            materialized.append(element.copy())  # 轴对称 cs 由优先级更高的 procedural joint 分支处理
+            continue
+
+        reflected_path, written = materialize_reflected_mesh_about_yz(
+            geometry.file_path,
+            mesh_root_dir=mesh_root_dir,
+            write_enabled=write_enabled,
+        )  # 顶点反射与 face 反序在 physics closure 前共同完成
+        materialized.append(
+            element.replace(
+                geometry=geometry.replace(
+                    file_path=str(reflected_path),
+                    reflected_about_yz=False,
+                )
+            )
+        )  # 新文件已经烘焙手性，标记必须清零以防 restore/exporter 二次反射
+        if written:
+            written_paths.append(reflected_path)
+    return materialized, written_paths
+
+
+def materialize_reflected_mesh_about_yz(
+    file_path: str,
+    *,
+    mesh_root_dir: Path,
+    write_enabled: bool = True,
+) -> tuple[Path, bool]:
+    r"""把 canonical triangle mesh 关于局部 $y$-$z$ 平面反射并原子发布。
+
+    顶点和 triangle face 分别执行：
+
+    $$
+    \mathbf v_i'=S\mathbf v_i,\qquad
+    S=\operatorname{diag}(-1,1,1),\qquad
+    (i,j,k)\mapsto(i,k,j).
+    $$
+
+    Face 反序用于抵消 improper transform 的 $\det(S)=-1$，使外法向与 signed
+    volume 保持正确。目标文件名由源内容 SHA-256 与反射 schema 共同决定；同内容
+    mesh 可跨 collision/visual/worker 复用，同 basename 异内容不会冲突。
+
+    Args:
+        file_path (str): canonical custom mesh 的本地 STL/OBJ 路径。
+        mesh_root_dir (Path): 当前 topology/run 共享 ``meshes/`` 根目录。
+        write_enabled (bool): ``False`` 时只返回稳定目标路径，不实际写文件。
+
+    Returns:
+        tuple[Path, bool]: 镜像 mesh 路径，以及本次是否首次发布该文件。
+
+    Raises:
+        FileNotFoundError: source mesh 无法解析时抛出。
+        ValueError: source 格式不支持，或镜像结果不满足 watertight/正体积合同时抛出。
+    """
+
+    source_path = _resolve_local_mesh_path(file_path)  # physics 前必须解析为真实本地文件
+    source_bytes = source_path.read_bytes()  # 内容变化会自然生成新 cache key
+    digest = hashlib.sha256(b"anymani_yz_reflect_v1\0" + source_bytes).hexdigest()[:16]
+    suffix = source_path.suffix.lower()  # 输出格式保持与 canonical source 一致，便于人工巡检
+    if suffix not in {".stl", ".obj"}:
+        raise ValueError(f"strict handedness reflection currently supports STL/OBJ meshes, got {source_path}")
+    target_path = Path(mesh_root_dir) / f"{source_path.stem}_yz_reflect_v1_{digest}{suffix}"
+    if target_path.is_file() or not write_enabled:
+        return target_path, False  # cache hit 与 dry-run 都不属于本候选的新写文件
+
+    import numpy as np
+    import trimesh
+
+    source_mesh = trimesh.load(source_path, force="mesh", process=True)
+    if not isinstance(source_mesh, trimesh.Trimesh) or len(source_mesh.vertices) == 0 or len(source_mesh.faces) == 0:
+        raise ValueError(f"handedness reflection requires a non-empty triangle mesh: {source_path}")
+
+    vertices = np.asarray(source_mesh.vertices, dtype=np.float64).copy()  # 顶点矩阵 $[N_v,3]$
+    vertices[:, 0] *= -1.0  # $\mathbf v'=S\mathbf v$，只翻转 mesh-local $x$
+    faces = np.asarray(source_mesh.faces, dtype=np.int64)[:, (0, 2, 1)].copy()  # $(i,j,k)\mapsto(i,k,j)$
+    reflected_mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    if not reflected_mesh.is_watertight:
+        raise ValueError(f"reflected handedness mesh must be watertight: {source_path}")
+    if not reflected_mesh.is_winding_consistent:
+        raise ValueError(f"reflected handedness mesh must have consistent winding: {source_path}")
+    if float(reflected_mesh.volume) <= 0.0:
+        raise ValueError(f"reflected handedness mesh must preserve positive volume: {source_path}")
+
+    exported = reflected_mesh.export(file_type=suffix.removeprefix("."))  # trimesh 统一序列化 STL/OBJ
+    payload = exported.encode("utf-8") if isinstance(exported, str) else bytes(exported)
+    written = _publish_bytes_once(target_path, payload)  # 并行 worker 中只允许一个首次发布者
+    return target_path, written
+
+
+def _resolve_local_mesh_path(file_path: str) -> Path:
+    r"""按 generator/physics 同源边界解析待镜像 custom mesh 路径。"""
+
+    if str(file_path).startswith("package://"):
+        raise ValueError(f"handedness mesh materialization requires a local path, got {file_path!r}")
+    raw_path = Path(file_path).expanduser()
+    if raw_path.is_absolute():
+        if not raw_path.is_file():
+            raise FileNotFoundError(raw_path)
+        return raw_path
+    for candidate in (Path.cwd() / raw_path, Path(__file__).resolve().parent / raw_path):
+        if candidate.is_file():
+            return candidate.resolve()
+    raise FileNotFoundError(f"Unable to resolve mesh path for handedness reflection: {file_path!r}")
+
+
+def _publish_bytes_once(target_path: Path, payload: bytes) -> bool:
+    r"""用同目录临时文件和原子 hard-link 发布共享 mesh。
+
+    临时文件完整写入后才尝试 ``os.link`` 到稳定目标名。并行 worker 中只有一个
+    进程能创建目标 inode；其余进程命中 ``FileExistsError`` 并复用胜者文件，
+    因而不会读取半写 target，也不会把复用文件误计入自身 ``written_paths``。
+    """
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)  # 同目录保证 hard-link 位于同一文件系统
+    temporary_path: Path | None = None  # finally 中只清理本次私有临时 inode
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=target_path.parent,
+            prefix=f".{target_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary.write(payload)  # 先完整序列化，稳定目标路径尚不可见
+            temporary.flush()
+            os.fsync(temporary.fileno())  # 发布前把用户态缓冲刷新到文件系统
+            temporary_path = Path(temporary.name)
+        try:
+            os.link(temporary_path, target_path)  # 原子 no-clobber 发布
+            return True
+        except FileExistsError:
+            return False  # 另一 worker 已发布同内容 hash 文件，当前调用安全复用
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)  # 临时文件永远不属于资产 bundle
 
 
 def _procedural_spec_from_mesh_elements(joint: JointCfg) -> ProceduralCsTipSpec | None:

@@ -63,6 +63,7 @@ import yaml
 
 from ..asset_base import AssetCfgBase, HandCfg
 from ..asset_schema_geometry import derive_generated_geometry_semantics, geometry_semantics_to_dict
+from ..handedness import handedness_contract
 from ..validator._finger_length import measure_finger_axial_lengths
 from ._base import ExporterBase, ExportResult
 
@@ -146,6 +147,13 @@ class SidecarExporter(ExporterBase):
             "dof": target.dof_count,
             "finger_count": len(target.fingers),
         }
+        expected_handedness_contract = handedness_contract(target=target.handedness)  # exporter 认可的唯一 generated same-$q$ 合同
+        metadata_handedness_contract = target.metadata.get("handedness_contract")
+        if target.handedness == "left" and metadata_handedness_contract != expected_handedness_contract:
+            raise ValueError(
+                "left HandCfg must carry a complete strict handedness_contract before sidecar export"
+            )  # 不能仅凭顶层 left 标签伪造“已完成物理反射”的证书
+        doc["handedness_contract"] = expected_handedness_contract  # 顶层轻量字段供 HandBank fail-closed gate 直接读取
         consumed_keys.add("id")
 
         if self.cfg.include_finger_stats:

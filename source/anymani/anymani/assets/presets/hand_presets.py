@@ -17,22 +17,16 @@ r"""hand preset 常量、注册表与整手组合辅助。
 - 修改时要像改实验表一样直接，不要追框架魔法。
 
 # NOTE:
-当前 hand preset 统一把 thumb 挂载理解为“canonical right-hand anchor”：
-
-- preset 本身只记录一套 thumb 挂载来源；
-- 真正的左/右手差异，不在这里重复保存两份数值；
-- 若 `handedness="left"`，则交给 `HumanLikeHandBuilder` 按 palm frame 约定
-  自动执行 $x \mapsto -x,\ \text{yaw} \mapsto -\text{yaw}$ 的镜像。
-
-这正对应你在 `平面示意-左手.png`、`平面示意-右手.png` 以及旧算法草案里
-反复强调的意图：hand preset 记录“组合锚点”，左右手唯一映射属于 hand 装配层。
+当前 hand preset 的 palm、全部 finger mounts、joint chains 与 mesh recipes 都采用
+canonical right-hand 语义，只保存一份离散真源。`HumanLikeHandBuilder` 完成整手
+装配后，再对完整 `HandCfg` 执行严格 $y$-$z$ 平面反射；因此不需要维护 left preset，
+也不会把 handedness 缩减为某一根 thumb mount 的局部特例。
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
-
 
 # --- 预设1：single palm allegro hand ---
 # 主要由 Allegro 的 single-box palm、对应挂载点，以及 Allegro fingers 构成。
@@ -43,7 +37,6 @@ SINGLE_PALM_ALLEGRO_HAND_PRESET: dict[str, Any] = {
     "palm_cfg": "single_box_allegro",  # palm 选择 single-box Allegro 几何锚点
     "finger_cfg": "allegro_non_thumb_v1",  # 非拇指统一采用 Allegro v1 preset
     "thumb_cfg": "allegro_thumb_v1",  # 拇指采用 Allegro thumb v1 preset
-    "mirror_thumb_mount_for_left": True,  # 左手时由 hand builder 自动做 thumb 镜像
 }
 
 
@@ -56,7 +49,6 @@ SINGLE_PALM_LEAP_HAND_PRESET: dict[str, Any] = {
     "palm_cfg": "single_box_leap",  # single-box LEAP palm
     "finger_cfg": "leap_non_thumb_v1",  # LEAP 非拇指 preset
     "thumb_cfg": "leap_thumb_v1",  # LEAP 拇指 preset
-    "mirror_thumb_mount_for_left": True,  # 左手映射交给 hand builder
 }
 
 
@@ -69,7 +61,6 @@ COM_PALM_ALLEGRO_HAND_PRESET: dict[str, Any] = {
     "palm_cfg": "com_allegro",  # composite palm 直接走 `com_allegro`
     "finger_cfg": "allegro_non_thumb_v1",  # Allegro 非拇指 preset
     "thumb_cfg": "allegro_thumb_v1",  # Allegro 拇指 preset
-    "mirror_thumb_mount_for_left": True,  # 左手 thumb 仍按 palm frame 规则镜像
 }
 
 
@@ -82,7 +73,6 @@ COM_PALM_LEAP_HAND_PRESET: dict[str, Any] = {
     "palm_cfg": "com_leap",  # composite palm 直接走 `com_leap`
     "finger_cfg": "leap_non_thumb_v1",  # LEAP 非拇指 preset
     "thumb_cfg": "leap_thumb_v1",  # LEAP 拇指 preset
-    "mirror_thumb_mount_for_left": True,  # 左手 thumb 映射交给 hand builder
 }
 
 

@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import math
 
-from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
+import pytest
+from assets.builder.hand_builders import HumanLikeHandBuilder
 from assets.builder.joint_builders_custom import CustomTipBuilderCfg
 from assets.exporter.urdf_writer import UrdfWriter, UrdfWriterCfg
 from assets.presets import get_finger_builder_preset, make_human_like_builder_cfg
@@ -165,3 +166,29 @@ def test_urdf_writer_serializes_custom_tip_mesh_for_human_like_hand(tmp_path):
     urdf_text = (tmp_path / "hand.urdf").read_text(encoding="utf-8")
     assert 'filename="meshes/finger_tip_soft.stl"' in urdf_text
     assert "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/custom/tips/" not in urdf_text
+
+
+def test_urdf_writer_rejects_unmaterialized_left_custom_mesh():
+    r"""Direct exporter 不得把待反射的 canonical mesh 静默写进 left URDF。
+
+    正式 generator 会在 physics closure 前把 ``reflected_about_yz=True`` 烘焙成
+    最终 mesh 并清除标记。若研究脚本绕过 generator 直接调用 ``UrdfWriter``，
+    fail-closed 比复制右手 source mesh 更安全，也能明确提示缺失的阶段边界。
+    """
+
+    finger_cfg = get_finger_builder_preset("leap_non_thumb_v1").replace(
+        tip={"type": "mesh", "tip_type": "wedge"},
+    )
+    left = HumanLikeHandBuilder(
+        make_human_like_builder_cfg(
+            name="left_unmaterialized_custom_tip",
+            family="leap",
+            handedness="left",
+            palm_cfg="single_box_leap",
+            finger_cfg=finger_cfg,
+            thumb_cfg="leap_thumb_v1",
+        )
+    ).build()
+
+    with pytest.raises(ValueError, match="reflected_about_yz"):
+        UrdfWriter(UrdfWriterCfg()).to_urdf_string(left)

@@ -32,9 +32,9 @@ from typing import Literal
 from ..asset_base import HandCfg
 from ..asset_builders import FingerBuilderCfg, HandBuilder, HandBuilderCfg
 from ..asset_schema_core import PoseCfg
+from ..handedness import lower_hand_to_handedness
 from .finger_buiders import RegularFingerBuilderCfg
-from .palm_builders import ComPalmBuilderCfg, SinglePalmBuilderCfg
-
+from .palm_builders import SinglePalmBuilderCfg
 
 NON_THUMB_FINGER_NAMES: tuple[str, ...] = ("index", "middle", "ring", "little")  # 统一非拇指命名顺序
 
@@ -42,38 +42,6 @@ NON_THUMB_FINGER_NAMES: tuple[str, ...] = ("index", "middle", "ring", "little") 
 def _to_pose_dict(values: dict[str, PoseCfg]) -> dict[str, PoseCfg]:
     r"""把宽松挂载点输入统一规范为 `PoseCfg` 字典。"""
     return {name: PoseCfg.from_value(value) for name, value in values.items()}  # 兼容 tuple / dict / PoseCfg
-
-
-def _mirror_thumb_pose_about_palm_yz_plane(pose: PoseCfg) -> PoseCfg:
-    r"""把 canonical right-hand 的 thumb 挂载位姿镜像为 left-hand 版本。
-
-    这里实现的，正是用户旧算法草案与 `平面示意-左手.png` / `平面示意-右手.png`
-    共同约束出的 palm-frame 规则：
-
-    1. 不管左手右手，palm frame 都保持同一套 $x/y/z$ 约定；
-    2. left/right 的主要差异体现在 thumb 相对 palm frame 的对称位置；
-    3. 该对称可视为关于 palm 的 $y$-$z$ 平面镜像，因此
-       $x' = -x,\ y' = y,\ z' = z$；
-    4. 同时 thumb 的主朝向 yaw 需要翻号，因此
-       $\psi' = -\psi$；
-    5. 其余 roll / pitch 在当前建模约定下保持不变。
-
-    # NOTE:
-    这里故意只变换 thumb，而不去碰 index/middle/ring/little，
-    因为用户给出的 hand-level 约定明确指出：非拇指在 palm frame 下保持不变，
-    左右手主要由 thumb 的镜像关系区分。
-
-    Args:
-        pose (PoseCfg): canonical right-hand 语义下的 thumb 挂载位姿。
-
-    Returns:
-        PoseCfg: 映射到 left-hand 物理语义后的 thumb 挂载位姿。
-    """
-
-    return PoseCfg(
-        pos=(-pose.pos[0], pose.pos[1], pose.pos[2]),  # 关于 palm 的 $y$-$z$ 平面镜像，只翻转 $x$
-        rpy=(pose.rpy[0], pose.rpy[1], -pose.rpy[2]),  # yaw 翻号；roll / pitch 保持当前约定
-    )
 
 
 def _ensure_resolved_finger_cfg(slot_name: str, cfg: FingerBuilderCfg | str | None) -> FingerBuilderCfg | None:
@@ -102,12 +70,11 @@ class HumanLikeHandBuilderCfg(HandBuilderCfg):
     - `mounts`
     """
 
-    class_type: type["HumanLikeHandBuilder"] | None = None
+    class_type: type[HumanLikeHandBuilder] | None = None
     handedness: Literal["left", "right"] = "right"  # 当前先显式区分左右手
     finger_cfg: FingerBuilderCfg | dict[str, FingerBuilderCfg] | None = None  # 非拇指配置：builder 层只接受已解析 cfg
     thumb_cfg: FingerBuilderCfg | None = None  # 拇指配置：preset 解析必须在更上层完成
     num_non_thumb: int = 3  # 默认 index/middle/ring 三根非拇指
-    mirror_thumb_mount_for_left: bool = True  # 若输入 mount 采用 canonical right-hand 语义，则左手时自动镜像 thumb
     mounts: dict[str, PoseCfg] = field(default_factory=dict)  # 显式挂载点覆盖；preset 解析应已在 preset/recipe 层完成
 
     def __post_init__(self):
@@ -138,7 +105,7 @@ class GripperLikeHandBuilderCfg(HandBuilderCfg):
     GripperLike 两分”的总体框架。
     """
 
-    class_type: type["GripperLikeHandBuilder"] | None = None
+    class_type: type[GripperLikeHandBuilder] | None = None
     finger_cfg: FingerBuilderCfg | dict[str, FingerBuilderCfg] | None = None  # 夹爪手未来可按指分配 cfg
     num_fingers: int = 3  # 夹爪数量
     mounts: dict[str, PoseCfg] = field(default_factory=dict)  # 指根挂载点
@@ -188,8 +155,8 @@ class HumanLikeHandBuilder(HandBuilder):
         palm_builder = self.cfg.palm_cfg.class_type(self.cfg.palm_cfg)  # palm 的具体几何由 palm builder 自己负责
         palm = palm_builder.build()  # hand-level 这里只消费已经构建好的 PalmCfg
 
-        metadata_mounts = self._apply_thumb_handedness_mapping(self._metadata_mounts(palm))
-        explicit_mounts = self._apply_thumb_handedness_mapping(self.cfg.mounts)
+        metadata_mounts = self._metadata_mounts(palm)  # palm metadata 始终保存 canonical right-hand mounts
+        explicit_mounts = {name: pose.copy() for name, pose in self.cfg.mounts.items()}  # 显式 mounts 同样先按 canonical right 解释
         # mount 优先级：fallback < palm metadata < 显式 cfg.mounts
         mounts = {**self._fallback_mounts(palm), **metadata_mounts, **explicit_mounts}
 
@@ -215,14 +182,15 @@ class HumanLikeHandBuilder(HandBuilder):
             # 原样挂在 metadata 中，留待后续真正 lower 成链式 joint/link。
             metadata["wrist_joints"] = [joint.to_dict() for joint in self.cfg.palm_cfg.wrist_joints]
 
-        return HandCfg(
+        canonical_hand = HandCfg(
             name=self.cfg.name,  # hand 名
             family=self.cfg.family,  # hand family 标签
-            handedness=self.cfg.handedness,  # 左右手属性
+            handedness="right",  # builder 内部唯一真源固定为 canonical right
             palm=palm,  # 已构建好的 palm
             fingers=fingers,  # 已装配好的 fingers
             metadata=metadata,  # 附加 provenance / wrist 占位信息
         )
+        return lower_hand_to_handedness(canonical_hand, self.cfg.handedness)  # 在完整 HandCfg 边界一次性 lower 到目标物理 handedness
 
     def _build_named_finger(self, finger_cfg: FingerBuilderCfg, finger_name: str, mount: PoseCfg):
         r"""把一个 finger cfg 变成具名 finger，并赋予 mount。"""
@@ -252,38 +220,6 @@ class HumanLikeHandBuilder(HandBuilder):
             return {}
         return _to_pose_dict(finger_mounts)
 
-    def _apply_thumb_handedness_mapping(self, mounts: dict[str, PoseCfg]) -> dict[str, PoseCfg]:
-        r"""把 canonical mount 字典映射到当前 hand 的物理 handedness。
-
-        这里之所以不直接在 `mount_presets.py` 做 handedness 修正，而是收口到
-        hand builder，有两个科研侧原因：
-
-        1. mount preset 文件应该只保存“离散锚点数据表”，不掺 hand-level 几何变换；
-        2. 左/右手 thumb 的唯一映射规则，属于“整手装配语义”，应与 `handedness`
-           一起在 builder 层统一解释。
-
-        # NOTE:
-        这里只对 `metadata_mounts` / `cfg.mounts` 这两类“外部给定的 canonical 锚点”
-        做映射；`_fallback_mounts(...)` 已经直接按目标 handedness 生成物理解，因此
-        绝不能再镜像第二次。
-
-        Args:
-            mounts (dict[str, PoseCfg]): 外部提供的 canonical mount 字典。
-
-        Returns:
-            dict[str, PoseCfg]: 已映射到当前 hand handedness 的 mount 字典副本。
-        """
-
-        mapped = {name: pose.copy() for name, pose in mounts.items()}  # 先复制，避免污染 cfg / metadata 原对象
-        if self.cfg.handedness != "left":
-            return mapped  # 右手直接使用 canonical right-hand anchor
-        if not self.cfg.mirror_thumb_mount_for_left:
-            return mapped  # 显式关闭时，调用方承诺自己已经给了物理 left-hand mount
-        if "thumb" not in mapped:
-            return mapped  # 没有 thumb mount 就无需映射
-        mapped["thumb"] = _mirror_thumb_pose_about_palm_yz_plane(mapped["thumb"])  # 只映射 thumb
-        return mapped
-
     def _fallback_mounts(self, palm) -> dict[str, PoseCfg]:
         r"""在没有显式 mount 也没有 preset mount 时，生成参数化挂载点。
 
@@ -299,9 +235,8 @@ class HumanLikeHandBuilder(HandBuilder):
         2. 后续可以把人工调参、mutate 扰动、真实 preset 替换叠加上去。
 
         # NOTE:
-        这里直接按目标 `handedness` 生成“物理解”，因此它的 thumb 已经是左/右手
-        各自对应的最终位置；后续 `_apply_thumb_handedness_mapping(...)` 不会再处理
-        fallback 结果，避免重复镜像。
+        fallback 与所有离散 preset 一样只构造 canonical right-hand anchors；完整
+        # `HandCfg` 构建完成后再由统一 handedness lowering 反射全部 mounts 与子树。
         """
 
         if isinstance(self.cfg.palm_cfg, SinglePalmBuilderCfg) and self.cfg.palm_cfg.shape == "box":
@@ -321,10 +256,10 @@ class HumanLikeHandBuilder(HandBuilder):
                 for name, x in zip(names, xs)
             }
             # 拇指用一个简化比例模型近似落在 palm 侧前方。
-            thumb_x = width * 0.22 if self.cfg.handedness == "right" else -width * 0.22
+            thumb_x = width * 0.22  # canonical right-hand thumb 位于 palm-frame $+x$ 一侧
             mounts["thumb"] = PoseCfg(
                 pos=(thumb_x, length * 0.33, -height * 0.15),
-                rpy=(0.0, 0.0, -1.5707963267948966 if self.cfg.handedness == "right" else 1.5707963267948966),
+                rpy=(0.0, 0.0, -1.5707963267948966),  # canonical right-hand thumb yaw
             )
             return mounts
         return {name: PoseCfg() for name in (*NON_THUMB_FINGER_NAMES[: self.cfg.num_non_thumb], "thumb")}  # 若无更好先验，就全部回退到零挂载点

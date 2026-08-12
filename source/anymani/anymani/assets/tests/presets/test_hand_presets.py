@@ -17,13 +17,12 @@ r"""hand preset 与 hand preview 入口回归测试。
 from __future__ import annotations
 
 import math
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 from assets.builder.hand_builders import HumanLikeHandBuilder
 from assets.presets import get_hand_builder_preset_data, make_human_like_builder_cfg_from_preset
-
 
 REPO_ROOT = Path(__file__).resolve().parents[6]  # 仓库根目录 `/home/hac/isaac/AnyMani`
 PREVIEW_HAND_SCRIPT = REPO_ROOT / "source" / "anymani" / "anymani" / "assets" / "presets" / "preview" / "preview_hand_preset.py"
@@ -48,18 +47,18 @@ def test_hand_preset_registry_keeps_single_palm_allegro_combination_readable():
     assert preset["palm_cfg"] == "single_box_allegro"
     assert preset["finger_cfg"] == "allegro_non_thumb_v1"
     assert preset["thumb_cfg"] == "allegro_thumb_v1"
-    assert preset["mirror_thumb_mount_for_left"] is True
+    assert "mirror_thumb_mount_for_left" not in preset  # handedness 不再允许退化为可关闭的 thumb-only 特例
 
 
-def test_same_hand_preset_can_switch_left_and_right_via_builder_thumb_mapping():
+def test_same_hand_preset_can_switch_left_and_right_via_strict_hand_mapping():
     r"""同一份 hand preset 应允许通过 handedness 覆盖切到 left-hand。
 
     这里验证的不是 mount preset 层的字符串分支，而是更高层的科研语义：
 
-    - hand preset 只保存一套 canonical thumb 锚点；
-    - handedness 改成 `left` 后，由 hand builder 执行唯一映射；
-    - non-thumb 在 palm frame 下保持不变；
-    - thumb 的 $x$ 与 yaw 满足镜像关系。
+    - hand preset 只保存一套 canonical right-hand 真源；
+    - handedness 改成 `left` 后，由 hand builder 对完整 ``HandCfg`` 执行唯一映射；
+    - 全部同名 finger mounts 都满足严格 YZ 反射；
+    - joint identity 与 policy 顺序保持不变。
     """
 
     right = HumanLikeHandBuilder(
@@ -82,12 +81,19 @@ def test_same_hand_preset_can_switch_left_and_right_via_builder_thumb_mapping():
     right_thumb = next(finger for finger in right.fingers if finger.name == "thumb")
     left_thumb = next(finger for finger in left.fingers if finger.name == "thumb")
 
-    assert left_index.mount.pos == right_index.mount.pos
-    assert left_index.mount.rpy == right_index.mount.rpy
+    assert math.isclose(left_index.mount.pos[0], -right_index.mount.pos[0], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_index.mount.pos[1], right_index.mount.pos[1], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_index.mount.pos[2], right_index.mount.pos[2], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_index.mount.rpy[0], right_index.mount.rpy[0], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_index.mount.rpy[1], -right_index.mount.rpy[1], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_index.mount.rpy[2], -right_index.mount.rpy[2], rel_tol=0.0, abs_tol=1e-6)
     assert math.isclose(left_thumb.mount.pos[0], -right_thumb.mount.pos[0], rel_tol=0.0, abs_tol=1e-6)
     assert math.isclose(left_thumb.mount.pos[1], right_thumb.mount.pos[1], rel_tol=0.0, abs_tol=1e-6)
     assert math.isclose(left_thumb.mount.pos[2], right_thumb.mount.pos[2], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_thumb.mount.rpy[0], right_thumb.mount.rpy[0], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_thumb.mount.rpy[1], -right_thumb.mount.rpy[1], rel_tol=0.0, abs_tol=1e-6)
     assert math.isclose(left_thumb.mount.rpy[2], -right_thumb.mount.rpy[2], rel_tol=0.0, abs_tol=1e-6)
+    assert [joint.name for joint in left.iter_joints()] == [joint.name for joint in right.iter_joints()]
 
 
 def test_preview_hand_script_accepts_hand_preset_name_and_writes_urdf(tmp_path):

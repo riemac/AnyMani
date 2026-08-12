@@ -410,7 +410,7 @@ def _build_hand_urdf_file_cfg(
             max_depenetration_velocity=1000.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=True,
+            enabled_self_collisions=urdf_cfg.self_collision,
             solver_position_iteration_count=8,
             solver_velocity_iteration_count=0,
             sleep_threshold=0.005,
@@ -590,6 +590,10 @@ def _validate_same_hand_schema(containers: tuple[HandContainer, ...]) -> None:
 def _hand_schema_signature(container: HandContainer) -> tuple[object, ...]:
     r"""从 `hand.yaml` sidecar 抽取 same-schema 有序签名。
 
+    `topology_name` 的首段 ``left_`` / ``right_`` 只标记同一 morphology 的
+    物理 handedness lowering，不属于 articulation schema。签名因此比较去除该单个
+    前缀后的 topology key；其余结构字段仍全部精确比较。
+
     Returns:
         tuple[object, ...]: topology、DOF、slot、finger summary 和 ordered revolute
         joint names。最后一项直接定义 batched action 第二维的关节语义。
@@ -606,12 +610,33 @@ def _hand_schema_signature(container: HandContainer) -> tuple[object, ...]:
     )  # 有序 finger schema，避免同 DOF 但 finger routing 不同的资产混入
     joint_sequence = _ordered_revolute_joint_names(sidecar, asset_id=container.asset_id)  # `[J]`，canonical joint order
     return (
-        sidecar.get("topology_name"),
+        _handedness_invariant_topology_key(sidecar.get("topology_name")),
         sidecar.get("dof"),
         tuple(sidecar.get("surviving_slots", [])),
         finger_signature,
         joint_sequence,
     )
+
+
+def _handedness_invariant_topology_key(topology_name: object) -> object:
+    r"""移除导出 topology 名最前面的物理 handedness 标记。
+
+    Generated bundle 的目录 identity 使用 ``left_*`` / ``right_*`` 区分物理资产侧别，
+    但严格镜像定义要求两侧共享同一 link/joint topology。这里只移除开头的一个
+    ``left_`` 或 ``right_``；后续 family、DOF、missing/mixed 与 connectivity tokens
+    原样保留，避免把不同 morphology 错判成同 schema。
+
+    Args:
+        topology_name (object): sidecar 顶层 ``topology_name``；合法 generated bundle
+            通常为字符串，缺失或非字符串值保持原样供签名拒绝。
+
+    Returns:
+        object: handedness-invariant morphology key，或未经改变的原始值。
+    """
+
+    if isinstance(topology_name, str) and topology_name.startswith(("left_", "right_")):
+        return topology_name.split("_", maxsplit=1)[1]  # 仅丢弃首个 side token，其余 topology identity 不变
+    return topology_name  # 非标准/缺失名称不做猜测，继续由完整签名精确比较
 
 
 def _ordered_revolute_joint_names(sidecar: dict[str, object], *, asset_id: str) -> tuple[str, ...]:

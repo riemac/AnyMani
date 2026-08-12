@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import assets.generator.hand_generator as hand_generator_module
 import assets.generator.premade.batch as premade_batch_module
 import pytest
 import yaml
+from assets.bank import HandContainer, HandContainerCfg
 from assets.builder.hand_builders import HumanLikeHandBuilder, HumanLikeHandBuilderCfg
 from assets.exporter.urdf_writer import UrdfWriter, UrdfWriterCfg
 from assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
@@ -371,6 +373,123 @@ def test_premade_exception_rolls_back_new_materialized_meshes(monkeypatch, tmp_p
     run_root = next(path for path in tmp_path.iterdir() if path.is_dir())
     assert list(run_root.rglob("*.obj")) == []
     assert [path for path in run_root.rglob("*") if path.is_dir()] == []
+
+
+def test_left_custom_mesh_is_rolled_back_when_physics_fails(monkeypatch, tmp_path):
+    r"""Left custom mesh 在 physics 前首次镜像后，失败候选必须回滚该共享文件。
+
+    该测试与 procedural ``cs`` 回滚不同：输入是项目内已有的非对称 custom STL，
+    materializer 会在当前 run 的 ``meshes/`` 下新建内容哈希镜像文件。physics 失败
+    后只删除本候选首次发布的镜像副本，canonical source mesh 必须保持存在。
+    """
+
+    def _raise_synthetic_failure(*_args, **_kwargs):
+        raise RuntimeError("synthetic reflected mesh physics failure")
+
+    custom_finger_cfg = make_human_like_builder_cfg(
+        name="left_custom_mesh_rollback",
+        family="leap",
+        handedness="left",
+        palm_cfg="single_box_leap",
+        finger_cfg="leap_non_thumb_v1",
+        thumb_cfg="leap_thumb_v1",
+    )
+    # 用 typed finger cfg 覆盖默认 cs tip，确保本测试经过普通 custom mesh reflection 分支。
+    custom_finger_cfg = custom_finger_cfg.replace(
+        finger_cfg=custom_finger_cfg.finger_cfg.replace(
+            tip={"type": "mesh", "tip_type": "wedge", "scale": 1.0},
+        ),
+        thumb_cfg=custom_finger_cfg.thumb_cfg.replace(
+            tip={"type": "mesh", "tip_type": "wedge", "scale": 1.0},
+        ),
+    )
+    built_left = HumanLikeHandBuilder(custom_finger_cfg).build()  # 读取 builder 实际解析后的默认 custom tip source
+    source_mesh = Path(
+        next(finger for finger in built_left.fingers if finger.name == "index")
+        .tip_joint.collisions[0]
+        .geometry.file_path
+    )
+    assert source_mesh.is_file()  # 本测试必须真实经过普通 custom STL reflection 分支
+    monkeypatch.setattr(hand_generator_module, "close_hand_physics", _raise_synthetic_failure)
+
+    cfg = HandGeneratorCfg(
+        mode="made",
+        artifact_level="bundle",
+        output_dir=tmp_path,
+        Made=custom_finger_cfg,
+        Validate=None,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic reflected mesh physics failure"):
+        HandGenerator(cfg).generate()
+
+    run_root = next(path for path in tmp_path.iterdir() if path.is_dir())
+    assert list(run_root.rglob("*_yz_reflect_v1_*")) == []  # 候选期镜像 mesh 已由 written_paths 回滚
+    assert source_mesh.is_file()  # canonical source 不属于 run 回滚边界
+
+
+def test_left_custom_mesh_bundle_closes_handedness_contract_end_to_end(tmp_path):
+    r"""Generator 应把 left custom mesh、physics、URDF、sidecar 与 Bank 闭合为同一事实。
+
+    该用例覆盖完整顺序：
+
+    $$
+    \text{canonical build}\to\text{left lowering}\to\text{mesh materialize}
+    \to\text{physics closure}\to\text{URDF/sidecar}\to\text{HandBank}.
+    $$
+
+    最终 sidecar 不得残留待处理反射标记，URDF 必须引用内容哈希镜像 mesh，且
+    Bank 在默认 ``allow_legacy_left_handedness=False`` 下可直接读取新证书资产。
+    """
+
+    builder_cfg = make_human_like_builder_cfg(
+        name="left_custom_mesh_bundle",
+        family="leap",
+        handedness="left",
+        palm_cfg="single_box_leap",
+        finger_cfg="leap_non_thumb_v1",
+        thumb_cfg="leap_thumb_v1",
+    )
+    builder_cfg = builder_cfg.replace(
+        finger_cfg=builder_cfg.finger_cfg.replace(
+            tip={"type": "mesh", "tip_type": "wedge", "scale": 1.0},
+        ),
+        thumb_cfg=builder_cfg.thumb_cfg.replace(
+            tip={"type": "mesh", "tip_type": "wedge", "scale": 1.0},
+        ),
+    )  # 全部 fingertips 使用非对称 custom STL，覆盖 non-thumb/thumb 功能相位
+    generator = HandGenerator(
+        HandGeneratorCfg(
+            mode="made",
+            artifact_level="bundle",
+            output_dir=tmp_path,
+            Made=builder_cfg,
+            Validate=None,
+        )
+    )
+
+    result = generator.generate()
+
+    assert result is not None and result.urdf_path is not None and result.sidecar_path is not None
+    sidecar = yaml.safe_load(result.sidecar_path.read_text(encoding="utf-8"))
+    urdf_text = result.urdf_path.read_text(encoding="utf-8")
+    assert sidecar["handedness_contract"]["target_handedness"] == "left"
+    assert sidecar["handedness_contract"]["same_q"] is True
+    assert "_yz_reflect_v1_" in urdf_text  # URDF 引用最终镜像 mesh，而非 canonical source basename
+
+    hand_snapshot = sidecar["hand_cfg"]
+    all_mesh_geometries = [
+        element["geometry"]
+        for finger in hand_snapshot["fingers"]
+        for joint in finger["joints"]
+        for element in [*joint["collisions"], *joint["visuals"]]
+        if "file_path" in element["geometry"]
+    ]
+    assert all(geometry["reflected_about_yz"] is False for geometry in all_mesh_geometries)
+    assert any("_yz_reflect_v1_" in geometry["file_path"] for geometry in all_mesh_geometries)
+
+    container = HandContainer.from_cfg(HandContainerCfg(path=result.urdf_path.parent))
+    assert container.sidecar["handedness"] == "left"  # 新 strict left 通过默认 legacy 安全门
 
 
 def test_premade_parallel_failure_falls_back_to_serial(monkeypatch, tmp_path):

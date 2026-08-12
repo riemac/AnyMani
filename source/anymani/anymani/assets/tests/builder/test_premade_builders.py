@@ -270,8 +270,12 @@ def test_single_box_allegro_uses_explicit_single_palm_mount_preset():
     assert math.isclose(thumb.mount.rpy[2], -1.65806278845, rel_tol=0.0, abs_tol=1e-6)
 
 
-def test_single_box_mount_preset_mirrors_left_thumb_only():
-    """single-box 左手当前只对 thumb 做显式镜像，non-thumb 保持不动。"""
+def test_single_box_mount_preset_mirrors_all_finger_mounts_for_left():
+    r"""single-box 左手的全部 finger mounts 都应满足严格整手镜像。
+
+    Finger 名称与顺序是 policy identity，不随空间反射交换；每个同名 finger 的
+    mount 则满足 $\mathbf p_L=S\mathbf p_R, R_L=SR_RS$。
+    """
 
     right = HumanLikeHandBuilder(
         make_human_like_builder_cfg(
@@ -299,9 +303,15 @@ def test_single_box_mount_preset_mirrors_left_thumb_only():
     right_thumb = next(finger for finger in right.fingers if finger.name == "thumb")
     left_thumb = next(finger for finger in left.fingers if finger.name == "thumb")
 
-    assert left_index.mount.pos == right_index.mount.pos
-    assert left_index.mount.rpy == right_index.mount.rpy
+    assert math.isclose(left_index.mount.pos[0], -right_index.mount.pos[0], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_index.mount.pos[1], right_index.mount.pos[1], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_index.mount.pos[2], right_index.mount.pos[2], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_index.mount.rpy[0], right_index.mount.rpy[0], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_index.mount.rpy[1], -right_index.mount.rpy[1], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_index.mount.rpy[2], -right_index.mount.rpy[2], rel_tol=0.0, abs_tol=1e-6)
     assert math.isclose(left_thumb.mount.pos[0], -right_thumb.mount.pos[0], rel_tol=0.0, abs_tol=1e-6)
     assert math.isclose(left_thumb.mount.pos[1], right_thumb.mount.pos[1], rel_tol=0.0, abs_tol=1e-6)
     assert math.isclose(left_thumb.mount.pos[2], right_thumb.mount.pos[2], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_thumb.mount.rpy[0], right_thumb.mount.rpy[0], rel_tol=0.0, abs_tol=1e-6)
+    assert math.isclose(left_thumb.mount.rpy[1], -right_thumb.mount.rpy[1], rel_tol=0.0, abs_tol=1e-6)
     assert math.isclose(left_thumb.mount.rpy[2], -right_thumb.mount.rpy[2], rel_tol=0.0, abs_tol=1e-6)

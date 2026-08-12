@@ -3,7 +3,7 @@ AnyMani Assets
 
 `source/anymani/anymani/assets/` 是 AnyMani 的手资产生成子项目。
 
-当前版本：`0.3.2`
+当前版本：`0.3.3`
 
 它负责的不是单一 URDF 导出，而是一整条可追溯的资产生产链：
 
@@ -27,6 +27,8 @@ AnyMani Assets
 9. `mixed=True` 只展开 non-thumb 的 LEAP / Allegro family 组合；thumb 始终与 base palm family 绑定，因为其 mount 位姿属于 palm 的 canonical 装配语义。
 10. validator 前物化的 procedural mesh 是候选期产物；候选被拒绝或闭包/导出异常时，只回滚本次新写文件，不在 generated asset 树中保留 OBJ-only 半成品。
 11. `summary.stats.rejected_by_reason` 按稳定 validator error-code 集合计数；多规则同时命中的样本只占一个组合键，因此原因计数总和等于 `rejected`。
+12. generated left 由 canonical right 关于 palm YZ 平面做完整物理反射：位置、姿态、revolute 轴、惯量和非对称 mesh 同步 lowering，左右共享 joint identity、limits 与相同 $q$ 功能语义。
+13. 新 generated bundle 在 `hand.yaml.handedness_contract` 中声明 `same_q=true` 与 `physical_lowering_complete=true`；缺少严格证书的历史 left bundle 默认拒绝加载，只能通过显式 legacy audit override 读取。
 
 常看入口
 --------

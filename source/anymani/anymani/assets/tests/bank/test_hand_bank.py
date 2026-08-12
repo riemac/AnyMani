@@ -11,6 +11,7 @@ import textwrap
 from pathlib import Path, PurePosixPath
 
 import pytest
+import yaml
 from anymani.assets.bank import HandBank, HandBankCfg, HandContainer, HandContainerCfg
 
 
@@ -20,6 +21,8 @@ def _write_sample(
     *,
     mesh_name: str = "finger_tip_soft.stl",
     include_sidecar: bool = True,
+    handedness: str = "right",
+    include_handedness_contract: bool = False,
 ) -> Path:
     r"""写出一个最小 post-mutate sample bundle。
 
@@ -28,6 +31,8 @@ def _write_sample(
         sample_id (str): sample 目录名，同时默认写入 sidecar `id`。
         mesh_name (str): 共享 mesh 文件名。
         include_sidecar (bool): 是否写 `hand.yaml`。
+        handedness (str): sidecar 顶层物理 handedness。
+        include_handedness_contract (bool): 是否写入严格整手镜像 contract v1。
 
     Returns:
         Path: sample bundle 目录。
@@ -57,15 +62,24 @@ def _write_sample(
         encoding="utf-8",
     )
     if include_sidecar:
+        sidecar = {
+            "id": sample_id,
+            "handedness": handedness,
+            "topology_name": f"{handedness}_t4_i4_m4_r4",
+            "dof": 16,
+            "hand_cfg": {},
+        }  # fixture 显式模拟 exporter 的顶层 bundle contract
+        if include_handedness_contract:
+            sidecar["handedness_contract"] = {
+                "version": "1.0",
+                "canonical_handedness": "right",
+                "target_handedness": handedness,
+                "reflection_plane": "palm_yz",
+                "same_q": True,
+                "physical_lowering_complete": True,
+            }  # 新 generated bundle 由该证书声明完整物理 lowering 已完成
         (sample_dir / "hand.yaml").write_text(
-            textwrap.dedent(
-                f"""
-                id: {sample_id}
-                topology_name: right_t4_i4_m4_r4
-                dof: 16
-                hand_cfg: {{}}
-                """
-            ).strip(),
+            yaml.safe_dump(sidecar, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
     return sample_dir
@@ -281,6 +295,91 @@ def test_hand_container_requires_sidecar_by_default(tmp_path: Path) -> None:
         require_sidecar=False,
     )
     assert relaxed.asset_id == "missing_sidecar"
+
+
+def test_generated_left_without_handedness_contract_is_rejected_by_default(tmp_path: Path) -> None:
+    r"""Legacy generated left 缺少严格镜像证书时必须 fail-closed。
+
+    旧资产只把 ``handedness: left`` 当标签，并未保证 palm、全部 mounts、joint
+    axes、mesh 与惯量满足完整反射合同。默认拒绝可防止它们重新进入训练集合。
+    """
+
+    run_root = tmp_path / "post_mutate"
+    _write_sample(run_root, "legacy_left", handedness="left", include_handedness_contract=False)
+
+    with pytest.raises(ValueError, match="legacy generated left"):
+        HandBank(
+            HandBankCfg(
+                post_mutate_path=run_root,
+                selection_mode="explicit",
+                containers=("legacy_left",),
+            )
+        ).resolve()
+
+
+def test_generated_left_legacy_override_is_explicit_and_local(tmp_path: Path) -> None:
+    r"""研究者显式开启 legacy override 后，旧 left 可用于审计但不改变默认值。"""
+
+    run_root = tmp_path / "post_mutate"
+    _write_sample(run_root, "legacy_left", handedness="left", include_handedness_contract=False)
+
+    selection = HandBank(
+        HandBankCfg(
+            post_mutate_path=run_root,
+            selection_mode="explicit",
+            containers=("legacy_left",),
+            allow_legacy_left_handedness=True,
+        )
+    ).resolve()
+
+    assert [asset.asset_id for asset in selection.assets] == ["legacy_left"]  # override 只放行当前 bank 实例
+
+
+def test_generated_right_without_handedness_contract_remains_readable(tmp_path: Path) -> None:
+    r"""Legacy generated right 是 canonical 真源，不因缺少新 left-lowering 证书被拒绝。"""
+
+    run_root = tmp_path / "post_mutate"
+    _write_sample(run_root, "legacy_right", handedness="right", include_handedness_contract=False)
+
+    selection = HandBank(
+        HandBankCfg(
+            post_mutate_path=run_root,
+            selection_mode="explicit",
+            containers=("legacy_right",),
+        )
+    ).resolve()
+
+    assert [asset.asset_id for asset in selection.assets] == ["legacy_right"]
+
+
+def test_official_left_without_generated_contract_is_not_rejected(tmp_path: Path) -> None:
+    r"""Official left 使用自身人工资产合同，不套用 generated legacy gate。"""
+
+    run_root = tmp_path / "official"
+    sample_dir = _write_sample(run_root, "official_left", handedness="left", include_handedness_contract=False)
+
+    container = HandContainer.from_cfg(
+        HandContainerCfg(path=sample_dir, source_kind="official"),
+    )
+
+    assert container.source_kind == "official"  # source_kind 是 gate 的权威边界，不从目录名猜测
+
+
+def test_generated_left_with_strict_handedness_contract_is_readable(tmp_path: Path) -> None:
+    r"""新 generated left 携带完整 contract v1 时应通过默认安全门。"""
+
+    run_root = tmp_path / "post_mutate"
+    _write_sample(run_root, "strict_left", handedness="left", include_handedness_contract=True)
+
+    selection = HandBank(
+        HandBankCfg(
+            post_mutate_path=run_root,
+            selection_mode="explicit",
+            containers=("strict_left",),
+        )
+    ).resolve()
+
+    assert selection.assets[0].sidecar["handedness_contract"]["same_q"] is True  # 证书保留给下游审计
 
 
 def test_hand_container_rejects_missing_mesh_reference(tmp_path: Path) -> None:

@@ -24,6 +24,7 @@ import yaml
 
 from ...asset_base import HandCfg
 from ...asset_sidecar import restore_hand_cfg_snapshot
+from ...handedness import validate_generated_handedness_contract
 
 _SIDECAR_FILENAME = "hand.yaml"
 _SIDECAR_SUMMARY_KEYS = {
@@ -60,12 +61,18 @@ class PostMutateSource:
     metadata: dict[str, Any]
 
 
-def load_post_mutate_source(topology_dir: Path | str) -> PostMutateSource:
+def load_post_mutate_source(
+    topology_dir: Path | str,
+    *,
+    allow_legacy_left_handedness: bool = False,
+) -> PostMutateSource:
     r"""从 pre-made topology 根目录恢复 mutate-only 来源。
 
     Args:
         topology_dir (Path | str): 形如
             `.../generated/<premade_timestamp>/<group>/<topology>/`
+        allow_legacy_left_handedness (bool): 是否显式允许缺少严格镜像证书的
+            legacy generated left；只供历史审计，默认 ``False``。
 
     Returns:
         PostMutateSource: 含恢复出的 `HandCfg` 与来源 provenance。
@@ -86,6 +93,10 @@ def load_post_mutate_source(topology_dir: Path | str) -> PostMutateSource:
     sidecar_doc = yaml.safe_load(sidecar_path.read_text(encoding="utf-8")) or {}  # topology 根 sidecar 是唯一真源
     if not isinstance(sidecar_doc, dict):
         raise ValueError(f"Sidecar must be a mapping, got {type(sidecar_doc).__name__}: {sidecar_path}")
+    validate_generated_handedness_contract(
+        sidecar_doc,
+        allow_legacy_left_handedness=allow_legacy_left_handedness,
+    )  # mutate-only 绕过 HandBank，因此在恢复完整 hand_cfg 前独立执行同一安全门
 
     hand_cfg_raw = sidecar_doc.get("hand_cfg")
     if not isinstance(hand_cfg_raw, dict):

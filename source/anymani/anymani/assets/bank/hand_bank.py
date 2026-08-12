@@ -187,6 +187,15 @@ class HandBankCfg(AssetBankCfg):
     official 缺少人工核验字段时严格拒绝。
     """
 
+    allow_legacy_left_handedness: bool = False
+    r"""是否显式允许缺少严格镜像证书的 legacy generated left。
+
+    ``False`` 是科研安全默认值。旧 generated left 只携带 handedness 标签，不保证
+    palm、全部 finger mounts、joint axes、mesh 和 inertia 已完成严格整手反射，
+    因而默认不能进入训练/评估资产集合。该 override 只服务历史审计与问题复现；
+    generated right 是 canonical 真源，official 则由自身资产合同管理，均不受此门影响。
+    """
+
     def __post_init__(self) -> None:
         r"""只做无 IO 的 cfg 归一化。
 
@@ -395,6 +404,7 @@ class HandBank(AssetBank):
             validate_mesh_relpaths=self.cfg.validate_mesh_relpaths,  # URDF mesh closure
             parse_visual_rgba=self.cfg.parse_visual_rgba,  # 可选 visual provenance
             require_geometry_semantics=self.cfg.require_geometry_semantics,  # distill/robots 按需
+            allow_legacy_left_handedness=self.cfg.allow_legacy_left_handedness,  # generated left 的严格合同安全门
         )
 
     @staticmethod

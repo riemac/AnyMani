@@ -47,7 +47,11 @@ def _load_heterogeneous_cfg_module():
     return module
 
 
-def _same_schema_sidecar(joint_names: tuple[str, ...]) -> dict[str, object]:
+def _same_schema_sidecar(
+    joint_names: tuple[str, ...],
+    *,
+    topology_name: str = "right_t2",
+) -> dict[str, object]:
     r"""构造 joint order 可控的同拓扑 sidecar。
 
     顶层 topology / DOF / slot / finger summary 完全相同，唯一变量是 `hand_cfg` 中
@@ -56,13 +60,15 @@ def _same_schema_sidecar(joint_names: tuple[str, ...]) -> dict[str, object]:
 
     Args:
         joint_names (tuple[str, ...]): articulation 预期采用的有序 revolute joint 名称。
+        topology_name (str): 带物理 handedness 前缀的导出 topology 名；默认保持
+            既有 ``right_t2`` 测试锚点。
 
     Returns:
         dict[str, object]: `HandContainer.sidecar` 的最小同拓扑替身。
     """
 
     return {
-        "topology_name": "right_t2",
+        "topology_name": topology_name,
         "dof": 2,
         "surviving_slots": ["thumb"],
         "fingers": [{"name": "thumb", "revolute_dof": 2}],
@@ -303,6 +309,32 @@ def test_same_schema_validation_rejects_permuted_revolute_joint_sequence() -> No
         validator(containers)
 
 
+def test_same_schema_validation_accepts_strict_left_right_pair() -> None:
+    r"""物理 handedness 前缀不得把同一 topology 误判成不同 articulation schema。
+
+    Generated 导出目录用 ``left_*`` / ``right_*`` 表达物理侧别，但严格镜像合同要求
+    两侧共享 link/joint topology、DOF 与 policy identity。因而 same-schema 签名应比较
+    去除单个 handedness 前缀后的 morphology key，同时继续精确比较有序 revolute
+    joint sequence；这使一个 2-env batched articulation 可以按 round-robin 路由左右手。
+    """
+
+    module = _load_heterogeneous_cfg_module()  # 取得生产路径使用的 schema validator
+    validator = module.HandSpawnAdapter.__init__.__globals__["_validate_same_hand_schema"]
+    joint_names = ("thumb_j0", "thumb_j1")  # 左右两侧共享完全相同的 action identity/order
+    containers = (
+        types.SimpleNamespace(
+            asset_id="left",
+            sidecar=_same_schema_sidecar(joint_names, topology_name="left_t2"),
+        ),
+        types.SimpleNamespace(
+            asset_id="right",
+            sidecar=_same_schema_sidecar(joint_names, topology_name="right_t2"),
+        ),
+    )
+
+    validator(containers)  # 不应抛错；handedness 是物理 lowering，不是 topology 变化
+
+
 def test_restore_visual_materials_is_opt_in_on_urdf_child_cfg(tmp_path: Path) -> None:
     r"""只有 opt-in hand spawn cfg 会把 child `UrdfFileCfg.func` 替换成颜色恢复 wrapper。"""
 
@@ -378,6 +410,41 @@ def test_multi_asset_spawner_propagates_urdf_contact_sensor_flag(tmp_path: Path)
 
     assert multi_asset_cfg.activate_contact_sensors is True
     assert multi_asset_cfg.assets_cfg[0].activate_contact_sensors is True
+
+
+def test_hand_spawn_propagates_self_collision_to_root_articulation(tmp_path: Path) -> None:
+    r"""`self_collision=False` 必须同时关闭 URDF 与 root articulation 的自碰撞。"""
+
+    module = _load_heterogeneous_cfg_module()
+    bundle_dir = tmp_path / "variant_no_self_collision"
+    bundle_dir.mkdir()
+    (bundle_dir / "hand.urdf").write_text("<robot name='stub'/>", encoding="utf-8")
+    (bundle_dir / "hand.yaml").write_text(
+        "id: variant_no_self_collision\n"
+        "topology_name: stub_topology\n"
+        "dof: 1\n"
+        "surviving_slots: [index]\n"
+        "fingers:\n"
+        "- name: index\n"
+        "  revolute_dof: 1\n",
+        encoding="utf-8",
+    )
+
+    urdf_cfg_type = module.HandSpawnAdapter.__init__.__globals__["HandUrdfSpawnCfg"]
+    spawn_cfg = module.HandSpawnCfg(
+        bank=module.HandBankCfg(
+            selection_mode="explicit",
+            containers=(str(bundle_dir),),
+            validate_mesh_relpaths=False,
+        ),
+        urdf=urdf_cfg_type(self_collision=False),
+        validate_same_schema=False,  # 本测试只验证 importer/root 配置透传，不重复 joint-schema 合同
+    )
+    robot_cfg = module.HandSpawnAdapter(spawn_cfg).build_articulation_cfg(prim_path="/World/Robot")
+    child_cfg = robot_cfg.spawn.assets_cfg[0]
+
+    assert child_cfg.self_collision is False
+    assert child_cfg.articulation_props.enabled_self_collisions is False
 
 
 def test_visual_material_restore_plan_is_shared_across_same_topology_assets() -> None:
