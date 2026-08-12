@@ -87,8 +87,8 @@ class DemoMountMutatorCfg(HandMutatorCfg):
     )
 
 
-class DemoQuotaMountMutatorCfg(HandMutatorCfg):
-    r"""测试 accepted/output quota 的 post-mutate cfg。"""
+class DemoProposalMountMutatorCfg(HandMutatorCfg):
+    r"""测试 `self_mode` proposal 概率的 post-mutate cfg。"""
 
     mount_perturb = MountPerturbCfg(
         self_mode={"identity": 0.5, "general": 0.5},
@@ -96,8 +96,8 @@ class DemoQuotaMountMutatorCfg(HandMutatorCfg):
     )
 
 
-class DemoQuotaLimitMutatorCfg(HandMutatorCfg):
-    r"""测试 `limit_tweak.self_mode` accepted/output quota 的 post-mutate cfg。"""
+class DemoProposalLimitMutatorCfg(HandMutatorCfg):
+    r"""测试 `limit_tweak.self_mode` proposal 概率的 post-mutate cfg。"""
 
     limit_tweak = LimitTweakCfg(
         self_mode={"identity": 0.5, "homologous_non_thumb": 0.5},
@@ -107,8 +107,8 @@ class DemoQuotaLimitMutatorCfg(HandMutatorCfg):
     )
 
 
-class DemoQuotaMountAndLimitMutatorCfg(HandMutatorCfg):
-    r"""测试多 mode-term 同时存在时的边缘 accepted/output 统计。"""
+class DemoProposalMountAndLimitMutatorCfg(HandMutatorCfg):
+    r"""测试多个 mode term 在每次候选中独立联合抽样。"""
 
     mount_perturb = MountPerturbCfg(
         self_mode={"identity": 0.5, "general": 0.5},
@@ -122,8 +122,8 @@ class DemoQuotaMountAndLimitMutatorCfg(HandMutatorCfg):
     )
 
 
-class DemoQuotaTipReplaceMutatorCfg(HandMutatorCfg):
-    r"""测试 `tip_replace.self_mode` accepted/output quota 与 tip_type proposal 统计。"""
+class DemoProposalTipReplaceMutatorCfg(HandMutatorCfg):
+    r"""测试 `tip_replace.self_mode` 与 tip type 的 proposal 统计。"""
 
     tip_replace = TipReplaceCfg(
         self_mode={"identity": 0.5, "same": 0.5},
@@ -132,8 +132,8 @@ class DemoQuotaTipReplaceMutatorCfg(HandMutatorCfg):
     )
 
 
-class DemoQuotaLinkScaleMutatorCfg(HandMutatorCfg):
-    r"""测试 `link_scale.self_mode` accepted/output quota。"""
+class DemoProposalLinkScaleMutatorCfg(HandMutatorCfg):
+    r"""测试 `link_scale.self_mode` proposal 统计。"""
 
     link_scale = LinkScaleCfg(
         self_mode={"identity": 0.5, "only_length": 0.5},
@@ -272,8 +272,51 @@ def test_post_mutate_run_reuses_shared_mesh_directory_for_custom_tip_outputs(tmp
         assert "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/custom/tips/" not in urdf_text
 
 
-def test_post_mutate_self_mode_probability_is_accepted_output_quota(tmp_path):
-    r"""self_mode dict 应控制 accepted/output 分布，而不是 proposal prior。"""
+def test_post_mutate_seed_replays_independent_joint_proposals_and_complete_summary(tmp_path):
+    r"""同一 seed 应重放完整联合样本，且多个 term 不得按边缘 quota 对齐。"""
+
+    topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
+    mutate_cfg = HandGeneratorCfg(
+        mode="mutate",
+        artifact_level="hand_cfg",
+        source_topology_dir=topology_dir,
+        output_dir=tmp_path,
+        n_samples=8,
+        post_mutate_seed=20260813,
+        Mutate=DemoProposalMountAndLimitMutatorCfg(),
+        Validate=None,
+        Physics=None,
+    )
+
+    first_results = list(HandGenerator(mutate_cfg).generate_batch())
+    second_results = list(HandGenerator(mutate_cfg).generate_batch())
+    first_samples = [result.metadata["post_mutate_samples"] for result in first_results]
+    second_samples = [result.metadata["post_mutate_samples"] for result in second_results]
+    joint_modes = {
+        (
+            sample["mount_perturb"]["resolved_self_mode"],
+            sample["limit_tweak"]["resolved_self_mode"],
+        )
+        for sample in first_samples
+    }
+    first_run_dir, _second_run_dir = _mutate_run_dirs(topology_dir)
+    summary = yaml.safe_load((first_run_dir / "summary.yaml").read_text(encoding="utf-8"))
+
+    assert first_samples == second_samples
+    assert len(joint_modes) >= 3  # 旧 quota schedule 只能产生两个彼此对齐的组合
+    assert summary["config"]["Mutate"]["mount_perturb"]["self_mode"] == {"identity": 0.5, "general": 0.5}
+    assert summary["post_mutate_sampling"]["seed"] == 20260813
+    assert summary["post_mutate_sampling"]["planned_variants"] == 8
+    assert summary["post_mutate_sampling"]["successful_variants"] == 8
+    assert summary["post_mutate_sampling"]["shortfall"] == 0
+    assert len(summary["post_mutate_sampling"]["slots"]) == 8
+    assert sum(summary["post_mutate_joint_mode_stats"]["proposed"].values()) == 8
+    assert summary["post_mutate_joint_mode_stats"]["proposed"] == summary["post_mutate_joint_mode_stats"]["accepted"]
+    assert "target_quota" not in str(summary)
+
+
+def test_tip_replace_records_proposed_and_accepted_type_counts(tmp_path):
+    r"""tip type 统计应来自实际 proposal，而不是由目标配额反推。"""
 
     topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
     mutate_cfg = HandGeneratorCfg(
@@ -282,156 +325,64 @@ def test_post_mutate_self_mode_probability_is_accepted_output_quota(tmp_path):
         source_topology_dir=topology_dir,
         output_dir=tmp_path,
         n_samples=4,
-        Mutate=DemoQuotaMountMutatorCfg(),
+        post_mutate_seed=20260813,
+        Mutate=DemoProposalTipReplaceMutatorCfg(),
         Validate=None,
     )
 
     results = list(HandGenerator(mutate_cfg).generate_batch())
 
-    modes = [
-        result.metadata["post_mutate_samples"]["mount_perturb"]["resolved_self_mode"]
-        for result in results
-    ]
     mutate_run_dir = _mutate_run_dirs(topology_dir)[0]
     summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
 
-    assert modes.count("identity") == 2
-    assert modes.count("general") == 2
-    assert summary["post_mutate_mode_stats"]["mount_perturb"]["identity"]["target_quota"] == 2
-    assert summary["post_mutate_mode_stats"]["mount_perturb"]["identity"]["accepted"] == 2
-    assert summary["post_mutate_mode_stats"]["mount_perturb"]["general"]["target_quota"] == 2
-    assert summary["post_mutate_mode_stats"]["mount_perturb"]["general"]["accepted"] == 2
+    assert len(results) == 4
+    assert summary["post_mutate_tip_type_stats"]["proposed"] == summary["post_mutate_tip_type_stats"]["accepted"]
+    assert sum(summary["post_mutate_tip_type_stats"]["accepted"].values()) > 0
 
 
-def test_limit_tweak_self_mode_probability_is_accepted_output_quota(tmp_path):
-    r"""`limit_tweak.self_mode` dict 也应控制 accepted/output 分布。"""
+def test_post_mutate_failed_slot_stops_at_its_own_attempt_budget(monkeypatch, tmp_path):
+    r"""一个槽位失败不应全局补位；每个槽位独立耗尽预算后形成 shortfall。"""
 
     topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
     mutate_cfg = HandGeneratorCfg(
         mode="mutate",
-        artifact_level="bundle",
+        artifact_level="hand_cfg",
         source_topology_dir=topology_dir,
         output_dir=tmp_path,
-        n_samples=4,
-        Mutate=DemoQuotaLimitMutatorCfg(),
+        n_samples=2,
+        post_mutate_seed=20260813,
+        post_mutate_attempts_per_variant=3,
+        Mutate=DemoProposalLinkScaleMutatorCfg(),
         Validate=None,
+        Physics=None,
     )
+    generator = HandGenerator(mutate_cfg)
 
-    results = list(HandGenerator(mutate_cfg).generate_batch())
+    def reject_candidate(**_kwargs):
+        generator._last_rejection_detail = {
+            "stage": "post_mutate_validate",
+            "errors": ["synthetic rejection"],
+            "error_codes": ["test.synthetic_rejection"],
+            "metadata": {},
+        }
+        generator._record_generation_rejection(
+            stage="post_mutate_validate",
+            error_codes=("test.synthetic_rejection",),
+        )
 
-    modes = [
-        result.metadata["post_mutate_samples"]["limit_tweak"]["resolved_self_mode"]
-        for result in results
-    ]
+    monkeypatch.setattr(generator, "_generate_once", reject_candidate)
+    results = list(generator.generate_batch())
     mutate_run_dir = _mutate_run_dirs(topology_dir)[0]
     summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
 
-    assert modes.count("identity") == 2
-    assert modes.count("homologous_non_thumb") == 2
-    assert summary["post_mutate_mode_stats"]["limit_tweak"]["identity"]["target_quota"] == 2
-    assert summary["post_mutate_mode_stats"]["limit_tweak"]["identity"]["accepted"] == 2
-    assert summary["post_mutate_mode_stats"]["limit_tweak"]["homologous_non_thumb"]["target_quota"] == 2
-    assert summary["post_mutate_mode_stats"]["limit_tweak"]["homologous_non_thumb"]["accepted"] == 2
-
-
-def test_multiple_mode_terms_track_marginal_accepted_output_quota(tmp_path):
-    r"""多个 mode-term 同时存在时，应各自满足自己的边缘 accepted/output 分布。"""
-
-    topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
-    mutate_cfg = HandGeneratorCfg(
-        mode="mutate",
-        artifact_level="bundle",
-        source_topology_dir=topology_dir,
-        output_dir=tmp_path,
-        n_samples=4,
-        Mutate=DemoQuotaMountAndLimitMutatorCfg(),
-        Validate=None,
-    )
-
-    results = list(HandGenerator(mutate_cfg).generate_batch())
-    mount_modes = [
-        result.metadata["post_mutate_samples"]["mount_perturb"]["resolved_self_mode"]
-        for result in results
-    ]
-    limit_modes = [
-        result.metadata["post_mutate_samples"]["limit_tweak"]["resolved_self_mode"]
-        for result in results
-    ]
-    mutate_run_dir = _mutate_run_dirs(topology_dir)[0]
-    summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
-
-    assert mount_modes.count("identity") == 2
-    assert mount_modes.count("general") == 2
-    assert limit_modes.count("identity") == 2
-    assert limit_modes.count("homologous_non_thumb") == 2
-    assert summary["post_mutate_mode_stats"]["mount_perturb"]["identity"]["accepted"] == 2
-    assert summary["post_mutate_mode_stats"]["mount_perturb"]["general"]["accepted"] == 2
-    assert summary["post_mutate_mode_stats"]["limit_tweak"]["identity"]["accepted"] == 2
-    assert summary["post_mutate_mode_stats"]["limit_tweak"]["homologous_non_thumb"]["accepted"] == 2
-
-
-def test_tip_replace_self_mode_probability_is_accepted_output_quota(tmp_path):
-    r"""`tip_replace.self_mode` dict 应控制 accepted/output mode 分布。"""
-
-    topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
-    mutate_cfg = HandGeneratorCfg(
-        mode="mutate",
-        artifact_level="bundle",
-        source_topology_dir=topology_dir,
-        output_dir=tmp_path,
-        n_samples=4,
-        Mutate=DemoQuotaTipReplaceMutatorCfg(),
-        Validate=None,
-    )
-
-    results = list(HandGenerator(mutate_cfg).generate_batch())
-
-    modes = [
-        result.metadata["post_mutate_samples"]["tip_replace"]["resolved_self_mode"]
-        for result in results
-    ]
-    mutate_run_dir = _mutate_run_dirs(topology_dir)[0]
-    summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
-
-    assert modes.count("identity") == 2
-    assert modes.count("same") == 2
-    assert summary["post_mutate_mode_stats"]["tip_replace"]["identity"]["target_quota"] == 2
-    assert summary["post_mutate_mode_stats"]["tip_replace"]["identity"]["accepted"] == 2
-    assert summary["post_mutate_mode_stats"]["tip_replace"]["same"]["target_quota"] == 2
-    assert summary["post_mutate_mode_stats"]["tip_replace"]["same"]["accepted"] == 2
-    assert sum(summary["post_mutate_tip_type_stats"]["proposed"].values()) == 8
-    assert sum(summary["post_mutate_tip_type_stats"]["accepted"].values()) == 8
-
-
-def test_link_scale_self_mode_probability_is_accepted_output_quota(tmp_path):
-    r"""`link_scale.self_mode` dict 应控制 accepted/output mode 分布。"""
-
-    topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
-    mutate_cfg = HandGeneratorCfg(
-        mode="mutate",
-        artifact_level="bundle",
-        source_topology_dir=topology_dir,
-        output_dir=tmp_path,
-        n_samples=4,
-        Mutate=DemoQuotaLinkScaleMutatorCfg(),
-        Validate=None,
-    )
-
-    results = list(HandGenerator(mutate_cfg).generate_batch())
-
-    modes = [
-        result.metadata["post_mutate_samples"]["link_scale"]["resolved_self_mode"]
-        for result in results
-    ]
-    mutate_run_dir = _mutate_run_dirs(topology_dir)[0]
-    summary = yaml.safe_load((mutate_run_dir / "summary.yaml").read_text(encoding="utf-8"))
-
-    assert modes.count("identity") == 2
-    assert modes.count("only_length") == 2
-    assert summary["post_mutate_mode_stats"]["link_scale"]["identity"]["target_quota"] == 2
-    assert summary["post_mutate_mode_stats"]["link_scale"]["identity"]["accepted"] == 2
-    assert summary["post_mutate_mode_stats"]["link_scale"]["only_length"]["target_quota"] == 2
-    assert summary["post_mutate_mode_stats"]["link_scale"]["only_length"]["accepted"] == 2
+    assert results == []
+    assert summary["stats"]["attempted"] == 6
+    assert summary["post_mutate_sampling"]["successful_variants"] == 0
+    assert summary["post_mutate_sampling"]["shortfall"] == 2
+    assert [slot["attempts"] for slot in summary["post_mutate_sampling"]["slots"]] == [3, 3]
+    assert all(slot["accepted"] is False for slot in summary["post_mutate_sampling"]["slots"])
+    assert sum(summary["post_mutate_joint_mode_stats"]["proposed"].values()) == 6
+    assert summary["post_mutate_joint_mode_stats"]["accepted"] == {}
 
 
 def test_unified_generate_runner_accepts_post_mutate_cli(monkeypatch, tmp_path):

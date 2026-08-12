@@ -14,13 +14,12 @@ tip spec 的不同投影，不能只改其中一项就当作完成了 tip replac
 custom mesh tip 的最终 `mass / inertial` 属于 generator 主链里的 physics closure。
 本算子只改 tip spec 的几何与接触语义，不在局部 mutator 内写最终动力学属性。
 
-本轮 contract 明确区分两层概率：
+本轮 contract 中两层概率都是 proposal，但随机变量的层级不同：
 
-1. `self_mode` 是样本级 accepted/output 分布，和 `mount_perturb` /
-   `limit_tweak` 一样由 generator quota 保障；
+1. `self_mode` 是整手样本级 proposal，每个候选独立抽取；
 2. `tip_range` 是 tip_type proposal 分布。若 validator 因 tip 几何偏置拒绝
-   某些 proposal，最终 accepted tip_type 分布可能轻微漂移，因此必须在 summary
-   中显式记录 proposed / accepted 计数，而不是把它伪装成后验 quota。
+    某些 proposal，最终 accepted tip_type 分布可能轻微漂移，因此必须在 summary
+    中显式记录 proposed / accepted 计数，而不是强制修平这种选择偏移。
 """
 
 from __future__ import annotations
@@ -104,8 +103,8 @@ class TipReplaceCfg(MutatorBaseCfg):
 
     - `None`：未显式指定时默认落到 `"same"`；
     - `str`：固定使用某一个 mode；
-    - `dict[str, float]`：按概率混合采样 mode，且该概率由 generator 解释为
-      accepted/output quota，而不是 proposal prior。
+    - `dict[str, float]`：每个候选按该概率独立抽取 mode；validator 可自然改变
+      最终 accepted 分布，generator 只记录这种选择偏移而不强制补齐。
 
     预设 mode：
 
@@ -214,8 +213,8 @@ class TipReplaceMutator(MutatorBase):
 
     该 runtime 使用结构化 sample payload，而不是把每根 finger 的 tip_type / scale
     平铺成一堆局部 sampler。原因和 `mount_perturb` / `limit_tweak` 相同：
-    mode 一旦进入 accepted quota，generator 必须能强制某个 mode 并重新生成
-    该 mode 所需的完整低层随机量，避免“只改 mode 名但缺少 tip specs”的伪样本。
+    mode 与其低层随机量在一次 proposal 中共同生成，避免“只改 mode 名但缺少
+    tip specs”的伪样本。
     """
 
     cfg: TipReplaceCfg
@@ -280,7 +279,7 @@ class TipReplaceMutator(MutatorBase):
         return self.sample_one_for_mode(target, resolved_mode=resolved_mode)
 
     def sample_one_for_mode(self, target: HandCfg, *, resolved_mode: str) -> dict[str, Any]:
-        r"""为 accepted-quota 路径生成指定 mode 的结构化随机量。
+        r"""为显式 mode 的局部测试或诊断生成结构化随机量。
 
         Args:
             target (HandCfg): 当前原始 hand schema。

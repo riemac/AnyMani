@@ -233,7 +233,7 @@ class LimitTweakMutator(MutatorBase):
         return self.sample_one_for_mode(target, resolved_mode=resolved_mode)
 
     def sample_one_for_mode(self, target: HandCfg, *, resolved_mode: str) -> dict[str, Any]:
-        r"""为 accepted-quota 路径生成指定 mode 的结构化随机量。
+        r"""为显式 mode 的局部测试或诊断生成结构化随机量。
 
         generator 层把 `self_mode=dict` 解释成 accepted/output 分布时，会在 term 内部
         强制重采指定 mode。若只改 mode 名而不重新生成 mode 专属 payload，就会出现

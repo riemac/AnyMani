@@ -9,7 +9,7 @@ r"""generator 运行时子系统。
 - `assets.generator.runtime.recipe_loader`
 - `assets.generator.runtime.restore`
 - `assets.generator.runtime.run_context`
-- `assets.generator.runtime.mutate_quota`
+- `assets.generator.runtime.mutate_sampling`
 """
 
 __all__: list[str] = []

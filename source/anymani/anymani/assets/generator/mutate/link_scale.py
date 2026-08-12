@@ -130,8 +130,8 @@ class LinkScaleCfg(MutatorBaseCfg):
 
     - `None`：未显式指定，默认落到 `"general"`；
     - `str`：固定使用某一个 mode；
-    - `dict[str, float]`：按概率混合采样 mode，且该概率由 generator 解释为
-      accepted/output quota，而不是 proposal prior。
+    - `dict[str, float]`：每个候选按该概率独立抽取 mode；validator 可自然改变
+      最终 accepted 分布，generator 只记录这种选择偏移而不强制补齐。
 
     预设 mode：
 
@@ -240,8 +240,7 @@ class LinkScaleMutator(MutatorBase):
         `link_scale` 现在和 `mount_perturb` / `limit_tweak` / `tip_replace`
         一样由高层 mode 决定实际随机量集合。因此采样层不再把所有潜在
         随机变量平铺出来，而是生成一份带 `resolved_self_mode` 的 payload。
-        这能保证 accepted quota 强制某个 mode 时，term 内部重新生成与该
-        mode 匹配的完整随机量。
+        这能保证每次 candidate proposal 只携带当前 mode 真正消费的随机量。
         """
 
         return {"sample": lambda: self._sample_one(target)}
@@ -368,7 +367,7 @@ class LinkScaleMutator(MutatorBase):
         return self.sample_one_for_mode(target, resolved_mode=resolved_mode)
 
     def sample_one_for_mode(self, target: HandCfg, *, resolved_mode: str) -> dict[str, Any]:
-        r"""为 accepted-quota 路径生成指定 mode 的结构化随机量。"""
+        r"""为显式 mode 的局部测试或诊断生成结构化随机量。"""
 
         if resolved_mode not in _ALL_SELF_MODES:
             raise ValueError(f"unsupported link_scale resolved mode: {resolved_mode!r}")

@@ -87,6 +87,19 @@ class HandMutatorCfg(AssetCfgBase):
 
         return bool(self.ordered_terms())
 
+    def to_dict(self) -> dict[str, Any]:
+        r"""序列化开放式 class-attribute term container。
+
+        `HandMutatorCfg` 自身只有运行时绑定字段，真正的科研配置由子类类属性声明。
+        通用 dataclass 序列化看不到这些 term，会把 `Mutate` 错写成空字典；这里以
+        `ordered_terms()` 为唯一真源，确保 summary 保存本轮实际使用的完整 proposal。
+        """
+
+        # 保留 cfg 对象交给 recipe serializer 递归展开；它会跳过 `_distribution`
+        # 等执行期私有字段。若在这里调用通用 dataclass `to_dict()`，未初始化的
+        # `init=False` runtime 字段会被误当成科研配置并触发 AttributeError。
+        return {name: term_cfg for name, term_cfg in self.ordered_terms()}
+
 
 class HandMutator:
     r"""post-mutate 流水线运行时。

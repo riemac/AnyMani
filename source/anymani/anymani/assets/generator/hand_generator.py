@@ -74,12 +74,9 @@ from .presentation.recolor import (
     normalize_recolor_spec,
     resolve_visual_recolor_materials,
 )
-from .quota.accepted_mode import (
-    mode_term_specs as _mode_term_specs,
-)
 from .result import HandGenerationResult
 from .runtime.artifact_lifecycle import rollback_created_directory, rollback_written_artifacts
-from .runtime.mutate_quota import run_mutate_batch_with_accepted_mode_quota
+from .runtime.mutate_sampling import run_mutate_batch_with_independent_proposals
 from .runtime.restore import PostMutateSource, load_post_mutate_source
 from .runtime.run_context import GenerationRunContext
 
@@ -116,7 +113,7 @@ def _has_enabled_mutation(cfg: HandMutatorCfg) -> bool:
     return cfg.has_terms()
 
 
-def _sample_mutation_terms(mutator: HandMutator, target: HandCfg) -> dict[str, dict[str, float]]:
+def _sample_mutation_terms(mutator: HandMutator, target: HandCfg) -> dict[str, dict[str, Any]]:
     r"""按 mutator 描述的独立联合分布为当前 hand 采样一组 term 参数。"""
 
     batch = mutator.sample_batch(target, batch_size=1)
@@ -209,12 +206,20 @@ class HandGeneratorCfg(AssetCfgBase):
     - ``"raise"``：直接抛出并行异常，便于专门排查 worker / pickle / 导出错误。
     """
 
-    post_mutate_max_attempt_factor: int = 10
-    """post-mutate validator 补采预算系数。
+    post_mutate_seed: int = 20260813
+    """post-mutate 联合 proposal 的随机种子。
 
-    若目标成功数为 $N$，最多允许尝试 $N\times f$ 个候选。这样可以实现
-    “目标 100、首轮成功 94、下一轮补 6” 的缺口补采，同时避免 validator
-    拒绝率异常时无限循环。
+    同一来源 topology、Mutate 配置和 seed 必须重放同一串 mode 与连续参数。
+    该 seed 只在当前 mutate batch 内生效，运行结束后恢复调用者的 Python
+    随机状态，避免资产生成改变后续实验的随机序列。
+    """
+
+    post_mutate_attempts_per_variant: int = 10
+    """每个计划 variant 槽位允许的完整联合 proposal 次数。
+
+    validator 拒绝后，当前候选的全部 mode 与连续参数共同作废；下一次尝试从
+    四个 mutator 的原始 proposal 分布重新独立抽样。预算耗尽只造成当前槽位
+    shortfall，不在其他 mode 内补采，也不占用后续槽位的预算。
     """
 
     Made: HandBuilderCfg = field(default_factory=HandBuilderCfg)
@@ -357,6 +362,8 @@ class HandGeneratorCfg(AssetCfgBase):
             raise ValueError("premade_parallel_workers must be >= 1 when provided")
         if self.premade_parallel_fallback not in {"serial", "raise"}:
             raise ValueError("premade_parallel_fallback must be either 'serial' or 'raise'")
+        if int(self.post_mutate_attempts_per_variant) < 1:
+            raise ValueError("post_mutate_attempts_per_variant must be >= 1")
 
         # pre-made façade 一旦显式给出 `connectivity_presets`，就必须同时给出 hand preset 列表；
         # 否则运行时连“这张映射是给谁的”都无法确定。
@@ -927,56 +934,16 @@ class HandGenerator:
 
         if self.cfg.mode == "mutate":
             target_count = max(int(self.cfg.n_samples), 0)
-            max_attempts = max(target_count * int(self.cfg.post_mutate_max_attempt_factor), 10)
             mutator = HandMutator(self.cfg.Mutate)
             source_hand = self._load_mutate_source().hand_cfg
-            accepted_mode_terms = _mode_term_specs(self.cfg.Mutate)
-
-            if accepted_mode_terms:
-                yield from run_mutate_batch_with_accepted_mode_quota(
-                    generator=self,
-                    mutator=mutator,
-                    source_hand=source_hand,
-                    accepted_mode_terms=accepted_mode_terms,
-                    target_count=target_count,
-                    max_attempts=max_attempts,
-                    sample_mutation_terms_fn=_sample_mutation_terms,
-                )
-                return
-
-            success_count = 0
-            attempt_count = 0
-
-            while success_count < target_count:
-                remaining = target_count - success_count
-                batch_budget = min(remaining, max_attempts - attempt_count)
-                if batch_budget <= 0:
-                    raise RuntimeError(
-                        "too many rejected samples during mutate-only generate_batch(); "
-                        f"succeeded={success_count}, target={target_count}, attempted={attempt_count}, "
-                        f"budget={max_attempts}"
-                    )
-
-                # 联合采样在这里按“缺口”批量完成：若目标 100 已成功 94，
-                # 下一轮只采 6 组联合参数，而不是重新采满 100。
-                try:
-                    sampled_batch = mutator.sample_batch(source_hand, batch_size=batch_budget)
-                except Exception:
-                    sampled_batch = [_sample_mutation_terms(mutator, source_hand) for _ in range(batch_budget)]
-
-                for sampled_terms in sampled_batch:
-                    attempt_count += 1
-                    result = self._generate_once(
-                        hand_preset_name=None,
-                        connectivity_preset_name=None,
-                        sampled_mutation_terms=sampled_terms,
-                    )
-                    if result is None:
-                        continue
-                    yield result
-                    success_count += 1
-                    if success_count >= target_count:
-                        break
+            yield from run_mutate_batch_with_independent_proposals(
+                generator=self,
+                mutator=mutator,
+                source_hand=source_hand,
+                target_count=target_count,
+                attempts_per_variant=int(self.cfg.post_mutate_attempts_per_variant),
+                seed=int(self.cfg.post_mutate_seed),
+            )
             return
 
         hand_preset_names = self._candidate_hand_preset_names()
@@ -1013,33 +980,6 @@ class HandGenerator:
             yield result
             success_count += 1
 
-    def _update_mode_quota_shortfall(self, diagnostics: dict[str, dict[str, dict[str, Any]]]) -> None:
-        r"""基于当前 accepted 计数回写每个 term/mode 的剩余 shortfall。"""
-
-        for per_term in diagnostics.values():
-            for stats in per_term.values():
-                stats["shortfall"] = int(stats["target_quota"]) - int(stats["accepted"])
-
-    def _classify_last_rejection(self) -> str:
-        r"""把最近一次 rejection stage 粗分到 per-mode diagnostics 字段。
-
-        当前 `GenerationRunContext` 只记录 stage，不记录 validator 细节。
-        因此这里先做保守分类：post_mutate_validate 统一计入 validator。
-        unsupported / incomplete 的细粒度统计已经在 validator certificate 中保留，
-        后续若 summary 需要逐项展开，可把 `ValidationResult.metadata` 接入这里。
-        """
-
-        context = self._ensure_run_context()
-        if context.last_rejection_stage == "post_mutate_validate" and self._last_rejection_detail:
-            metadata = self._last_rejection_detail.get("metadata")
-            certificate = metadata.get("finger_spacing_certificate") if isinstance(metadata, dict) else None
-            if isinstance(certificate, dict):
-                if certificate.get("complete") is False:
-                    if certificate.get("skipped_bodies"):
-                        return "rejected_by_unsupported_geometry"
-                    return "rejected_by_incomplete_certificate"
-            return "rejected_by_validator"
-        return "rejected_by_validator"
 __all__ = [
     "HandGenerationResult",
     "HandGeneratorCfg",

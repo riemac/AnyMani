@@ -23,8 +23,7 @@
 当前目录路由固定为：
 
 - `premade/`：pre-made topology / connectivity / identity / batch orchestration
-- `runtime/`：run 生命周期、recipe I/O、mutate-only restore、quota batch helper
-- `quota/`：accepted/output mode quota 的分配与 forced-mode lowering
+- `runtime/`：run 生命周期、recipe I/O、mutate-only restore、逐槽独立联合 proposal
 - `presentation/`：recolor lowering、ASCII tree 等展示层工具
 - `mutate/`：post-mutate term 与 pipeline
 
@@ -52,4 +51,4 @@
   与 CPU reference contract；
 - Patch/Delta Merge/Deferred Execution 只有在 benchmark 同时证明吞吐收益、内存可控且错误定位不退化时
   才进入主路径；
-- 任何并行化都要比较 wall time、峰值内存、accepted/output quota 与导出结果等价性，不以 kernel 数量代替收益。
+- 任何并行化都要比较 wall time、峰值内存、固定 seed 下的联合 proposal 与导出结果等价性，不以 kernel 数量代替收益。

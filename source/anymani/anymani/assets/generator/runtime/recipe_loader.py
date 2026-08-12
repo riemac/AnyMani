@@ -55,6 +55,7 @@ post-mutate 运行时复杂度塞进 loader。
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,10 @@ from ...builder.hand_builders import GripperLikeHandBuilderCfg
 from ...exporter.hand_exporter import HandExporterCfg
 from ...exporter.sidecar import SidecarCfg
 from ...exporter.urdf_writer import UrdfWriterCfg
+from ...presets import make_human_like_builder_cfg
+from ...validator.finger_rules import FingerValidatorCfg
+from ...validator.hand_rules import HandValidatorCfg
+from ...validator.joint_rules import JointValidatorCfg
 from ..hand_generator import HandGeneratorCfg
 from ..mutate import (
     HandMutatorCfg,
@@ -74,11 +79,6 @@ from ..mutate import (
     MountPerturbCfg,
     TipReplaceCfg,
 )
-from ...presets import make_human_like_builder_cfg
-from ...validator.finger_rules import FingerValidatorCfg
-from ...validator.hand_rules import HandValidatorCfg
-from ...validator.joint_rules import JointValidatorCfg
-
 
 # ============================================================================
 #  Recipe Loader
@@ -440,6 +440,14 @@ def _dump_value(value: Any) -> Any:
     序列化时显式移除 `class_type`，并把 tuple / Path 压成 YAML 友好格式。
     """
 
+    if isinstance(value, HandMutatorCfg):
+        return _dump_value(value.to_dict())
+    if is_dataclass(value):
+        return {
+            obj_field.name: _dump_value(getattr(value, obj_field.name))
+            for obj_field in fields(value)
+            if obj_field.name != "class_type" and not obj_field.name.startswith("_")
+        }
     if hasattr(value, "to_dict"):
         return _dump_value(value.to_dict())
     if isinstance(value, Path):
