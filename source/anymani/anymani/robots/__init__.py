@@ -31,6 +31,7 @@ __all__ = [
     "lower_hand_geometry_semantics",
     "materialize_owner_geometry_cache",
     "materialize_warp_owner_geometry_cache",
+    "release_warp_owner_geometry_cache",
     "sample_owner_home_surfaces",
     "sample_palm_anchor_supports",
     "selected_point_jacobian",
@@ -87,6 +88,7 @@ def __getattr__(name: str) -> Any:
     if name in {
         "materialize_owner_geometry_cache",
         "materialize_warp_owner_geometry_cache",
+        "release_warp_owner_geometry_cache",
         "sample_owner_home_surfaces",
         "sample_palm_anchor_supports",
     }:

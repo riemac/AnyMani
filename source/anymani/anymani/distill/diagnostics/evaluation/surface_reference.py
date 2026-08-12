@@ -89,7 +89,7 @@ def compare_warp_and_kaolin_distances(
     transformed_faces: list[torch.Tensor] = []  # 每项 `[B,F_g,3,3]`，当前 `{h}`，m
     for owner_index, record in enumerate(owner_cache.records):  # $g=0,...,G-1$
         local_faces = torch.as_tensor(  # CPU numpy triangles -> GPU tensor
-            record.mesh.triangles,  # `[F_g,3,3]` owner-local union boundary，m
+            record.surface_mesh.triangles,  # `[F_g,3,3]` owner-local UDF surface，m
             device=query_points_h.device,  # 与 query 同 GPU
             dtype=torch.float32,  # 与 Warp/Kaolin kernel 同 dtype
         )  # `[F_g,3,3]` owner-local union boundary

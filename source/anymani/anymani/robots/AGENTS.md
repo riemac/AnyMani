@@ -33,7 +33,10 @@
 - $q_{home}$ 是 POE/URDF 运动学参考，不要求落在控制 limits 内；limits 只服务合法采样与控制。
 - fixed descendants 吸收到 link/owner home 变换，不作为零旋量混入活动 JOINT 轴。
 - 非祖先 owner–JOINT Jacobian 必须精确为零；不同手指不能因全局 joint 顺序互相污染当前轴线。
-- 同 owner 多 solid 必须使用真实 Boolean union；输入或输出非 volume 时严格失败，不得回退到 convex hull、包围盒或 buried-face heuristic。
+- unsigned UDF、最近点、home surface 与局部 shell 只要求有限非空的真实三角表面，不要求 watertight；不得把开放表面补洞或替换为 hull/box。
+- `solid_mesh` 是独立可选证据：同 owner 多 solid 必须使用真实 Boolean union；palm interior anchor 必须取得合法 solid，否则严格失败。
+- Warp 上传按实际 float32 顶点过滤零边长/零面积面，审计删除数量与 float64 面积比例；面积损失超过 $10^{-8}$ 时严格失败。
+- GPU owner BVH 必须通过 lease/release 受 resident asset window 管理；全局 cache 不得永久强引用已退出窗口的资产。
 - 不同 owner 永不做几何 union，因为最近点来源和一阶 Jacobian 必须可追踪。
 
 ## 测试

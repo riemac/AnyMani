@@ -147,6 +147,7 @@ def query_owner_surfaces_warp(
                 inputs=[
                     handle.mesh.id,
                     handle.face_altitudes,
+                    handle.source_face_indices,
                     wp.from_torch(points_local, dtype=wp.vec3),
                     wp.from_torch(distance_flat, dtype=wp.float32),
                     wp.from_torch(closest_flat, dtype=wp.vec3),
@@ -178,6 +179,7 @@ try:
     def _warp_owner_surface_query_kernel(
         mesh: wp.uint64,
         face_altitudes: wp.array(dtype=wp.vec3),
+        source_face_indices: wp.array(dtype=wp.int32),
         points_local: wp.array(dtype=wp.vec3),
         distance: wp.array(dtype=float),
         closest_point: wp.array(dtype=wp.vec3),
@@ -201,7 +203,7 @@ try:
         closest = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
         closest_point[thread] = closest
         distance[thread] = wp.length(closest - points_local[thread])
-        face_index[thread] = query.face
+        face_index[thread] = source_face_indices[query.face]
         bary = wp.vec3(1.0 - query.u - query.v, query.u, query.v)
         barycentric[thread] = bary
         altitudes = face_altitudes[query.face]

@@ -238,7 +238,10 @@ def _home_surface_normals(
     """从固定 face provenance 读取 owner-local boundary normals。"""
 
     normals = np.stack(
-        [record.mesh.face_normals[face_indices] for record, face_indices in zip(cache.records, home_surface.face_indices)],
+        [
+            record.surface_mesh.face_normals[face_indices]
+            for record, face_indices in zip(cache.records, home_surface.face_indices)
+        ],
         axis=0,
     )
     return torch.as_tensor(normals, device=device, dtype=dtype)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -11,10 +12,16 @@ import trimesh
 from anymani.assets.bank import HandContainer, HandContainerCfg
 from anymani.robots.geometry_kinematics import lower_hand_geometry_semantics
 from anymani.robots.owner_geometry import (
+    OwnerGeometryCache,
+    OwnerSurfaceRecord,
     materialize_owner_geometry_cache,
+    materialize_warp_owner_geometry_cache,
+    prepare_warp_surface_view,
+    release_warp_owner_geometry_cache,
     sample_owner_home_surfaces,
     sample_palm_anchor_supports,
     strict_owner_union,
+    warp_owner_geometry_cache_stats,
 )
 
 _MOTHER_ROOT = (
@@ -45,7 +52,8 @@ def test_mother_owner_geometry_materializes_closed_union_and_reproducible_surfac
 
     assert len(cache.records) == 21
     assert cache.asset_content_hash == container.geometry_semantics.content_hash
-    assert all(record.mesh.is_volume for record in cache.records)
+    assert all(record.surface_mesh.is_volume for record in cache.records)
+    assert all(record.solid_mesh is not None for record in cache.records)
     assert sum(record.boolean_applied for record in cache.records) >= 1
 
     samples = sample_owner_home_surfaces(cache, points_per_owner=16, sampling_seed=17)
@@ -54,7 +62,7 @@ def test_mother_owner_geometry_materializes_closed_union_and_reproducible_surfac
     assert np.array_equal(samples.points_owner_local_m, repeated.points_owner_local_m)
     assert np.array_equal(samples.face_indices, repeated.face_indices)
     for record, points in zip(cache.records, samples.points_owner_local_m):
-        distances = trimesh.proximity.signed_distance(record.mesh, points)
+        distances = trimesh.proximity.signed_distance(record.surface_mesh, points)
         assert np.max(np.abs(distances)) < 1.0e-7
 
     anchors = sample_palm_anchor_supports(
@@ -98,3 +106,149 @@ def test_strict_union_removes_buried_faces_without_filling_open_groove() -> None
     groove = strict_owner_union([wall_a, wall_b], owner_id="palm/groove")
     assert groove.is_volume
     assert not bool(groove.contains(np.asarray([[0.0, 0.0, 0.0]]))[0])
+
+
+def test_open_owner_surface_supports_home_points_but_rejects_interior_anchors() -> None:
+    r"""开放三角表面可定义 UDF 边界，但不能伪装成 palm solid。"""
+
+    surface = trimesh.Trimesh(
+        vertices=np.asarray([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]]),
+        faces=np.asarray([[0, 1, 2], [0, 2, 3]]),
+        process=False,
+    )
+    record = OwnerSurfaceRecord(
+        owner_id="palm",
+        owner_index=0,
+        role="palm",
+        component_ids=("palm/open_surface",),
+        surface_mesh=surface,
+        solid_mesh=None,
+        boolean_applied=False,
+    )
+    cache = OwnerGeometryCache("open-palm", "open-palm-hash", "manifold-unused", (record,))
+    home = sample_owner_home_surfaces(cache, points_per_owner=8, sampling_seed=17)
+
+    assert home.points_owner_local_m.shape == (1, 8, 3)
+    assert np.max(np.abs(home.points_owner_local_m[..., 2])) < 1.0e-12
+
+    semantics = SimpleNamespace(
+        owners=(SimpleNamespace(owner_id="palm", owner_index=0),),
+        anchor_seeds=(SimpleNamespace(seed_id="seed/index", finger_name="index", position_a_m=(0.0, 0.0, 0.0)),),
+        asset_to_hand_rotation=np.eye(3),
+        asset_to_hand_translation_m=np.zeros(3),
+    )
+    spec = SimpleNamespace(
+        owner_ids=("palm",),
+        owner_home_transforms=torch.eye(4, dtype=torch.float64).unsqueeze(0),
+    )
+    surface_only = sample_palm_anchor_supports(
+        cache,
+        semantics,
+        spec,
+        anchors_per_finger=4,
+        sampling_seed=23,
+        radial_support_radius_m=2.0,
+        surface_fraction=1.0,
+    )
+    assert surface_only.surface_mask.all()
+
+    with pytest.raises(ValueError, match="solid_mesh"):
+        sample_palm_anchor_supports(
+            cache,
+            semantics,
+            spec,
+            anchors_per_finger=4,
+            sampling_seed=23,
+            radial_support_radius_m=2.0,
+            surface_fraction=0.5,
+        )
+
+
+def test_mesh_component_welds_stl_vertices_before_solid_classification(tmp_path: Path) -> None:
+    r"""STL 的逐面重复顶点应确定性焊接，几何闭合体不得被误判成开放表面。"""
+
+    mesh_path = tmp_path / "closed_box.stl"
+    trimesh.creation.box(extents=(0.1, 0.2, 0.3)).export(mesh_path)
+    component = SimpleNamespace(
+        component_id="palm/mesh",
+        owner_id="palm",
+        geometry_kind="mesh",
+        geometry_payload={"file_path": str(mesh_path), "scale": (1.0, 1.0, 1.0)},
+    )
+    semantics = SimpleNamespace(
+        owners=(SimpleNamespace(owner_id="palm", owner_index=0, role="palm", component_ids=("palm/mesh",)),),
+        components=(component,),
+        content_hash="welded-box",
+    )
+    container = SimpleNamespace(asset_id="welded-box", geometry_semantics=semantics, mesh_refs=())
+    spec = SimpleNamespace(
+        owner_ids=("palm",),
+        component_owner_local_transforms=torch.eye(4, dtype=torch.float64).unsqueeze(0),
+    )
+
+    cache = materialize_owner_geometry_cache(container, spec)
+
+    assert cache.records[0].surface_mesh.is_watertight
+    assert cache.records[0].solid_mesh is not None
+    assert cache.records[0].solid_mesh.is_volume
+
+
+def test_float32_surface_view_filters_negligible_collapsed_faces_and_enforces_area_budget() -> None:
+    r"""只允许删除 float32 中坍缩且总面积可忽略的三角面。"""
+
+    vertices = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0 + 1.0e-8, 0.0, 0.0],
+            [1.0, 1.0e-8, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    surface = trimesh.Trimesh(vertices=vertices, faces=np.asarray([[0, 1, 2], [3, 4, 5]]), process=False)
+
+    view = prepare_warp_surface_view(surface, owner_id="tip/index", max_area_loss_fraction=1.0e-8)
+
+    assert view.faces.shape == (1, 3)
+    assert view.audit.input_face_count == 2
+    assert view.audit.removed_face_count == 1
+    assert view.audit.removed_area_fraction < 1.0e-8
+
+    tiny_only = trimesh.Trimesh(vertices=vertices[3:], faces=np.asarray([[0, 1, 2]]), process=False)
+    with pytest.raises(ValueError, match="area-loss budget"):
+        prepare_warp_surface_view(tiny_only, owner_id="tip/index", max_area_loss_fraction=1.0e-8)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Warp CUDA cache contract requires an NVIDIA GPU")
+def test_warp_owner_cache_lease_release_evicts_global_resident_reference() -> None:
+    r"""resident window 释放最后一个 lease 后，同一 key 必须从全局缓存驱逐。"""
+
+    baseline = warp_owner_geometry_cache_stats()  # 其他 contract 可能已持有独立资产 cache
+    box = trimesh.creation.box(extents=(0.1, 0.2, 0.3))
+    record = OwnerSurfaceRecord(
+        owner_id="palm",
+        owner_index=0,
+        role="palm",
+        component_ids=("palm/box",),
+        surface_mesh=box,
+        solid_mesh=box.copy(),
+        boolean_applied=False,
+    )
+    geometry_cache = OwnerGeometryCache(
+        asset_id="lease-test",
+        asset_content_hash="lease-test-content",
+        boolean_backend="not-used",
+        records=(record,),
+        surface_geometry_hash="lease-test-unique-surface",
+    )
+    first = materialize_warp_owner_geometry_cache(geometry_cache, device="cuda:0")
+    second = materialize_warp_owner_geometry_cache(geometry_cache, device="cuda:0")
+
+    assert first is second
+    assert warp_owner_geometry_cache_stats()["lease_count"] == baseline["lease_count"] + 2
+    assert not release_warp_owner_geometry_cache(first)
+    assert warp_owner_geometry_cache_stats()["lease_count"] == baseline["lease_count"] + 1
+    assert release_warp_owner_geometry_cache(second)
+    assert warp_owner_geometry_cache_stats() == baseline
