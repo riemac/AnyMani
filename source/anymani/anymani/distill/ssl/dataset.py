@@ -48,9 +48,11 @@ from anymani.robots.geometry_kinematics import (  # 静态语义 -> 动态 POE s
 )
 from anymani.robots.owner_geometry import (  # owner union 与 CPU/GPU geometry caches
     AnchorSamples,  # palm surface/interior supports
+    GeometryIdentity,  # physical mapping 与 q-domain 双重身份
     HomeSurfaceSamples,  # owner boundary-only samples
     OwnerGeometryCache,  # CPU strict Manifold union
     WarpOwnerGeometryCache,  # GPU owner BVHs
+    geometry_identity,  # 实际 surface+kinematics -> leakage identity
     materialize_owner_geometry_cache,  # collision components -> owner union
     materialize_warp_owner_geometry_cache,  # owner union -> Warp mesh
     sample_owner_home_surfaces,  # area candidates + farthest point
@@ -93,12 +95,13 @@ class GeometryAssetRuntime:  # q-independent asset state
     """
 
     container: HandContainer  # bank bundle + geometry semantics
-    spec_cpu: EmbodimentGeometrySpec  # CPU float32 POE/graph/component transforms
+    spec_cpu: EmbodimentGeometrySpec  # CPU float64 POE/graph/component transforms，identity 数值真值
     geometry_cache: OwnerGeometryCache  # owner-local strict unions
     home_surface: HomeSurfaceSamples  # `[G,M,3]` boundary-only owner local
     anchors: AnchorSamples  # `[K,3]` hand-frame palm supports
     workspace_query_bank_h: torch.Tensor  # `[N_W,3]`，CPU float32，跨 q 固定
     evidence_cpu: StaticGeometryEvidence  # CPU retained evidence reference
+    identity: GeometryIdentity  # physical group 与 configuration-domain provenance
 
     @property
     def asset_id(self) -> str:
@@ -134,6 +137,7 @@ class OnlineGeometrySample:  # variable-length sample
     queries: SpatialQueryBatch  # `[1,G,N_Q,...]`
     field_targets: FieldTargetBatch  # `[1,G,N_Q,L]` $\\rho$ 与 distance
     sensitivity_targets: SensitivityTargetBatch  # `[1,E]` $\\kappa$、`[1,E,L]` g
+    q_index: torch.Tensor | None = None  # `[Q]`，资产本地 Sobol 序列中的绝对 q cursor
 
 
 @dataclass(frozen=True)  # 一次 forward 的 q/query/target 轴共同冻结
@@ -150,6 +154,7 @@ class PaddedOnlineGeometryBatch:  # heterogeneous dense batch
     queries: SpatialQueryBatch  # `[B,26,N_Q,...]`
     field_targets: FieldTargetBatch  # invalid owner/query 由 valid_mask 屏蔽
     sensitivity_targets: SensitivityTargetBatch  # `[B,E_max]` selectors + valid_mask
+    q_index: torch.Tensor | None = None  # `[B]`，每个样本的资产本地 Sobol cursor
 
 
 class SobolJointSampler:  # 每资产独立低差异 q 序列
@@ -166,10 +171,12 @@ class SobolJointSampler:  # 每资产独立低差异 q 序列
         if spec.joint_limits is None:  # robots spec 必须显式交付采样域
             raise ValueError("EmbodimentGeometrySpec must contain joint_limits for q sampling")  # 不猜 [-pi,pi]
         self.limits = spec.joint_limits.detach().cpu().to(torch.float64)  # `[N_J,2]`，rad
+        self.seed = int(seed)  # engine 重建与 checkpoint resume 的 deterministic identity
+        self.cursor = 0  # 已消费的 Sobol q 数；不是 optimizer step
         self.engine = torch.quasirandom.SobolEngine(  # 连续 draw 保留低差异序列状态
             dimension=self.limits.shape[0],  # $N_J$ 随资产变化
             scramble=True,  # Owen scrambling 提供 seed 可复现随机化
-            seed=int(seed),  # 每资产独立派生 seed
+            seed=self.seed,  # 每资产独立派生 seed
         )
 
     def draw(
@@ -185,7 +192,32 @@ class SobolJointSampler:  # 每资产独立低差异 q 序列
             raise ValueError("Sobol draw count must be positive")  # fail-fast
         unit = self.engine.draw(count, dtype=torch.float64)  # $[0,1]^{N_J}$ 低差异序列
         q = self.limits[:, 0] + unit * (self.limits[:, 1] - self.limits[:, 0])  # $q=l+u(h-l)$，rad
+        self.cursor += int(count)  # draw 成功后推进，异常不会伪造已消费 q
         return q.to(device=device, dtype=dtype)  # 只在最终边界上传/转换
+
+    def state_dict(self) -> dict[str, int]:
+        r"""返回可写入 checkpoint 的低差异序列状态。"""
+
+        return {"seed": self.seed, "cursor": self.cursor, "dimension": int(self.limits.shape[0])}
+
+    def load_state_dict(self, state: dict[str, int]) -> None:
+        r"""从 seed+cursor 重建 Sobol engine，确保 resume 后下一个 q 完全一致。"""
+
+        if int(state.get("seed", -1)) != self.seed:
+            raise ValueError("Sobol checkpoint seed does not match asset sampler")
+        if int(state.get("dimension", -1)) != self.limits.shape[0]:
+            raise ValueError("Sobol checkpoint dimension does not match asset joint count")
+        cursor = int(state.get("cursor", -1))
+        if cursor < 0:
+            raise ValueError("Sobol checkpoint cursor must be non-negative")
+        self.engine = torch.quasirandom.SobolEngine(
+            dimension=self.limits.shape[0],
+            scramble=True,
+            seed=self.seed,
+        )
+        if cursor:
+            self.engine.fast_forward(cursor)
+        self.cursor = cursor
 
 
 def materialize_geometry_asset_runtime(
@@ -206,8 +238,9 @@ def materialize_geometry_asset_runtime(
     semantics = container.geometry_semantics  # assets 层唯一静态语义入口
     if semantics is None:  # distill 不允许自己解析 hand.yaml/URDF
         raise ValueError("container must be resolved with require_geometry_semantics=True")  # bank 配置错误
-    spec = lower_hand_geometry_semantics(semantics, dtype=torch.float32)  # CPU robots 动态规格
+    spec = lower_hand_geometry_semantics(semantics, dtype=torch.float64)  # identity/cache 使用 CPU float64 真值
     geometry_cache = materialize_owner_geometry_cache(container, spec)  # 严格 owner union
+    identity = geometry_identity(semantics, spec, geometry_cache)  # limits 与物理映射身份显式分离
     home_surface = sample_owner_home_surfaces(  # 真实 union boundary，不含 interior
         geometry_cache,  # `[G]` owner unions
         points_per_owner=config.home_points_per_owner,  # 每 owner 固定 $M$
@@ -246,6 +279,7 @@ def materialize_geometry_asset_runtime(
         anchors,
         workspace,
         evidence,
+        identity,
     )
 
 
@@ -282,22 +316,25 @@ def move_geometry_asset_to_device(
 
 def sample_online_geometry(
     state: GeometryAssetDeviceState,  # 当前资产 GPU state
-    q: torch.Tensor,  # `[1,N_J]`，rad
+    q: torch.Tensor,  # `[Q,N_J]`，同一资产的构型 block，rad
     *,
     query_config: SpatialQuerySamplerCfg = SpatialQuerySamplerCfg(),  # 50/25/25
     target_config: GeometryFieldTargetCfg = GeometryFieldTargetCfg(),  # teacher
     sampling_seed: int = 0,  # shell/adjacent/edge sampling realization
+    q_index: torch.Tensor | None = None,  # `[Q]` asset-local absolute Sobol cursor
     ) -> OnlineGeometrySample:  # unpadded one-asset teacher sample
-    r"""为一项资产的 ``[1,N_J]`` q 生成 query 与 Warp teacher。
+    r"""为一项资产的 ``[Q,N_J]`` q block 生成 query 与 Warp teacher。
 
     query 与 teacher 都从 ``q.detach()`` 的物理构型生成；模型对 q 的 Sobolev 图在 trainer 中另建，
     因此 teacher 几何路径不接收模型梯度。
     """
 
-    if q.shape != (1, state.spec.space_screws.shape[0]):  # 当前接口一资产一 q
-        raise ValueError("sample_online_geometry expects one q with the asset's true N_J")  # 不 padding 此层
+    if q.ndim != 2 or q.shape[1] != state.spec.space_screws.shape[0] or q.shape[0] < 1:
+        raise ValueError("sample_online_geometry expects [Q,N_J] with the asset's true N_J")
+    if q_index is not None and q_index.shape != (q.shape[0],):
+        raise ValueError("q_index must have shape [Q] matching the asset q block")
     queries = sample_spatial_queries(  # 当前 q 下 `[1,G,N_Q,3]`
-        q,  # 物理 rad
+        q,  # 物理 rad；Q 个构型共享 query/teacher batch 轴
         state.spec,  # owner FK/graph
         state.runtime.geometry_cache,  # owner boundary
         state.runtime.home_surface,  # shell/adjacent 候选
@@ -306,7 +343,7 @@ def sample_online_geometry(
         sampling_seed=sampling_seed,  # 当前 realization
     )
     field_targets, sensitivity_targets = generate_geometry_field_targets(  # GPU Warp teacher
-        q,  # 当前 owner transforms/Jacobian
+        q,  # 当前 owner transforms/Jacobian；同一资产一次处理 Q 个构型
         state.spec,  # POE/ancestor masks
         state.runtime.geometry_cache,  # CPU face/component provenance
         state.warp_cache,  # GPU BVHs
@@ -321,6 +358,54 @@ def sample_online_geometry(
         queries=queries,  # `[1,G,N_Q,...]`
         field_targets=field_targets,  # zero-order teacher
         sensitivity_targets=sensitivity_targets,  # sampled-edge teacher
+        q_index=q_index.detach().cpu() if q_index is not None else None,  # provenance 不进入 CUDA teacher
+    )
+
+
+def split_online_geometry_sample(sample: OnlineGeometrySample) -> tuple[OnlineGeometrySample, ...]:
+    r"""把一次同资产 `[Q,N_J]` teacher block 展开为 padding 所需的 `[1,N_J]` 样本。
+
+    split 只切 batch 轴，不重新采样 query、最近点、BVH 或 Jacobian；因此 `Q>1` 与逐 q
+    循环共享完全相同的 teacher 数值，差别只在底层 FK/target 是否被一次批量调用。
+    """
+
+    q_count = sample.q.shape[0]
+    return tuple(
+        OnlineGeometrySample(
+            asset_id=sample.asset_id,
+            q=sample.q[index : index + 1],
+            evidence=sample.evidence,
+            queries=SpatialQueryBatch(
+                sample.queries.query_points_h[index : index + 1],
+                sample.queries.query_stratum[index : index + 1],
+                sample.queries.adjacent_owner_index[index : index + 1],
+            ),
+            field_targets=FieldTargetBatch(
+                query_points=sample.field_targets.query_points[index : index + 1],
+                query_stratum=sample.field_targets.query_stratum[index : index + 1],
+                distance=sample.field_targets.distance[index : index + 1],
+                density=sample.field_targets.density[index : index + 1],
+                valid_mask=sample.field_targets.valid_mask[index : index + 1],
+                owner_role=sample.field_targets.owner_role,
+                bandwidths=sample.field_targets.bandwidths,
+                provenance=sample.field_targets.provenance,
+            ),
+            sensitivity_targets=SensitivityTargetBatch(
+                owner_index=sample.sensitivity_targets.owner_index,
+                query_index=sample.sensitivity_targets.query_index,
+                joint_index=sample.sensitivity_targets.joint_index,
+                ancestor_mask=sample.sensitivity_targets.ancestor_mask,
+                closest_point=sample.sensitivity_targets.closest_point[index : index + 1],
+                closest_source=sample.sensitivity_targets.closest_source[index : index + 1],
+                uniqueness_margin=sample.sensitivity_targets.uniqueness_margin[index : index + 1],
+                kappa=sample.sensitivity_targets.kappa[index : index + 1],
+                field_sensitivity=sample.sensitivity_targets.field_sensitivity[index : index + 1],
+                valid_mask=sample.sensitivity_targets.valid_mask[index : index + 1],
+                provenance=sample.sensitivity_targets.provenance,
+            ),
+            q_index=sample.q_index[index : index + 1] if sample.q_index is not None else None,
+        )
+        for index in range(q_count)
     )
 
 
@@ -407,6 +492,7 @@ def pad_online_geometry_samples(
     edge_valid = torch.zeros(  # `[B,E_max]`；padding/non-smooth edge loss mask
         batch_size, max_edge_count, device=device, dtype=torch.bool
     )
+    q_index = torch.full((batch_size,), -1, device=device, dtype=torch.long)  # `[B]`，未知 cursor 为 -1
 
     for batch_index, sample in enumerate(samples):  # 每项独立真实 $N_J/G/E$
         joint_count = sample.q.shape[1]  # 当前 $N_J$
@@ -435,6 +521,10 @@ def pad_online_geometry_samples(
         kappa[batch_index, :edge_count] = sensitivity.kappa[0]  # m/rad
         field_sensitivity[batch_index, :edge_count] = sensitivity.field_sensitivity[0]  # 1/rad
         edge_valid[batch_index, :edge_count] = sensitivity.valid_mask[0]  # edge loss mask
+        if sample.q_index is not None:
+            if sample.q_index.numel() != 1:
+                raise ValueError("pad_online_geometry_samples expects split samples with one q_index")
+            q_index[batch_index] = sample.q_index.reshape(-1)[0].to(device=device)
 
     queries = SpatialQueryBatch(  # decoder/sampler provenance 包
         query_points, query_stratum, adjacent_owner
@@ -479,6 +569,7 @@ def pad_online_geometry_samples(
         queries=queries,  # `[B,26,N_Q,...]`
         field_targets=field_targets,  # zero-order
         sensitivity_targets=sensitivity_targets,  # first-order
+        q_index=q_index,  # asset-local Sobol provenance
     )
 
 
@@ -541,6 +632,7 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
                 device=state.spec.space_screws.device,  # 与 GPU spec/model 同 device
                 dtype=state.spec.space_screws.dtype,  # 与 spec/model 同 dtype
             )
+            q_cursor = self.samplers[asset_index].cursor - 1  # 当前 draw 的 asset-local absolute cursor
             samples.append(  # 完整在线 query/teacher 未 padding 样本
                 sample_online_geometry(  # Warp GPU main path
                     state,  # 当前 asset
@@ -548,9 +640,77 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
                     query_config=self.query_config,  # 50/25/25
                     target_config=self.target_config,  # $d/\\rho/\\kappa/g$
                     sampling_seed=self.seed + step * batch_size + batch_offset,  # 唯一 realization
+                    q_index=torch.tensor([q_cursor]),  # 采样 provenance
                 )
             )
         return pad_online_geometry_samples(samples, padding=self.padding)  # `[B,20]/[B,26]` batch
+
+    def sample_asset_blocks(
+        self,
+        *,
+        assets_per_microbatch: int,
+        q_per_asset: int,
+        step: int,
+    ) -> PaddedOnlineGeometryBatch:
+        r"""按 `A_mb` 资产、每资产 `Q_mb` 构型一次生成逻辑 `A_mb*Q_mb` batch。
+
+        资产按 manifest 顺序确定性轮转；每个资产只调用一次 batched query/target backend，随后
+        才切成现有 padding 容器。因此这个接口是 multi-q runtime 的实际入口，旧 `sample` 保持
+        `Q=1` 兼容路径供历史 tiny-overfit 使用。
+        """
+
+        if assets_per_microbatch < 1 or q_per_asset < 1 or step < 0:
+            raise ValueError("assets_per_microbatch, q_per_asset and step must be positive/non-negative")
+        samples: list[OnlineGeometrySample] = []
+        for asset_offset in range(assets_per_microbatch):
+            asset_index = (step * assets_per_microbatch + asset_offset) % len(self.states)
+            state = self.states[asset_index]
+            q_block = self.samplers[asset_index].draw(
+                q_per_asset,
+                device=state.spec.space_screws.device,
+                dtype=state.spec.space_screws.dtype,
+            )
+            q_start = self.samplers[asset_index].cursor - q_per_asset  # block 起始 absolute cursor
+            block = sample_online_geometry(
+                state,
+                q_block,
+                query_config=self.query_config,
+                target_config=self.target_config,
+                sampling_seed=self.seed + step * assets_per_microbatch + asset_offset,
+                q_index=torch.arange(q_start, q_start + q_per_asset),  # Q block asset-local provenance
+            )
+            samples.extend(split_online_geometry_sample(block))
+        return pad_online_geometry_samples(samples, padding=self.padding)
+
+    def state_dict(self) -> dict[str, object]:
+        r"""返回每资产 Sobol cursor 与采样 seed，供 checkpoint runtime state 使用。"""
+
+        return {
+            "seed": self.seed,
+            "asset_ids": tuple(state.runtime.asset_id for state in self.states),
+            "samplers": tuple(sampler.state_dict() for sampler in self.samplers),
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        r"""严格恢复与当前 manifest 同序的每资产 q cursor。"""
+
+        seed = state.get("seed", -1)
+        if not isinstance(seed, int) or seed != self.seed:
+            raise ValueError("batcher checkpoint seed does not match resolved training seed")
+        raw_asset_ids = state.get("asset_ids", ())
+        if not isinstance(raw_asset_ids, (tuple, list)):
+            raise ValueError("batcher checkpoint asset IDs must be a sequence")
+        asset_ids = tuple(str(asset_id) for asset_id in raw_asset_ids)
+        expected_ids = tuple(asset.runtime.asset_id for asset in self.states)
+        if asset_ids != expected_ids:
+            raise ValueError("batcher checkpoint asset order does not match manifest")
+        sampler_states = state.get("samplers", ())
+        if not isinstance(sampler_states, (tuple, list)) or len(sampler_states) != len(self.samplers):
+            raise ValueError("batcher checkpoint sampler count does not match manifest")
+        for sampler, sampler_state in zip(self.samplers, sampler_states):
+            if not isinstance(sampler_state, dict):
+                raise ValueError("invalid Sobol sampler checkpoint state")
+            sampler.load_state_dict(sampler_state)
 
 
 __all__ = [  # SSL data stage 稳定公开面
@@ -565,4 +725,5 @@ __all__ = [  # SSL data stage 稳定公开面
     "move_geometry_asset_to_device",  # CPU -> GPU/Warp state
     "pad_online_geometry_samples",  # variable -> dense masks
     "sample_online_geometry",  # q -> query/teacher
+    "split_online_geometry_sample",  # Q block -> current padding oracle
 ]

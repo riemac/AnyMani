@@ -15,7 +15,7 @@ $$
 
 from __future__ import annotations
 
-from typing import Literal  # 只允许两项预注册 ablation，避免自由字符串改变实验含义
+from typing import Literal  # 只允许预注册 ablation，避免自由字符串改变实验含义
 
 import torch  # latent、query 与 batch permutation 全部保持 PyTorch 计算图
 
@@ -24,8 +24,20 @@ from anymani.distill.models.input_adapters.geometry import (  # retained latent/
     GeometryLatents,
     StaticGeometryEvidence,
 )
+from anymani.distill.ssl.dataset import PaddedOnlineGeometryBatch
 
-GeometrySSLAblation = Literal["query_only", "latent_shuffle"]  # 受控诊断枚举
+GeometrySSLAblation = Literal[
+    "query_only",
+    "latent_shuffle",
+    "first_order_zero",
+    "first_order_joint_shuffle",
+    "first_order_sign_flip",
+]  # 受控诊断枚举
+
+StratifiedComponents = dict[
+    str,
+    dict[str, dict[str, tuple[tuple[float, ...], tuple[float, ...]]]],
+]  # metric -> axis -> bin -> `(per-sample numerator, per-sample denominator)`
 
 
 def geometry_ssl_ablation_forward(
@@ -85,6 +97,23 @@ def geometry_ssl_ablation_forward(
             latents.zero_order.index_select(0, batch_permutation),  # $z_b^{(0)}\leftarrow z_{\pi(b)}^{(0)}$
             latents.first_order.index_select(0, batch_permutation),  # $z_b^{(1)}\leftarrow z_{\pi(b)}^{(1)}$
         )
+    elif ablation == "first_order_zero":  # 只删除一阶包，零阶几何和 query path 保持完整
+        ablated = GeometryLatents(latents.zero_order, torch.zeros_like(latents.first_order))
+    elif ablation == "first_order_sign_flip":  # 检查 $z_i^{(1)}$ 的有向物理语义是否被 decoder 使用
+        ablated = GeometryLatents(latents.zero_order, -latents.first_order)
+    elif ablation == "first_order_joint_shuffle":  # 只破坏每个 hand 内的 JOINT 对应关系
+        joint_valid = evidence.joint_valid_mask
+        if joint_valid is None:
+            joint_valid = torch.ones(latents.first_order.shape[:2], device=q.device, dtype=torch.bool)
+        if joint_valid.ndim == 1:
+            joint_valid = joint_valid.unsqueeze(0).expand(q.shape[0], -1)
+        shuffled = torch.zeros_like(latents.first_order)
+        for batch_index in range(q.shape[0]):
+            valid_indices = torch.where(joint_valid[batch_index])[0]
+            if len(valid_indices) < 2:
+                raise ValueError("first_order_joint_shuffle requires at least two valid JOINTs per sample")
+            shuffled[batch_index, valid_indices] = latents.first_order[batch_index, valid_indices].roll(1, dims=0)
+        ablated = GeometryLatents(latents.zero_order, shuffled)
     else:  # 未注册诊断不得静默退回完整 forward
         raise ValueError(f"unknown geometry SSL ablation={ablation!r}")
     return model.decode_latents(  # decoder 权重、query features 与 selectors 均与完整模型相同
@@ -97,4 +126,365 @@ def geometry_ssl_ablation_forward(
     )
 
 
-__all__ = ["GeometrySSLAblation", "geometry_ssl_ablation_forward"]  # 稳定诊断公开面
+def same_asset_q_permutation(asset_ids: tuple[str, ...], *, device: torch.device) -> torch.Tensor:
+    r"""构造每个资产内部循环移位的 batch permutation，用于同手跨 q latent shuffle。"""
+
+    permutation = torch.arange(len(asset_ids), device=device)
+    for asset_id in dict.fromkeys(asset_ids):
+        indices = [index for index, candidate in enumerate(asset_ids) if candidate == asset_id]
+        if len(indices) < 2:
+            raise ValueError("same-asset q shuffle requires at least two q samples per asset")
+        source = torch.tensor(indices, device=device)
+        permutation[source] = source.roll(1)
+    return permutation
+
+
+def cross_asset_permutation(asset_ids: tuple[str, ...], *, device: torch.device) -> torch.Tensor:
+    r"""构造每个样本都映射到不同资产的循环 permutation。"""
+
+    batch_size = len(asset_ids)
+    for shift in range(1, batch_size):
+        candidate = tuple((index + shift) % batch_size for index in range(batch_size))
+        if all(asset_ids[source] != asset_ids[target] for target, source in enumerate(candidate)):
+            return torch.tensor(candidate, device=device)
+    raise ValueError("cross-asset shuffle requires a batch permutation with different source assets")
+
+
+def geometry_ssl_reconstruction_metrics(
+    prediction: GeometrySSLForward,
+    batch: PaddedOnlineGeometryBatch,
+) -> dict[str, float]:
+    r"""计算无需 q-autograd 的 density、κ 与 derived-g raw MSE，供固定 ablation 比较。"""
+
+    field_mask = batch.field_targets.valid_mask.unsqueeze(-1).expand_as(prediction.density)
+    edge_mask = batch.sensitivity_targets.valid_mask
+    edge_band_mask = edge_mask.unsqueeze(-1).expand_as(batch.sensitivity_targets.field_sensitivity)
+    density_error = prediction.density - batch.field_targets.density
+    kappa_error = prediction.kappa - batch.sensitivity_targets.kappa
+    owner_index = batch.sensitivity_targets.owner_index
+    query_index = batch.sensitivity_targets.query_index
+    batch_index = torch.arange(prediction.density.shape[0], device=prediction.density.device).unsqueeze(1)
+    selected_density = prediction.density[batch_index, owner_index, query_index]
+    selected_distance = batch.field_targets.distance[batch_index, owner_index, query_index]
+    derived = (
+        -selected_distance.unsqueeze(-1)
+        * batch.field_targets.bandwidths.square().reciprocal()
+        * selected_density
+        * prediction.kappa.unsqueeze(-1)
+    )
+    derived_error = derived - batch.sensitivity_targets.field_sensitivity
+    return {
+        "density": float(density_error.square()[field_mask].mean().detach()),
+        "kappa": float(kappa_error.square()[edge_mask].mean().detach()),
+        "derived_field": float(derived_error.square()[edge_band_mask].mean().detach()),
+    }
+
+
+def geometry_ssl_reconstruction_metrics_per_sample(
+    prediction: GeometrySSLForward,
+    batch: PaddedOnlineGeometryBatch,
+) -> dict[str, tuple[float | None, ...]]:
+    r"""按每个 `(asset,q)` 样本返回 raw MSE，供配对 bootstrap 与形态等权聚合。
+
+    某个样本若没有有效一阶 edge，则对应 κ/derived 指标为 `None`；不能把空分母写成 0
+    后伪装为完美预测。零阶 field 每个真实样本必须有有效 query。
+    """
+
+    field_mask = batch.field_targets.valid_mask.unsqueeze(-1).expand_as(prediction.density)
+    edge_mask = batch.sensitivity_targets.valid_mask
+    edge_band_mask = edge_mask.unsqueeze(-1).expand_as(batch.sensitivity_targets.field_sensitivity)
+    density_error = prediction.density - batch.field_targets.density
+    kappa_error = prediction.kappa - batch.sensitivity_targets.kappa
+    owner_index = batch.sensitivity_targets.owner_index
+    query_index = batch.sensitivity_targets.query_index
+    batch_index = torch.arange(prediction.density.shape[0], device=prediction.density.device).unsqueeze(1)
+    selected_density = prediction.density[batch_index, owner_index, query_index]
+    selected_distance = batch.field_targets.distance[batch_index, owner_index, query_index]
+    derived = (
+        -selected_distance.unsqueeze(-1)
+        * batch.field_targets.bandwidths.square().reciprocal()
+        * selected_density
+        * prediction.kappa.unsqueeze(-1)
+    )
+    derived_error = derived - batch.sensitivity_targets.field_sensitivity
+    return {
+        "density": _per_sample_masked_mse(density_error, field_mask),
+        "kappa": _per_sample_masked_mse(kappa_error, edge_mask),
+        "derived_field": _per_sample_masked_mse(derived_error, edge_band_mask),
+    }
+
+
+def geometry_ssl_stratified_components_per_sample(
+    prediction: GeometrySSLForward,
+    batch: PaddedOnlineGeometryBatch,
+) -> StratifiedComponents:
+    r"""返回 owner/stratum/bandwidth/distance/ancestor 分层的逐样本充分统计量。
+
+    每个 bin 保存平方误差和 $N$ 与有效标量数 $D$，后续先在同一 morphology 内跨 q 求
+    $\sum_qN/\sum_qD$，再对 morphology 等权。各轴是独立边际，不构造高维笛卡尔积，避免
+    4 个 held-out morphology 被数百个稀疏交叉格切碎。
+
+    Returns:
+        StratifiedComponents: ``metric -> axis -> bin -> (numerators, denominators)``；两个 tuple
+        的长度均为 batch size。适用轴为：
+
+        - density：owner role、50:25:25 query stratum、bandwidth、distance shell；
+        - κ：owner role、query stratum、distance shell、ancestor/non-ancestor；
+        - derived-g：上述全部五个轴。
+    """
+
+    density_error = prediction.density - batch.field_targets.density  # `[B,G,N_Q,L]`，无量纲
+    kappa_error = prediction.kappa - batch.sensitivity_targets.kappa  # `[B,E]`，m/rad
+    derived_error = _derived_field_error(prediction, batch)  # `[B,E,L]`，1/rad
+    batch_size, owner_count, query_count, bandwidth_count = density_error.shape  # 四条监督轴
+    field_valid = batch.field_targets.valid_mask.unsqueeze(-1).expand_as(density_error)  # `[B,G,N_Q,L]`
+    edge_valid = batch.sensitivity_targets.valid_mask  # `[B,E]`，唯一最近点与 padding 共同有效
+    edge_band_valid = edge_valid.unsqueeze(-1).expand_as(derived_error)  # `[B,E,L]`
+
+    # 统一 owner role 为 `[B,G]`，再按 sampled edge owner selector收集一阶 role。
+    owner_role = batch.field_targets.owner_role  # `[G]` 或 `[B,G]`，0/1/2
+    if owner_role.ndim == 1:
+        owner_role = owner_role.unsqueeze(0).expand(batch_size, -1)  # 同结构 batch 共享 role
+    owner_index = _batched_selector(batch.sensitivity_targets.owner_index, batch_size)  # `[B,E]`
+    query_index = _batched_selector(batch.sensitivity_targets.query_index, batch_size)  # `[B,E]`
+    batch_index = torch.arange(batch_size, device=density_error.device).unsqueeze(1)  # `[B,1]`
+    edge_owner_role = owner_role.gather(1, owner_index)  # `[B,E]`，sampled owner 的 PALM/JOINT/TIP
+    edge_query_stratum = batch.field_targets.query_stratum[batch_index, owner_index, query_index]  # `[B,E]`
+    edge_distance = batch.field_targets.distance[batch_index, owner_index, query_index]  # `[B,E]`，m
+    ancestor = _batched_selector(batch.sensitivity_targets.ancestor_mask, batch_size)  # `[B,E]` bool
+
+    result: StratifiedComponents = {
+        "density": {"owner_role": {}, "query_stratum": {}, "bandwidth": {}, "distance_shell": {}},
+        "kappa": {"owner_role": {}, "query_stratum": {}, "distance_shell": {}, "ancestor": {}},
+        "derived_field": {
+            "owner_role": {},
+            "query_stratum": {},
+            "bandwidth": {},
+            "distance_shell": {},
+            "ancestor": {},
+        },
+    }
+
+    # owner role 与 query stratum 是 density/κ/g 共享的物理边际轴。
+    for role_value, role_name in ((0, "palm"), (1, "joint"), (2, "tip")):
+        density_mask = field_valid & (owner_role[:, :, None, None] == role_value)  # `[B,G,N_Q,L]`
+        edge_mask = edge_valid & (edge_owner_role == role_value)  # `[B,E]`
+        result["density"]["owner_role"][role_name] = _per_sample_masked_components(
+            density_error, density_mask
+        )
+        result["kappa"]["owner_role"][role_name] = _per_sample_masked_components(kappa_error, edge_mask)
+        result["derived_field"]["owner_role"][role_name] = _per_sample_masked_components(
+            derived_error, edge_mask.unsqueeze(-1).expand_as(derived_error)
+        )
+    for stratum_value, stratum_name in ((0, "workspace"), (1, "owner_shell"), (2, "adjacent")):
+        density_mask = field_valid & (batch.field_targets.query_stratum.unsqueeze(-1) == stratum_value)
+        edge_mask = edge_valid & (edge_query_stratum == stratum_value)
+        result["density"]["query_stratum"][stratum_name] = _per_sample_masked_components(
+            density_error, density_mask
+        )
+        result["kappa"]["query_stratum"][stratum_name] = _per_sample_masked_components(kappa_error, edge_mask)
+        result["derived_field"]["query_stratum"][stratum_name] = _per_sample_masked_components(
+            derived_error, edge_mask.unsqueeze(-1).expand_as(derived_error)
+        )
+
+    # bandwidth 只适用于多带宽 density 与 derived-g；κ 是共享的距离导数，不复制 L 轴。
+    for bandwidth_index in range(bandwidth_count):
+        bin_name = f"sigma_{bandwidth_index}"
+        density_band_mask = field_valid[..., bandwidth_index]  # `[B,G,N_Q]`
+        derived_band_mask = edge_band_valid[..., bandwidth_index]  # `[B,E]`
+        result["density"]["bandwidth"][bin_name] = _per_sample_masked_components(
+            density_error[..., bandwidth_index], density_band_mask
+        )
+        result["derived_field"]["bandwidth"][bin_name] = _per_sample_masked_components(
+            derived_error[..., bandwidth_index], derived_band_mask
+        )
+
+    # distance shell 使用实际 bandwidth 边界：`<=σ0`、逐相邻 σ 区间与 `>σ_last`。
+    for shell_name, field_shell, edge_shell in _distance_shell_masks(
+        batch.field_targets.distance,
+        edge_distance,
+        batch.field_targets.bandwidths,
+    ):
+        density_mask = field_valid & field_shell.unsqueeze(-1)
+        edge_mask = edge_valid & edge_shell
+        result["density"]["distance_shell"][shell_name] = _per_sample_masked_components(
+            density_error, density_mask
+        )
+        result["kappa"]["distance_shell"][shell_name] = _per_sample_masked_components(kappa_error, edge_mask)
+        result["derived_field"]["distance_shell"][shell_name] = _per_sample_masked_components(
+            derived_error, edge_mask.unsqueeze(-1).expand_as(derived_error)
+        )
+
+    # ancestor/non-ancestor 只适用于 sampled一阶 edges；结构零也必须作为独立 bin 被报告。
+    for ancestor_value, ancestor_name in ((True, "ancestor"), (False, "non_ancestor")):
+        edge_mask = edge_valid & (ancestor == ancestor_value)
+        result["kappa"]["ancestor"][ancestor_name] = _per_sample_masked_components(kappa_error, edge_mask)
+        result["derived_field"]["ancestor"][ancestor_name] = _per_sample_masked_components(
+            derived_error, edge_mask.unsqueeze(-1).expand_as(derived_error)
+        )
+    return result
+
+
+def aggregate_geometry_ssl_stratified_components(
+    blocks: tuple[tuple[tuple[str, ...], StratifiedComponents], ...],
+) -> dict[str, object]:
+    r"""把 validation blocks 聚合为 morphology/bin/axis 等权的三项选择指标。
+
+    同一 ``asset_id`` 的所有 q 先对 numerator/denominator 求和得到该 morphology 的 bin MSE；
+    每个 bin 再对具有有效 denominator 的 morphology 等权；每个 axis 对非空 bins 等权；每个
+    metric 对适用 axes 等权。这样不同 q block 大小、尾资产组、bandwidth bin 数和 ancestor bin
+    数都不会隐式改变 morphology 或 axis 权重。
+
+    Returns:
+        dict[str, object]: 包含 ``metric_scores``、``axis_scores``、``bin_scores`` 及每 bin 的
+        morphology 数；可直接写入 checkpoint selection evidence。
+    """
+
+    if not blocks:
+        raise ValueError("stratified validation aggregation requires non-empty blocks")
+    # `metric/axis/bin/asset -> [numerator_sum, denominator_sum]` 是重排 block 后不变的充分统计量。
+    accumulated: dict[str, dict[str, dict[str, dict[str, list[float]]]]] = {}
+    for asset_ids, components in blocks:
+        for metric, axes in components.items():
+            metric_store = accumulated.setdefault(metric, {})
+            for axis, bins in axes.items():
+                axis_store = metric_store.setdefault(axis, {})
+                for bin_name, (numerators, denominators) in bins.items():
+                    if len(numerators) != len(asset_ids) or len(denominators) != len(asset_ids):
+                        raise ValueError("stratified component batch axis does not match asset IDs")
+                    bin_store = axis_store.setdefault(bin_name, {})
+                    for asset_id, numerator, denominator in zip(asset_ids, numerators, denominators):
+                        totals = bin_store.setdefault(asset_id, [0.0, 0.0])
+                        totals[0] += float(numerator)
+                        totals[1] += float(denominator)
+
+    bin_scores: dict[str, dict[str, dict[str, dict[str, float | int]]]] = {}
+    axis_scores: dict[str, dict[str, float]] = {}
+    metric_scores: dict[str, float] = {}
+    for metric, axes in accumulated.items():
+        bin_scores[metric] = {}
+        axis_scores[metric] = {}
+        for axis, bins in axes.items():
+            bin_scores[metric][axis] = {}
+            nonempty_bin_scores: list[float] = []
+            for bin_name, by_asset in bins.items():
+                morphology_scores = [
+                    numerator / denominator
+                    for numerator, denominator in by_asset.values()
+                    if denominator > 0.0
+                ]
+                if not morphology_scores:
+                    continue  # 空 bin 不以 0 进入 axis 均值
+                score = sum(morphology_scores) / len(morphology_scores)  # morphology 等权
+                bin_scores[metric][axis][bin_name] = {
+                    "mse": score,
+                    "morphology_count": len(morphology_scores),
+                }
+                nonempty_bin_scores.append(score)
+            if nonempty_bin_scores:
+                axis_scores[metric][axis] = sum(nonempty_bin_scores) / len(nonempty_bin_scores)  # bin 等权
+        if not axis_scores[metric]:
+            raise ValueError(f"stratified validation metric={metric!r} has no non-empty axes")
+        metric_scores[metric] = sum(axis_scores[metric].values()) / len(axis_scores[metric])  # axis 等权
+    expected_metrics = {"density", "kappa", "derived_field"}
+    if set(metric_scores) != expected_metrics:
+        raise ValueError("stratified validation must produce density, kappa and derived_field scores")
+    return {"metric_scores": metric_scores, "axis_scores": axis_scores, "bin_scores": bin_scores}
+
+
+def _per_sample_masked_mse(error: torch.Tensor, mask: torch.Tensor) -> tuple[float | None, ...]:
+    r"""沿 batch 外全部轴归约 masked MSE，空 denominator 返回 `None`。"""
+
+    weight = mask.to(error.dtype)
+    flattened_error = error.reshape(error.shape[0], -1)
+    flattened_weight = weight.reshape(weight.shape[0], -1)
+    numerators = (flattened_error.square() * flattened_weight).sum(dim=1)
+    denominators = flattened_weight.sum(dim=1)
+    return tuple(
+        float(numerator.detach() / denominator.detach()) if float(denominator.detach()) > 0.0 else None
+        for numerator, denominator in zip(numerators, denominators)
+    )
+
+
+def _per_sample_masked_components(
+    error: torch.Tensor,
+    mask: torch.Tensor,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    r"""沿 batch 外全部轴返回平方误差和与有效标量数，不在此层做平均。"""
+
+    weight = mask.to(error.dtype)  # bool mask -> 0/1，维持 error dtype 的乘法路径
+    flattened_error = error.reshape(error.shape[0], -1)  # `[B,K]`，K 是当前 bin 的候选标量轴
+    flattened_weight = weight.reshape(weight.shape[0], -1)  # `[B,K]`
+    numerators = (flattened_error.square() * flattened_weight).sum(dim=1)  # `[B]`，平方误差和
+    denominators = flattened_weight.sum(dim=1)  # `[B]`，有效标量数
+    return (
+        tuple(float(value.detach()) for value in numerators),
+        tuple(float(value.detach()) for value in denominators),
+    )
+
+
+def _batched_selector(selector: torch.Tensor, batch_size: int) -> torch.Tensor:
+    r"""把共享 `[E]` selector 扩为 `[B,E]`，不复制物理索引。"""
+
+    return selector.unsqueeze(0).expand(batch_size, -1) if selector.ndim == 1 else selector
+
+
+def _derived_field_error(
+    prediction: GeometrySSLForward,
+    batch: PaddedOnlineGeometryBatch,
+) -> torch.Tensor:
+    r"""返回链式预测 $\hat g=-d\sigma^{-2}\hat\rho\hat\kappa$ 与 teacher 的误差。"""
+
+    batch_size = prediction.density.shape[0]  # $B$
+    owner_index = _batched_selector(batch.sensitivity_targets.owner_index, batch_size)  # `[B,E]`
+    query_index = _batched_selector(batch.sensitivity_targets.query_index, batch_size)  # `[B,E]`
+    batch_index = torch.arange(batch_size, device=prediction.density.device).unsqueeze(1)  # `[B,1]`
+    selected_density = prediction.density[batch_index, owner_index, query_index]  # `[B,E,L]`
+    selected_distance = batch.field_targets.distance[batch_index, owner_index, query_index]  # `[B,E]`
+    derived = (
+        -selected_distance.unsqueeze(-1)
+        * batch.field_targets.bandwidths.square().reciprocal()
+        * selected_density
+        * prediction.kappa.unsqueeze(-1)
+    )  # `[B,E,L]`，1/rad
+    return derived - batch.sensitivity_targets.field_sensitivity  # `[B,E,L]`
+
+
+def _distance_shell_masks(
+    field_distance: torch.Tensor,
+    edge_distance: torch.Tensor,
+    bandwidths: torch.Tensor,
+) -> tuple[tuple[str, torch.Tensor, torch.Tensor], ...]:
+    r"""按递增物理 bandwidth 构造互斥且完备的 distance-shell masks。"""
+
+    if torch.any(bandwidths[1:] <= bandwidths[:-1]):
+        raise ValueError("distance-shell stratification requires strictly increasing bandwidths")
+    shells: list[tuple[str, torch.Tensor, torch.Tensor]] = []
+    lower = None
+    for index, upper in enumerate(bandwidths):
+        if lower is None:
+            field_mask = field_distance <= upper
+            edge_mask = edge_distance <= upper
+            name = f"le_sigma_{index}"
+        else:
+            field_mask = (field_distance > lower) & (field_distance <= upper)
+            edge_mask = (edge_distance > lower) & (edge_distance <= upper)
+            name = f"sigma_{index - 1}_to_{index}"
+        shells.append((name, field_mask, edge_mask))
+        lower = upper
+    if lower is None:
+        raise ValueError("distance-shell stratification requires at least one bandwidth")
+    shells.append(("gt_sigma_last", field_distance > lower, edge_distance > lower))
+    return tuple(shells)
+
+
+__all__ = [
+    "GeometrySSLAblation",
+    "cross_asset_permutation",
+    "aggregate_geometry_ssl_stratified_components",
+    "geometry_ssl_ablation_forward",
+    "geometry_ssl_reconstruction_metrics",
+    "geometry_ssl_reconstruction_metrics_per_sample",
+    "geometry_ssl_stratified_components_per_sample",
+    "same_asset_q_permutation",
+]  # 稳定诊断公开面

@@ -66,7 +66,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-
 from anymani.robots.owner_geometry import WarpOwnerGeometryCache
 
 
@@ -120,12 +119,15 @@ def query_owner_surfaces_warp(
     if len(warp_cache.handles) != owner_count:
         raise ValueError("Warp owner cache axis does not match query owner axis")
     device = query_points_h.device
-    distance = torch.empty((batch_size, owner_count, query_count), device=device, dtype=torch.float32)
-    closest_local = torch.empty((batch_size, owner_count, query_count, 3), device=device, dtype=torch.float32)
-    face_index = torch.empty((batch_size, owner_count, query_count), device=device, dtype=torch.int32)
-    barycentric = torch.empty((batch_size, owner_count, query_count, 3), device=device, dtype=torch.float32)
-    feature_margin = torch.empty((batch_size, owner_count, query_count), device=device, dtype=torch.float32)
-    sign = torch.empty((batch_size, owner_count, query_count), device=device, dtype=torch.float32)
+    # Owner-major storage makes each per-owner `[B,N_Q,...]` slice contiguous. With `[B,G,...]`,
+    # `tensor[:, owner_index].reshape(-1)` allocates a copy when B>1, so Warp writes would never reach
+    # the original output and leave uninitialized distances in the teacher tensor.
+    distance = torch.empty((owner_count, batch_size, query_count), device=device, dtype=torch.float32)
+    closest_local = torch.empty((owner_count, batch_size, query_count, 3), device=device, dtype=torch.float32)
+    face_index = torch.empty((owner_count, batch_size, query_count), device=device, dtype=torch.int32)
+    barycentric = torch.empty((owner_count, batch_size, query_count, 3), device=device, dtype=torch.float32)
+    feature_margin = torch.empty((owner_count, batch_size, query_count), device=device, dtype=torch.float32)
+    sign = torch.empty((owner_count, batch_size, query_count), device=device, dtype=torch.float32)
     stream = wp.stream_from_torch(torch.cuda.current_stream(device=device))
     with wp.ScopedStream(stream, sync_enter=False, sync_exit=False):
         for owner_index, handle in enumerate(warp_cache.handles):
@@ -135,12 +137,12 @@ def query_owner_surfaces_warp(
                 torch.einsum("bij,bnj->bni", inverse_transform[:, :3, :3], points_h.reshape(batch_size, -1, 3))
                 + inverse_transform[:, :3, 3].unsqueeze(1)
             ).reshape(-1, 3).contiguous()
-            distance_flat = distance[:, owner_index].reshape(-1)
-            closest_flat = closest_local[:, owner_index].reshape(-1, 3)
-            face_flat = face_index[:, owner_index].reshape(-1)
-            barycentric_flat = barycentric[:, owner_index].reshape(-1, 3)
-            feature_margin_flat = feature_margin[:, owner_index].reshape(-1)
-            sign_flat = sign[:, owner_index].reshape(-1)
+            distance_flat = distance[owner_index].reshape(-1)
+            closest_flat = closest_local[owner_index].reshape(-1, 3)
+            face_flat = face_index[owner_index].reshape(-1)
+            barycentric_flat = barycentric[owner_index].reshape(-1, 3)
+            feature_margin_flat = feature_margin[owner_index].reshape(-1)
+            sign_flat = sign[owner_index].reshape(-1)
             wp.launch(
                 _warp_owner_surface_query_kernel,
                 dim=points_local.shape[0],
@@ -158,6 +160,12 @@ def query_owner_surfaces_warp(
                 ],
                 device=warp_cache.device,
             )
+    distance = distance.permute(1, 0, 2).contiguous()
+    closest_local = closest_local.permute(1, 0, 2, 3).contiguous()
+    face_index = face_index.permute(1, 0, 2).contiguous()
+    barycentric = barycentric.permute(1, 0, 2, 3).contiguous()
+    feature_margin = feature_margin.permute(1, 0, 2).contiguous()
+    sign = sign.permute(1, 0, 2).contiguous()
     closest_h = (
         torch.einsum("bgij,bgnj->bgni", owner_transforms_hg[..., :3, :3], closest_local)
         + owner_transforms_hg[..., :3, 3].unsqueeze(-2)

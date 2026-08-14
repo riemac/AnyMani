@@ -12,8 +12,10 @@ import trimesh
 from anymani.assets.bank import HandContainer, HandContainerCfg
 from anymani.robots.geometry_kinematics import lower_hand_geometry_semantics
 from anymani.robots.owner_geometry import (
+    GeometryIdentity,
     OwnerGeometryCache,
     OwnerSurfaceRecord,
+    geometry_identity,
     materialize_owner_geometry_cache,
     materialize_warp_owner_geometry_cache,
     prepare_warp_surface_view,
@@ -191,6 +193,58 @@ def test_mesh_component_welds_stl_vertices_before_solid_classification(tmp_path:
     assert cache.records[0].surface_mesh.is_watertight
     assert cache.records[0].solid_mesh is not None
     assert cache.records[0].solid_mesh.is_volume
+
+
+@_requires_local_mother
+def test_physical_identity_excludes_joint_limits_but_configuration_domain_includes_them() -> None:
+    r"""limit-only variants 应共享物理映射组，但保留不同构型采样域身份。"""
+
+    container = HandContainer.from_cfg(
+        HandContainerCfg(path=_MOTHER_ROOT),
+        require_geometry_semantics=True,
+    )
+    assert container.geometry_semantics is not None
+    spec = lower_hand_geometry_semantics(container.geometry_semantics, dtype=torch.float64)
+    cache = materialize_owner_geometry_cache(container, spec)
+    original = geometry_identity(container.geometry_semantics, spec, cache)
+    shifted_limits = spec.joint_limits + torch.tensor((-0.01, 0.02), dtype=torch.float64)
+    changed_spec = spec.__class__(
+        **{
+            **spec.__dict__,
+            "joint_limits": shifted_limits,
+        }
+    )
+    changed = geometry_identity(container.geometry_semantics, changed_spec, cache)
+
+    assert isinstance(original, GeometryIdentity)
+    assert original.physical_geometry_hash == changed.physical_geometry_hash
+    assert original.configuration_domain_hash != changed.configuration_domain_hash
+
+
+@_requires_local_mother
+def test_physical_identity_changes_when_owner_surface_changes() -> None:
+    r"""owner-local 物理表面变化必须形成新的 leakage group。"""
+
+    container = HandContainer.from_cfg(
+        HandContainerCfg(path=_MOTHER_ROOT),
+        require_geometry_semantics=True,
+    )
+    assert container.geometry_semantics is not None
+    spec = lower_hand_geometry_semantics(container.geometry_semantics, dtype=torch.float64)
+    cache = materialize_owner_geometry_cache(container, spec)
+    original = geometry_identity(container.geometry_semantics, spec, cache)
+    changed_cache = OwnerGeometryCache(
+        asset_id=cache.asset_id,
+        asset_content_hash=cache.asset_content_hash,
+        boolean_backend=cache.boolean_backend,
+        records=cache.records,
+        surface_geometry_hash="0" * 64,
+        surface_processing_version=cache.surface_processing_version,
+    )
+
+    changed = geometry_identity(container.geometry_semantics, spec, changed_cache)
+
+    assert original.physical_geometry_hash != changed.physical_geometry_hash
 
 
 def test_float32_surface_view_filters_negligible_collapsed_faces_and_enforces_area_budget() -> None:

@@ -47,7 +47,7 @@ def test_warp_owner_query_returns_surface_point_face_and_barycentric_provenance(
     warp_cache = materialize_warp_owner_geometry_cache(geometry_cache, device="cuda:0")
 
     spec = spec_cpu.to(device="cuda:0", dtype=torch.float32)
-    owner_transforms = spec.owner_home_transforms.unsqueeze(0)
+    owner_transforms = spec.owner_home_transforms.unsqueeze(0).expand(2, -1, -1, -1).clone()
     local_points = torch.as_tensor(surface.points_owner_local_m, device="cuda:0", dtype=torch.float32)
     query_h = (
         torch.einsum("bgij,gnj->bgni", owner_transforms[..., :3, :3], local_points)
@@ -56,6 +56,8 @@ def test_warp_owner_query_returns_surface_point_face_and_barycentric_provenance(
     result = query_owner_surfaces_warp(query_h, owner_transforms, warp_cache)
     torch.cuda.synchronize()
 
+    assert result.distance_m.shape == (2, 21, 8)
+    assert torch.min(result.distance_m).item() >= 0.0
     assert torch.max(result.distance_m).item() < 2.0e-5
     torch.testing.assert_close(result.closest_point_h_m, query_h, atol=2.0e-5, rtol=0.0)
     assert torch.all(result.face_index >= 0)

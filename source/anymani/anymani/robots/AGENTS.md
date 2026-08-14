@@ -37,6 +37,7 @@
 - `solid_mesh` 是独立可选证据：同 owner 多 solid 必须使用真实 Boolean union；palm interior anchor 必须取得合法 solid，否则严格失败。
 - Warp 上传按实际 float32 顶点过滤零边长/零面积面，审计删除数量与 float64 面积比例；面积损失超过 $10^{-8}$ 时严格失败。
 - GPU owner BVH 必须通过 lease/release 受 resident asset window 管理；全局 cache 不得永久强引用已退出窗口的资产。
+- `physical_geometry_hash` 覆盖 frame、$q_{home}$、运动学 lowering、owner/component transform 与实际 owner surface，明确排除 joint limits；`configuration_domain_hash` 单独覆盖 joint names 与 limits。
 - 不同 owner 永不做几何 union，因为最近点来源和一阶 Jacobian 必须可追踪。
 
 ## 测试

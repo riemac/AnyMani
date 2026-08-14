@@ -37,7 +37,7 @@ g_{\sigma_\ell,g,i}(x;q)
 \quad[\mathrm{rad}^{-1}].
 $$
 
-第一版同时训练五项：
+第一版场重建训练五项，trainer 另传入 latent paired parity 项：
 
 $$
 \mathcal L_{SSL}
@@ -46,7 +46,8 @@ $$
 +\lambda_\kappa\mathcal L_\kappa
 +\lambda_g\mathcal L_g^{(\kappa)}
 +\lambda_{Sob}\mathcal L_{Sob}
-+\lambda_{chain}\mathcal L_{chain}.
++\lambda_{chain}\mathcal L_{chain}
++\lambda_{pair}\mathcal L_{pair}.
 $$
 
 其中 $\hat g^{(\kappa)}$ 由 $\hat\rho$、$\hat\kappa$ 与链式法则产生；
@@ -103,7 +104,7 @@ from ...representations.targets.field_samples import FieldTargetBatch, Sensitivi
 class GeometrySSLWeights:
     r"""第一版联合物理目标的无量纲权重。
 
-    五项在正式首版中均为正；默认 ``1.0`` 只提供可运行的解析/集成测试锚点，不表示不同单位与
+    六项在正式首版中均为正；默认 ``1.0`` 只提供可运行的解析/集成测试锚点，不表示不同单位与
     数值尺度的目标天然等权。正式训练应在固定 generated 校准批次上比较各项写入共享编码器的
     梯度范数，再把校准后的常数保存到完整解析的实验配置。官方 LEAP/Allegro
     留出数据不能参与权重校准。
@@ -114,6 +115,7 @@ class GeometrySSLWeights:
         derived_field (float): $\lambda_g$，约束 $\hat g^{(\kappa)}\approx g$。
         sobolev (float): $\lambda_{Sob}$，约束同一密度函数的构型自导数。
         chain (float): $\lambda_{chain}$，约束两条预测斜率彼此一致。
+        paired (float): $\lambda_{pair}$，约束 joint-sign rewrite 下 $Z^{(0)}$ 偶、$z_i^{(1)}$ 奇。
     """
 
     density: float = 1.0
@@ -121,6 +123,7 @@ class GeometrySSLWeights:
     derived_field: float = 1.0
     sobolev: float = 1.0
     chain: float = 1.0
+    paired: float = 1.0
 
     def __post_init__(self) -> None:
         r"""验证所有权重非负。
@@ -132,7 +135,7 @@ class GeometrySSLWeights:
             ValueError: 任一权重小于零时抛出。
         """
 
-        values = (self.density, self.kappa, self.derived_field, self.sobolev, self.chain)
+        values = (self.density, self.kappa, self.derived_field, self.sobolev, self.chain, self.paired)
         if any(value < 0.0 for value in values):
             raise ValueError("Geometry SSL loss weights must be non-negative")
 
@@ -152,6 +155,7 @@ class GeometrySSLTerms:
         derived_field (torch.Tensor): $\hat g^{(\kappa)}$ 对解析教师 $g$ 的误差。
         sobolev (torch.Tensor): $\hat g^{auto}$ 对解析教师 $g$ 的误差。
         chain (torch.Tensor): $\hat g^{(\kappa)}$ 与 $\hat g^{auto}$ 的一致性误差。
+        paired (torch.Tensor): joint-sign 成对 latent parity 误差。
         derived_field_sensitivity (torch.Tensor): ``[B,E,L]``，单位 $\mathrm{rad}^{-1}$。
         auto_field_sensitivity (torch.Tensor): ``[B,E,L]``，单位 $\mathrm{rad}^{-1}$。
     """
@@ -162,8 +166,13 @@ class GeometrySSLTerms:
     derived_field: torch.Tensor  # $\mathcal L_g^{(\kappa)}$
     sobolev: torch.Tensor  # $\mathcal L_{Sob}$
     chain: torch.Tensor  # $\mathcal L_{chain}$
+    paired: torch.Tensor  # $\mathcal L_{pair}$
     derived_field_sensitivity: torch.Tensor  # `[B,E,L]` 的 $\hat g^{(\kappa)}$
     auto_field_sensitivity: torch.Tensor  # `[B,E,L]` 的 $\hat g^{auto}$
+    numerators: tuple[torch.Tensor, ...] = ()  # 六项平方误差 numerator，按有效标量而非平均值记录
+    denominators: tuple[torch.Tensor, ...] = ()  # 六项有效标量 denominator
+    paired_additive_numerators: tuple[torch.Tensor, torch.Tensor] | tuple[()] = ()  # `(N_0,N_1)`
+    paired_additive_denominators: tuple[torch.Tensor, torch.Tensor] | tuple[()] = ()  # `(D_0,D_1)`
 
 
 def _masked_mean_square(error: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -180,13 +189,20 @@ def _masked_mean_square(error: torch.Tensor, mask: torch.Tensor) -> torch.Tensor
     归一化分母是有效标量通道数，而不是归属体或查询点总数，避免不同无效比例改变梯度尺度。
     """
 
+    numerator, denominator = _masked_mean_square_components(error, mask)
+    return numerator / denominator  # 对有效标量取均值
+
+
+def _masked_mean_square_components(error: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""返回 masked MSE 的平方误差 numerator 与有效标量 denominator。"""
+
     while mask.ndim < error.ndim:
         mask = mask.unsqueeze(-1)  # 把 `[B,...]` 掩码广播到带宽等尾轴
     weight = mask.to(error.dtype).expand_as(error)  # 每个有效标量通道权重为 1
     denominator = weight.sum()  # 有效标量 target 总数
     if int(denominator.detach().item()) == 0:
         raise ValueError("masked objective received no valid targets")
-    return torch.sum(weight * error.square()) / denominator  # 对有效标量取均值
+    return torch.sum(weight * error.square()), denominator  # 保留 numerator/denominator 审计事实
 
 
 def selected_density_coordinate_derivative(
@@ -299,6 +315,9 @@ class GeometrySSLObjective(nn.Module):
         kappa_prediction: torch.Tensor,
         field_targets: FieldTargetBatch,
         sensitivity_targets: SensitivityTargetBatch,
+        paired_loss: torch.Tensor | None = None,
+        paired_components: tuple[torch.Tensor, torch.Tensor] | None = None,
+        paired_additive_components: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> GeometrySSLTerms:
         r"""计算第一版完整联合目标，并返回可分别记录的各项。
 
@@ -308,6 +327,8 @@ class GeometrySSLObjective(nn.Module):
             kappa_prediction (torch.Tensor): ``[B,E]`` 的 $\hat\kappa$，单位 m/rad。
             field_targets (FieldTargetBatch): 零阶距离/密度真值、带宽和查询点有效掩码。
             sensitivity_targets (SensitivityTargetBatch): 抽样边上的 $\kappa/g$ 与非光滑掩码。
+            paired_loss (torch.Tensor | None): 真实物理 sign rewrite 得到的 latent parity 标量。独立
+                field contract 可省略，此时使用与 prediction graph 相连的零值。
 
         Returns:
             GeometrySSLTerms: 五个标量损失、总损失和两条 ``[B,E,L]`` 场灵敏度路径。
@@ -321,14 +342,16 @@ class GeometrySSLObjective(nn.Module):
         if kappa_prediction.shape != sensitivity_targets.kappa.shape:
             raise ValueError("kappa prediction and target must share shape [B,E]")
 
-        density_loss = _masked_mean_square(
+        density_numerator, density_denominator = _masked_mean_square_components(
             density_prediction - field_targets.density,
             field_targets.valid_mask,
-        )  # $\mathcal L_{density}$，全部查询点来源与带宽都受监督
-        kappa_loss = _masked_mean_square(
+        )  # $\mathcal L_{density}$ 的 numerator/denominator
+        density_loss = density_numerator / density_denominator  # $\mathcal L_{density}$
+        kappa_numerator, kappa_denominator = _masked_mean_square_components(
             kappa_prediction - sensitivity_targets.kappa,
             sensitivity_targets.valid_mask,
-        )  # $\mathcal L_\kappa$，包含非祖先结构零
+        )  # $\mathcal L_\kappa$ 的 numerator/denominator
+        kappa_loss = kappa_numerator / kappa_denominator  # $\mathcal L_\kappa$
 
         owner_index = sensitivity_targets.owner_index  # `[E]` 抽样归属体索引
         query_index = sensitivity_targets.query_index  # `[E]` 抽样查询点索引
@@ -341,10 +364,11 @@ class GeometrySSLObjective(nn.Module):
             * selected_density
             * kappa_prediction.unsqueeze(-1)
         )  # $\hat g^{(\kappa)}=-(d/\sigma^2)\hat\rho\hat\kappa$，`[B,E,L]`
-        derived_field_loss = _masked_mean_square(
+        derived_numerator, derived_denominator = _masked_mean_square_components(
             derived_field - sensitivity_targets.field_sensitivity,
             sensitivity_targets.valid_mask,
-        )  # $\mathcal L_g^{(\kappa)}$
+        )  # $\mathcal L_g^{(\kappa)}$ 的 numerator/denominator
+        derived_field_loss = derived_numerator / derived_denominator  # $\mathcal L_g^{(\kappa)}$
 
         auto_field = selected_density_coordinate_derivative(
             density_prediction,
@@ -354,14 +378,38 @@ class GeometrySSLObjective(nn.Module):
             sensitivity_targets.joint_index,
             create_graph=True,
         )  # `[B,E,L]`，同一密度预测器对固定 `{h}` 查询点的自导数
-        sobolev_loss = _masked_mean_square(
+        sobolev_numerator, sobolev_denominator = _masked_mean_square_components(
             auto_field - sensitivity_targets.field_sensitivity,
             sensitivity_targets.valid_mask,
-        )  # $\mathcal L_{Sob}$
-        chain_loss = _masked_mean_square(
+        )  # $\mathcal L_{Sob}$ 的 numerator/denominator
+        sobolev_loss = sobolev_numerator / sobolev_denominator  # $\mathcal L_{Sob}$
+        chain_numerator, chain_denominator = _masked_mean_square_components(
             derived_field - auto_field,
             sensitivity_targets.valid_mask,
-        )  # $\mathcal L_{chain}$，连接显式一阶输出头与密度函数切向
+        )  # $\mathcal L_{chain}$ 的 numerator/denominator
+        chain_loss = chain_numerator / chain_denominator  # $\mathcal L_{chain}$
+        pair_loss = density_prediction.sum() * 0.0 if paired_loss is None else paired_loss
+        if pair_loss.ndim != 0 or not torch.isfinite(pair_loss):
+            raise ValueError("paired_loss must be one finite scalar")
+        if paired_components is None:
+            pair_numerator = pair_loss
+            pair_denominator = torch.ones_like(pair_loss)
+        else:
+            pair_numerator, pair_denominator = paired_components
+            if pair_numerator.ndim != 0 or pair_denominator.ndim != 0 or float(pair_denominator.detach()) <= 0.0:
+                raise ValueError("paired loss components must be finite scalar tensors with positive denominator")
+        if paired_additive_components is None:
+            pair_additive_numerators: tuple[torch.Tensor, torch.Tensor] | tuple[()] = ()
+            pair_additive_denominators: tuple[torch.Tensor, torch.Tensor] | tuple[()] = ()
+        else:
+            zero_numerator, zero_denominator, first_numerator, first_denominator = paired_additive_components
+            if any(
+                value.ndim != 0 or not torch.isfinite(value)
+                for value in (zero_numerator, zero_denominator, first_numerator, first_denominator)
+            ) or float(zero_denominator.detach()) <= 0.0 or float(first_denominator.detach()) <= 0.0:
+                raise ValueError("paired additive components must be finite scalars with positive denominators")
+            pair_additive_numerators = (zero_numerator, first_numerator)
+            pair_additive_denominators = (zero_denominator, first_denominator)
 
         total = (
             self.weights.density * density_loss
@@ -369,6 +417,7 @@ class GeometrySSLObjective(nn.Module):
             + self.weights.derived_field * derived_field_loss
             + self.weights.sobolev * sobolev_loss
             + self.weights.chain * chain_loss
+            + self.weights.paired * pair_loss
         )  # 第一版联合标量目标
         return GeometrySSLTerms(
             total=total,
@@ -377,8 +426,27 @@ class GeometrySSLObjective(nn.Module):
             derived_field=derived_field_loss,
             sobolev=sobolev_loss,
             chain=chain_loss,
+            paired=pair_loss,
             derived_field_sensitivity=derived_field,
             auto_field_sensitivity=auto_field,
+            numerators=(
+                density_numerator,
+                kappa_numerator,
+                derived_numerator,
+                sobolev_numerator,
+                chain_numerator,
+                pair_numerator,
+            ),
+            denominators=(
+                density_denominator,
+                kappa_denominator,
+                derived_denominator,
+                sobolev_denominator,
+                chain_denominator,
+                pair_denominator,
+            ),
+            paired_additive_numerators=pair_additive_numerators,
+            paired_additive_denominators=pair_additive_denominators,
         )
 
 

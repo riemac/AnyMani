@@ -74,7 +74,7 @@ $$
 不变；共同绕 $n_p$ 旋转时这些标量不变；镜像时有向叉积翻号，因此左右手性仍可区分。
 锚点编号不携带语义，任何锚点排列都只重排集合轴，不改变聚合结果。
 
-关节符号规范通过网络结构兑现。成对改写：
+关节符号规范通过真实物理输入的成对改写训练与验收。成对改写：
 
 $$
 (\mathcal S_i,q_i,q_{home,i})
@@ -82,31 +82,26 @@ $$
 (-\mathcal S_i,-q_i,-q_{home,i})
 $$
 
-表示同一物理运动。轴线上一点 $p_i=\omega_i\times v_i$ 为符号偶；轴向投影和有向叉积
-构成符号奇载体。零阶运动输入只使用：
+表示同一物理运动。轴线上一点 $p_i=\omega_i\times v_i$、轴向投影和有向叉积共同定义
+screw–anchor 关系；它们经同一共享投影和 anchor-set attention 得到一个完整的
+$f_i^{screw}$。网络不接收裸 $s_i\in\{-1,+1\}$，也不把 $f_i^{screw}$ 拆成可执行的
+even/odd 双支。
+
+当前构型使用带符号的物理坐标：
 
 $$
-\left(
-\frac{q_i-q_{home,i}}{\pi}
-\right)^2,
-\qquad
-f_i^{screw,even},
-\qquad
-\frac{q_i-q_{home,i}}{\pi}f_i^{screw,odd},
+\theta_i=\frac{q_i-q_{home,i}}{\pi}.
 $$
 
-因此零阶路径严格为偶。一阶输出采用偶系数与奇载体逐维相乘：
+所有 JOINT 共享一个普通 residual head：
 
 $$
-z_i^{(1)}
-=
-a\left(z_i^{(0)},f_i^{screw,even}\right)
-\odot
-W_{odd}f_i^{screw,odd},
+z_i^{(1)}=H_1\!\left([z_i^{(0)}\Vert f_i^{screw}]\right).
 $$
 
-其中 $W_{odd}$ 无偏置，故一阶路径严格为奇。这一结构保证不替代成对规范测试；测试仍需
-检查实现中的广播、索引和资产 lowering 是否同步翻转了全部物理量。
+普通 $H_1$ 不人为硬编码 parity；训练目标对同步改写后的成对 latent 约束
+$Z^{(0)}$ 为偶、对应 $z_i^{(1)}$ 为奇。测试仍需检查广播、索引和资产 lowering
+是否同步翻转了全部物理量。
 
 关节限位不属于本模块输入。两个仅限位不同、运动学与碰撞几何相同的手，在相同物理 $q$
 下必须得到相同几何表征。限位只服务构型采样、边界验证和后续策略局部状态。
@@ -129,11 +124,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
-from torch import nn
-
 from anymani.assets.asset_schema_geometry import HandGeometrySemanticsCfg
 from anymani.robots.geometry_kinematics import EmbodimentGeometrySpec
 from anymani.robots.owner_geometry import AnchorSamples, HomeSurfaceSamples
+from torch import nn
 
 from ..backbones.geometry_transformer import GraphBiasedTransformer
 
@@ -150,7 +144,7 @@ class GeometryEncoderConfig:
     Attributes:
         relation_width (int): 单个点—锚点关系的隐藏宽度。
         home_width (int): 每个归属体基准表面聚合后的宽度。
-        screw_width (int): 旋量偶/奇证据的固定宽度。
+        screw_width (int): 完整学习式 $f_i^{screw}$ 的固定宽度。
         hidden_width (int): 整手 Transformer 表征宽度。
         zero_order_width (int): 零阶表征宽度 $D_0$。
         first_order_width (int): 一阶表征宽度 $D_1$。
@@ -159,7 +153,7 @@ class GeometryEncoderConfig:
 
     relation_width: int = 64  # 单个点—锚点关系的隐藏宽度
     home_width: int = 64  # 每个归属体基准表面聚合后的宽度
-    screw_width: int = 64  # 固定宽度 $f_i^{screw}$ 的偶/奇分支宽度
+    screw_width: int = 64  # 单一固定宽度 $f_i^{screw}$
     hidden_width: int = 128  # 整手 Transformer 隐藏宽度
     zero_order_width: int = 128  # $D_0$
     first_order_width: int = 64  # $D_1$
@@ -506,8 +500,8 @@ class ImplicitGeometryEncoder(nn.Module):
         模块生命周期：本类全部参数随 SSL 检查点迁入 PPO；密度和灵敏度解码器不在本类中，
         因而导出保留检查点时无需根据参数名字猜测哪些层应删除。
 
-        一阶路径复用同一套旋量—锚点关系，不建立第二套逐锚点网络。偶特征进入零阶实体输入，
-        奇载体绕过零阶投影并在整手主干之后与对应 JOINT 零阶表征组合。
+        一阶路径复用唯一的 $f_i^{screw}$，不建立第二套逐锚点网络。完整 screw feature
+        同时进入 JOINT entity 输入和整手主干后的共享 residual head。
         """
 
         super().__init__()
@@ -518,11 +512,16 @@ class ImplicitGeometryEncoder(nn.Module):
             nn.GELU(),
         )
         self.home_attention_score = nn.Linear(config.home_width, 1)  # 每个归属体内共享的表面点打分
-        self.screw_even_projection = nn.Linear(config.relation_width, config.screw_width)  # 轴线偶特征
-        self.screw_attention_score = nn.Linear(config.relation_width, 1)  # 沿锚点的共享旋量权重
-        self.screw_odd_projection = nn.Linear(3, config.screw_width, bias=False)  # 结构性关节符号奇载体
+        self.screw_relation_projection = nn.Sequential(
+            nn.Linear(9, config.relation_width),
+            nn.GELU(),
+            nn.Linear(config.relation_width, config.relation_width),
+            nn.GELU(),
+        )  # 每个 screw–anchor pair 共用的九标量学习式投影
+        self.screw_attention_score = nn.Linear(config.relation_width, 1)  # 沿完整实际 K 轴共享打分
+        self.screw_projection = nn.Linear(config.relation_width, config.screw_width)  # 唯一 $f_i^{screw}$
         self.joint_motion_projection = nn.Sequential(
-            nn.Linear(1 + 2 * config.screw_width, config.home_width),
+            nn.Linear(1 + config.screw_width, config.home_width),
             nn.GELU(),
             nn.Linear(config.home_width, config.home_width),
             nn.GELU(),
@@ -540,13 +539,11 @@ class ImplicitGeometryEncoder(nn.Module):
             max_graph_distance=config.max_graph_distance,
         )
         self.zero_order_head = nn.Linear(config.hidden_width, config.zero_order_width)  # $Z^{(0)}$ 投影
-        self.first_order_coefficient = nn.Sequential(
+        self.first_order_head = nn.Sequential(
             nn.Linear(config.zero_order_width + config.screw_width, config.first_order_width),
             nn.GELU(),
             nn.Linear(config.first_order_width, config.first_order_width),
-            nn.Tanh(),
-        )  # 只读符号偶上下文的系数
-        self.first_order_carrier = nn.Linear(config.screw_width, config.first_order_width, bias=False)  # 奇载体投影
+        )  # 所有 JOINT 共享的 canonical residual $H_1([z_i^{(0)}\Vert f_i^{screw}])$
 
     def encode_points(self, points: torch.Tensor, evidence: StaticGeometryEvidence) -> torch.Tensor:
         r"""公开共享点—锚点前端，供基准表面点与训练期查询点使用同一组参数。
@@ -575,22 +572,29 @@ class ImplicitGeometryEncoder(nn.Module):
         weights = torch.softmax(logits, dim=-1)  # 每个样本/归属体沿自身有效表面点归一化
         return torch.sum(weights.unsqueeze(-1) * point_features, dim=-2)  # `[G,D_home]` 或 `[B,G,D_home]`
 
-    def _screw_features(self, evidence: StaticGeometryEvidence) -> tuple[torch.Tensor, torch.Tensor]:
-        r"""构造固定宽度的关节符号偶上下文与奇载体。
+    def _screw_features(self, evidence: StaticGeometryEvidence) -> torch.Tensor:
+        r"""构造单一、固定宽度的学习式 $f_i^{screw}$。
 
         空间旋量满足 $v=-\omega\times p$；单位轴的最小范数轴上一点为
-        $p=\omega\times v$，在 $(\omega,v)\mapsto(-\omega,-v)$ 下保持不变。
+        $p=\omega\times v$。每个 anchor 的九标量关系由轴点的六个 $SO(2)$ 不变量与
+        三个保留关节正方向语义的有向标量组成：
+
+        $$
+        [\phi(p_i,c_k),\ n_p^T\omega_i,\
+        \omega_{i,\perp}^Tr_{ik,\perp}/L,\
+        n_p^T(\omega_{i,\perp}\times r_{ik,\perp})/L].
+        $$
+
+        九维关系只经过一套共享投影和一套 anchor attention，输出一个 $f_i^{screw}$；
+        不把有向量拆成独立网络分支，也不输入裸 sign bit。
         """
 
         omega = evidence.space_screws[..., :3]  # `[N_J,3]` 或 `[B,N_J,3]`，关节符号奇
         linear = evidence.space_screws[..., 3:]  # 同轴线分量，单位 m
         axis_point = torch.cross(omega, linear, dim=-1)  # $p_i=\omega_i\times v_i$，关节符号偶，单位 m
-        per_anchor_even = self.point_anchor_encoder.encode_per_anchor(
+        axis_point_relations = self.point_anchor_encoder.relation_scalars(
             axis_point, evidence.anchors, evidence.palm_normal
-        )  # `[N_J,K,D_r]`，$SO(2)$ 不变且 sign 偶
-        weights = torch.softmax(self.screw_attention_score(per_anchor_even), dim=-2)  # 沿实际 K 轴
-        even_summary = torch.sum(weights * per_anchor_even, dim=-2)  # `[...,N_J,D_r]`，符号偶
-        even_feature = self.screw_even_projection(even_summary)  # 固定宽度 $f_i^{screw,even}$
+        )  # `[...,N_J,K,6]`，轴线位置、绝对尺度与手性关系
 
         if evidence.anchors.ndim == 2:
             relation = axis_point[:, None, :] - evidence.anchors[None, :, :]  # `[N_J,K,3]`
@@ -614,17 +618,20 @@ class ImplicitGeometryEncoder(nn.Module):
             keepdim=True,
         )  # $n_p^T(\omega_\perp\times r_\perp)$，sign 奇，单位 m
         anchor_count = evidence.anchors.shape[-2]
-        odd_basis = torch.cat(
+        directed_relations = torch.cat(
             (
                 omega_height.unsqueeze(-2).expand(*omega_height.shape[:-2], omega_height.shape[-2], anchor_count, 1),
                 dot / self.config.length_scale_m,
                 cross / self.config.length_scale_m,
             ),
             dim=-1,
-        )  # `[...,N_J,K,3]`，无量纲且每一维严格 sign 奇
-        odd_summary = torch.sum(weights * odd_basis, dim=-2)  # `[...,N_J,3]`，偶权重保持符号奇
-        odd_feature = self.screw_odd_projection(odd_summary)  # 固定宽度 $f_i^{screw,odd}$，无 bias
-        return even_feature, odd_feature
+        )  # `[...,N_J,K,3]`，无量纲有向旋量—锚点关系
+        relation_tokens = self.screw_relation_projection(
+            torch.cat((axis_point_relations, directed_relations), dim=-1)
+        )  # `[...,N_J,K,D_r]`，唯一 screw relation token
+        weights = torch.softmax(self.screw_attention_score(relation_tokens), dim=-2)  # 沿实际 K 轴
+        summary = torch.sum(weights * relation_tokens, dim=-2)  # `[...,N_J,D_r]`，anchor permutation 不变
+        return self.screw_projection(summary)  # `[...,N_J,D_s]`，单一 $f_i^{screw}$
 
     def forward(self, q: torch.Tensor, evidence: StaticGeometryEvidence) -> GeometryLatents:
         r"""计算部署保留的零阶/一阶几何表征。
@@ -664,45 +671,43 @@ class ImplicitGeometryEncoder(nn.Module):
             joint_valid = joint_valid.unsqueeze(0).expand(batch_size, -1)
 
         home_feature = self._home_features(evidence)  # `[G,D_home]` 或 `[B,G,D_home]`
-        screw_even, screw_odd = self._screw_features(evidence)  # `[...,N_J,D_s]` 偶/奇旋量证据
+        screw_feature = self._screw_features(evidence)  # `[...,N_J,D_s]` 完整 $f_i^{screw}$
         theta = ((q - evidence.q_home) / math.pi) * joint_valid  # padding JOINT 的运动严格为零
-        screw_even_batch = screw_even if evidence_is_batched else screw_even.unsqueeze(0).expand(q.shape[0], -1, -1)
-        screw_odd_batch = screw_odd if evidence_is_batched else screw_odd.unsqueeze(0).expand(q.shape[0], -1, -1)
-        screw_even_batch = screw_even_batch * joint_valid.unsqueeze(-1)  # padding screw 不携带形态证据
-        screw_odd_batch = screw_odd_batch * joint_valid.unsqueeze(-1)  # padding 奇载体严格为零
-        signed_motion = theta.unsqueeze(-1) * screw_odd_batch  # sign×sign=偶，保留运动方向与轴语义
+        screw_batch = (
+            screw_feature if evidence_is_batched else screw_feature.unsqueeze(0).expand(q.shape[0], -1, -1)
+        )
+        screw_batch = screw_batch * joint_valid.unsqueeze(-1)  # padding screw 不携带形态证据
         motion_input = torch.cat(
             (
-                theta.square().unsqueeze(-1),
-                screw_even_batch,
-                signed_motion,
+                theta.unsqueeze(-1),
+                screw_batch,
             ),
             dim=-1,
-        )  # `[B,N_J,1+2D_s]`，成对 joint-sign 下严格为偶
-        joint_motion_feature = self.joint_motion_projection(motion_input)  # `[B,N_J,D_home]` 偶特征
+        )  # `[B,N_J,1+D_s]`，带符号当前构型与完整旋量语义
+        joint_motion_feature = self.joint_motion_projection(motion_input)  # `[B,N_J,D_home]`
 
         entity_motion = torch.zeros(
             batch_size, owner_count, self.config.home_width, device=q.device, dtype=q.dtype
         )  # PALM/TIP 合法零值
-        entity_screw_even = torch.zeros(
+        entity_screw = torch.zeros(
             batch_size, owner_count, self.config.screw_width, device=q.device, dtype=q.dtype
         )  # PALM/TIP 无 JOINT 旋量
         if evidence.joint_entity_index.ndim == 1:
             entity_motion[:, evidence.joint_entity_index] = joint_motion_feature  # 同结构共享 routing
-            entity_screw_even[:, evidence.joint_entity_index] = screw_even_batch
+            entity_screw[:, evidence.joint_entity_index] = screw_batch
         else:
             routing = evidence.joint_entity_index.clamp_min(0).unsqueeze(-1).expand(-1, -1, self.config.home_width)
             entity_motion.scatter_(1, routing, joint_motion_feature * joint_valid.unsqueeze(-1))
             screw_routing = evidence.joint_entity_index.clamp_min(0).unsqueeze(-1).expand(
                 -1, -1, self.config.screw_width
             )
-            entity_screw_even.scatter_(1, screw_routing, screw_even_batch)
+            entity_screw.scatter_(1, screw_routing, screw_batch)
 
         role = self.role_embedding(evidence.entity_role)
         if role.ndim == 2:
             role = role.unsqueeze(0).expand(batch_size, -1, -1)  # 同结构共享角色轴
         home = home_feature if evidence_is_batched else home_feature.unsqueeze(0).expand(batch_size, -1, -1)
-        entity_input = torch.cat((entity_motion, home, entity_screw_even, role), dim=-1)  # 按属性直接拼接
+        entity_input = torch.cat((entity_motion, home, entity_screw, role), dim=-1)  # 按属性直接拼接
         tokens = self.entity_projection(entity_input) * entity_valid.unsqueeze(-1)  # padding token 输入严格为零
         contextual = self.backbone(
             tokens,
@@ -720,12 +725,10 @@ class ImplicitGeometryEncoder(nn.Module):
                 -1, -1, self.config.zero_order_width
             )
             joint_zero_order = torch.gather(zero_order, 1, gather_routing)
-        even_context = torch.cat(
-            (joint_zero_order, screw_even_batch), dim=-1
-        )  # 一阶 head 的 sign 偶系数输入
-        coefficient = self.first_order_coefficient(even_context)  # `[B,N_J,D_1]`，sign 偶
-        carrier = self.first_order_carrier(screw_odd_batch)  # `[B,N_J,D_1]`，符号奇且无偏置
-        first_order = coefficient * carrier * joint_valid.unsqueeze(-1)  # padding JOINT 与非物理输出严格为零
+        first_order_input = torch.cat(
+            (joint_zero_order, screw_batch), dim=-1
+        )  # `[B,N_J,D_0+D_s]`，所有 JOINT 共享同一输入类型
+        first_order = self.first_order_head(first_order_input) * joint_valid.unsqueeze(-1)  # canonical residual
         return GeometryLatents(zero_order=zero_order, first_order=first_order)
 
 

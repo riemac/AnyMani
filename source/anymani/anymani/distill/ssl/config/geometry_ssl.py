@@ -18,7 +18,7 @@ from anymani.distill.models.input_adapters.geometry import (  # encoder 与跨�
     GeometryEncoderConfig,
     GeometryPaddingCfg,
 )
-from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLWeights  # 五项权重
+from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLWeights  # 六项权重
 from anymani.distill.representations.queries.spatial_sampling import SpatialQuerySamplerCfg  # 50/25/25 query
 from anymani.distill.representations.targets.geometry_field import GeometryFieldTargetCfg  # 带宽/edge/mask
 from anymani.distill.ssl.dataset import GeometryAssetMaterializationCfg  # home/anchor/workspace cache
@@ -33,8 +33,12 @@ class GeometrySSLAssetCfg:
     后 manifest 再以 SHA-256 ``content_hash`` 检查重命名/复制导致的隐蔽泄漏。
     """
 
-    train_paths: tuple[str, ...] = ()  # generated optimizer 数据来源
-    validation_paths: tuple[str, ...] = ()  # generated 固定 held-out bank
+    family_paths: tuple[str, ...] = ()  # mother+variants；非空时自动按 physical hash 分组
+    mother_asset_id: str = ""  # family 模式中固定进入训练的 mother ID
+    validation_asset_count: int = 4  # 期望 held-out asset 数；完整 group 可使实际数调整
+    split_seed: int = 20260813  # physical group 确定性划分 seed
+    train_paths: tuple[str, ...] = ()  # 显式 generated optimizer 数据来源
+    validation_paths: tuple[str, ...] = ()  # 显式 generated fixed held-out bank
     official_evaluation_paths: tuple[str, ...] = ()  # 冻结后 zero-shot/adaptation 身份
 
     def __post_init__(self) -> None:
@@ -45,6 +49,12 @@ class GeometrySSLAssetCfg:
         official = set(self.official_evaluation_paths)  # official 隔离集合
         if train & validation or train & official or validation & official:  # 任意 pair 交集
             raise ValueError("train/validation/official asset paths must be disjoint")  # 配置构造即拒绝
+        if self.family_paths and (self.train_paths or self.validation_paths):
+            raise ValueError("family_paths cannot be combined with explicit train/validation paths")
+        if self.family_paths and not self.mother_asset_id:
+            raise ValueError("family_paths require mother_asset_id for the fixed train group")
+        if self.validation_asset_count < 0:
+            raise ValueError("validation_asset_count must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -70,15 +80,25 @@ class GeometrySSLOptimizerCfg:
 class GeometrySSLTrainLoopCfg:
     r"""训练步数、微批次、复现实验与输出频率。
 
-    ``batch_size`` 是每次 forward 的资产/q 样本数；有效 batch 为
-    $B_{eff}=B\times N_{acc}$。gradient accumulation 按 microbatch loss 除以 $N_{acc}$，因此不改变
-    总梯度均值。validation 使用启动时固定的一份 Sobol q/query/teacher bank。
+    `assets_per_microbatch` 与 `q_per_asset_per_microbatch` 声明逻辑 batch 轴；有效 batch 为
+    $B_{eff}=A_{mb}Q_{mb}N_{acc}$。gradient accumulation 按 microbatch loss 除以 $N_{acc}$，因此不改变
+    总梯度均值。`batch_size` 只保留为两条逻辑轴的乘积校验。validation 使用固定的 Sobol q/query/teacher bank。
     """
 
-    steps: int = 10_000  # optimizer 更新次数
-    batch_size: int = 16  # 单次 GPU forward 的 $B$
-    gradient_accumulation_steps: int = 1  # 每次 optimizer step 的 microbatches
+    steps: int = 30_000  # optimizer 更新次数上限；实际完成由资产 q coverage 决定
+    batch_size: int = 4  # 兼容旧入口；必须等于 A_mb*Q_mb
+    assets_per_microbatch: int = 2  # 一次 microbatch 的资产数 $A_{mb}$
+    q_per_asset_per_microbatch: int = 2  # 每资产 batched FK/target 的 q 数 $Q_{mb}$
+    max_resident_assets: int = 20  # GPU resident asset window 上限
+    q_per_asset_per_epoch: int = 256  # 每个训练资产每 epoch 的新 Sobol q 数
+    epochs: int = 20  # epoch coverage 由每资产 q cursor 定义
+    validation_q_per_asset: int = 64  # held-out morphology 固定 q bank 数
+    calibration_batches: int = 8  # 训练资产固定 calibration microbatch 数
+    calibration_min_weight: float = 1.0e-2  # 一次性梯度归一化下界
+    calibration_max_weight: float = 1.0e3  # 一次性梯度归一化上界
+    gradient_accumulation_steps: int = 4  # 每次 optimizer step 的 microbatches，有效 batch=16
     seed: int = 0  # model、Sobol、query/edge 路由总种子
+    deterministic_algorithms: bool = True  # resume/seed 对照要求 CUDA backward 使用确定实现
     device: str = "cuda:0"  # Warp 主路径要求 CUDA
     dtype: str = "float32"  # OmegaConf 1.3 structured config 不支持 Literal
     log_every_steps: int = 10  # TensorBoard/JSONL 标量周期
@@ -86,6 +106,7 @@ class GeometrySSLTrainLoopCfg:
     validation_every_steps: int = 250  # 固定 generated held-out bank 周期
     output_dir: str = "logs/geometry_ssl"  # 项目运行证据根
     experiment_name: str = "multi_anchor_geometry_ssl"  # 稳定实验目录名
+    resume_checkpoint: str = ""  # 可选完整 SSL checkpoint；空字符串表示从头开始
 
     def __post_init__(self) -> None:
         r"""拒绝空训练、空 batch、空累积或不可触发的记录周期。"""
@@ -93,6 +114,9 @@ class GeometrySSLTrainLoopCfg:
         counts = (  # 全部为离散正整数语义
             self.steps,  # optimizer steps
             self.batch_size,  # microbatch B
+            self.assets_per_microbatch,  # A_mb
+            self.q_per_asset_per_microbatch,  # Q_mb
+            self.calibration_batches,  # calibration batch count
             self.gradient_accumulation_steps,  # accumulation count
             self.log_every_steps,  # logging interval
             self.checkpoint_every_steps,  # checkpoint interval
@@ -100,6 +124,12 @@ class GeometrySSLTrainLoopCfg:
         )
         if any(value < 1 for value in counts):  # 0 会让生命周期分支不可达或除零
             raise ValueError("all training counts and intervals must be positive")  # 配置闸门
+        if self.batch_size != self.assets_per_microbatch * self.q_per_asset_per_microbatch:
+            raise ValueError("batch_size must equal assets_per_microbatch*q_per_asset_per_microbatch")
+        if self.max_resident_assets < self.assets_per_microbatch or self.q_per_asset_per_epoch < 1:
+            raise ValueError("resident asset cap must fit one microbatch and epoch q budget must be positive")
+        if self.calibration_min_weight <= 0.0 or self.calibration_max_weight < self.calibration_min_weight:
+            raise ValueError("calibration weight bounds are invalid")
         cuda_device = self.device == "cuda" or (
             self.device.startswith("cuda:") and self.device.removeprefix("cuda:").isdigit()
         )
@@ -124,7 +154,7 @@ class GeometrySSLExperimentCfg:
     target: GeometryFieldTargetCfg = field(default_factory=GeometryFieldTargetCfg)  # teacher 物理超参
     padding: GeometryPaddingCfg = field(default_factory=GeometryPaddingCfg)  # 20 JOINT/26 owner 上限
     model: GeometrySSLModelConfig = field(default_factory=GeometrySSLModelConfig)  # 网络容量
-    objective: GeometrySSLWeights = field(default_factory=GeometrySSLWeights)  # 五项损失权重
+    objective: GeometrySSLWeights = field(default_factory=GeometrySSLWeights)  # 六项损失权重
     optimizer: GeometrySSLOptimizerCfg = field(default_factory=GeometrySSLOptimizerCfg)  # AdamW
     train: GeometrySSLTrainLoopCfg = field(default_factory=GeometrySSLTrainLoopCfg)  # 生命周期
 
@@ -139,17 +169,22 @@ class GeometrySSLExperimentCfg:
 class GeometrySSLAssetManifest:
     r"""resolve 后按内容哈希冻结的资产 split 证据。
 
-    每条记录包含 asset ID、SHA-256、source kind、topology、family、handedness、JOINT/owner 数。
-    内容哈希而非路径是 leakage 判据，因此复制或重命名资产也不能跨 split。
+    每条记录包含 asset ID、content/physical/configuration hashes、source kind、topology、family、
+    handedness、JOINT/owner 数。physical hash 是学习映射 leakage 判据；content hash 继续防止完全相同
+    sidecar 复制或重命名后跨 split。
     """
 
     schema_version: str  # manifest schema
     train: tuple[dict[str, str], ...]  # generated optimizer split
     validation: tuple[dict[str, str], ...]  # generated fixed held-out split
     official_evaluation: tuple[dict[str, str], ...]  # 冻结后隔离 split
+    split_strategy: str = "explicit"  # explicit 或 physical_group
+    split_seed: int = 0  # physical_group 模式的 deterministic seed
+    requested_validation_asset_count: int = 0  # group split 目标数量
+    actual_validation_asset_count: int = 0  # 完整 group 约束后的实际数量
 
     def __post_init__(self) -> None:
-        r"""拒绝任何 ``content_hash`` 跨 train/validation/official 重用。"""
+        r"""拒绝任何 content 或 physical identity 跨 split 重用。"""
 
         groups = tuple(  # 每个 split 的唯一内容集合
             {record["content_hash"] for record in split}  # 路径/ID 不参与判据
@@ -157,6 +192,16 @@ class GeometrySSLAssetManifest:
         )
         if groups[0] & groups[1] or groups[0] & groups[2] or groups[1] & groups[2]:  # pairwise disjoint
             raise ValueError("asset content hashes leak across train/validation/official splits")  # 硬停止
+        physical_groups = tuple(
+            {record["physical_geometry_hash"] for record in split if record.get("physical_geometry_hash")}
+            for split in (self.train, self.validation, self.official_evaluation)
+        )
+        if (
+            physical_groups[0] & physical_groups[1]
+            or physical_groups[0] & physical_groups[2]
+            or physical_groups[1] & physical_groups[2]
+        ):
+            raise ValueError("physical geometry hashes leak across train/validation/official splits")
 
 
 def resolved_config_dict(config: GeometrySSLExperimentCfg) -> dict[str, Any]:
@@ -181,6 +226,10 @@ def experiment_config_from_dict(payload: dict[str, Any]) -> GeometrySSLExperimen
 
     assets_payload = dict(payload["assets"])  # Hydra ListConfig -> 基础容器
     assets = GeometrySSLAssetCfg(  # 路径轴冻结为 tuple
+        family_paths=tuple(assets_payload.get("family_paths", ())),  # automatic grouped family
+        mother_asset_id=str(assets_payload.get("mother_asset_id", "")),  # fixed train group
+        validation_asset_count=int(assets_payload.get("validation_asset_count", 4)),  # held-out target
+        split_seed=int(assets_payload.get("split_seed", 20260813)),  # group split seed
         train_paths=tuple(assets_payload["train_paths"]),  # generated train
         validation_paths=tuple(assets_payload["validation_paths"]),  # generated held-out
         official_evaluation_paths=tuple(assets_payload["official_evaluation_paths"]),  # official only
@@ -197,7 +246,7 @@ def experiment_config_from_dict(payload: dict[str, Any]) -> GeometrySSLExperimen
         target=GeometryFieldTargetCfg(**target_payload),  # $d/\\rho/\\kappa/g$
         padding=GeometryPaddingCfg(**dict(payload["padding"])),  # 20/5/26
         model=GeometrySSLModelConfig(**model_payload),  # encoder+decoder
-        objective=GeometrySSLWeights(**dict(payload["objective"])),  # 五项权重
+        objective=GeometrySSLWeights(**dict(payload["objective"])),  # 六项权重
         optimizer=GeometrySSLOptimizerCfg(**dict(payload["optimizer"])),  # AdamW
         train=GeometrySSLTrainLoopCfg(**dict(payload["train"])),  # loop/logging
     )

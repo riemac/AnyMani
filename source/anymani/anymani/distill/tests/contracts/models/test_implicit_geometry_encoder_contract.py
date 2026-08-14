@@ -13,6 +13,11 @@ from anymani.distill.models.input_adapters.geometry import (
     pad_static_geometry_evidence,
     stack_static_geometry_evidence,
 )
+from anymani.distill.objectives.representations.gauge_consistency import (
+    deterministic_partial_joint_sign,
+    joint_sign_paired_loss,
+    rewrite_joint_sign_coordinates,
+)
 
 pytestmark = pytest.mark.contract
 
@@ -185,33 +190,93 @@ def test_anchor_permutation_and_common_so2_rotation_do_not_change_latents() -> N
     torch.testing.assert_close(rotated_latents.first_order, reference.first_order, atol=1.0e-10, rtol=1.0e-10)
 
 
-def test_paired_joint_sign_rewrite_makes_zero_order_even_and_first_order_odd() -> None:
-    r"""同步翻转 screw、q 与 q_home 时，零阶严格为偶、一阶严格为奇。"""
+def test_encoder_uses_single_screw_feature_and_shared_residual_head() -> None:
+    r"""canonical encoder 不得保留 even/odd 双投影与 coefficient/carrier 乘法结构。"""
+
+    encoder = _encoder()
+    module_names = {name for name, _module in encoder.named_modules()}
+
+    assert "screw_projection" in module_names
+    assert "first_order_head" in module_names
+    assert "screw_even_projection" not in module_names
+    assert "screw_odd_projection" not in module_names
+    assert "first_order_coefficient" not in module_names
+    assert "first_order_carrier" not in module_names
+
+
+def test_partial_joint_sign_rewrite_and_paired_loss_encode_even_odd_contract() -> None:
+    r"""只改写 JOINT 1 时，paired loss 要求全部 Z0 偶且只有对应 z1 分量为奇。"""
 
     torch.manual_seed(13)
-    evidence = _static_evidence()
+    evidence = _two_joint_static_evidence()
     encoder = _encoder().eval()
-    q = torch.tensor([[0.37], [-0.18]], dtype=torch.float64)
+    q = torch.tensor([[0.37, -0.18], [-0.21, 0.42]], dtype=torch.float64)
     reference = encoder(q, evidence)
+    rewritten_q, rewritten_evidence, sign = rewrite_joint_sign_coordinates(q, evidence, joint_index=1)
 
-    rewritten = StaticGeometryEvidence(
-        anchors=evidence.anchors,
-        home_surface_points=evidence.home_surface_points,
-        home_surface_mask=evidence.home_surface_mask,
-        palm_normal=evidence.palm_normal,
-        space_screws=-evidence.space_screws,
-        q_home=-evidence.q_home,
-        entity_role=evidence.entity_role,
-        entity_joint_index=evidence.entity_joint_index,
-        joint_entity_index=evidence.joint_entity_index,
-        shortest_path=evidence.shortest_path,
-        parent_direction=evidence.parent_direction,
-        child_direction=evidence.child_direction,
+    torch.testing.assert_close(rewritten_q[:, 0], q[:, 0])
+    torch.testing.assert_close(rewritten_q[:, 1], -q[:, 1])
+    torch.testing.assert_close(rewritten_evidence.space_screws[0], evidence.space_screws[0])
+    torch.testing.assert_close(rewritten_evidence.space_screws[1], -evidence.space_screws[1])
+    torch.testing.assert_close(rewritten_evidence.q_home[0], evidence.q_home[0])
+    torch.testing.assert_close(rewritten_evidence.q_home[1], -evidence.q_home[1])
+    torch.testing.assert_close(sign, torch.tensor([1.0, -1.0], dtype=torch.float64))
+
+    ideal_paired = reference.__class__(
+        zero_order=reference.zero_order,
+        first_order=reference.first_order * sign.view(1, -1, 1),
     )
-    paired = encoder(-q, rewritten)
+    ideal_loss = joint_sign_paired_loss(reference, ideal_paired, joint_sign=sign)
+    torch.testing.assert_close(ideal_loss, torch.zeros_like(ideal_loss))
+    shifted_paired = reference.__class__(
+        zero_order=reference.zero_order + 1.0,
+        first_order=reference.first_order * sign.view(1, -1, 1) + 2.0,
+    )
+    shifted_loss = joint_sign_paired_loss(reference, shifted_paired, joint_sign=sign)
+    torch.testing.assert_close(shifted_loss, torch.tensor(5.0, dtype=torch.float64))  # $1^2+2^2$
 
-    torch.testing.assert_close(paired.zero_order, reference.zero_order, atol=1.0e-10, rtol=1.0e-10)
-    torch.testing.assert_close(paired.first_order, -reference.first_order, atol=1.0e-10, rtol=1.0e-10)
+    actual_paired = encoder(rewritten_q, rewritten_evidence)
+    actual_loss = joint_sign_paired_loss(reference, actual_paired, joint_sign=sign)
+    actual_loss.backward()
+    assert torch.isfinite(actual_loss)
+    assert any(parameter.grad is not None for parameter in encoder.parameters())
+
+    valid = torch.tensor([[True, True, False], [True, False, False]])
+    first_pattern = deterministic_partial_joint_sign(valid, step=0, dtype=torch.float64)
+    repeated_pattern = deterministic_partial_joint_sign(valid, step=0, dtype=torch.float64)
+    torch.testing.assert_close(first_pattern, repeated_pattern)
+    torch.testing.assert_close(first_pattern[:, 2], torch.ones(2, dtype=torch.float64))
+
+
+def test_so2_and_partial_joint_sign_rewrites_commute() -> None:
+    r"""面内 frame rewrite 与单 JOINT 坐标反向的先后顺序不得改变 paired 物理输入。"""
+
+    evidence = _two_joint_static_evidence()
+    q = torch.tensor([[0.31, -0.27]], dtype=torch.float64)
+    angle = 0.913
+
+    sign_q, sign_evidence, sign = rewrite_joint_sign_coordinates(q, evidence, joint_index=1)
+    sign_then_so2 = _rotate_about_palm_normal(sign_evidence, angle)
+
+    so2_evidence = _rotate_about_palm_normal(evidence, angle)
+    so2_then_sign_q, so2_then_sign, second_sign = rewrite_joint_sign_coordinates(
+        q,
+        so2_evidence,
+        joint_index=1,
+    )
+
+    torch.testing.assert_close(sign_q, so2_then_sign_q, atol=1.0e-12, rtol=0.0)
+    torch.testing.assert_close(sign_then_so2.anchors, so2_then_sign.anchors, atol=1.0e-12, rtol=0.0)
+    torch.testing.assert_close(
+        sign_then_so2.home_surface_points,
+        so2_then_sign.home_surface_points,
+        atol=1.0e-12,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(sign_then_so2.palm_normal, so2_then_sign.palm_normal, atol=1.0e-12, rtol=0.0)
+    torch.testing.assert_close(sign_then_so2.space_screws, so2_then_sign.space_screws, atol=1.0e-12, rtol=0.0)
+    torch.testing.assert_close(sign_then_so2.q_home, so2_then_sign.q_home, atol=1.0e-12, rtol=0.0)
+    torch.testing.assert_close(sign, second_sign)
 
 
 def test_same_structure_assets_share_one_forward_with_per_sample_static_evidence() -> None:

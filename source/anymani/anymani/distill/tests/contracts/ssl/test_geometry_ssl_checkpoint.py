@@ -10,6 +10,7 @@ from anymani.distill.models.input_adapters.geometry import GeometryEncoderConfig
 from anymani.distill.ssl.checkpoint import (
     GeometrySSLCheckpointMetadata,
     load_geometry_ssl_checkpoint,
+    load_geometry_ssl_runtime_state,
     load_retained_geometry_encoder,
     save_geometry_ssl_checkpoint,
 )
@@ -55,7 +56,14 @@ def test_checkpoint_resumes_full_state_and_transfers_only_encoder(tmp_path: Path
         asset_manifest={"train": [{"asset_id": "synthetic", "content_hash": "abc"}]},
         resolved_config={"model": {"bandwidth_count": 2}},
     )
-    save_geometry_ssl_checkpoint(path, model=model, optimizer=optimizer, step=3, metadata=metadata)
+    save_geometry_ssl_checkpoint(
+        path,
+        model=model,
+        optimizer=optimizer,
+        step=3,
+        metadata=metadata,
+        runtime_state={"epoch": 2, "block_index": 5, "asset_ids": ("synthetic",)},
+    )
 
     resumed = GeometrySSLModel(config)
     resumed_optimizer = torch.optim.AdamW(resumed.parameters(), lr=1.0e-3)
@@ -69,6 +77,7 @@ def test_checkpoint_resumes_full_state_and_transfers_only_encoder(tmp_path: Path
     assert step == 3
     assert loaded_metadata["code_revision"] == "test-revision"
     assert resumed_optimizer.state_dict()["state"]
+    assert load_geometry_ssl_runtime_state(path)["epoch"] == 2
 
     transferred = ImplicitGeometryEncoder(config.encoder)
     report = load_retained_geometry_encoder(path, encoder=transferred)

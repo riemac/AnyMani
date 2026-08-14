@@ -68,6 +68,7 @@ import hashlib
 from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import numpy as np
 import trimesh
@@ -177,6 +178,20 @@ class WarpSurfaceView:
     faces: np.ndarray  # `[F_valid,3]` int32
     source_face_indices: np.ndarray  # `[F_valid]`，指向 `surface_mesh.faces`
     audit: WarpSurfaceAudit  # 面积守恒和删除数量
+
+
+@dataclass(frozen=True)
+class GeometryIdentity:
+    r"""一项已物化资产的物理映射身份与构型采样域身份。
+
+    `physical_geometry_hash` 覆盖 frame、$q_{home}$、空间旋量、owner home 位姿、
+    祖先/图关系、component-to-owner 变换和实际 owner surface；明确排除 joint limits。
+    `configuration_domain_hash` 只覆盖规范 joint names 与合法角域，因此 limit-only
+    variants 会共享物理 group，但保留不同 Sobol 采样域 provenance。
+    """
+
+    physical_geometry_hash: str  # 学习映射 leakage group 的 SHA-256
+    configuration_domain_hash: str  # `joint names + limits` 的 SHA-256
 
 
 _WarpCacheKey = tuple[str, str, str]
@@ -377,6 +392,65 @@ def warp_owner_geometry_cache_stats() -> dict[str, int]:
         "owner_mesh_count": sum(len(cache.handles) for cache in _WARP_OWNER_CACHE.values()),
         "lease_count": sum(_WARP_OWNER_CACHE_LEASES.values()),
     }
+
+
+def geometry_identity(
+    semantics: HandGeometrySemanticsCfg,
+    spec: EmbodimentGeometrySpec,
+    cache: OwnerGeometryCache,
+) -> GeometryIdentity:
+    r"""计算不含路径、时间戳和资产 ID 的物理/构型双重身份。
+
+    物理 hash 对应映射 $(q,x,g)\mapsto d_g(x;q)$，所以包含定义 owner 运动与
+    表面的全部量；limits 只改变训练会从哪个 $q$ 域采样，不改变该映射。调用方应使用
+    同一精度 lowering（正式 manifest 使用 CPU float64），避免 dtype 选择混入身份。
+
+    Args:
+        semantics (HandGeometrySemanticsCfg): 已验证的 frame、owner 与 joint 名义语义。
+        spec (EmbodimentGeometrySpec): 对应资产的 CPU 运动学 lowering。
+        cache (OwnerGeometryCache): 已焊接/并集后的实际 owner surface。
+
+    Returns:
+        GeometryIdentity: 物理映射 hash 与 configuration-domain hash。
+    """
+
+    if spec.joint_limits is None:
+        raise ValueError("geometry identity requires explicit joint limits for configuration-domain provenance")
+    if tuple(spec.joint_names) != tuple(semantics.active_joint_names):
+        raise ValueError("geometry identity joint axis does not match geometry semantics")
+    if tuple(spec.owner_ids) != tuple(owner.owner_id for owner in semantics.owners):
+        raise ValueError("geometry identity owner axis does not match geometry semantics")
+    surface_hash = cache.surface_geometry_hash or _owner_surface_geometry_hash(cache.records)
+
+    physical = hashlib.sha256()
+    physical.update(b"physical-geometry-v1\0")
+    _hash_strings(physical, spec.joint_names)  # q 坐标身份与规范顺序
+    _hash_strings(physical, spec.owner_ids)  # owner/field 输出身份与规范顺序
+    _hash_strings(physical, tuple(owner.role for owner in semantics.owners))  # PALM/JOINT/TIP 语义
+    _hash_tensor(physical, spec.space_screws, floating=True)  # `[N_J,6]`，{h} 空间旋量
+    _hash_tensor(physical, spec.q_home, floating=True)  # `[N_J]`，rad reference
+    _hash_tensor(physical, spec.owner_home_transforms, floating=True)  # `[G,4,4]`，owner local -> {h}
+    _hash_tensor(physical, spec.owner_ancestor_mask, floating=False)  # `[G,N_J]` 动力学结构零
+    _hash_tensor(physical, spec.joint_ancestor_mask, floating=False)  # `[N_J,N_J]` 分支结构
+    for optional in (
+        spec.owner_parent_indices,
+        spec.owner_graph_shortest,
+        spec.owner_graph_parent,
+        spec.owner_graph_child,
+        spec.component_owner_indices,
+    ):
+        _hash_optional_tensor(physical, optional, floating=False)
+    _hash_optional_tensor(physical, spec.component_owner_local_transforms, floating=True)
+    physical.update(bytes.fromhex(surface_hash))  # 实际三角表面，已排除 mesh path/asset ID
+
+    domain = hashlib.sha256()
+    domain.update(b"configuration-domain-v1\0")
+    _hash_strings(domain, spec.joint_names)  # limit 每一行对应的 q 坐标
+    _hash_tensor(domain, spec.joint_limits, floating=True)  # `[N_J,2]`，rad
+    return GeometryIdentity(
+        physical_geometry_hash=physical.hexdigest(),
+        configuration_domain_hash=domain.hexdigest(),
+    )
 
 
 def prepare_warp_surface_view(
@@ -781,6 +855,37 @@ def _owner_surface_geometry_hash(records: tuple[OwnerSurfaceRecord, ...]) -> str
     return digest.hexdigest()
 
 
+def _hash_strings(digest: Any, values: tuple[str, ...]) -> None:
+    r"""以长度前缀编码字符串轴，避免连接歧义。"""
+
+    digest.update(len(values).to_bytes(8, "little", signed=False))
+    for value in values:
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "little", signed=False))
+        digest.update(encoded)
+
+
+def _hash_tensor(digest: Any, value: Any, *, floating: bool) -> None:
+    r"""把 tensor 规约成 CPU little-endian 连续数组后写入 shape、dtype 与数值。"""
+
+    tensor = value.detach().cpu()
+    array = np.asarray(tensor, dtype="<f8" if floating else "<i8")
+    array = np.ascontiguousarray(array)
+    digest.update(b"f8" if floating else b"i8")
+    digest.update(np.asarray(array.shape, dtype="<i8").tobytes())
+    digest.update(array.tobytes())
+
+
+def _hash_optional_tensor(digest: Any, value: Any | None, *, floating: bool) -> None:
+    r"""为可选物理关系张量加入 presence bit 后复用规范 tensor 编码。"""
+
+    if value is None:
+        digest.update(b"\x00")
+        return
+    digest.update(b"\x01")
+    _hash_tensor(digest, value, floating=floating)
+
+
 def _stable_owner_seed(seed: int, owner_id: str) -> int:
     """把全局种子和稳定 owner ID 混成 NumPy 接受的 32-bit 种子。"""
 
@@ -847,6 +952,7 @@ def _farthest_point_indices(points: np.ndarray, count: int) -> np.ndarray:
 __all__ = [
     "HomeSurfaceSamples",
     "AnchorSamples",
+    "GeometryIdentity",
     "OwnerGeometryCache",
     "OwnerSurfaceRecord",
     "WarpOwnerGeometryCache",
@@ -856,6 +962,7 @@ __all__ = [
     "materialize_owner_geometry_cache",
     "materialize_warp_owner_geometry_cache",
     "prepare_warp_surface_view",
+    "geometry_identity",
     "release_warp_owner_geometry_cache",
     "sample_owner_home_surfaces",
     "sample_palm_anchor_supports",

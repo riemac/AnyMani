@@ -62,6 +62,7 @@ def save_geometry_ssl_checkpoint(
     optimizer: torch.optim.Optimizer,  # resume 所需动量/二阶矩
     step: int,  # 已完成 optimizer steps
     metadata: GeometrySSLCheckpointMetadata,  # 科研复现实验合同
+    runtime_state: Mapping[str, Any] | None = None,  # epoch/window/Sobol cursor resume state
 ) -> None:
     r"""保存可 resume 的完整 state 和无需 decoder 装配即可读取的 retained state。
 
@@ -85,6 +86,7 @@ def save_geometry_ssl_checkpoint(
             "retained_state": model.retained_state_dict(),  # 仅 `encoder.*`
             "optimizer_state": optimizer.state_dict(),  # AdamW moments/param groups
             "metadata": asdict(metadata),  # 只含 weights-only loader 支持的基础类型
+            "runtime_state": dict(runtime_state or {}),  # 资产窗口与每资产 q 游标
         },
         temporary,  # 正式路径在完整写入前保持不存在/旧版本
     )
@@ -109,6 +111,16 @@ def load_geometry_ssl_checkpoint(
     if optimizer is not None:  # inference/审计可只恢复模型
         optimizer.load_state_dict(payload["optimizer_state"])  # 恢复 AdamW moments 与 param groups
     return int(payload["step"]), dict(payload["metadata"])  # 调用者决定下一 step 与记录方式
+
+
+def load_geometry_ssl_runtime_state(path: Path, *, map_location: str | torch.device = "cpu") -> dict[str, Any]:
+    r"""读取 checkpoint 中的 runtime cursor，不装配模型或 optimizer。"""
+
+    payload = _load_payload(path, map_location=map_location)
+    runtime_state = payload.get("runtime_state", {})
+    if not isinstance(runtime_state, Mapping):
+        raise ValueError("geometry SSL checkpoint runtime_state must be a mapping")
+    return dict(runtime_state)
 
 
 def load_retained_geometry_encoder(
@@ -184,6 +196,7 @@ __all__ = [  # checkpoint 模块稳定公开面
     "GeometrySSLCheckpointMetadata",  # metadata schema
     "RetainedLoadReport",  # transfer 审计报告
     "load_geometry_ssl_checkpoint",  # SSL resume
+    "load_geometry_ssl_runtime_state",  # window/Sobol cursor resume
     "load_retained_geometry_encoder",  # PPO/IL transfer
     "save_geometry_ssl_checkpoint",  # 原子完整保存
 ]

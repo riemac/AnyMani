@@ -14,6 +14,7 @@ from anymani.distill.ssl.config import (
     experiment_config_from_dict,
     resolved_config_dict,
 )
+from anymani.distill.ssl.split import GeometryAssetIdentityRecord, split_geometry_asset_groups
 
 
 def test_omegaconf_payload_round_trip_rebuilds_validated_dataclasses() -> None:
@@ -60,8 +61,49 @@ def test_asset_manifest_rejects_content_hash_leakage_across_splits() -> None:
         GeometrySSLAssetManifest("1.0.0", train, validation, ())
 
 
+def test_asset_manifest_rejects_physical_geometry_leakage_across_splits() -> None:
+    r"""不同 limits/content 但同一物理映射的资产仍不得跨 split。"""
+
+    train = ({"asset_id": "train", "content_hash": "content-a", "physical_geometry_hash": "same"},)
+    validation = ({"asset_id": "limit-only", "content_hash": "content-b", "physical_geometry_hash": "same"},)
+    with pytest.raises(ValueError, match="physical geometry hashes leak"):
+        GeometrySSLAssetManifest("1.0.0", train, validation, ())
+
+
 def test_official_path_cannot_overlap_generated_train_or_validation() -> None:
     """official evaluation 配置在 bank resolve 前也必须与 generated splits 隔离。"""
 
     with pytest.raises(ValueError, match="paths must be disjoint"):
         GeometrySSLAssetCfg(train_paths=("/same",), official_evaluation_paths=("/same",))
+
+
+def test_grouped_split_is_deterministic_keeps_mother_group_in_train_and_prevents_leakage() -> None:
+    r"""同 physical hash 的 limit-only 资产必须整组移动，mother 所在组固定训练。"""
+
+    records = (
+        GeometryAssetIdentityRecord("mother", "/family/mother", "content-m", "physical-a", "domain-a"),
+        GeometryAssetIdentityRecord("limit-only", "/family/limit", "content-l", "physical-a", "domain-b"),
+        GeometryAssetIdentityRecord("shape-b", "/family/b", "content-b", "physical-b", "domain-a"),
+        GeometryAssetIdentityRecord("shape-c", "/family/c", "content-c", "physical-c", "domain-a"),
+        GeometryAssetIdentityRecord("shape-d", "/family/d", "content-d", "physical-d", "domain-a"),
+    )
+
+    first = split_geometry_asset_groups(
+        records,
+        mother_asset_id="mother",
+        validation_asset_count=2,
+        split_seed=20260813,
+    )
+    second = split_geometry_asset_groups(
+        records,
+        mother_asset_id="mother",
+        validation_asset_count=2,
+        split_seed=20260813,
+    )
+
+    assert first == second
+    assert {record.asset_id for record in first.train} >= {"mother", "limit-only"}
+    assert {record.physical_geometry_hash for record in first.train}.isdisjoint(
+        record.physical_geometry_hash for record in first.validation
+    )
+    assert len(first.validation) == 2

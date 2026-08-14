@@ -15,7 +15,7 @@ import numpy as np  # dense latent/mask/error 使用压缩 NPZ
 from torch.utils.tensorboard import SummaryWriter  # 在线曲线不替代 JSONL 事实源
 
 from anymani.distill.models.geometry_ssl import GeometrySSLForward  # latent/density/κ 预测包
-from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLTerms  # 五项损失包
+from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLTerms  # 六项损失包
 from anymani.distill.ssl.dataset import PaddedOnlineGeometryBatch  # target、mask 与资产身份
 
 
@@ -37,17 +37,45 @@ class GeometrySSLRunLogger:
         self.output_dir = output_dir  # NPZ 与结构化记录共同根
         self.writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))  # event 文件
         self.jsonl_path = output_dir / "metrics.jsonl"  # append-only 标量证据
+        self.runtime_jsonl_path = output_dir / "runtime.jsonl"  # window/memory/throughput 生命周期证据
+
+    def log_runtime_event(self, event: dict[str, Any]) -> None:
+        r"""追加一条 resident-window 或 optimizer-step 运行时事件。
+
+        runtime 事实与物理 loss 分文件保存，避免内存、吞吐或 lease 生命周期被误作训练指标。
+        ``device_memory_before/after`` 是设备全局 free-memory 口径，``torch_*`` 只覆盖 PyTorch
+        caching allocator；前者包含 Warp BVH 与其他 CUDA 分配，不能解释成 BVH 独占字节数。
+
+        Args:
+            event (dict[str, Any]): 仅含 JSON 基础类型的已命名运行时事件。
+        """
+
+        with self.runtime_jsonl_path.open("a", encoding="utf-8") as stream:  # append-only 生命周期序列
+            stream.write(json.dumps(event, sort_keys=True) + "\n")  # 每行可独立恢复和审计
+
+        if event.get("event") == "optimizer_step":  # 在线趋势只记录 step-level 连续标量
+            step = int(event["step"])  # optimizer 更新坐标
+            for name in (
+                "step_seconds",
+                "q_samples_per_second",
+                "cuda_peak_allocated_bytes",
+                "cuda_peak_reserved_bytes",
+            ):
+                value = event.get(name)  # CPU/不可用口径允许显式 None
+                if value is not None:
+                    self.writer.add_scalar(f"runtime/{name}", float(value), step)  # 与 JSONL 同值
 
     def log_terms(
         self,
         *,
         step: int,  # optimizer step，从 1 开始
         split: str,  # `train` 或 `validation`
-        terms: GeometrySSLTerms,  # 当前 batch 的五项标量损失
+        terms: GeometrySSLTerms,  # 当前 batch 的六项标量损失
         asset_ids: tuple[str, ...],  # `[B]` 路由身份
         gradient_norm: float | None = None,  # train-only clip 前总范数
+        batch: PaddedOnlineGeometryBatch | None = None,  # q cursor provenance
     ) -> None:
-        r"""记录五项损失、总损失、资产路由和可选共享参数梯度范数。
+        r"""记录六项损失、总损失、资产路由和可选共享参数梯度范数。
 
         ``density`` 无量纲；``kappa`` 的误差来自 m/rad；``derived_field``、``sobolev`` 与 ``chain``
         来自 1/rad 场灵敏度。loss 已在 objective 中平方并对有效标量归一化，因此这里统一记录标量，
@@ -61,7 +89,14 @@ class GeometrySSLRunLogger:
             "derived_field": float(terms.derived_field.detach()),  # chain-rule 显式路径 MSE
             "sobolev": float(terms.sobolev.detach()),  # density 对物理 q 自导数 MSE
             "chain": float(terms.chain.detach()),  # 两条预测灵敏度路径一致性 MSE
+            "paired": float(terms.paired.detach()),  # joint-sign latent 偶/奇成对 MSE
         }
+        term_names = ("density", "kappa", "derived_field", "sobolev", "chain", "paired")
+        components = {
+            f"{name}_{suffix}": float(value.detach())
+            for suffix, values in (("numerator", terms.numerators), ("denominator", terms.denominators))
+            for name, value in zip(term_names, values)
+        }  # 原始平方误差和与有效标量数，允许按完整 mask 重新聚合
         for name, value in scalars.items():  # TensorBoard 命名与 JSONL 字段保持同构
             self.writer.add_scalar(f"{split}/{name}", value, step)  # 横轴固定 optimizer step
         if gradient_norm is not None:  # validation 不反向，因此该字段为空
@@ -70,7 +105,11 @@ class GeometrySSLRunLogger:
             "step": step,
             "split": split,
             "asset_ids": list(asset_ids),
+            "q_index": (
+                batch.q_index.detach().cpu().tolist() if batch is not None and batch.q_index is not None else None
+            ),
             **scalars,
+            **components,
         }
         if gradient_norm is not None:  # train record 才写入梯度证据
             record["gradient_norm"] = gradient_norm  # 与 TensorBoard 数值相同
@@ -102,12 +141,28 @@ class GeometrySSLRunLogger:
         np.savez_compressed(  # dense arrays 较大，使用无损压缩保留逐元素误差
             path,  # 输出文件
             asset_ids=np.asarray(batch.asset_ids),  # `[B]` Unicode asset IDs
+            q_index=(
+                batch.q_index.detach().cpu().numpy()
+                if batch.q_index is not None
+                else np.full(len(batch.asset_ids), -1, dtype=np.int64)
+            ),  # `[B]` asset-local Sobol absolute cursor
+            q=batch.q.detach().cpu().numpy(),  # `[B,20]` physical rad，配合 joint mask 解释
+            query_points_h=batch.queries.query_points_h.detach().cpu().numpy(),  # `[B,26,N_Q,3]`，m
+            query_stratum=batch.queries.query_stratum.detach().cpu().numpy(),  # 0/1/2 的 50:25:25 provenance
+            adjacent_owner_index=batch.queries.adjacent_owner_index.detach().cpu().numpy(),  # adjacent routing
+            owner_role=batch.field_targets.owner_role.detach().cpu().numpy(),  # PALM/JOINT/TIP 分层轴
+            bandwidths_m=batch.field_targets.bandwidths.detach().cpu().numpy(),  # `[L]` 物理带宽
             zero_order=prediction.latents.zero_order.detach().cpu().numpy(),  # `[B,26,D_0]`
             first_order=prediction.latents.first_order.detach().cpu().numpy(),  # `[B,20,D_1]`
             entity_valid_mask=entity_valid.detach().cpu().numpy(),  # `[B,26]` bool
             joint_valid_mask=joint_valid.detach().cpu().numpy(),  # `[B,20]` bool
             field_valid_mask=batch.field_targets.valid_mask.detach().cpu().numpy(),  # `[B,26,N_Q]`
             edge_valid_mask=batch.sensitivity_targets.valid_mask.detach().cpu().numpy(),  # `[B,E]`
+            ancestor_mask=batch.sensitivity_targets.ancestor_mask.detach().cpu().numpy(),  # 祖先/非祖先
+            edge_owner_index=batch.sensitivity_targets.owner_index.detach().cpu().numpy(),  # sampled owner
+            edge_query_index=batch.sensitivity_targets.query_index.detach().cpu().numpy(),  # sampled query
+            edge_joint_index=batch.sensitivity_targets.joint_index.detach().cpu().numpy(),  # sampled JOINT
+            distance_m=batch.field_targets.distance.detach().cpu().numpy(),  # distance shell 分层真值
             density_error=(prediction.density - batch.field_targets.density).detach().cpu().numpy(),  # 无量纲
             kappa_error=(prediction.kappa - batch.sensitivity_targets.kappa).detach().cpu().numpy(),  # m/rad
         )

@@ -36,6 +36,8 @@ input adapter、backbone 与零/一阶 heads 构成 retained geometry encoder。
 
 official LEAP/Allegro 不参与 generated 训练、辅助权重校准或 checkpoint 选择；冻结后的 zero-shot 与独立 geometry-only adaptation 必须使用分离配置和证据。
 
+generated train/validation 必须按 `physical_geometry_hash` 整组划分；路径、asset ID 或完整 sidecar `content_hash` 不足以识别 limit-only 物理重复。`configuration_domain_hash` 只记录 joint names/limits 采样域，不得把同一物理映射拆到两个 split。
+
 ## 入口与测试
 
 当前 GM RL 入口仍为 `python -m anymani.distill.train` 与 `python -m anymani.distill.play`；`tasks/inhand` 的既有路线使用仓库根 `scripts/rl_games/train.py` / `play.py`。若未来迁移到 `rl/`，入口、文档与调用方必须在同一提交闭合。SSL/IL 入口只有在 resolved config、日志、checkpoint 和 sanity tests 闭合后才可声明可运行。
