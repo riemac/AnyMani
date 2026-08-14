@@ -9,7 +9,7 @@ import torch
 from anymani.assets.bank import HandContainer, HandContainerCfg
 from anymani.distill.representations.queries.spatial_sampling import (
     SpatialQuerySamplerCfg,
-    build_workspace_query_bank,
+    materialize_owner_surface_sampling_cache,
     sample_spatial_queries,
 )
 from anymani.distill.representations.targets.geometry_field import generate_geometry_field_targets
@@ -18,7 +18,7 @@ from anymani.robots.geometry_kinematics import forward_owner_transforms, lower_h
 from anymani.robots.owner_geometry import (
     materialize_owner_geometry_cache,
     materialize_warp_owner_geometry_cache,
-    sample_owner_home_surfaces,
+    sample_palm_anchor_supports,
 )
 
 pytestmark = pytest.mark.contract
@@ -49,24 +49,26 @@ def test_warp_geometry_targets_close_density_chain_and_kappa_finite_difference()
     assert container.geometry_semantics is not None
     spec_cpu = lower_hand_geometry_semantics(container.geometry_semantics)
     geometry_cache = materialize_owner_geometry_cache(container, spec_cpu)
-    home_surface = sample_owner_home_surfaces(geometry_cache, points_per_owner=64, sampling_seed=31)
     query_config = SpatialQuerySamplerCfg(query_count=64)
-    workspace = build_workspace_query_bank(
+    anchors = sample_palm_anchor_supports(
         geometry_cache,
+        container.geometry_semantics,
         spec_cpu,
-        home_surface,
-        query_count=query_config.stratum_counts[0],
+        anchors_per_finger=10,
         sampling_seed=37,
     )
     warp_cache = materialize_warp_owner_geometry_cache(geometry_cache, device="cuda:0")
     spec = spec_cpu.to(device="cuda:0", dtype=torch.float32)
+    surface_sampling = materialize_owner_surface_sampling_cache(
+        geometry_cache, device="cuda:0", dtype=torch.float32
+    )
+    anchors_hand_m = torch.as_tensor(anchors.anchors_hand_m, device="cuda:0", dtype=torch.float32)
     q = spec.q_home.unsqueeze(0)
     queries = sample_spatial_queries(
         q,
         spec,
-        geometry_cache,
-        home_surface,
-        workspace,
+        surface_sampling,
+        anchors_hand_m,
         config=query_config,
         sampling_seed=41,
     )
@@ -82,9 +84,9 @@ def test_warp_geometry_targets_close_density_chain_and_kappa_finite_difference()
     torch.cuda.synchronize()
 
     assert field.distance.shape == (1, 21, 64)
-    assert field.density.shape == (1, 21, 64, 4)
+    assert field.density.shape == (1, 21, 64, 3)
     assert sensitivity.kappa.shape == (1, 42)
-    assert sensitivity.field_sensitivity.shape == (1, 42, 4)
+    assert sensitivity.field_sensitivity.shape == (1, 42, 3)
     assert torch.count_nonzero(sensitivity.kappa[:, ~sensitivity.ancestor_mask]) == 0
     assert torch.count_nonzero(sensitivity.field_sensitivity[:, ~sensitivity.ancestor_mask]) == 0
     assert sensitivity.provenance["global_second_nearest_margin"] == "not_materialized"
@@ -120,3 +122,71 @@ def test_warp_geometry_targets_close_density_chain_and_kappa_finite_difference()
         atol=3.0e-3,
         rtol=3.0e-2,
     )
+
+
+@_requires_local_mother
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Warp CUDA target contract requires an NVIDIA GPU")
+def test_fixed_workspace_separates_static_palm_from_q_sensitive_joint_owner() -> None:
+    """同一 `{h}` workspace realization 下，PALM distance 静止而动态 owner 必须响应 q。"""
+
+    container = HandContainer.from_cfg(
+        HandContainerCfg(path=_MOTHER_ROOT),
+        require_geometry_semantics=True,
+    )
+    assert container.geometry_semantics is not None
+    spec_cpu = lower_hand_geometry_semantics(container.geometry_semantics)
+    geometry_cache = materialize_owner_geometry_cache(container, spec_cpu)
+    anchors = sample_palm_anchor_supports(
+        geometry_cache,
+        container.geometry_semantics,
+        spec_cpu,
+        anchors_per_finger=10,
+        sampling_seed=47,
+    )
+    spec = spec_cpu.to(device="cuda:0", dtype=torch.float32)
+    surface_sampling = materialize_owner_surface_sampling_cache(
+        geometry_cache, device="cuda:0", dtype=torch.float32
+    )
+    warp_cache = materialize_warp_owner_geometry_cache(geometry_cache, device="cuda:0")
+    q = spec.q_home.repeat(2, 1)
+    q[1, 0] += 0.25
+    config = SpatialQuerySamplerCfg(query_count=64)
+    queries = sample_spatial_queries(
+        q,
+        spec,
+        surface_sampling,
+        torch.as_tensor(anchors.anchors_hand_m, device="cuda:0", dtype=torch.float32),
+        config=config,
+        sampling_seed=53,
+    )
+    field, _ = generate_geometry_field_targets(
+        q,
+        spec,
+        geometry_cache,
+        warp_cache,
+        queries,
+        edge_sampling_seed=59,
+    )
+    workspace_count = config.stratum_counts[0]
+    palm_index = spec.owner_ids.index("palm")
+    dynamic_owner = int(torch.where(spec.owner_ancestor_mask[:, 0])[0][0])
+
+    torch.testing.assert_close(
+        queries.query_points_h[0, palm_index, :workspace_count],
+        queries.query_points_h[1, dynamic_owner, :workspace_count],
+        atol=0.0,
+        rtol=0.0,
+    )
+    torch.testing.assert_close(
+        field.distance[0, palm_index, :workspace_count],
+        field.distance[1, palm_index, :workspace_count],
+        atol=2.0e-7,
+        rtol=2.0e-6,
+    )
+    assert torch.max(
+        torch.abs(
+            field.distance[0, dynamic_owner, :workspace_count]
+            - field.distance[1, dynamic_owner, :workspace_count]
+        )
+    ) > 1.0e-5
+    torch.testing.assert_close(field.bandwidths[0], field.bandwidths[1], atol=0.0, rtol=0.0)

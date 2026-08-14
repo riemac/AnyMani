@@ -45,6 +45,7 @@ def geometry_ssl_ablation_forward(
     q: torch.Tensor,  # `[B,N_J]`，rad
     evidence: StaticGeometryEvidence,  # 同结构或 padding 后跨结构静态证据
     query_points_h: torch.Tensor,  # `[B,G,N_Q,3]`，`{h}`，m
+    bandwidths: torch.Tensor,  # `[N_σ]` 或 `[B,N_σ]`，显式 decoder 条件
     *,
     owner_index: torch.Tensor,  # `[E]` 或 `[B,E]`
     query_index: torch.Tensor,  # 与 owner selector 同形状
@@ -119,6 +120,7 @@ def geometry_ssl_ablation_forward(
     return model.decode_latents(  # decoder 权重、query features 与 selectors 均与完整模型相同
         ablated,  # 唯一被干预的变量
         query_features,  # 未打乱的本样本 query path
+        bandwidths=bandwidths,  # 与完整 forward 相同的实际 sigma realization
         entity_valid_mask=entity_valid,  # invalid owner prediction 继续严格清零
         owner_index=owner_index,  # 保留本样本 sampled owner
         query_index=query_index,  # 保留本样本 sampled query
@@ -166,9 +168,10 @@ def geometry_ssl_reconstruction_metrics(
     batch_index = torch.arange(prediction.density.shape[0], device=prediction.density.device).unsqueeze(1)
     selected_density = prediction.density[batch_index, owner_index, query_index]
     selected_distance = batch.field_targets.distance[batch_index, owner_index, query_index]
+    inverse_sigma_squared = _edge_inverse_sigma_squared(batch.field_targets.bandwidths)
     derived = (
         -selected_distance.unsqueeze(-1)
-        * batch.field_targets.bandwidths.square().reciprocal()
+        * inverse_sigma_squared
         * selected_density
         * prediction.kappa.unsqueeze(-1)
     )
@@ -200,9 +203,10 @@ def geometry_ssl_reconstruction_metrics_per_sample(
     batch_index = torch.arange(prediction.density.shape[0], device=prediction.density.device).unsqueeze(1)
     selected_density = prediction.density[batch_index, owner_index, query_index]
     selected_distance = batch.field_targets.distance[batch_index, owner_index, query_index]
+    inverse_sigma_squared = _edge_inverse_sigma_squared(batch.field_targets.bandwidths)
     derived = (
         -selected_distance.unsqueeze(-1)
-        * batch.field_targets.bandwidths.square().reciprocal()
+        * inverse_sigma_squared
         * selected_density
         * prediction.kappa.unsqueeze(-1)
     )
@@ -233,13 +237,13 @@ def geometry_ssl_stratified_components_per_sample(
         - derived-g：上述全部五个轴。
     """
 
-    density_error = prediction.density - batch.field_targets.density  # `[B,G,N_Q,L]`，无量纲
+    density_error = prediction.density - batch.field_targets.density  # `[B,G,N_Q,N_σ]`，无量纲
     kappa_error = prediction.kappa - batch.sensitivity_targets.kappa  # `[B,E]`，m/rad
-    derived_error = _derived_field_error(prediction, batch)  # `[B,E,L]`，1/rad
+    derived_error = _derived_field_error(prediction, batch)  # `[B,E,N_σ]`，1/rad
     batch_size, owner_count, query_count, bandwidth_count = density_error.shape  # 四条监督轴
-    field_valid = batch.field_targets.valid_mask.unsqueeze(-1).expand_as(density_error)  # `[B,G,N_Q,L]`
+    field_valid = batch.field_targets.valid_mask.unsqueeze(-1).expand_as(density_error)  # `[B,G,N_Q,N_σ]`
     edge_valid = batch.sensitivity_targets.valid_mask  # `[B,E]`，唯一最近点与 padding 共同有效
-    edge_band_valid = edge_valid.unsqueeze(-1).expand_as(derived_error)  # `[B,E,L]`
+    edge_band_valid = edge_valid.unsqueeze(-1).expand_as(derived_error)  # `[B,E,N_σ]`
 
     # 统一 owner role 为 `[B,G]`，再按 sampled edge owner selector收集一阶 role。
     owner_role = batch.field_targets.owner_role  # `[G]` 或 `[B,G]`，0/1/2
@@ -267,7 +271,7 @@ def geometry_ssl_stratified_components_per_sample(
 
     # owner role 与 query stratum 是 density/κ/g 共享的物理边际轴。
     for role_value, role_name in ((0, "palm"), (1, "joint"), (2, "tip")):
-        density_mask = field_valid & (owner_role[:, :, None, None] == role_value)  # `[B,G,N_Q,L]`
+        density_mask = field_valid & (owner_role[:, :, None, None] == role_value)  # `[B,G,N_Q,N_σ]`
         edge_mask = edge_valid & (edge_owner_role == role_value)  # `[B,E]`
         result["density"]["owner_role"][role_name] = _per_sample_masked_components(
             density_error, density_mask
@@ -287,7 +291,7 @@ def geometry_ssl_stratified_components_per_sample(
             derived_error, edge_mask.unsqueeze(-1).expand_as(derived_error)
         )
 
-    # bandwidth 只适用于多带宽 density 与 derived-g；κ 是共享的距离导数，不复制 L 轴。
+    # sigma 轴只适用于 density 与 derived-g；κ 是共享的距离导数，不复制 $N_\sigma$ 轴。
     for bandwidth_index in range(bandwidth_count):
         bin_name = f"sigma_{bandwidth_index}"
         density_band_mask = field_valid[..., bandwidth_index]  # `[B,G,N_Q]`
@@ -441,9 +445,10 @@ def _derived_field_error(
     batch_index = torch.arange(batch_size, device=prediction.density.device).unsqueeze(1)  # `[B,1]`
     selected_density = prediction.density[batch_index, owner_index, query_index]  # `[B,E,L]`
     selected_distance = batch.field_targets.distance[batch_index, owner_index, query_index]  # `[B,E]`
+    inverse_sigma_squared = _edge_inverse_sigma_squared(batch.field_targets.bandwidths)  # `[1|B,1,L]`
     derived = (
         -selected_distance.unsqueeze(-1)
-        * batch.field_targets.bandwidths.square().reciprocal()
+        * inverse_sigma_squared
         * selected_density
         * prediction.kappa.unsqueeze(-1)
     )  # `[B,E,L]`，1/rad
@@ -457,25 +462,41 @@ def _distance_shell_masks(
 ) -> tuple[tuple[str, torch.Tensor, torch.Tensor], ...]:
     r"""按递增物理 bandwidth 构造互斥且完备的 distance-shell masks。"""
 
-    if torch.any(bandwidths[1:] <= bandwidths[:-1]):
+    if bandwidths.ndim not in {1, 2}:
+        raise ValueError("distance-shell bandwidths must have shape [L] or [B,L]")
+    if torch.any(bandwidths[..., 1:] <= bandwidths[..., :-1]):
         raise ValueError("distance-shell stratification requires strictly increasing bandwidths")
     shells: list[tuple[str, torch.Tensor, torch.Tensor]] = []
     lower = None
-    for index, upper in enumerate(bandwidths):
+    for index in range(bandwidths.shape[-1]):
+        upper = bandwidths[index] if bandwidths.ndim == 1 else bandwidths[:, index]
+        field_upper = upper if bandwidths.ndim == 1 else upper[:, None, None]
+        edge_upper = upper if bandwidths.ndim == 1 else upper[:, None]
         if lower is None:
-            field_mask = field_distance <= upper
-            edge_mask = edge_distance <= upper
+            field_mask = field_distance <= field_upper
+            edge_mask = edge_distance <= edge_upper
             name = f"le_sigma_{index}"
         else:
-            field_mask = (field_distance > lower) & (field_distance <= upper)
-            edge_mask = (edge_distance > lower) & (edge_distance <= upper)
+            field_lower = lower if bandwidths.ndim == 1 else lower[:, None, None]
+            edge_lower = lower if bandwidths.ndim == 1 else lower[:, None]
+            field_mask = (field_distance > field_lower) & (field_distance <= field_upper)
+            edge_mask = (edge_distance > edge_lower) & (edge_distance <= edge_upper)
             name = f"sigma_{index - 1}_to_{index}"
         shells.append((name, field_mask, edge_mask))
         lower = upper
     if lower is None:
         raise ValueError("distance-shell stratification requires at least one bandwidth")
-    shells.append(("gt_sigma_last", field_distance > lower, edge_distance > lower))
+    field_lower = lower if bandwidths.ndim == 1 else lower[:, None, None]
+    edge_lower = lower if bandwidths.ndim == 1 else lower[:, None]
+    shells.append(("gt_sigma_last", field_distance > field_lower, edge_distance > edge_lower))
     return tuple(shells)
+
+
+def _edge_inverse_sigma_squared(bandwidths: torch.Tensor) -> torch.Tensor:
+    r"""把 ``[L]`` 或 ``[B,L]`` sigma 变形成 sampled-edge 可广播的 ``[1|B,1,L]``。"""
+
+    inverse = bandwidths.square().reciprocal()  # $\sigma^{-2}$，m⁻²
+    return inverse.view(1, 1, -1) if inverse.ndim == 1 else inverse.unsqueeze(1)
 
 
 __all__ = [

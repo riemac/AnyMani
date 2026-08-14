@@ -47,6 +47,7 @@ def _loss(
         q,
         batch.evidence,
         batch.queries.query_points_h,
+        batch.field_targets.bandwidths,
         owner_index=batch.sensitivity_targets.owner_index,
         query_index=batch.sensitivity_targets.query_index,
         joint_index=batch.sensitivity_targets.joint_index,
@@ -75,7 +76,7 @@ def test_real_mother_fixed_batch_loss_decreases() -> None:
             require_geometry_semantics=True,
         )
     ).resolve().assets[0]
-    query_config = SpatialQuerySamplerCfg(query_count=4)
+    query_config = SpatialQuerySamplerCfg(query_count=8)  # 最小合法 4/2/2 分层，shell 保持内外严格各半
     runtime = materialize_geometry_asset_runtime(
         container,
         query_config=query_config,
@@ -105,7 +106,6 @@ def test_real_mother_fixed_batch_loss_decreases() -> None:
             ),
             decoder_hidden_width=32,
             decoder_residual_blocks=1,
-            bandwidth_count=4,
         )
     ).cuda()
     objective = GeometrySSLObjective(GeometrySSLWeights())

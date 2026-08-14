@@ -1,15 +1,15 @@
-r"""多带宽密度与 sampled-edge 距离灵敏度解码器。
+r"""显式 sigma 条件密度与 sampled-edge 距离灵敏度解码器。
 
 设 $z_g^{(0)}\in\mathbb R^{D_0}$ 是归属体 $g$ 的关节符号偶零阶表征，
 $z_i^{(1)}\in\mathbb R^{D_1}$ 是 JOINT $i$ 的符号奇一阶表征，
 $u(x)=\Psi_C(x)\in\mathbb R^{D_q}$ 是查询点相对完整 anchor 星座的共享特征。
-密度解码器在每个 query 上同时输出全部 $L$ 个 Gaussian 带宽：
+密度解码器对每个显式 `(query,sigma)` 条件输出一个 scalar：
 
 $$
-D_\rho\left(z_g^{(0)},u(x)\right)
+D_\rho\left(z_g^{(0)},u(x),\log\frac{\sigma}{\sigma_{ref}}\right)
 \longrightarrow
-\hat{\boldsymbol\rho}_g(x;q)
-\in(0,1)^L.
+\hat\rho_{g,\sigma}(x;q)
+\in(0,1).
 $$
 
 距离灵敏度解码器只在 sampled owner--query--JOINT edges 上读取：
@@ -34,13 +34,13 @@ $$
 zero_order       : [B, G, D_0]
 first_order      : [B, N_J, D_1]
 query_features   : [B, G, N_Q, D_q]
-density          : [B, G, N_Q, L]
+density          : [B, G, N_Q, N_sigma]
 sampled kappa    : [B, E]
 ```
 
 $E$ 是抽样的归属体—查询点—JOINT 边数。密度路径保留完整归属体与查询点轴；灵敏度路径通过
 `owner_index/query_index/joint_index` 只读取需要监督的边，避免实际生成
-``[B,G,N_Q,N_J]`` 大张量。所有查询点始终同时输出全部 $L$ 个带宽，采样来源不分配独占带宽。
+``[B,G,N_Q,N_J]`` 大张量。$N_Q$ 与 $N_\sigma$ 都是数据轴，不进入网络固定宽度。
 
 FiLM 条件来自同一归属体的 $z_g^{(0)}$，不会混入其他归属体的标签；跨归属体信息已经由
 保留的整手 Transformer 写入 $z_g^{(0)}$。查询特征来自与基准表面共享参数的点—锚点前端，
@@ -76,10 +76,10 @@ class ImplicitFieldDecoderConfig:
         first_order_width (int): JOINT 一阶表征宽度 $D_1$。
         query_width (int): 共享点—锚点查询特征宽度 $D_q$。
         hidden_width (int): FiLM/灵敏度解码器的中间宽度。
-        bandwidth_count (int): 同时输出的 Gaussian 带宽数 $L$。
+        sigma_reference_m (float): 显式 sigma 对数比例的参考长度，单位 m。
         residual_blocks (int): 密度解码器中连续 FiLM 残差块数量。
 
-    数值默认 ``hidden_width=128``、``bandwidth_count=4``、``residual_blocks=3`` 是首个
+    数值默认 ``hidden_width=128``、``sigma_reference_m=0.016``、``residual_blocks=3`` 是首个
     可运行容量锚点，不是已经由跨手型消融接受的最终容量。
     """
 
@@ -87,7 +87,7 @@ class ImplicitFieldDecoderConfig:
     first_order_width: int
     query_width: int
     hidden_width: int = 128
-    bandwidth_count: int = 4
+    sigma_reference_m: float = 0.016
     residual_blocks: int = 3
 
     def __post_init__(self) -> None:
@@ -98,11 +98,12 @@ class ImplicitFieldDecoderConfig:
             self.first_order_width,
             self.query_width,
             self.hidden_width,
-            self.bandwidth_count,
             self.residual_blocks,
         )
         if any(value <= 0 for value in values):
             raise ValueError("all implicit decoder widths/counts must be positive")
+        if self.sigma_reference_m <= 0.0:
+            raise ValueError("sigma_reference_m must be strictly positive")
 
 
 class _FiLMResidualBlock(nn.Module):
@@ -147,35 +148,48 @@ class _FiLMResidualBlock(nn.Module):
 
 
 class ConditionalDensityDecoder(nn.Module):
-    r"""从归属体零阶表征与共享查询特征解码全部 Gaussian 带宽。
+    r"""从 query--sigma 主路径与归属体 FiLM 条件解码标量 Gaussian 密度。
 
-    输入轴为 ``zero_order: [B,G,D_0]`` 和 ``query_features: [B,G,N_Q,D_q]``；输出为
-    ``[B,G,N_Q,L]``。sigmoid 只约束邻近场范围 $(0,1)$，不约束 $Z^{(0)}$ 或
-    $z_i^{(1)}$ 的符号与数值范围。
+    对每个 `(owner,query,sigma)`：
+
+    $$
+    D_\rho\left(z_g^{(0)}(q),u_{g,r}(x),\log\frac{\sigma}{\sigma_{ref}}\right)
+    \longrightarrow \hat\rho_{g,r,\sigma}\in(0,1).
+    $$
+
+    ``query_features`` 与显式 sigma 进入主特征路径；``zero_order`` 只作为每层 FiLM 条件。输出逻辑
+    shape 仍为 ``[B,G,N_Q,N_sigma]``，但最后一轴是可变的采样轴，不是线性层固定输出宽度。
     """
 
     def __init__(self, config: ImplicitFieldDecoderConfig) -> None:
-        r"""构造查询投影、连续 FiLM 残差块和多带宽输出层。
+        r"""构造 query--sigma 投影、连续 owner FiLM 残差块和标量输出层。
 
         Args:
-            config (ImplicitFieldDecoderConfig): 输入类型宽度、隐藏宽度、带宽数与残差块数量。
-
-        输出层宽度严格等于 $L$，与查询点数 $N_Q$ 无关；改变每批查询点数量不需要重建输出头。
+            config (ImplicitFieldDecoderConfig): 输入类型宽度、sigma reference、隐藏宽度与残差块数量。
         """
 
         super().__init__()
         self.config = config
-        self.query_projection = nn.Linear(config.query_width, config.hidden_width)  # query relation -> decoder width
+        self.query_projection = nn.Linear(  # $[u(x)\Vert\log(\sigma/\sigma_{ref})]$ -> decoder width
+            config.query_width + 1,
+            config.hidden_width,
+        )
         self.blocks = nn.ModuleList(
             _FiLMResidualBlock(config.hidden_width, config.zero_order_width)
             for _ in range(config.residual_blocks)
         )
-        self.output = nn.Linear(config.hidden_width, config.bandwidth_count)  # 每个 query 的 $L$ 个通道
+        self.output = nn.Linear(config.hidden_width, 1)  # 每个 `(owner,query,sigma)` 只输出一个标量 $\rho$
 
-    def forward(self, zero_order: torch.Tensor, query_features: torch.Tensor) -> torch.Tensor:
-        r"""预测 `[B,G,N_Q,L]` 逐 owner 多带宽密度。
+    def forward(
+        self,
+        zero_order: torch.Tensor,
+        query_features: torch.Tensor,
+        bandwidths: torch.Tensor,
+    ) -> torch.Tensor:
+        r"""向量化预测 ``[B,G,N_Q,N_sigma]`` 逐 owner 显式 sigma 密度。
 
         `query_features` 不含查询点来源；相同物理查询点的预测函数不因采样来源标签改变。
+        ``bandwidths`` 接受跨 batch 共享的 ``[N_sigma]`` 或逐样本 ``[B,N_sigma]``，单位 m。
         """
 
         if zero_order.ndim != 3 or query_features.ndim != 4:
@@ -186,12 +200,25 @@ class ConditionalDensityDecoder(nn.Module):
             raise ValueError("zero_order width does not match decoder config")
         if query_features.shape[-1] != self.config.query_width:
             raise ValueError("query feature width does not match decoder config")
+        bandwidths = bandwidths.detach()  # sigma 是外生物理条件，不建立优化或 q->sigma 梯度路径
+        if bandwidths.ndim == 1:
+            bandwidths = bandwidths.unsqueeze(0).expand(query_features.shape[0], -1)  # `[B,N_σ]`
+        if bandwidths.ndim != 2 or bandwidths.shape[0] != query_features.shape[0] or torch.any(bandwidths <= 0.0):
+            raise ValueError("bandwidths must have positive shape [N_sigma] or [B,N_sigma]")
 
-        hidden = self.query_projection(query_features)  # `[B,G,N_Q,D_h]`
-        condition = zero_order.unsqueeze(2).expand(-1, -1, query_features.shape[2], -1)  # 归属体表征广播到查询轴
+        sigma_count = bandwidths.shape[1]  # $N_\sigma$ 是当前数据轴，可在不同调用中变化
+        query = query_features.unsqueeze(3).expand(-1, -1, -1, sigma_count, -1)  # `[B,G,N_Q,N_σ,D_q]`
+        log_sigma = torch.log(bandwidths / self.config.sigma_reference_m)  # `[B,N_σ]`，无量纲
+        log_sigma = log_sigma[:, None, None, :, None].expand(  # 广播到每个 owner/query，不引入类别身份
+            -1, query_features.shape[1], query_features.shape[2], -1, -1
+        )
+        hidden = self.query_projection(torch.cat((query, log_sigma), dim=-1))  # `[B,G,N_Q,N_σ,D_h]`
+        condition = zero_order[:, :, None, None, :].expand(  # 同一 owner latent 调制全部 query/sigma slots
+            -1, -1, query_features.shape[2], sigma_count, -1
+        )
         for block in self.blocks:
             hidden = block(hidden, condition)  # 每层持续读取归属体表征，避免只在入口轻触几何记忆
-        return torch.sigmoid(self.output(hidden))  # $\hat\rho\in(0,1)$；latent 本身不做 sigmoid
+        return torch.sigmoid(self.output(hidden)).squeeze(-1)  # `[B,G,N_Q,N_σ]`，$\hat\rho\in(0,1)$
 
 
 class DistanceSensitivityDecoder(nn.Module):

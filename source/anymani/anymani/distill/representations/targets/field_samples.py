@@ -1,12 +1,12 @@
 r"""多锚点条件隐式场的零阶与抽样边一阶监督数据包。
 
 对批大小 $B$、PALM/JOINT/TIP 归属体数 $G=N_E$、每个归属体查询点数 $N_Q$ 与
-Gaussian 带宽数 $L$，零阶目标逻辑形状为：
+显式 sigma 样本数 $N_\sigma$，零阶目标逻辑形状为：
 
 ```text
 query_points : [B, G, N_Q, 3]  # `{h}`，m；固定查询基线可由 [N_Q,3] 广播
 distance     : [B, G, N_Q]     # $d_g$，m
-density      : [B, G, N_Q, L]  # $\rho_{\sigma,g}$，无量纲
+density      : [B, G, N_Q, N_sigma]  # $\rho_{\sigma,g}$，无量纲
 valid_mask   : [B, G, N_Q]     # True 表示该归属体/查询点监督有效
 owner_role   : [G]             # PALM/JOINT/TIP；同结构微批次共享并与实体轴同索引
 ```
@@ -19,7 +19,7 @@ owner_role   : [G]             # PALM/JOINT/TIP；同结构微批次共享并与
 不是另造一套物理标签。$K$ 始终表示锚点数，不得再用于查询轴。当前不训练独立整手并集监督。
 
 若启用一阶监督，逻辑完整形状是 ``kappa: [B,G,N_Q,N_J]`` 与
-``g: [B,G,N_Q,L,N_J]``，但默认只实际生成抽样的归属体—JOINT 边或方向 JVP，
+``g: [B,G,N_Q,N_sigma,N_J]``，但默认只实际生成抽样的归属体—JOINT 边或方向 JVP，
 并保留最近点来源、祖先结构零与非光滑区域掩码。
 """
 
@@ -55,10 +55,10 @@ class FieldTargetBatch:
     query_points: torch.Tensor  # `[B,G,N_Q,3]`，`{h}`，m
     query_stratum: torch.Tensor  # `[B,G,N_Q]`，`QueryStratum`
     distance: torch.Tensor  # `[B,G,N_Q]`，m
-    density: torch.Tensor  # `[B,G,N_Q,L]`，无量纲
+    density: torch.Tensor  # `[B,G,N_Q,N_sigma]`，无量纲
     valid_mask: torch.Tensor  # `[B,G,N_Q]`，有效监督
     owner_role: torch.Tensor  # `[G]` 或跨结构 padding 后 `[B,G]`
-    bandwidths: torch.Tensor  # `[L]`，m
+    bandwidths: torch.Tensor  # `[N_sigma]` 或 `[B,N_sigma]`，m；后者保存实际 sigma realization
     provenance: Mapping[str, str]
 
     def __post_init__(self) -> None:
@@ -75,8 +75,15 @@ class FieldTargetBatch:
             raise ValueError("query_stratum must have shape [B,G,N_Q]")
         if self.distance.shape != base_shape or self.valid_mask.shape != base_shape:
             raise ValueError("distance and valid_mask must have shape [B,G,N_Q]")
-        if self.bandwidths.ndim != 1 or self.density.shape != (*base_shape, self.bandwidths.numel()):
-            raise ValueError("density must have shape [B,G,N_Q,L] and bandwidths must have shape [L]")
+        if self.bandwidths.ndim not in {1, 2}:
+            raise ValueError("bandwidths must have shape [L] or [B,L]")
+        if self.bandwidths.ndim == 2 and self.bandwidths.shape[0] != base_shape[0]:
+            raise ValueError("sampled bandwidths [B,L] must share B with query targets")
+        bandwidth_count = self.bandwidths.shape[-1]  # $N_\sigma$ 是数据采样轴，不是 decoder 固定宽度
+        if self.density.shape != (*base_shape, bandwidth_count):
+            raise ValueError("density must have shape [B,G,N_Q,N_sigma]")
+        if torch.any(self.bandwidths <= 0.0):
+            raise ValueError("bandwidths must be strictly positive")
         if self.owner_role.shape not in {(base_shape[1],), (base_shape[0], base_shape[1])}:
             raise ValueError("owner_role must have shape [G] or [B,G]")
         if self.valid_mask.dtype != torch.bool:
@@ -94,7 +101,7 @@ class SensitivityTargetBatch:
     r"""只在抽样的归属体—查询点—JOINT 边上实际生成的一阶监督。
 
     设抽样边数为 $E$。`owner_index/query_index/joint_index` 共同选择零阶监督中的一个查询点
-    和一个 JOINT 坐标；每条边对全部 $L$ 个带宽保存场灵敏度。非祖先边的
+    和一个 JOINT 坐标；每条边对全部 $N_\sigma$ 个显式 sigma 保存场灵敏度。非祖先边的
     `ancestor_mask=False`，且 `kappa/field_sensitivity` 必须精确为零。
     """
 
@@ -106,7 +113,7 @@ class SensitivityTargetBatch:
     closest_source: torch.Tensor  # `[B,E]`，稳定碰撞部件/三角面来源标识
     uniqueness_margin: torch.Tensor  # `[B,E]`，m
     kappa: torch.Tensor  # `[B,E]`，m/rad
-    field_sensitivity: torch.Tensor  # `[B,E,L]`，1/rad
+    field_sensitivity: torch.Tensor  # `[B,E,N_sigma]`，1/rad
     valid_mask: torch.Tensor  # `[B,E]`
     provenance: Mapping[str, str] = field(default_factory=dict)  # 最近点、mask、frame 与单位定义
 

@@ -15,6 +15,7 @@ from anymani.robots.owner_geometry import (
     GeometryIdentity,
     OwnerGeometryCache,
     OwnerSurfaceRecord,
+    _radial_decay_candidates,
     geometry_identity,
     materialize_owner_geometry_cache,
     materialize_warp_owner_geometry_cache,
@@ -85,8 +86,38 @@ def test_mother_owner_geometry_materializes_closed_union_and_reproducible_surfac
     )
     assert anchors.anchors_hand_m.shape == (40, 3)
     assert anchors.surface_mask.sum() == 20
+    assert anchors.radial_decay_scale_m == pytest.approx(0.025)
+    assert anchors.algorithm_version == "palm-seed-radial-gaussian-fps-v1"
     assert np.array_equal(anchors.anchors_hand_m, repeated_anchors.anchors_hand_m)
     assert len(set(anchors.finger_names)) == 4  # 仅 provenance；网络仍读取统一 40-anchor 集合
+    hand_rotation = np.asarray(container.geometry_semantics.asset_to_hand_rotation, dtype=np.float64).reshape(3, 3)
+    hand_translation = np.asarray(container.geometry_semantics.asset_to_hand_translation_m, dtype=np.float64)
+    for seed in container.geometry_semantics.anchor_seeds:
+        seed_hand = hand_rotation @ np.asarray(seed.position_a_m, dtype=np.float64) + hand_translation
+        seed_mask = np.asarray(anchors.seed_ids) == seed.seed_id
+        seed_points = anchors.anchors_hand_m[seed_mask]
+        radius = np.linalg.norm(seed_points - seed_hand, axis=-1)
+        pairwise = np.linalg.norm(seed_points[:, None, :] - seed_points[None, :, :], axis=-1)
+        pairwise += np.eye(len(seed_points))
+        assert np.max(radius) <= anchors.radial_support_radius_m + 1.0e-12
+        assert np.min(pairwise) > 1.0e-6
+
+
+def test_anchor_radial_rejection_matches_declared_truncated_gaussian() -> None:
+    r"""等量 proposal 的接受率必须服从 $\exp[-r^2/(2\tau_a^2)]$，而非硬球均匀采样。"""
+
+    scale = 0.025
+    count = 20_000
+    radii = np.asarray([0.0, scale, 2.0 * scale], dtype=np.float64)
+    points = np.concatenate(
+        tuple(np.tile(np.asarray([[radius, 0.0, 0.0]]), (count, 1)) for radius in radii),
+        axis=0,
+    )
+    accepted = _radial_decay_candidates(points, np.zeros(3), scale, seed=31)
+    actual = np.asarray([np.count_nonzero(np.isclose(accepted[:, 0], radius)) / count for radius in radii])
+    expected = np.exp(-0.5 * (radii / scale) ** 2)
+
+    np.testing.assert_allclose(actual, expected, atol=0.012, rtol=0.0)
 
 
 def test_strict_union_removes_buried_faces_without_filling_open_groove() -> None:

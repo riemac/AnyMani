@@ -5,8 +5,8 @@ r"""多锚点整手条件隐式场的联合物理目标。
 ``distill.representations`` 生成；可学习编码器与解码器由 ``distill.models`` 拥有。
 这种拆分保证每个物理项可以独立关闭、替换或审计，而不把目标生成器和网络绑成不可消融单体。
 
-对批大小 $B$、表面归属体 $G=N_E$、每归属体查询数 $N_Q$、Gaussian 带宽数 $L$，
-零阶预测与真值形状为 ``[B,G,N_Q,L]``：
+对批大小 $B$、表面归属体 $G=N_E$、每归属体查询数 $N_Q$、显式 sigma 数 $N_\sigma$，
+零阶预测与真值形状为 ``[B,G,N_Q,N_sigma]``：
 
 $$
 \rho_{\sigma_\ell,g}(x;q)
@@ -19,7 +19,7 @@ $$
 $$
 
 一阶监督只实际生成 $E$ 条抽样归属体—查询点—JOINT 边，不构造完整
-``[B,G,N_Q,L,N_J]`` Jacobian。距离灵敏度和场灵敏度分别为：
+``[B,G,N_Q,N_sigma,N_J]`` Jacobian。距离灵敏度和场灵敏度分别为：
 
 $$
 \kappa_{g,i}(x;q)
@@ -71,9 +71,9 @@ $\partial/\partial q=(1/\pi)\partial/\partial(q/\pi)$。本模块及全部解码
 监督张量轴：
 
 ```text
-density target / prediction : [B, G, N_Q, L]
+density target / prediction : [B, G, N_Q, N_sigma]
 kappa target / prediction   : [B, E]
-g target                    : [B, E, L]
+g target                    : [B, E, N_sigma]
 valid query mask            : [B, G, N_Q]
 valid edge mask             : [B, E]
 ```
@@ -228,7 +228,7 @@ def selected_density_coordinate_derivative(
     该样本自身的导数。实现只循环抽样的 $E\times L$，不构造完整 Jacobian。
 
     Args:
-        density_prediction (torch.Tensor): ``[B,G,N_Q,L]`` 的同一密度解码器输出。
+        density_prediction (torch.Tensor): ``[B,G,N_Q,N_sigma]`` 的同一密度解码器输出。
         q (torch.Tensor): ``[B,N_J]`` 的物理关节角，单位 rad，必须 ``requires_grad=True``。
         owner_index (torch.Tensor): ``[E]`` 或跨结构 padding 后 ``[B,E]`` 抽样归属体索引。
         query_index (torch.Tensor): 与 owner selector 同形状的查询点索引。
@@ -249,7 +249,7 @@ def selected_density_coordinate_derivative(
     if owner_index.ndim == 2 and owner_index.shape[0] != density_prediction.shape[0]:
         raise ValueError("batched selectors must share B with density_prediction")
     edge_count = owner_index.shape[-1]  # 每个样本的抽样边存储预算 $E$
-    bandwidth_count = density_prediction.shape[-1]  # Gaussian 通道数 $L$
+    bandwidth_count = density_prediction.shape[-1]  # 当前显式 sigma 数据轴 $N_\sigma$
     batch_index = torch.arange(density_prediction.shape[0], device=density_prediction.device)
     per_edge: list[torch.Tensor] = []  # 每项最终为 `[B,L]`
     for edge in range(edge_count):
@@ -323,7 +323,7 @@ class GeometrySSLObjective(nn.Module):
 
         Args:
             q (torch.Tensor): ``[B,N_J]`` 物理关节构型，单位 rad，且保留编码器计算图。
-            density_prediction (torch.Tensor): ``[B,G,N_Q,L]`` 的 $\hat\rho$。
+            density_prediction (torch.Tensor): ``[B,G,N_Q,N_sigma]`` 的 $\hat\rho$。
             kappa_prediction (torch.Tensor): ``[B,E]`` 的 $\hat\kappa$，单位 m/rad。
             field_targets (FieldTargetBatch): 零阶距离/密度真值、带宽和查询点有效掩码。
             sensitivity_targets (SensitivityTargetBatch): 抽样边上的 $\kappa/g$ 与非光滑掩码。
@@ -338,7 +338,7 @@ class GeometrySSLObjective(nn.Module):
         """
 
         if density_prediction.shape != field_targets.density.shape:
-            raise ValueError("density prediction and target must share shape [B,G,N_Q,L]")
+            raise ValueError("density prediction and target must share shape [B,G,N_Q,N_sigma]")
         if kappa_prediction.shape != sensitivity_targets.kappa.shape:
             raise ValueError("kappa prediction and target must share shape [B,E]")
 
@@ -357,7 +357,11 @@ class GeometrySSLObjective(nn.Module):
         query_index = sensitivity_targets.query_index  # `[E]` 抽样查询点索引
         selected_density = _select_owner_queries(density_prediction, owner_index, query_index)  # `[B,E,L]`
         selected_distance = _select_owner_queries(field_targets.distance, owner_index, query_index)  # `[B,E]`，m
-        inverse_sigma_squared = field_targets.bandwidths.square().reciprocal()  # `[L]`，m⁻²
+        inverse_sigma_squared = field_targets.bandwidths.square().reciprocal()  # `[L]` 或 `[B,L]`，m⁻²
+        if inverse_sigma_squared.ndim == 1:
+            inverse_sigma_squared = inverse_sigma_squared.view(1, 1, -1)  # 跨 batch/edge 共享固定 sigma grid
+        else:
+            inverse_sigma_squared = inverse_sigma_squared.unsqueeze(1)  # `[B,1,N_σ]` actual realization
         derived_field = (
             -selected_distance.unsqueeze(-1)
             * inverse_sigma_squared

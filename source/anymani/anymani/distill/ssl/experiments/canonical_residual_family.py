@@ -67,7 +67,8 @@ def canonical_residual_family_experiment() -> GeometrySSLExperimentCfg:
         ),
         query=SpatialQuerySamplerCfg(query_count=64),
         target=GeometryFieldTargetCfg(
-            bandwidths_m=(0.004, 0.012, 0.032, 0.064),
+            bandwidth_centers_m=(0.004, 0.016, 0.064),
+            bandwidth_jitter_relative=0.10,
             edges_per_owner=2,
         ),
         model=GeometrySSLModelConfig(
@@ -85,7 +86,7 @@ def canonical_residual_family_experiment() -> GeometrySSLExperimentCfg:
             ),
             decoder_hidden_width=128,
             decoder_residual_blocks=3,
-            bandwidth_count=4,
+            sigma_reference_m=0.016,
         ),
         objective=GeometrySSLWeights(
             density=1.0,

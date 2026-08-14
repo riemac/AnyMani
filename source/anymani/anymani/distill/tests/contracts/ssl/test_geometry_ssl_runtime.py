@@ -2,6 +2,7 @@ r"""Geometry SSL runtime 的 q cursor、Q block 与 resident window 合同。"""
 
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,7 @@ from anymani.distill.ssl.runtime import (
     ResidentGeometryAssetWindow,
     WindowedOnlineGeometryBatcher,
 )
+from anymani.distill.ssl.runtime.validation import _update_training_q_bank_digest
 
 pytestmark = pytest.mark.contract
 
@@ -92,7 +94,7 @@ def _sample(q: torch.Tensor) -> OnlineGeometrySample:
         asset_id="synthetic",
         q=q,
         evidence=evidence,
-        queries=SpatialQueryBatch(points, strata, torch.full_like(strata, -1)),
+        queries=SpatialQueryBatch(points, strata, torch.full_like(strata, -1), torch.full_like(strata, -1)),
         field_targets=field,
         sensitivity_targets=sensitivity,
         q_index=torch.arange(batch_size),
@@ -133,6 +135,32 @@ def test_q_block_split_matches_padding_of_individual_q_samples() -> None:
         block_batch.sensitivity_targets.field_sensitivity,
         individual_batch.sensitivity_targets.field_sensitivity,
     )
+
+
+def test_validation_digest_covers_sigma_query_routing_and_valid_support() -> None:
+    """固定 bank identity 必须对实际 sigma、query routing 与监督有效支持集敏感。"""
+
+    batch = pad_online_geometry_samples(
+        list(split_online_geometry_sample(_sample(torch.tensor([[0.1, -0.2]], dtype=torch.float64)))),
+        padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
+    )
+
+    def digest_for(value) -> str:
+        digest = hashlib.sha256()
+        _update_training_q_bank_digest(digest, value)
+        return digest.hexdigest()
+
+    baseline = digest_for(batch)
+    batch.field_targets.bandwidths[0, 0] += 1.0e-4
+    changed_sigma = digest_for(batch)
+    batch.queries.workspace_anchor_index[0, 0, 0] = 1
+    changed_routing = digest_for(batch)
+    batch.sensitivity_targets.valid_mask[0, 0] = False
+    changed_support = digest_for(batch)
+
+    assert changed_sigma != baseline
+    assert changed_routing != changed_sigma
+    assert changed_support != changed_routing
 
 
 def test_resident_window_evicts_old_asset_and_enforces_cap() -> None:

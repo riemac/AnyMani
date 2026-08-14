@@ -10,6 +10,7 @@ from anymani.distill.diagnostics.evaluation.geometry_ssl import (
 )
 from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelConfig
 from anymani.distill.models.input_adapters.geometry import GeometryEncoderConfig, StaticGeometryEvidence
+from anymani.distill.objectives.representations.field_reconstruction import selected_density_coordinate_derivative
 
 
 def _evidence() -> StaticGeometryEvidence:
@@ -57,7 +58,6 @@ def _model() -> GeometrySSLModel:
             ),
             decoder_hidden_width=16,
             decoder_residual_blocks=1,
-            bandwidth_count=2,
         )
     ).to(dtype=torch.float64)
 
@@ -98,6 +98,7 @@ def test_query_only_zeros_latents_but_preserves_query_features() -> None:
         q,
         evidence,
         queries,
+        torch.tensor([0.004, 0.016], dtype=torch.float64),
         owner_index=torch.tensor([1]),
         query_index=torch.tensor([0]),
         joint_index=torch.tensor([0]),
@@ -122,6 +123,7 @@ def test_latent_shuffle_reorders_only_batch_latents() -> None:
         q,
         evidence,
         queries,
+        torch.tensor([0.004, 0.016], dtype=torch.float64),
         owner_index=torch.tensor([1]),
         query_index=torch.tensor([0]),
         joint_index=torch.tensor([0]),
@@ -155,6 +157,7 @@ def test_first_order_ablations_leave_zero_order_and_query_path_unchanged() -> No
     queries = torch.randn(2, 3, 4, 3, dtype=torch.float64) * 0.02
     original = model.encoder(q, evidence)
     common = {
+        "bandwidths": torch.tensor([0.004, 0.016], dtype=torch.float64),
         "owner_index": torch.tensor([1, 2]),
         "query_index": torch.tensor([0, 1]),
         "joint_index": torch.tensor([0, 1]),
@@ -172,3 +175,63 @@ def test_first_order_ablations_leave_zero_order_and_query_path_unchanged() -> No
     assert torch.count_nonzero(zero.latents.first_order) == 0
     torch.testing.assert_close(sign.latents.first_order, -original.first_order)
     torch.testing.assert_close(shuffled.latents.first_order, original.first_order.roll(1, dims=1))
+
+
+def test_density_decoder_treats_sigma_as_a_variable_data_axis() -> None:
+    """同一 scalar decoder 应接受任意 sigma 数量，重复 sigma 必须产生相同逐点读取。"""
+
+    model = _model().eval()
+    evidence = _evidence()
+    q = torch.tensor([[0.2], [-0.3]], dtype=torch.float64)
+    queries = torch.randn(2, 3, 4, 3, dtype=torch.float64) * 0.02
+    latents = model.encoder(q, evidence)
+    query_features = model.encoder.encode_points(queries, evidence)
+
+    repeated_sigma = torch.tensor([0.004, 0.004], dtype=torch.float64, requires_grad=True)
+    repeated = model.density_decoder(latents.zero_order, query_features, repeated_sigma)
+    five_sigma = model.density_decoder(
+        latents.zero_order,
+        query_features,
+        torch.tensor([0.004, 0.008, 0.016, 0.032, 0.064], dtype=torch.float64),
+    )
+
+    assert repeated.shape == (2, 3, 4, 2)
+    assert five_sigma.shape == (2, 3, 4, 5)
+    torch.testing.assert_close(repeated[..., 0], repeated[..., 1], atol=1.0e-15, rtol=1.0e-15)
+    assert torch.max(torch.abs(five_sigma[..., 0] - five_sigma[..., -1])) > 1.0e-8
+    repeated.sum().backward()
+    assert repeated_sigma.grad is None
+
+
+def test_density_q_jvp_holds_explicit_sigma_fixed() -> None:
+    """Sobolev 导数只沿 physical q 图传播，外生 sigma 即使标记梯度也必须被截断。"""
+
+    model = _model().eval()
+    q = torch.tensor([[0.2], [-0.3]], dtype=torch.float64, requires_grad=True)
+    sigma = torch.tensor([[0.004, 0.016], [0.004, 0.016]], dtype=torch.float64, requires_grad=True)
+    owner_index = torch.tensor([1], dtype=torch.long)
+    query_index = torch.tensor([0], dtype=torch.long)
+    joint_index = torch.tensor([0], dtype=torch.long)
+    prediction = model(
+        q,
+        _evidence(),
+        torch.randn(2, 3, 4, 3, dtype=torch.float64) * 0.02,
+        sigma,
+        owner_index,
+        query_index,
+        joint_index,
+    )
+    derivative = selected_density_coordinate_derivative(
+        prediction.density,
+        q,
+        owner_index,
+        query_index,
+        joint_index,
+        create_graph=True,
+    )
+    (prediction.density.sum() + derivative.square().sum()).backward()
+
+    assert derivative.shape == (2, 1, 2)
+    assert torch.isfinite(derivative).all()
+    assert q.grad is not None and torch.isfinite(q.grad).all()
+    assert sigma.grad is None

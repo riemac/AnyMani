@@ -1,7 +1,7 @@
 r"""几何 SSL 的 TensorBoard、JSONL 与 dense NPZ 同步记录器。
 
 三种产物承担不同证据角色：TensorBoard 服务在线趋势；JSONL 保存逐 step 标量与资产路由；NPZ 保存
-``[B,G,N_Q,L]`` density error、``[B,E]`` κ error、latent 和全部 padding/target masks。任何被 mask
+``[B,G,N_Q,N_sigma]`` density error、``[B,E]`` κ error、latent 和全部 padding/target masks。任何被 mask
 排除的样本仍留在 NPZ，避免“损失没看见”被误解释为“数据中不存在”。
 """
 
@@ -150,8 +150,9 @@ class GeometrySSLRunLogger:
             query_points_h=batch.queries.query_points_h.detach().cpu().numpy(),  # `[B,26,N_Q,3]`，m
             query_stratum=batch.queries.query_stratum.detach().cpu().numpy(),  # 0/1/2 的 50:25:25 provenance
             adjacent_owner_index=batch.queries.adjacent_owner_index.detach().cpu().numpy(),  # adjacent routing
+            workspace_anchor_index=batch.queries.workspace_anchor_index.detach().cpu().numpy(),  # anchor routing
             owner_role=batch.field_targets.owner_role.detach().cpu().numpy(),  # PALM/JOINT/TIP 分层轴
-            bandwidths_m=batch.field_targets.bandwidths.detach().cpu().numpy(),  # `[L]` 物理带宽
+            bandwidths_m=batch.field_targets.bandwidths.detach().cpu().numpy(),  # `[B,N_σ]` actual sigma
             zero_order=prediction.latents.zero_order.detach().cpu().numpy(),  # `[B,26,D_0]`
             first_order=prediction.latents.first_order.detach().cpu().numpy(),  # `[B,20,D_1]`
             entity_valid_mask=entity_valid.detach().cpu().numpy(),  # `[B,26]` bool

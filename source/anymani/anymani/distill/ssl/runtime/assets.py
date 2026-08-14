@@ -7,12 +7,14 @@ optimizer 或 validation metric，也不解析 URDF/hand.yaml。
 
 from __future__ import annotations
 
+import hashlib  # static anchor/home-surface realization 的 byte-level fingerprint
 from typing import Literal  # generated/official 决定 bank 的迁移与 fail-closed 路由
 
 import torch  # official identity-only lowering 使用 CPU float64
 
 from anymani.assets.bank.hand_bank import HandBank, HandBankCfg  # 资产集合唯一入口
 from anymani.assets.bank.hand_container import HandContainer, HandContainerCfg  # 显式 bundle 选择
+from anymani.distill.representations.queries.spatial_sampling import SURFACE_QUERY_SAMPLING_VERSION
 from anymani.distill.ssl.config import GeometrySSLAssetManifest, GeometrySSLExperimentCfg
 from anymani.distill.ssl.dataset import GeometryAssetRuntime, materialize_geometry_asset_runtime
 from anymani.distill.ssl.split import (
@@ -21,7 +23,14 @@ from anymani.distill.ssl.split import (
     split_geometry_asset_groups,
 )
 from anymani.robots.geometry_kinematics import lower_hand_geometry_semantics
-from anymani.robots.owner_geometry import GeometryIdentity, geometry_identity, materialize_owner_geometry_cache
+from anymani.robots.owner_geometry import (
+    AnchorSamples,
+    GeometryIdentity,
+    HomeSurfaceSamples,
+    OwnerGeometryCache,
+    geometry_identity,
+    materialize_owner_geometry_cache,
+)
 
 
 def resolve_assets(
@@ -53,7 +62,100 @@ def resolve_assets(
     return selection.assets  # HandBank 保持配置声明顺序
 
 
-def manifest_record(container: HandContainer, identity: GeometryIdentity) -> dict[str, str]:
+def anchor_realization_record(anchors: AnchorSamples | None) -> dict[str, str]:
+    r"""把实际 anchor 点集及其采样语义规约成可供 resume 比对的 manifest 字段。"""
+
+    if anchors is None:  # official identity-only 资产不生成训练 anchor
+        return {
+            "anchor_realization_hash": "",
+            "anchor_sampling_version": "",
+            "anchor_sampling_seed": "",
+            "anchor_count": "",
+            "anchor_support_radius_m": "",
+            "anchor_radial_decay_scale_m": "",
+            "anchor_surface_fraction": "",
+        }
+    digest = hashlib.sha256()
+    digest.update(b"anymani-anchor-realization-v1\0")
+    for array in (anchors.anchors_hand_m, anchors.surface_mask):
+        contiguous = array.copy(order="C")
+        digest.update(str(contiguous.dtype).encode("ascii"))
+        digest.update(str(tuple(contiguous.shape)).encode("ascii"))
+        digest.update(contiguous.tobytes(order="C"))
+    for values in (anchors.finger_names, anchors.seed_ids):
+        for value in values:
+            encoded = value.encode("utf-8")
+            digest.update(len(encoded).to_bytes(4, "little"))
+            digest.update(encoded)
+    scalar_provenance = (
+        anchors.algorithm_version,
+        str(anchors.sampling_seed),
+        repr(anchors.radial_support_radius_m),
+        repr(anchors.radial_decay_scale_m),
+        repr(anchors.surface_fraction),
+    )
+    for value in scalar_provenance:
+        digest.update(value.encode("ascii"))
+        digest.update(b"\0")
+    return {
+        "anchor_realization_hash": digest.hexdigest(),
+        "anchor_sampling_version": anchors.algorithm_version,
+        "anchor_sampling_seed": str(anchors.sampling_seed),
+        "anchor_count": str(len(anchors.anchors_hand_m)),
+        "anchor_support_radius_m": repr(anchors.radial_support_radius_m),
+        "anchor_radial_decay_scale_m": repr(anchors.radial_decay_scale_m),
+        "anchor_surface_fraction": repr(anchors.surface_fraction),
+    }
+
+
+def home_surface_realization_record(
+    home_surface: HomeSurfaceSamples | None,
+    geometry_cache: OwnerGeometryCache | None,
+) -> dict[str, str]:
+    r"""记录 retained home points 与其真实 surface/Boolean 生产语义。"""
+
+    if home_surface is None or geometry_cache is None:  # official identity-only 路径不生成 retained samples
+        return {
+            "home_surface_realization_hash": "",
+            "home_surface_sampling_seed": "",
+            "home_surface_oversample_factor": "",
+            "boolean_backend": "",
+            "surface_geometry_hash": "",
+            "surface_processing_version": "",
+            "surface_query_sampling_version": "",
+        }
+    digest = hashlib.sha256()
+    digest.update(b"anymani-home-surface-realization-v1\0")
+    for array in (home_surface.points_owner_local_m, home_surface.face_indices, home_surface.barycentric):
+        contiguous = array.copy(order="C")
+        digest.update(str(contiguous.dtype).encode("ascii"))
+        digest.update(str(tuple(contiguous.shape)).encode("ascii"))
+        digest.update(contiguous.tobytes(order="C"))
+    for owner_id in home_surface.owner_ids:
+        encoded = owner_id.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "little"))
+        digest.update(encoded)
+    for value in (str(home_surface.sampling_seed), str(home_surface.oversample_factor)):
+        digest.update(value.encode("ascii"))
+        digest.update(b"\0")
+    return {
+        "home_surface_realization_hash": digest.hexdigest(),
+        "home_surface_sampling_seed": str(home_surface.sampling_seed),
+        "home_surface_oversample_factor": str(home_surface.oversample_factor),
+        "boolean_backend": geometry_cache.boolean_backend,
+        "surface_geometry_hash": geometry_cache.surface_geometry_hash,
+        "surface_processing_version": geometry_cache.surface_processing_version,
+        "surface_query_sampling_version": SURFACE_QUERY_SAMPLING_VERSION,
+    }
+
+
+def manifest_record(
+    container: HandContainer,
+    identity: GeometryIdentity,
+    anchors: AnchorSamples | None = None,
+    home_surface: HomeSurfaceSamples | None = None,
+    geometry_cache: OwnerGeometryCache | None = None,
+) -> dict[str, str]:
     r"""提取 content、physical mapping 与 configuration-domain 三层身份。"""
 
     semantics = container.geometry_semantics  # bank 已验证的静态语义真源
@@ -70,6 +172,8 @@ def manifest_record(container: HandContainer, identity: GeometryIdentity) -> dic
         "handedness": semantics.handedness,
         "joint_count": str(len(semantics.active_joint_names)),
         "owner_count": str(len(semantics.owners)),
+        **anchor_realization_record(anchors),
+        **home_surface_realization_record(home_surface, geometry_cache),
     }
 
 
@@ -83,9 +187,27 @@ def build_manifest(
     r"""冻结三类 split，并通过 manifest 构造拒绝 content/physical identity 泄漏。"""
 
     return GeometrySSLAssetManifest(
-        schema_version="1.0.0",
-        train=tuple(manifest_record(asset.container, asset.identity) for asset in train_assets),
-        validation=tuple(manifest_record(asset.container, asset.identity) for asset in validation_assets),
+        schema_version="1.1.0",
+        train=tuple(
+            manifest_record(
+                asset.container,
+                asset.identity,
+                asset.anchors,
+                asset.home_surface,
+                asset.geometry_cache,
+            )
+            for asset in train_assets
+        ),
+        validation=tuple(
+            manifest_record(
+                asset.container,
+                asset.identity,
+                asset.anchors,
+                asset.home_surface,
+                asset.geometry_cache,
+            )
+            for asset in validation_assets
+        ),
         official_evaluation=tuple(manifest_record(container, identity) for container, identity in official_assets),
         split_strategy="physical_group" if grouped_split is not None else "explicit",
         split_seed=0 if grouped_split is None else grouped_split.split_seed,
@@ -175,7 +297,9 @@ def resolve_generated_runtime_splits(
 
 
 __all__ = [
+    "anchor_realization_record",
     "build_manifest",
+    "home_surface_realization_record",
     "materialize_identity_only",
     "resolve_assets",
     "resolve_generated_runtime_splits",

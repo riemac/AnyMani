@@ -128,8 +128,10 @@ class AnchorSamples:
     seed_ids: tuple[str, ...]  # `[K]` provenance；只用于重现与审计
     surface_mask: np.ndarray  # `[K]`，surface/interior 采样来源
     radial_support_radius_m: float
+    radial_decay_scale_m: float  # 截断 Gaussian 的 $\tau_a$，m；只改变支持球内的候选测度
     surface_fraction: float
     sampling_seed: int
+    algorithm_version: str  # 修改 proposal/acceptance/selection 语义时必须显式升级
 
 
 @dataclass(frozen=True)
@@ -621,19 +623,32 @@ def sample_palm_anchor_supports(
     anchors_per_finger: int,
     sampling_seed: int,
     radial_support_radius_m: float = 0.05,
+    radial_decay_scale_m: float | None = None,
     surface_fraction: float = 0.5,
 ) -> AnchorSamples:
-    r"""从每根手指 seed 邻域与 PALM solid 交集采 surface/interior anchors。
+    r"""从每根手指挂载 seed 的径向衰减 PALM 支持域采 surface/interior anchors。
 
-    seed 只控制 palm 支持邻域，绝不把 finger index 编入锚点特征。surface 候选按面积抽样，
-    interior 候选在 solid 的 AABB rejection sample 中取得；两者随后都以确定性最远点方式均匀化。
-    输出锚点统一变换到 `{h}`，并保留 provenance 供审计，不改变网络中的完整 $K$ 集合语义。
+    对 seed-local 距离 $r=\|p-p_{seed}\|_2$，支持域限制为 $r\le R_a$，候选接受权重为：
+
+    $$
+    w_a(r)=\exp\left(-\frac{r^2}{2\tau_a^2}\right).
+    $$
+
+    surface proposal 按 PALM union 的真实三角形面积采样，interior proposal 在
+    ``sphere(seed,R_a) ∩ palm solid`` 内按体积采样；径向接受后继续用确定性最远点选择，兼顾
+    挂载点附近的概率偏好与有限 $K$ 下的点间分离。seed/finger 只属于采样 provenance，不进入网络。
+
+    数值锚点：$R_a=0.05\,\mathrm m$、$\tau_a=R_a/2=0.025\,\mathrm m$、每指 10 点、
+    surface/interior 各半。它们是首个可运行主线配置，不是已经由消融接受的算法常数。
     """
 
     if anchors_per_finger < 1:
         raise ValueError("anchors_per_finger must be positive")
-    if radial_support_radius_m <= 0.0:
-        raise ValueError("radial_support_radius_m must be positive")
+    radial_decay_scale_m = (  # 独立调用覆盖 $R_a$ 时，未声明的 $\tau_a$ 始终保持 $R_a/2$ 关系
+        0.5 * radial_support_radius_m if radial_decay_scale_m is None else radial_decay_scale_m
+    )
+    if radial_support_radius_m <= 0.0 or not 0.0 < radial_decay_scale_m <= radial_support_radius_m:
+        raise ValueError("anchor support radius and radial decay scale must satisfy 0 < tau_a <= R_a")
     if not 0.0 <= surface_fraction <= 1.0:
         raise ValueError("surface_fraction must lie in [0,1]")
     if spec.owner_ids != tuple(owner.owner_id for owner in semantics.owners):
@@ -662,10 +677,16 @@ def sample_palm_anchor_supports(
         )
         local_surface = sampled_surface[0]  # 可选第三返回值不属于 anchor 几何合同
         local_surface = _within_radius(local_surface, seed_local, radial_support_radius_m)
+        local_surface = _radial_decay_candidates(  # 面积 proposal 经 $w_a(r)$ 接受后偏向真实挂载 seed
+            local_surface,
+            seed_local,
+            radial_decay_scale_m,
+            seed=_stable_owner_seed(sampling_seed + 2, seed.seed_id),
+        )
         if len(local_surface) < surface_count:
             raise ValueError(
                 f"anchor seed '{seed.seed_id}' has only {len(local_surface)} palm surface candidates "
-                f"within radius {radial_support_radius_m} m; need {surface_count}"
+                f"after radial decay within radius {radial_support_radius_m} m; need {surface_count}"
             )
         selected_surface = (
             local_surface[_farthest_point_indices(local_surface, surface_count)] if surface_count else np.empty((0, 3))
@@ -676,13 +697,25 @@ def sample_palm_anchor_supports(
                 "palm interior anchors require OwnerSurfaceRecord.solid_mesh; "
                 "an open surface cannot define inside support"
             )
+        interior_candidates = max(anchors_per_finger * 64, 256)  # 大候选池使径向接受后仍可做覆盖选择
         local_interior = _sample_interior_support(
             palm_record.solid_mesh,
             seed_local,
             radial_support_radius_m,
-            interior_count,
+            interior_candidates if interior_count else 0,
             seed=_stable_owner_seed(sampling_seed + 1, seed.seed_id),
         ) if palm_record.solid_mesh is not None else np.empty((0, 3))
+        local_interior = _radial_decay_candidates(  # 体积 proposal 使用与 surface 相同的物理衰减尺度
+            local_interior,
+            seed_local,
+            radial_decay_scale_m,
+            seed=_stable_owner_seed(sampling_seed + 3, seed.seed_id),
+        )
+        if len(local_interior) < interior_count:
+            raise ValueError(
+                f"anchor seed '{seed.seed_id}' has only {len(local_interior)} palm interior candidates "
+                f"after radial decay within radius {radial_support_radius_m} m; need {interior_count}"
+            )
         selected_interior = (
             local_interior[_farthest_point_indices(local_interior, interior_count)]
             if interior_count
@@ -701,8 +734,10 @@ def sample_palm_anchor_supports(
         seed_ids=tuple(all_seed_ids),
         surface_mask=np.asarray(all_surface_mask, dtype=bool),
         radial_support_radius_m=float(radial_support_radius_m),
+        radial_decay_scale_m=float(radial_decay_scale_m),
         surface_fraction=float(surface_fraction),
         sampling_seed=int(sampling_seed),
+        algorithm_version="palm-seed-radial-gaussian-fps-v1",
     )
 
 
@@ -899,6 +934,37 @@ def _within_radius(points: np.ndarray, center: np.ndarray, radius: float) -> np.
     """返回球形支持邻域内的候选点。"""
 
     return points[np.linalg.norm(points - center[None, :], axis=-1) <= radius]
+
+
+def _radial_decay_candidates(
+    points: np.ndarray,
+    center: np.ndarray,
+    scale: float,
+    *,
+    seed: int,
+) -> np.ndarray:
+    r"""按截断 Gaussian 径向权重接受 PALM surface/volume proposal。
+
+    输入 proposal 已经由 ``_within_radius`` 或 ``_sample_interior_support`` 限制在支持球内；本函数
+    只实施 $w_a(r)=\exp(-r^2/(2\tau_a^2))$。由于 $w_a(0)=1$，可直接把权重作为接受概率，
+    无需未知归一化常数。后续最远点选择负责有限 anchor 数下的点间分离。
+
+    Args:
+        points (np.ndarray): ``[N,3]`` PALM-local surface 或 interior proposal，单位 m。
+        center (np.ndarray): ``[3]`` first-active mount seed，PALM-local，单位 m。
+        scale (float): 截断 Gaussian 衰减尺度 $\tau_a>0$，单位 m。
+        seed (int): 独立、可复现的候选接受随机种子。
+
+    Returns:
+        np.ndarray: 保持原 proposal 顺序的接受点，形状 ``[N_{accept},3]``。
+    """
+
+    if len(points) == 0:  # 空 surface/solid proposal 原样返回，由 caller 给出带 seed 的失败信息
+        return points
+    squared_radius = np.sum((points - center[None, :]) ** 2, axis=-1)  # $r^2$，单位 $\mathrm m^2$
+    acceptance = np.exp(-squared_radius / (2.0 * scale * scale))  # $w_a(r)\in(0,1]$，无量纲
+    rng = np.random.default_rng(seed)  # 每个 seed/source 独立，修改一类候选不扰动另一类
+    return points[rng.random(len(points)) < acceptance]  # rejection sampling 保留原始面积/体积基测度
 
 
 def _sample_interior_support(

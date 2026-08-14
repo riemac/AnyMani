@@ -37,11 +37,11 @@ $$
 零阶和一阶张量轴刻意分离：
 
 ```text
-distance / density  [B, G, N_Q] / [B, G, N_Q, L]
+distance / density  [B, G, N_Q] / [B, G, N_Q, N_sigma]
 sampled selectors   owner/query/joint: [E]
 closest point       [B, E, 3]
 kappa               [B, E]
-g                    [B, E, L]
+g                    [B, E, N_sigma]
 ```
 
 完整 $[B,G,N_Q,N_J]$ Jacobian 会把大量非祖先结构零和未使用 query 物化到显存，因此默认不构造。
@@ -51,8 +51,8 @@ finger chain 的祖先。
 
 距离导数的符号来自固定 query。令 surface point 速度为 $J_i$，则 query-to-surface 向量为
 $r=x-y^*$，$n=r/\|r\|$。由于 query 对 q 停止梯度，$\partial r/\partial q_i=-J_i$，故
-$\kappa_i=-n^T J_i$。若 query 跟着 owner 共动，这个公式会多出 query velocity 并退化；因此
-workspace bank 固定、target 计算显式使用 detached query coordinates。
+$\kappa_i=-n^T J_i$。若 query 跟着 owner 共动，这个公式会多出 query velocity 并退化；因此 workspace
+realization 固定于同资产 q 子批次的 `{h}`，target 计算显式使用 detached query coordinates。
 
 最近点先由 Warp 以 owner-local 坐标返回，再变回 `{h}`。为了调用 robots 的解析 point Jacobian，
 本模块把 selected closest point 反变换回对应 owner reference link。这里使用当前 owner transform，
@@ -71,8 +71,8 @@ margin 大于阈值。provenance 明确写 ``global_second_nearest_margin=not_ma
 分别报告 mask 覆盖率、按 owner/距离壳层的有效比例，以及 CPU/Kaolin reference 上的最近源切换；
 不能只报告被 mask 后的低误差。
 
-bandwidth 使用统一 SI 米制，首个候选为 4/12/32/64 mm。所有 query 同时监督全部 L 个带宽，stratum
-不决定带宽，owner 大小也不做独立归一化。共同尺度实验必须同时缩放 geometry、query、anchor 与
+sigma 使用统一 SI 米制。训练中心为 4/16/64 mm 并施加 log-space 有界 jitter；validation 固定使用
+4/8/16/32/64 mm。stratum 不决定 sigma，owner 大小也不做独立归一化。共同尺度实验必须同时缩放 geometry、query、anchor 与
 bandwidth；只缩放 geometry 而保持米制 bandwidth 是有意改变物理尺度，不是 invariance test。
 
 生成的 ``FieldTargetBatch`` 与 ``SensitivityTargetBatch`` 是 privileged data package。模型 decoder
@@ -82,7 +82,8 @@ bandwidth；只缩放 geometry 而保持米制 bandwidth 是有意改变物理�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -101,9 +102,16 @@ from .warp_surface import query_owner_surfaces_warp
 
 @dataclass(frozen=True)
 class GeometryFieldTargetCfg:
-    r"""首个可运行 Warp 教师的米制带宽与 sampled-edge mask 配置。"""
+    r"""显式 sigma Monte-Carlo 场教师与 sampled-edge mask 配置。
 
-    bandwidths_m: tuple[float, ...] = (0.004, 0.012, 0.032, 0.064)  # smoke/calibration 候选，不是最终消融结论
+    三个中心带宽 $\bar\sigma=(4,16,64)$ mm 定义近/中/远测量尺度。训练时在 log-space 有界均匀
+    采样，默认相对范围为 $[0.9\bar\sigma,1.1\bar\sigma]$；同一资产 q 子批次共享一次 realization。
+    decoder 读取每个实际 sigma，而不是把中心编号当作固定输出通道身份。
+    """
+
+    bandwidth_centers_m: tuple[float, ...] = (0.004, 0.016, 0.064)  # 4/16/64 mm 训练中心
+    bandwidth_jitter_relative: float = 0.10  # log-space 有界采样的相对半宽，默认 ±10%
+    validation_bandwidths_m: tuple[float, ...] = (0.004, 0.008, 0.016, 0.032, 0.064)  # 固定 4--64 mm 网格
     edges_per_owner: int = 2  # 每个 owner 至少覆盖祖先/非祖先候选
     distance_epsilon_m: float = 1.0e-6  # $d\approx0$ 时 UDF 方向未定义
     feature_margin_min_m: float = 1.0e-5  # 最近投影点远离当前三角面边界的阈值
@@ -111,14 +119,65 @@ class GeometryFieldTargetCfg:
     def __post_init__(self) -> None:
         """拒绝无带宽、非递增带宽与失去 sampled-edge 监督的配置。"""
 
-        if not self.bandwidths_m or any(value <= 0.0 for value in self.bandwidths_m):
-            raise ValueError("bandwidths_m must contain strictly positive values")
-        if any(left >= right for left, right in zip(self.bandwidths_m[:-1], self.bandwidths_m[1:])):
-            raise ValueError("bandwidths_m must be strictly increasing")
+        if not self.bandwidth_centers_m or any(value <= 0.0 for value in self.bandwidth_centers_m):
+            raise ValueError("bandwidth_centers_m must contain strictly positive values")
+        if any(left >= right for left, right in zip(self.bandwidth_centers_m[:-1], self.bandwidth_centers_m[1:])):
+            raise ValueError("bandwidth_centers_m must be strictly increasing")
+        if not self.validation_bandwidths_m or any(value <= 0.0 for value in self.validation_bandwidths_m):
+            raise ValueError("validation_bandwidths_m must contain strictly positive values")
+        if any(
+            left >= right for left, right in zip(self.validation_bandwidths_m[:-1], self.validation_bandwidths_m[1:])
+        ):
+            raise ValueError("validation_bandwidths_m must be strictly increasing")
+        if not 0.0 <= self.bandwidth_jitter_relative < 1.0:
+            raise ValueError("bandwidth_jitter_relative must lie in [0,1)")
         if self.edges_per_owner < 1:
             raise ValueError("edges_per_owner must be positive")
         if self.distance_epsilon_m <= 0.0 or self.feature_margin_min_m < 0.0:
             raise ValueError("distance epsilon must be positive and feature margin non-negative")
+
+
+def sample_geometry_bandwidths(
+    config: GeometryFieldTargetCfg,
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    sampling_seed: int,
+) -> torch.Tensor:
+    r"""为一个同资产 q 子批次采一次显式 sigma realization。
+
+    设中心为 $\bar\sigma_\ell$、相对半宽为 $\delta_\sigma$，则：
+
+    $$
+    \epsilon_\ell\sim\mathcal U(\log(1-\delta_\sigma),\log(1+\delta_\sigma)),
+    \qquad
+    \sigma_\ell=\bar\sigma_\ell\exp(\epsilon_\ell).
+    $$
+
+    同一 realization 沿 q 子批次 batch 轴广播，使不同 q 在相同测量尺度下可比较；下一 q 子批次由
+    新 seed 重采。返回 tensor 不启用梯度，sigma 只作为 decoder/teacher 的固定条件。
+    """
+
+    centers = torch.tensor(config.bandwidth_centers_m, device=device, dtype=dtype)  # `[N_σ]`，m
+    generator = torch.Generator(device=device)  # 与 query/edge seed 分离但由同一在线 step 确定
+    generator.manual_seed(int(sampling_seed))
+    relative = config.bandwidth_jitter_relative  # $\delta_\sigma$，无量纲
+    lower = math.log1p(-relative)  # 精确对应 $(1-\delta_\sigma)\bar\sigma$
+    upper = math.log1p(relative)  # 精确对应 $(1+\delta_\sigma)\bar\sigma$
+    epsilon = lower + (upper - lower) * torch.rand(centers.shape, generator=generator, device=device, dtype=dtype)
+    realization = centers * torch.exp(epsilon)  # `[N_σ]`，m，严格正
+    return realization.unsqueeze(0).expand(batch_size, -1)  # `[B,N_σ]` shared q-subbatch view
+
+
+def fixed_validation_geometry_field_config(config: GeometryFieldTargetCfg) -> GeometryFieldTargetCfg:
+    r"""返回使用固定 sigma 网格、完全关闭 jitter 的 validation teacher 配置。"""
+
+    return replace(
+        config,
+        bandwidth_centers_m=config.validation_bandwidths_m,
+        bandwidth_jitter_relative=0.0,
+    )
 
 
 def generate_geometry_field_targets(
@@ -150,7 +209,13 @@ def generate_geometry_field_targets(
         raise ValueError("q and query points must share CUDA device and float dtype")
     owner_transforms = forward_owner_transforms(spec, q.detach())  # teacher/query 路径停止 q 梯度
     surface = query_owner_surfaces_warp(queries.query_points_h, owner_transforms, warp_cache)
-    bandwidths = torch.tensor(config.bandwidths_m, device=q.device, dtype=q.dtype)
+    bandwidths = sample_geometry_bandwidths(  # `[B,N_σ]` 实际 sigma，不是固定输出 channel identity
+        config,
+        batch_size=q.shape[0],
+        device=q.device,
+        dtype=q.dtype,
+        sampling_seed=edge_sampling_seed + 104_729,
+    )
     density = gaussian_density_from_distance(surface.distance_m, bandwidths)
     field_valid = torch.isfinite(surface.distance_m) & (surface.face_index >= 0)
     role_index = {"palm": 0, "joint": 1, "tip": 2}

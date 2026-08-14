@@ -36,6 +36,7 @@ from anymani.distill.objectives.representations.field_reconstruction import (
     GeometrySSLTerms,
     GeometrySSLWeights,
 )
+from anymani.distill.representations.targets.geometry_field import fixed_validation_geometry_field_config
 from anymani.distill.ssl.calibration import calibrate_geometry_ssl_weights
 from anymani.distill.ssl.checkpoint import (
     GeometrySSLCheckpointMetadata,
@@ -229,11 +230,13 @@ def run_geometry_ssl_pretraining(
             seed=config.train.seed + 1_000_003,
             runtime_config=validation_runtime_config,
             query_config=config.query,
-            target_config=config.target,
+            target_config=fixed_validation_geometry_field_config(config.target),
             padding=config.padding,
         )
-        validation_batches = validation_batcher.sample_epoch()
-        validation_window.release_all()
+        try:
+            validation_batches = validation_batcher.sample_epoch()
+        finally:
+            validation_window.release_all()  # teacher 物化失败也必须释放已上传的 validation BVH lease
 
     # 模型、optimizer 与 resume/calibration 分支在同一 resolved config 下构造。
     model = GeometrySSLModel(config.model).to(device=device, dtype=dtype)
@@ -282,24 +285,27 @@ def run_geometry_ssl_pretraining(
             torch.cuda.set_rng_state_all(cuda_rng_state)
     else:
         calibration_state = train_batcher.state_dict()  # calibration 不消费正式 q coverage
-        calibration_batches = tuple(train_batcher.sample() for _ in range(config.train.calibration_batches))
-        calibrated_weights = calibrate_geometry_ssl_weights(
-            model,
-            GeometrySSLObjective,
-            calibration_batches,
-            lambda calibration_model, calibration_objective, calibration_batch: forward_objective(
-                calibration_model,
-                calibration_objective,
-                calibration_batch,
-                pair_step=0,
-            )[1],
-            output_path=output_dir / "loss_calibration.yaml",
-            min_weight=config.train.calibration_min_weight,
-            max_weight=config.train.calibration_max_weight,
-        )
-        train_batcher.load_state_dict(calibration_state)
-        del calibration_batches
-        model.zero_grad(set_to_none=True)
+        try:
+            calibration_batches = tuple(train_batcher.sample() for _ in range(config.train.calibration_batches))
+            calibrated_weights = calibrate_geometry_ssl_weights(
+                model,
+                GeometrySSLObjective,
+                calibration_batches,
+                lambda calibration_model, calibration_objective, calibration_batch: forward_objective(
+                    calibration_model,
+                    calibration_objective,
+                    calibration_batch,
+                    pair_step=0,
+                )[1],
+                output_path=output_dir / "loss_calibration.yaml",
+                min_weight=config.train.calibration_min_weight,
+                max_weight=config.train.calibration_max_weight,
+            )
+            train_batcher.load_state_dict(calibration_state)
+            del calibration_batches
+            model.zero_grad(set_to_none=True)
+        finally:
+            train_window.release_all()  # calibration 成败都不把临时 resident BVH 带到正式训练生命周期
 
     # Calibration 后 config/metadata 才是 checkpoint 与 downstream transfer 的最终事实源。
     config = replace(config, objective=calibrated_weights)

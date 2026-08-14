@@ -1,8 +1,8 @@
 r"""多资产在线几何 SSL 数据物化、Sobol q 采样与跨结构 padding。
 
 该模块不把 $(asset,q,query,target)$ 全量离线固化。每项资产只物化一次静态证据：owner union、
-home boundary、anchors、workspace bank、robots kinematic spec 与 Warp BVH；训练 step 再从 joint limits
-用 scrambled Sobol 采样合法 q，生成当前 shell/adjacent query 和 Warp teacher。
+home boundary、anchors、owner triangle sampling table、robots kinematic spec 与 Warp BVH；训练 step
+再从 joint limits 用 scrambled Sobol 采样合法 q，生成 workspace/shell/adjacent query 和 Warp teacher。
 
 跨结构 batch 使用明确上限：最多 20 个 JOINT、5 个 TIP、26 个 owner。padding 只是 GPU 稠密容器：
 
@@ -29,9 +29,10 @@ from anymani.distill.models.input_adapters.geometry import (  # retained 静态�
     pad_static_geometry_evidence,  # 跨结构静态轴 padding
 )
 from anymani.distill.representations.queries.spatial_sampling import (  # 50/25/25 query 测度
+    OwnerSurfaceSamplingCache,  # GPU owner-local triangle/area/normal static cache
     SpatialQueryBatch,  # query 坐标/stratum/adjacent provenance
     SpatialQuerySamplerCfg,  # $N_W/N_S/N_A$
-    build_workspace_query_bank,  # 跨 q 固定 `{h}` workspace
+    materialize_owner_surface_sampling_cache,  # owner union -> GPU 在线 proposal 测度
     sample_spatial_queries,  # 当前 q owner-shell/adjacent
 )
 from anymani.distill.representations.targets.field_samples import (  # 类型化 $d/\\rho/\\kappa/g$ targets
@@ -65,23 +66,23 @@ class GeometryAssetMaterializationCfg:  # CPU cache 数值配置
     r"""每项资产固定一次的 static geometry 采样配置。
 
     数值锚点：每 owner 64 个 boundary points、每 finger 10 个 palm anchors、anchor 支持半径 5 cm，
-    surface/interior 各半；workspace AABB 外扩 3 cm。正式实验可 override，但 resolved config 必须记录。
+    surface/interior 各半。workspace 球云半径属于 online query config，不与 anchor 支持半径隐式绑定。
     """
 
     home_points_per_owner: int = 64  # $M_g$
     anchors_per_finger: int = 10  # 首个可运行 anchor 数值锚点
     anchor_radius_m: float = 0.05  # palm seed 支持半径，m
+    anchor_radial_decay_scale_m: float = 0.025  # $\tau_a=R_a/2$，挂载 seed 径向衰减尺度，m
     anchor_surface_fraction: float = 0.5  # surface/interior 各半
     static_sampling_seed: int = 0  # owner-aware 派生后逐资产固定
-    workspace_padding_m: float = 0.03  # home geometry AABB 外扩，m
 
     def __post_init__(self) -> None:
         r"""验证静态点预算、米制半径与 surface/interior 混合比例。"""
 
         if self.home_points_per_owner < 1 or self.anchors_per_finger < 1:  # 点集不可为空
             raise ValueError("home/anchor point budgets must be positive")  # encoder 集合合同
-        if self.anchor_radius_m <= 0.0 or self.workspace_padding_m < 0.0:  # 米制距离域
-            raise ValueError("anchor radius must be positive and workspace padding non-negative")  # fail-fast
+        if not 0.0 < self.anchor_radial_decay_scale_m <= self.anchor_radius_m:  # $0<\tau_a\le R_a$
+            raise ValueError("anchor radial decay scale must lie in (0, anchor_radius_m]")  # fail-fast
         if not 0.0 <= self.anchor_surface_fraction <= 1.0:  # convex mixture 权重
             raise ValueError("anchor_surface_fraction must lie in [0,1]")  # 不 clamp 改变测度
 
@@ -91,7 +92,7 @@ class GeometryAssetRuntime:  # q-independent asset state
     r"""一项资产的 CPU 静态物化结果。
 
     该对象与 q/step 无关，可跨所有训练 step 复用；CPU meshes 保留真实 triangles/provenance，只有
-    ``spec/evidence/workspace`` 张量在上传时转换 dtype/device。
+    ``spec/evidence`` 张量在上传时转换 dtype/device；workspace realization 属于在线 Monte-Carlo query。
     """
 
     container: HandContainer  # bank bundle + geometry semantics
@@ -99,7 +100,6 @@ class GeometryAssetRuntime:  # q-independent asset state
     geometry_cache: OwnerGeometryCache  # owner-local strict unions
     home_surface: HomeSurfaceSamples  # `[G,M,3]` boundary-only owner local
     anchors: AnchorSamples  # `[K,3]` hand-frame palm supports
-    workspace_query_bank_h: torch.Tensor  # `[N_W,3]`，CPU float32，跨 q 固定
     evidence_cpu: StaticGeometryEvidence  # CPU retained evidence reference
     identity: GeometryIdentity  # physical group 与 configuration-domain provenance
 
@@ -121,6 +121,7 @@ class GeometryAssetDeviceState:  # device-resident asset state
     runtime: GeometryAssetRuntime  # CPU provenance/cache owner
     spec: EmbodimentGeometrySpec  # GPU POE/graph tensors
     warp_cache: WarpOwnerGeometryCache  # GPU owner BVHs
+    surface_sampling: OwnerSurfaceSamplingCache  # GPU triangle/normal/area proposal cache
     evidence: StaticGeometryEvidence  # GPU retained static inputs
 
 
@@ -228,8 +229,8 @@ def materialize_geometry_asset_runtime(
     ) -> GeometryAssetRuntime:  # CPU static asset materialization
     r"""从 bank container 构造一项资产全部 CPU 静态 cache。
 
-    顺序是静态语义 lowering → owner Boolean union → boundary home points → palm anchors → fixed workspace
-    bank → retained evidence。前一阶段失败不得被后一阶段近似替代。
+    顺序是静态语义 lowering → owner Boolean union → boundary home points → palm anchors → retained
+    evidence。workspace query 由固定 anchors 在每个同资产 q 子批次在线重采，不再静态物化 AABB bank。
 
     Returns:
         GeometryAssetRuntime: 与 q/step 无关、可复用的 CPU 静态状态。
@@ -253,15 +254,8 @@ def materialize_geometry_asset_runtime(
         anchors_per_finger=config.anchors_per_finger,  # 每 seed 固定数量
         sampling_seed=config.static_sampling_seed,  # 可复现实例
         radial_support_radius_m=config.anchor_radius_m,  # 球形支持半径，m
+        radial_decay_scale_m=config.anchor_radial_decay_scale_m,  # 截断 Gaussian $\tau_a$，m
         surface_fraction=config.anchor_surface_fraction,  # surface/interior 比例
-    )
-    workspace = build_workspace_query_bank(  # 固定 `{h}` 采样，不能随 q 共动
-        geometry_cache,  # owner 轴与资产 AABB provenance
-        spec,  # owner home poses
-        home_surface,  # boundary samples 构造 hand AABB
-        query_count=query_config.stratum_counts[0],  # $N_W$
-        padding_m=config.workspace_padding_m,  # AABB 外扩，m
-        sampling_seed=config.static_sampling_seed,  # 固定 workspace realization
     )
     evidence = build_static_geometry_evidence(  # retained encoder 的全部静态输入
         semantics,  # owner roles/normal
@@ -277,7 +271,6 @@ def materialize_geometry_asset_runtime(
         geometry_cache,
         home_surface,
         anchors,
-        workspace,
         evidence,
         identity,
     )
@@ -300,6 +293,11 @@ def move_geometry_asset_to_device(
     warp_cache = materialize_warp_owner_geometry_cache(  # owner BVH 上传或 hash cache hit
         runtime.geometry_cache, device=str(target_device)
     )
+    surface_sampling = materialize_owner_surface_sampling_cache(  # 同一 owner surface 的在线 query proposal
+        runtime.geometry_cache,
+        device=target_device,
+        dtype=dtype,
+    )
     semantics = runtime.container.geometry_semantics  # evidence roles/normal 来源
     if semantics is None:  # frozen runtime 理论上不应丢失 container 语义
         raise ValueError("runtime container lost geometry semantics")  # 防御性一致性闸门
@@ -311,7 +309,7 @@ def move_geometry_asset_to_device(
         device=target_device,  # resident device
         dtype=dtype,  # 与 model 一致
     )
-    return GeometryAssetDeviceState(runtime, spec, warp_cache, evidence)  # 完整 GPU asset state
+    return GeometryAssetDeviceState(runtime, spec, warp_cache, surface_sampling, evidence)  # 完整 GPU asset state
 
 
 def sample_online_geometry(
@@ -336,9 +334,8 @@ def sample_online_geometry(
     queries = sample_spatial_queries(  # 当前 q 下 `[1,G,N_Q,3]`
         q,  # 物理 rad；Q 个构型共享 query/teacher batch 轴
         state.spec,  # owner FK/graph
-        state.runtime.geometry_cache,  # owner boundary
-        state.runtime.home_surface,  # shell/adjacent 候选
-        state.runtime.workspace_query_bank_h,  # 固定 workspace
+        state.surface_sampling,  # 完整 owner triangle/area/normal proposal
+        state.evidence.anchors,  # 固定 `{h}` anchors；workspace realization 每 q 子批次重采
         config=query_config,  # stratum 比例/壳厚
         sampling_seed=sampling_seed,  # 当前 realization
     )
@@ -379,6 +376,7 @@ def split_online_geometry_sample(sample: OnlineGeometrySample) -> tuple[OnlineGe
                 sample.queries.query_points_h[index : index + 1],
                 sample.queries.query_stratum[index : index + 1],
                 sample.queries.adjacent_owner_index[index : index + 1],
+                sample.queries.workspace_anchor_index[index : index + 1],
             ),
             field_targets=FieldTargetBatch(
                 query_points=sample.field_targets.query_points[index : index + 1],
@@ -387,7 +385,11 @@ def split_online_geometry_sample(sample: OnlineGeometrySample) -> tuple[OnlineGe
                 density=sample.field_targets.density[index : index + 1],
                 valid_mask=sample.field_targets.valid_mask[index : index + 1],
                 owner_role=sample.field_targets.owner_role,
-                bandwidths=sample.field_targets.bandwidths,
+                bandwidths=(
+                    sample.field_targets.bandwidths
+                    if sample.field_targets.bandwidths.ndim == 1
+                    else sample.field_targets.bandwidths[index : index + 1]
+                ),
                 provenance=sample.field_targets.provenance,
             ),
             sensitivity_targets=SensitivityTargetBatch(
@@ -429,13 +431,13 @@ def pad_online_geometry_samples(
     device = samples[0].q.device  # 全 batch 唯一 GPU
     dtype = samples[0].q.dtype  # q/geometry/target 浮点 dtype
     query_count = samples[0].queries.query_points_h.shape[2]  # 固定 $N_Q$
-    bandwidths = samples[0].field_targets.bandwidths  # 固定 `[L]`，m
+    bandwidth_count = samples[0].field_targets.bandwidths.shape[-1]  # 动态 $N_\sigma$ 数据轴
     if any(sample.q.device != device or sample.q.dtype != dtype for sample in samples):  # device/dtype 一致性
         raise ValueError("all online samples must share device and dtype")  # 禁止隐式 copy/cast
     if any(sample.queries.query_points_h.shape[2] != query_count for sample in samples):  # query 轴
         raise ValueError("all samples must share N_Q")  # 当前 decoder 稠密 query 轴不 padding
-    if any(not torch.equal(sample.field_targets.bandwidths, bandwidths) for sample in samples):  # 物理 $\\sigma$
-        raise ValueError("all samples must share physical bandwidths")  # 禁止同通道不同单位/尺度
+    if any(sample.field_targets.bandwidths.shape[-1] != bandwidth_count for sample in samples):
+        raise ValueError("all samples in one dense batch must share N_sigma")
 
     batch_size = len(samples)  # $B$
     max_owner_count = padding.max_owner_count  # $G_{max}=26=1+20+5$
@@ -454,11 +456,15 @@ def pad_online_geometry_samples(
         batch_size, max_owner_count, query_count, device=device, dtype=torch.long
     )
     adjacent_owner = torch.full_like(query_stratum, -1)  # 非 adjacent/padding sentinel
+    workspace_anchor = torch.full_like(query_stratum, -1)  # 非 workspace/padding sentinel
+    bandwidths = torch.zeros(  # `[B,N_σ]`，每个样本实际采样的 sigma，m
+        batch_size, bandwidth_count, device=device, dtype=dtype
+    )
     distance = torch.zeros(  # `[B,26,N_Q]` unsigned owner distance，m
         batch_size, max_owner_count, query_count, device=device, dtype=dtype
     )
     density = torch.zeros(  # `[B,26,N_Q,L]`，无量纲
-        batch_size, max_owner_count, query_count, bandwidths.numel(), device=device, dtype=dtype
+        batch_size, max_owner_count, query_count, bandwidth_count, device=device, dtype=dtype
     )
     field_valid = torch.zeros(  # `[B,26,N_Q]`；唯一 zero-order loss 归一化 mask
         batch_size, max_owner_count, query_count, device=device, dtype=torch.bool
@@ -487,7 +493,7 @@ def pad_online_geometry_samples(
         batch_size, max_edge_count, device=device, dtype=dtype
     )
     field_sensitivity = torch.zeros(  # `[B,E_max,L]`，1/rad
-        batch_size, max_edge_count, bandwidths.numel(), device=device, dtype=dtype
+        batch_size, max_edge_count, bandwidth_count, device=device, dtype=dtype
     )
     edge_valid = torch.zeros(  # `[B,E_max]`；padding/non-smooth edge loss mask
         batch_size, max_edge_count, device=device, dtype=torch.bool
@@ -502,6 +508,9 @@ def pad_online_geometry_samples(
         query_points[batch_index, :owner_count] = sample.queries.query_points_h[0]  # `{h}` query
         query_stratum[batch_index, :owner_count] = sample.queries.query_stratum[0]  # 0/1/2 provenance
         adjacent_owner[batch_index, :owner_count] = sample.queries.adjacent_owner_index[0]  # neighbor owner
+        workspace_anchor[batch_index, :owner_count] = sample.queries.workspace_anchor_index[0]  # anchor provenance
+        sample_bandwidths = sample.field_targets.bandwidths  # `[N_σ]` 或 split 后 `[1,N_σ]`
+        bandwidths[batch_index] = sample_bandwidths if sample_bandwidths.ndim == 1 else sample_bandwidths[0]
         distance[batch_index, :owner_count] = sample.field_targets.distance[0]  # m
         density[batch_index, :owner_count] = sample.field_targets.density[0]  # `[G,N_Q,L]`
         field_valid[batch_index, :owner_count] = sample.field_targets.valid_mask[0]  # zero-order mask
@@ -527,7 +536,7 @@ def pad_online_geometry_samples(
             q_index[batch_index] = sample.q_index.reshape(-1)[0].to(device=device)
 
     queries = SpatialQueryBatch(  # decoder/sampler provenance 包
-        query_points, query_stratum, adjacent_owner
+        query_points, query_stratum, adjacent_owner, workspace_anchor
     )
     field_targets = FieldTargetBatch(  # zero-order target + valid normalization mask
         query_points=query_points,  # `[B,26,N_Q,3]`，`{h}`，m
@@ -536,7 +545,7 @@ def pad_online_geometry_samples(
         density=density,  # `[B,26,N_Q,L]`，无量纲
         valid_mask=field_valid,  # invalid owner/query 全 False
         owner_role=owner_role,  # `[B,26]`
-        bandwidths=bandwidths,  # `[L]`，m
+        bandwidths=bandwidths,  # `[B,N_σ]`，每个样本实际 sigma，m
         provenance={  # frame/unit/backend/padding 必须可审计
             "frame": "h",  # hand semantic frame
             "length_unit": "m",  # SI length

@@ -31,7 +31,6 @@ def test_calibration_uses_density_as_reference_and_writes_frozen_clipped_weights
             ),
             decoder_hidden_width=8,
             decoder_residual_blocks=1,
-            bandwidth_count=1,
         )
     )
     parameter = model.encoder.screw_projection.weight

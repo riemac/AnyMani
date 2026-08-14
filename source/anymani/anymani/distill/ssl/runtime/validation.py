@@ -22,6 +22,7 @@ from anymani.distill.diagnostics.evaluation.geometry_ssl import (
 )
 from anymani.distill.diagnostics.recording.geometry_ssl import GeometrySSLRunLogger
 from anymani.distill.models.geometry_ssl import GeometrySSLForward, GeometrySSLModel
+from anymani.distill.representations.targets.geometry_field import fixed_validation_geometry_field_config
 from anymani.distill.ssl.config import GeometrySSLExperimentCfg
 from anymani.distill.ssl.dataset import (
     GeometryAssetRuntime,
@@ -101,16 +102,23 @@ def fixed_validation_ablation_evidence(
             "query_index": batch.sensitivity_targets.query_index,
             "joint_index": batch.sensitivity_targets.joint_index,
         }
-        full = model(q, batch.evidence, batch.queries.query_points_h, **common)
+        full = model(q, batch.evidence, batch.queries.query_points_h, batch.field_targets.bandwidths, **common)
         predictions: dict[str, GeometrySSLForward | None] = {"full": full}
         predictions["query_only"] = geometry_ssl_ablation_forward(
-            model, q, batch.evidence, batch.queries.query_points_h, ablation="query_only", **common
+            model,
+            q,
+            batch.evidence,
+            batch.queries.query_points_h,
+            batch.field_targets.bandwidths,
+            ablation="query_only",
+            **common,
         )
         predictions["same_asset_q_shuffle"] = geometry_ssl_ablation_forward(
             model,
             q,
             batch.evidence,
             batch.queries.query_points_h,
+            batch.field_targets.bandwidths,
             ablation="latent_shuffle",
             batch_permutation=same_asset_q_permutation(batch.asset_ids, device=q.device),
             **common,
@@ -125,13 +133,20 @@ def fixed_validation_ablation_evidence(
                 q,
                 batch.evidence,
                 batch.queries.query_points_h,
+                batch.field_targets.bandwidths,
                 ablation="latent_shuffle",
                 batch_permutation=cross_permutation,
                 **common,
             )
         for name in ("first_order_zero", "first_order_joint_shuffle", "first_order_sign_flip"):
             predictions[name] = geometry_ssl_ablation_forward(
-                model, q, batch.evidence, batch.queries.query_points_h, ablation=name, **common
+                model,
+                q,
+                batch.evidence,
+                batch.queries.query_points_h,
+                batch.field_targets.bandwidths,
+                ablation=name,
+                **common,
             )
         per_ablation = {
             name: geometry_ssl_reconstruction_metrics_per_sample(prediction, batch) if prediction is not None else None
@@ -199,11 +214,11 @@ def stream_training_morphology_q_bank(
         seed=bank_seed,
         runtime_config=runtime_config,
         query_config=config.query,
-        target_config=config.target,
+        target_config=fixed_validation_geometry_field_config(config.target),
         padding=config.padding,
     )
     digest = hashlib.sha256()  # q/query/teacher byte-level identity
-    digest.update(b"geometry-ssl-train-morphology-q-bank-v1\0")
+    digest.update(b"geometry-ssl-train-morphology-q-bank-v2\0")
     records: list[dict[str, object]] = []
     cpu_rng_state = torch.get_rng_state()  # validation 不推进正式训练 RNG
     cuda_rng_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
@@ -216,6 +231,7 @@ def stream_training_morphology_q_bank(
                     batch.q,
                     batch.evidence,
                     batch.queries.query_points_h,
+                    batch.field_targets.bandwidths,
                     owner_index=batch.sensitivity_targets.owner_index,
                     query_index=batch.sensitivity_targets.query_index,
                     joint_index=batch.sensitivity_targets.joint_index,
@@ -288,9 +304,19 @@ def _update_training_q_bank_digest(digest: _HashWriter, batch: PaddedOnlineGeome
         batch.q,
         batch.queries.query_points_h,
         batch.queries.query_stratum,
+        batch.queries.workspace_anchor_index,
+        batch.queries.adjacent_owner_index,
+        batch.field_targets.bandwidths,
+        batch.field_targets.valid_mask,
+        batch.field_targets.owner_role,
         batch.sensitivity_targets.owner_index,
         batch.sensitivity_targets.query_index,
         batch.sensitivity_targets.joint_index,
+        batch.sensitivity_targets.ancestor_mask,
+        batch.sensitivity_targets.closest_point,
+        batch.sensitivity_targets.closest_source,
+        batch.sensitivity_targets.uniqueness_margin,
+        batch.sensitivity_targets.valid_mask,
         batch.field_targets.distance,
         batch.field_targets.density,
         batch.sensitivity_targets.kappa,

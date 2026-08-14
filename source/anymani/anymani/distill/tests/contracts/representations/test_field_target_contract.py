@@ -15,6 +15,11 @@ from anymani.distill.representations.targets.field_samples import (
     QueryStratum,
     SensitivityTargetBatch,
 )
+from anymani.distill.representations.targets.geometry_field import (
+    GeometryFieldTargetCfg,
+    fixed_validation_geometry_field_config,
+    sample_geometry_bandwidths,
+)
 
 pytestmark = pytest.mark.contract
 
@@ -53,6 +58,52 @@ def test_multiband_density_and_field_sensitivity_obey_chain_and_scale_laws() -> 
     assert density.shape == (1, 1, 3, 4)
     assert sensitivity.shape == (1, 1, 3, 4, 2)
     assert math.isclose(float(density[0, 0, 0, 0]), 1.0)
+
+
+def test_log_uniform_sigma_sampling_is_bounded_shared_and_reproducible() -> None:
+    """同资产 q 子批次共享 4/16/64 mm 的 log-space ±10% realization。"""
+
+    config = GeometryFieldTargetCfg(
+        bandwidth_centers_m=(0.004, 0.016, 0.064),
+        bandwidth_jitter_relative=0.10,
+    )
+    sampled = sample_geometry_bandwidths(
+        config,
+        batch_size=3,
+        device=torch.device("cpu"),
+        dtype=torch.float64,
+        sampling_seed=17,
+    )
+    repeated = sample_geometry_bandwidths(
+        config,
+        batch_size=3,
+        device=torch.device("cpu"),
+        dtype=torch.float64,
+        sampling_seed=17,
+    )
+    centers = torch.tensor(config.bandwidth_centers_m, dtype=torch.float64)
+
+    assert sampled.shape == (3, 3)
+    torch.testing.assert_close(sampled, sampled[:1].expand_as(sampled), atol=0.0, rtol=0.0)
+    torch.testing.assert_close(sampled, repeated, atol=0.0, rtol=0.0)
+    assert torch.all(sampled[0] >= 0.9 * centers)
+    assert torch.all(sampled[0] <= 1.1 * centers)
+
+    validation_config = fixed_validation_geometry_field_config(config)
+    validation_sigma = sample_geometry_bandwidths(
+        validation_config,
+        batch_size=3,
+        device=torch.device("cpu"),
+        dtype=torch.float64,
+        sampling_seed=99,
+    )
+    expected_validation_sigma = torch.tensor([0.004, 0.008, 0.016, 0.032, 0.064], dtype=torch.float64)
+    torch.testing.assert_close(
+        validation_sigma,
+        expected_validation_sigma.expand_as(validation_sigma),
+        atol=0.0,
+        rtol=0.0,
+    )
 
 
 def test_density_rejects_nonpositive_bandwidth() -> None:

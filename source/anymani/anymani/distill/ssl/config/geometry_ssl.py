@@ -159,10 +159,14 @@ class GeometrySSLExperimentCfg:
     train: GeometrySSLTrainLoopCfg = field(default_factory=GeometrySSLTrainLoopCfg)  # 生命周期
 
     def __post_init__(self) -> None:
-        r"""闭合 target bandwidth $L$ 与 density decoder 输出轴 $L$。"""
+        r"""验证 model sigma reference 位于 target 正带宽域内。
 
-        if self.model.bandwidth_count != len(self.target.bandwidths_m):  # 逐带宽监督必须同轴
-            raise ValueError("model bandwidth_count must equal target bandwidth count")  # 不广播/截断
+        sigma 数量是 target 的动态数据轴，不再与 decoder 输出宽度闭合；这里只要求 reference 为合法
+        物理尺度，避免 ``log(sigma/sigma_reference)`` 接收退化配置。
+        """
+
+        if self.model.sigma_reference_m <= 0.0:  # 双层 fail-fast 使独立 config round-trip 也保持物理域
+            raise ValueError("model sigma_reference_m must be strictly positive")
 
 
 @dataclass(frozen=True)
@@ -224,6 +228,23 @@ def experiment_config_from_dict(payload: dict[str, Any]) -> GeometrySSLExperimen
     ``__post_init__`` 数值/轴合同重新执行。
     """
 
+    required_contract_fields = {
+        "materialization": {"anchor_radial_decay_scale_m"},
+        "query": {"workspace_radius_m"},
+        "target": {"bandwidth_centers_m", "bandwidth_jitter_relative", "validation_bandwidths_m"},
+        "model": {"sigma_reference_m"},
+    }
+    missing = {
+        section: tuple(sorted(names - set(dict(payload.get(section, {})))))
+        for section, names in required_contract_fields.items()
+        if names - set(dict(payload.get(section, {})))
+    }
+    if missing:
+        raise ValueError(
+            "resolved config predates the online-query/explicit-sigma contract; "
+            f"missing_fields={missing}"
+        )
+
     assets_payload = dict(payload["assets"])  # Hydra ListConfig -> 基础容器
     assets = GeometrySSLAssetCfg(  # 路径轴冻结为 tuple
         family_paths=tuple(assets_payload.get("family_paths", ())),  # automatic grouped family
@@ -235,7 +256,10 @@ def experiment_config_from_dict(payload: dict[str, Any]) -> GeometrySSLExperimen
         official_evaluation_paths=tuple(assets_payload["official_evaluation_paths"]),  # official only
     )
     target_payload = dict(payload["target"])  # teacher mapping
-    target_payload["bandwidths_m"] = tuple(target_payload["bandwidths_m"])  # 固定物理 $\\sigma_\\ell$ 轴
+    target_payload["bandwidth_centers_m"] = tuple(target_payload["bandwidth_centers_m"])  # sigma 中心轴
+    target_payload["validation_bandwidths_m"] = tuple(
+        target_payload["validation_bandwidths_m"]
+    )  # 固定 validation sigma 网格
     model_payload = dict(payload["model"])  # retained/disposable model mapping
     model_payload["encoder"] = GeometryEncoderConfig(**dict(model_payload["encoder"]))  # nested encoder
     return GeometrySSLExperimentCfg(  # 构造顺序触发全部子配置验证

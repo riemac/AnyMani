@@ -62,7 +62,7 @@ uniform scale 验收同时缩放 geometry、query、anchor 与带宽：$x'=\lamb
 - `JOINT`：该关节物理实体所拥有的 collision surface、运动学属性与 $z_i^{(1)}$ routing；
 - `TIP`：distal/tip posed geometry。
 
-当前密度监督保持逐归属体输出 `[B,G,N_Q,L]`，不训练独立 whole-hand union head。若需要联合诊断，只能在共同查询网格上从逐归属体预测解析派生，并明确它不是新的物理监督目标。
+当前密度监督保持逐归属体、逐显式 sigma 输出 `[B,G,N_Q,N_sigma]`，不训练独立 whole-hand union head。decoder 对每个 `(owner,query,sigma)` 使用同一个 scalar reader，$N_\sigma$ 不是固定输出头宽度。若需要联合诊断，只能在共同查询网格上从逐归属体预测解析派生，并明确它不是新的物理监督目标。
 
 这些分组仍是实验 contract，不是所有资产已经完成审核的事实。official LEAP/Allegro 等资产需要 collision 可视化、人工检查、versioned sidecar 与 coverage/no-duplicate validation 后才能进入正式 target pipeline。
 

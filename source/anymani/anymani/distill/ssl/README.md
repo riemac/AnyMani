@@ -25,11 +25,11 @@ python -m anymani.distill.ssl.pretrain --config-name geometry_ssl_canonical_resi
 ```text
 HandBank geometry semantics
     -> CPU POE spec + strict owner Manifold union
-    -> boundary-only home samples + palm anchors + fixed workspace bank
+    -> boundary-only home samples + radial-decay palm anchors + owner triangle sampling tables
     -> CPU catalog + bounded GPU resident asset window + reusable Warp BVH leases
     -> scrambled Sobol q within joint limits
-    -> 50/25/25 workspace / owner-shell / adjacent queries
-    -> online d / rho / kappa / g teacher
+    -> online 50/25/25 anchor-workspace / current owner-shell / owner-adjacent queries
+    -> explicit sigma-conditioned online d / rho / kappa / g teacher
     -> optional 20-JOINT / 26-owner heterogeneous padding
     -> retained encoder + SSL-only density/kappa decoders
     -> fixed train-only gradient calibration
@@ -37,13 +37,13 @@ HandBank geometry semantics
     -> deterministic full resume + retained-only encoder state
 ```
 
-静态 cache 每项资产只物化一次；每个训练 step 只采 q、当前 query 与 target。在线主路径必须使用 GPU Warp，失败即报错，不自动回退 trimesh。CPU trimesh/manifold3d 只负责离线 Boolean、闭合性验证、surface/anchor sampling 和 reference truth。
+静态 cache 每项资产只物化一次；physical anchors 固定，workspace offsets、current-surface shell/adjacent 与 sigma 在每个同资产 q 子批次在线重采。在线主路径必须使用 GPU Warp，失败即报错，不自动回退 trimesh。CPU trimesh/manifold3d 只负责离线 Boolean、闭合性验证、surface/anchor sampling table 和 reference truth。
 
 ## Input 与 Target 分离
 
 retained encoder 只读取部署可获得的当前物理 $q$ 与静态手型证据：显式 $q_{home}$、ordered screws、topology graph、PALM/JOINT/TIP home boundary samples、palm normal 与完整无序 physical anchors。joint limits 只用于 Sobol q 采样，不进入 encoder。
 
-以下信息不得进入 retained encoder：current distance、closest point、surface Jacobian、query stratum、target field、contact、action、history、object state 或 future state。training-only decoder 可以读取固定 `{h}` query coordinates 与 retained latent，SSL 后默认整体删除。
+以下信息不得进入 retained encoder：current distance、closest point、surface Jacobian、query stratum、target field、contact、action、history、object state 或 future state。training-only decoder 读取 detached `{h}` query coordinates、显式 sigma 与 retained latent，SSL 后整体删除。
 
 ## 隐式 Gaussian 主线
 
@@ -61,7 +61,7 @@ $$
 
 单位 $\mathrm{rad}^{-1}$。联合目标同时训练 density、显式 $\kappa$、由预测 $\rho/\kappa$ 派生的 $g$、同一 density predictor 对物理 q 的 Sobolev 自导数，以及两条预测灵敏度路径的 chain consistency。
 
-默认带宽为 4/12/32/64 mm；每 owner query 默认 64 个，按 32 workspace、16 owner-shell、16 adjacent 分解。模型默认 padding 上限为 20 JOINT、5 TIP、26 owner；无效槽由 entity/joint/field/edge masks 屏蔽，不具有可学习 identity。
+训练 sigma 中心为 4/16/64 mm，并施加 log-space 有界 ±10% jitter；validation 固定使用 4/8/16/32/64 mm。decoder 对每个 `(owner,query,sigma)` 输出一个 scalar，$N_Q$ 与 $N_\sigma$ 都只是数据轴。每 owner query 默认 64 个，按 32 workspace、16 owner-shell、16 adjacent 分解。模型默认 padding 上限为 20 JOINT、5 TIP、26 owner；无效槽由 entity/joint/field/edge masks 屏蔽，不具有可学习 identity。
 
 ## Validation 与诊断
 

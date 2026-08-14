@@ -34,7 +34,6 @@ def _config() -> GeometrySSLModelConfig:
         ),
         decoder_hidden_width=16,
         decoder_residual_blocks=1,
-        bandwidth_count=2,
     )
 
 
@@ -54,7 +53,7 @@ def test_checkpoint_resumes_full_state_and_transfers_only_encoder(tmp_path: Path
         package_version="test-version",
         geometry_semantics_schema="1.0.0",
         asset_manifest={"train": [{"asset_id": "synthetic", "content_hash": "abc"}]},
-        resolved_config={"model": {"bandwidth_count": 2}},
+        resolved_config={"model": {"sigma_reference_m": 0.016}},
     )
     save_geometry_ssl_checkpoint(
         path,

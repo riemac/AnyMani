@@ -10,7 +10,7 @@ retained after SSL
 
 training-only disposable
   shared point-anchor query features
-    + Z^(0) -> ConditionalDensityDecoder -> rho [B,G,N_Q,L]
+    + Z^(0) + explicit sigma -> ConditionalDensityDecoder -> rho [B,G,N_Q,N_sigma]
     + Z^(1) -> DistanceSensitivityDecoder -> kappa [B,E]
 ```
 
@@ -44,19 +44,19 @@ class GeometrySSLModelConfig:
     r"""retained encoder 与 disposable decoder 的显式组装配置。
 
     decoder 输入宽度只从 encoder 输出类型派生，禁止训练配置单独复制 $D_0/D_1/D_q$ 后发生漂移。
-    ``bandwidth_count=L`` 必须与 target 的物理带宽轴逐元素同序。
+    sigma 数量属于 target 的动态采样轴；model 只保存对数比例的参考长度，不保存固定输出通道数。
     """
 
     encoder: GeometryEncoderConfig = field(default_factory=GeometryEncoderConfig)  # retained 容量
     decoder_hidden_width: int = 128  # training-only FiLM/κ reader 宽度
     decoder_residual_blocks: int = 3  # density FiLM residual blocks
-    bandwidth_count: int = 4  # 必须与 target bandwidth 轴一致
+    sigma_reference_m: float = 0.016  # $\log(\sigma/\sigma_{ref})$ 的 16 mm 参考尺度
 
     def __post_init__(self) -> None:
         r"""拒绝退化 decoder 容量、零 residual block 与空带宽轴。"""
 
-        if self.decoder_hidden_width < 1 or self.decoder_residual_blocks < 1 or self.bandwidth_count < 1:  # 域
-            raise ValueError("decoder width, residual blocks and bandwidth count must be positive")  # 闸门
+        if self.decoder_hidden_width < 1 or self.decoder_residual_blocks < 1 or self.sigma_reference_m <= 0.0:
+            raise ValueError("decoder width, residual blocks and sigma reference must be positive")
 
     def decoder_config(self) -> ImplicitFieldDecoderConfig:
         r"""从 retained 类型宽度派生唯一 decoder 输入合同。
@@ -70,7 +70,7 @@ class GeometrySSLModelConfig:
             first_order_width=self.encoder.first_order_width,  # $D_1$
             query_width=self.encoder.relation_width,  # $D_q$
             hidden_width=self.decoder_hidden_width,  # disposable 内部宽度
-            bandwidth_count=self.bandwidth_count,  # $L$
+            sigma_reference_m=self.sigma_reference_m,  # 显式 sigma 的无量纲 log-ratio reference
             residual_blocks=self.decoder_residual_blocks,  # density FiLM 深度
         )
 
@@ -85,7 +85,7 @@ class GeometrySSLForward:
 
     latents: GeometryLatents  # retained $Z^{(0)},Z^{(1)}$
     query_features: torch.Tensor  # `[B,G,N_Q,D_q]`，共享点—锚点前端
-    density: torch.Tensor  # `[B,G,N_Q,L]`
+    density: torch.Tensor  # `[B,G,N_Q,N_sigma]`
     kappa: torch.Tensor  # `[B,E]`
 
 
@@ -115,6 +115,7 @@ class GeometrySSLModel(nn.Module):
         q: torch.Tensor,  # `[B,N_J]` 或 padding `[B,20]`，rad
         evidence: StaticGeometryEvidence,  # 静态 hand evidence 与 masks
         query_points_h: torch.Tensor,  # `[B,G,N_Q,3]`，`{h}`，m
+        bandwidths: torch.Tensor,  # `[N_σ]` 或 `[B,N_σ]`，m，显式 decoder 条件
         owner_index: torch.Tensor,  # `[E]`/`[B,E]`
         query_index: torch.Tensor,  # `[E]`/`[B,E]`
         joint_index: torch.Tensor,  # `[E]`/`[B,E]`
@@ -125,6 +126,7 @@ class GeometrySSLModel(nn.Module):
             q (torch.Tensor): ``[B,N_J]`` 当前物理关节角，rad，保留模型 JVP 计算图。
             evidence (StaticGeometryEvidence): 当前结构模式的静态可部署证据。
             query_points_h (torch.Tensor): ``[B,G,N_Q,3]`` 固定 `{h}` queries，m，已停止采样梯度。
+            bandwidths (torch.Tensor): ``[N_sigma]`` 或 ``[B,N_sigma]`` 实际 sigma，m。
             owner_index (torch.Tensor): ``[E]`` 或跨结构 ``[B,E]`` sampled owner selectors。
             query_index (torch.Tensor): 与 owner selector 同形状的 query selectors。
             joint_index (torch.Tensor): 与 owner selector 同形状的 JOINT selectors。
@@ -146,6 +148,7 @@ class GeometrySSLModel(nn.Module):
         return self.decode_latents(  # 集中 disposable 路径供完整模型与 ablation 共用
             latents,  # retained $Z^{(0)},Z^{(1)}$
             query_features,  # `[B,G,N_Q,D_q]`
+            bandwidths=bandwidths,  # 显式 sigma 数据轴
             entity_valid_mask=entity_valid,  # padding owner mask
             owner_index=owner_index,  # sampled owner
             query_index=query_index,  # sampled query
@@ -157,6 +160,7 @@ class GeometrySSLModel(nn.Module):
         latents: GeometryLatents,  # 可为完整/zero/shuffled latent
         query_features: torch.Tensor,  # 固定 query path
         *,
+        bandwidths: torch.Tensor,  # `[N_σ]` 或 `[B,N_σ]`
         entity_valid_mask: torch.Tensor | None,  # `[B,G]`
         owner_index: torch.Tensor,  # `[E]`/`[B,E]`
         query_index: torch.Tensor,  # `[E]`/`[B,E]`
@@ -164,12 +168,12 @@ class GeometrySSLModel(nn.Module):
     ) -> GeometrySSLForward:
         r"""从显式 latent/query features 运行 disposable heads，供受控 ablation 复用。
 
-        density 预测为 $\hat\rho\in\mathbb R^{B\times G\times N_Q\times L}$；κ 只在 sampled edges
+        density 预测为 $\hat\rho\in\mathbb R^{B\times G\times N_Q\times N_\sigma}$；κ 只在 sampled edges
         输出 $\hat\kappa\in\mathbb R^{B\times E}$。该函数不重新编码 q/evidence，因此 ablation 可以只干预
         latent 而保持 decoder/query path 相同。
         """
 
-        density = self.density_decoder(latents.zero_order, query_features)  # `[B,G,N_Q,L]`
+        density = self.density_decoder(latents.zero_order, query_features, bandwidths)  # `[B,G,N_Q,N_σ]`
         if entity_valid_mask is not None:  # padding owner 不属于物理监督测度
             density = density * entity_valid_mask.unsqueeze(-1).unsqueeze(-1)  # padding owner 不产生虚假场值
         kappa = self.sensitivity_decoder(  # 读取 sampled `(g,r,i)`，不物化完整 $G\times N_Q\times N_J$

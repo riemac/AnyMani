@@ -12,7 +12,7 @@ from anymani.distill.models.input_adapters.geometry import GeometryEncoderConfig
 from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLObjective, GeometrySSLWeights
 from anymani.distill.representations.queries.spatial_sampling import (
     SpatialQuerySamplerCfg,
-    build_workspace_query_bank,
+    materialize_owner_surface_sampling_cache,
     sample_spatial_queries,
 )
 from anymani.distill.representations.targets.geometry_field import generate_geometry_field_targets
@@ -63,15 +63,11 @@ def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
         sampling_seed=59,
     )
     query_config = SpatialQuerySamplerCfg(query_count=64)
-    workspace = build_workspace_query_bank(
-        geometry_cache,
-        spec_cpu,
-        home_surface,
-        query_count=query_config.stratum_counts[0],
-        sampling_seed=61,
-    )
     warp_cache = materialize_warp_owner_geometry_cache(geometry_cache, device="cuda:0")
     spec = spec_cpu.to(device="cuda:0", dtype=torch.float32)
+    surface_sampling = materialize_owner_surface_sampling_cache(
+        geometry_cache, device="cuda:0", dtype=torch.float32
+    )
     evidence = build_static_geometry_evidence(
         semantics,
         spec,
@@ -84,9 +80,8 @@ def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
     queries = sample_spatial_queries(
         q.detach(),
         spec,
-        geometry_cache,
-        home_surface,
-        workspace,
+        surface_sampling,
+        evidence.anchors,
         config=query_config,
         sampling_seed=67,
     )
@@ -117,13 +112,13 @@ def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
             encoder=encoder_config,
             decoder_hidden_width=32,
             decoder_residual_blocks=2,
-            bandwidth_count=4,
         )
     ).to(device="cuda:0", dtype=torch.float32)
     prediction = model(
         q,
         evidence,
         queries.query_points_h,
+        field_targets.bandwidths,
         sensitivity_targets.owner_index,
         sensitivity_targets.query_index,
         sensitivity_targets.joint_index,
@@ -140,7 +135,7 @@ def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
 
     assert prediction.latents.zero_order.shape == (1, 21, 24)
     assert prediction.latents.first_order.shape == (1, 16, 12)
-    assert prediction.density.shape == (1, 21, 64, 4)
+    assert prediction.density.shape == (1, 21, 64, 3)
     assert prediction.kappa.shape == (1, 42)
     assert torch.isfinite(terms.total)
     assert q.grad is not None and torch.isfinite(q.grad).all()

@@ -71,7 +71,6 @@ def test_synthetic_geometry_ssl_forward_joint_jvp_and_backward() -> None:
         first_order_width=12,
         query_width=16,
         hidden_width=32,
-        bandwidth_count=2,
         residual_blocks=2,
     )
     density_decoder = ConditionalDensityDecoder(decoder_config).to(dtype=dtype)
@@ -93,7 +92,8 @@ def test_synthetic_geometry_ssl_forward_joint_jvp_and_backward() -> None:
 
     latents = encoder(q, evidence)
     query_features = encoder.encode_points(query_points.detach(), evidence)  # Sobolev 固定 `{h}` query，采样路径 stop-gradient
-    density_prediction = density_decoder(latents.zero_order, query_features)
+    bandwidths = torch.tensor([0.012, 0.032], dtype=dtype)
+    density_prediction = density_decoder(latents.zero_order, query_features, bandwidths)
     owner_index = torch.tensor([1, 2], dtype=torch.long)
     query_index = torch.tensor([1, 2], dtype=torch.long)
     joint_index = torch.tensor([0, 0], dtype=torch.long)
@@ -106,7 +106,6 @@ def test_synthetic_geometry_ssl_forward_joint_jvp_and_backward() -> None:
         joint_index,
     )
 
-    bandwidths = torch.tensor([0.012, 0.032], dtype=dtype)
     distance = torch.full((batch_size, owner_count, query_count), 0.02, dtype=dtype)
     density_target = gaussian_density_from_distance(distance, bandwidths)
     field_targets = FieldTargetBatch(

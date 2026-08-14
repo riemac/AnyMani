@@ -61,7 +61,12 @@ def _sample(joint_count: int, asset_id: str) -> OnlineGeometrySample:
     query_points = torch.zeros(1, owner_count, query_count, 3, dtype=torch.float64)
     query_points[..., 0] = torch.linspace(-0.05, 0.08, query_count, dtype=torch.float64)
     stratum = torch.tensor([0, 0, 1, 2], dtype=torch.long).reshape(1, 1, query_count).expand(1, owner_count, -1)
-    queries = SpatialQueryBatch(query_points, stratum, torch.full_like(stratum, -1))
+    queries = SpatialQueryBatch(
+        query_points,
+        stratum,
+        torch.full_like(stratum, -1),
+        torch.full_like(stratum, -1),
+    )
     distance = torch.full((1, owner_count, query_count), 0.02, dtype=torch.float64)
     density = torch.exp(-0.5 * (distance.unsqueeze(-1) / bandwidths).square())
     field = FieldTargetBatch(
@@ -115,7 +120,6 @@ def test_padded_cross_structure_model_objective_and_backward() -> None:
                 max_graph_distance=4,
             ),
             decoder_hidden_width=32,
-            bandwidth_count=2,
             decoder_residual_blocks=1,
         ),
     ).to(dtype=torch.float64)
@@ -123,6 +127,7 @@ def test_padded_cross_structure_model_objective_and_backward() -> None:
         q,
         batch.evidence,
         batch.queries.query_points_h,
+        batch.field_targets.bandwidths,
         owner_index=batch.sensitivity_targets.owner_index,
         query_index=batch.sensitivity_targets.query_index,
         joint_index=batch.sensitivity_targets.joint_index,

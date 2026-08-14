@@ -43,6 +43,7 @@ def forward_objective(
         q,
         batch.evidence,
         batch.queries.query_points_h,
+        batch.field_targets.bandwidths,  # `[B,N_σ]` actual sigma，q 导数中保持固定
         owner_index=batch.sensitivity_targets.owner_index,
         query_index=batch.sensitivity_targets.query_index,
         joint_index=batch.sensitivity_targets.joint_index,
@@ -132,7 +133,7 @@ def objective_denominators_from_batch(
 ) -> tuple[tuple[float, ...], tuple[float, float]]:
     r"""由 masks 与 latent widths 预计算五项 field 及 paired 两支有效标量数。"""
 
-    bandwidth_count = batch.field_targets.bandwidths.numel()  # $L$
+    bandwidth_count = batch.field_targets.bandwidths.shape[-1]  # $N_\sigma$ 数据采样轴
     field_count = float(batch.field_targets.valid_mask.sum()) * bandwidth_count
     edge_count = float(batch.sensitivity_targets.valid_mask.sum())
     edge_band_count = edge_count * bandwidth_count
