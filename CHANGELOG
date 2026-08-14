@@ -1,3 +1,12 @@
+0.5.3 - 2026-08-13
+==================
+
+- 修复 post-mutate family 的候选采样与序列化合同，以独立联合 proposal、整候选拒绝重采和确定性审计生成正式 right LEAP mother + 20 variants。
+- 将 owner geometry 明确拆为 surface-first 与 optional solid：焊接 STL 重复顶点，审计 Warp float32 collapsed faces，保留最近面 provenance，并修复多 batch Warp 输出写入非连续视图导致的错误距离。
+- 按 `physical_geometry_hash` 整组隔离 generated train/validation，新增 canonical signed-screw residual encoder、物理 joint-sign paired rewrite、六项全局归一化目标与 train-only 固定梯度校准。
+- 闭合有界 resident-window、每资产 Sobol q provenance、epoch coverage、runtime telemetry、scientific-config resume 与 deterministic replay；将 Hydra 入口收敛为薄 façade，并按资产、调度、目标、验证和 checkpoint 职责拆分 runtime。
+- 新增 held-out morphology 分层 checkpoint selection、training-morphology independent-q replay、固定 latent ablation 与 asset/q 两级 paired bootstrap；当前证据边界仍限于同 source、right-handed、同 topology、16-DOF family，正式 20-epoch pilot 与 PPO/official 泛化尚未执行。
+
 0.5.2 - 2026-08-11
 ==================
 
