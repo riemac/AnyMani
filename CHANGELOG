@@ -1,3 +1,12 @@
+0.5.4 - 2026-08-15
+==================
+
+- 将训练查询改为静态 physical anchors 与 owner triangle tables 驱动的在线 Monte-Carlo realization：workspace 使用 anchor-local 均匀体积球，owner-shell 连续采 current surface 双侧壳层，owner-adjacent 均匀覆盖全部 graph one-hop neighbors。
+- 为 PALM anchors 增加 $R_a=5$ cm、$\tau_a=R_a/2$ 的截断 Gaussian 径向 proposal、确定性 farthest-point selection、算法版本和实际 realization SHA-256；manifest/resume 现在严格比较 anchor、retained home-surface、Boolean/surface backend 与 surface-query sampling provenance。
+- 将 density decoder 改为逐 `(owner,query,sigma)` scalar reader：query 与 $\log(\sigma/16\,\mathrm{mm})$ 走主路径，$z^{(0)}$ 逐层 FiLM 调制；训练使用 4/16/64 mm log-space ±10% jitter，validation 固定使用 4/8/16/32/64 mm。
+- 固定 validation/replay digest 现覆盖 workspace/adjacent routing 与实际 sigma；新增采样分布、刚体等价、shell/adjacent、动态 sigma、fixed-sigma q-JVP、anchor provenance 和真实 LEAP CUDA/Warp q-sensitivity 合同。
+- 当前证据仍限于合同测试、真实 mother CUDA teacher 与同 topology right LEAP family 的运行准备；正式 21-asset、20-epoch pilot、PPO transfer 与 official/cross-topology 泛化尚未执行。
+
 0.5.3 - 2026-08-13
 ==================
 
