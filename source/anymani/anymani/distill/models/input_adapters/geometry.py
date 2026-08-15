@@ -106,7 +106,7 @@ $Z^{(0)}$ 为偶、对应 $z_i^{(1)}$ 为奇。测试仍需检查广播、索引
 关节限位不属于本模块输入。两个仅限位不同、运动学与碰撞几何相同的手，在相同物理 $q$
 下必须得到相同几何表征。限位只服务构型采样、边界验证和后续策略局部状态。
 
-数值锚点：首个可运行配置使用 $D_0=128$、$D_1=64$、3 层、4 头、随机失活为 0，
+数值锚点：canonical 配置使用 $D_0=128$、$D_1=64$、2 层、4 头、随机失活为 0，
 固定长度数值尺度为 0.1 m。它们是工程起点，不是实验结论。正式选择必须同时报告留出误差、
 参数量、激活显存，以及 RTX 5070 Ti、$B=4096$ 下完整保留路径的 p95 延迟。
 
@@ -124,72 +124,68 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
-from anymani.assets.asset_schema_geometry import HandGeometrySemanticsCfg
-from anymani.robots.geometry_kinematics import EmbodimentGeometrySpec
-from anymani.robots.owner_geometry import AnchorSamples, HomeSurfaceSamples
 from torch import nn
 
-from ..backbones.geometry_transformer import GraphBiasedTransformer
+from anymani.assets.asset_schema_geometry import HandGeometrySemanticsCfg
+from anymani.distill.representations.sources.collision_geometry import AnchorSamples, HomeSurfaceSamples
+from anymani.distill.representations.sources.kinematics import EmbodimentGeometrySpec
+
+from ..backbones.geometry_transformer import GraphBiasedTransformer, GraphBiasedTransformerCfg
 
 
 @dataclass(frozen=True)
-class GeometryEncoderConfig:
-    r"""部署保留几何编码器的显式容量与物理归一化配置。
+class SO2AnchorFrontendCfg:
+    r"""点/旋量—锚点前端、owner 内集合聚合与角色 embedding 容量。
 
-    默认宽度是首个可运行容量锚点：$D_0=128$、$D_1=64$、整手隐藏宽度 128、3 层、4 头。
-    它们尚未经过跨手型容量消融，不应在论文中写成算法常数。`length_scale_m=0.1` 只把米制一阶量
-    调整到神经网络易处理的数值范围；该常数对所有手型一致，不执行每手归一化，因此不会删除
-    真实绝对尺度。
-
-    Attributes:
-        relation_width (int): 单个点—锚点关系的隐藏宽度。
-        home_width (int): 每个归属体基准表面聚合后的宽度。
-        screw_width (int): 完整学习式 $f_i^{screw}$ 的固定宽度。
-        hidden_width (int): 整手 Transformer 表征宽度。
-        zero_order_width (int): 零阶表征宽度 $D_0$。
-        first_order_width (int): 一阶表征宽度 $D_1$。
-        length_scale_m (float): 全手共享的米制数值尺度。
+    ``length_scale_m=0.1`` 只把米制一次量和二次量变为网络易处理的无量纲数值；它对所有手型
+    共用，不按资产尺寸归一化，因此不会删除真实尺度。anchor、home point 与 screw relation 的
+    投影权重跨 owner、JOINT 和资产共享。
     """
 
-    relation_width: int = 64  # 单个点—锚点关系的隐藏宽度
-    home_width: int = 64  # 每个归属体基准表面聚合后的宽度
-    screw_width: int = 64  # 单一固定宽度 $f_i^{screw}$
-    hidden_width: int = 128  # 整手 Transformer 隐藏宽度
-    zero_order_width: int = 128  # $D_0$
-    first_order_width: int = 64  # $D_1$
-    transformer_layers: int = 3  # Pre-LN entity blocks 数
-    attention_heads: int = 4  # 图偏置注意力头数
-    feedforward_width: int = 256  # Transformer FFN 宽度
-    dropout: float = 0.0  # 几何合同默认不使用随机失活
-    length_scale_m: float = 0.1  # 全手共享固定米制数值尺度，不按手型归一化
-    max_graph_distance: int = 8  # 图偏置最远桶
+    relation_width: int = 64  # 单个 point/screw—anchor relation 的隐藏宽度 $D_r$
+    home_width: int = 64  # home surface 与当前 joint-motion property 的聚合宽度
+    screw_width: int = 64  # 完整学习式 $f_i^{screw}$ 的固定宽度 $D_s$
+    role_width: int = 8  # PALM/JOINT/TIP 三类共享角色 embedding 宽度
+    length_scale_m: float = 0.1  # 全手共享 SI 长度数值尺度，单位 m
 
     def __post_init__(self) -> None:
-        r"""拒绝无法形成合法注意力或物理归一化的配置。
+        r"""拒绝空前端容量或退化的物理数值尺度。"""
 
-        隐藏宽度必须能被注意力头数整除，保证每头宽度 $D_h=D/H$ 为整数。固定米制数值尺度
-        必须严格为正；零值会使位置和二次关系归一化出现除零。宽度为零不被解释为关闭分支，
-        受控消融应使用显式实验变体，而不是构造退化张量。
-
-        Raises:
-            ValueError: 任一宽度非正、注意力头无法整除隐藏宽度或米制尺度非正时抛出。
-        """
-
-        widths = (
-            self.relation_width,
-            self.home_width,
-            self.screw_width,
-            self.hidden_width,
-            self.zero_order_width,
-            self.first_order_width,
-            self.feedforward_width,
-        )
-        if any(width <= 0 for width in widths):
-            raise ValueError("all geometry encoder widths must be positive")
-        if self.hidden_width % self.attention_heads != 0:
-            raise ValueError("hidden_width must be divisible by attention_heads")
-        if self.length_scale_m <= 0.0:
+        if min(self.relation_width, self.home_width, self.screw_width, self.role_width) < 1:
+            raise ValueError("all geometry frontend widths must be positive")
+        if self.length_scale_m <= 0.0:  # 一次/二次关系分别除以 $L$/$L^2$
             raise ValueError("length_scale_m must be strictly positive")
+
+
+@dataclass(frozen=True)
+class GeometryLatentHeadsCfg:
+    r"""零阶 owner 表征与逐 JOINT 一阶 residual 表征的固定类型宽度。"""
+
+    zero_order_width: int = 128  # 每 owner 零阶 latent 宽度 $D_0$
+    first_order_width: int = 64  # 每活动 JOINT 一阶 latent 宽度 $D_1$
+    first_order_source: str = "residual_screw"  # 当前 $H_1([z_i^{(0)}\Vert f_i^{screw}])$ 路线
+
+    def __post_init__(self) -> None:
+        r"""拒绝空 latent，并防止未实现的一阶候选被静默当作 canonical。"""
+
+        if self.zero_order_width < 1 or self.first_order_width < 1:
+            raise ValueError("zero/first-order latent widths must be positive")
+        if self.first_order_source != "residual_screw":
+            raise ValueError("only first_order_source='residual_screw' is currently implemented")
+
+
+@dataclass(frozen=True)
+class GeometryEncoderCfg:
+    r"""部署保留几何编码器的前端、整手主干与类型化 heads 组合。
+
+    canonical experiment 明确使用 2 层 graph-biased encoder-only Transformer，而不是依赖底层
+    默认值。全部容量仍是首个可运行锚点；正式选择需同时比较留出误差、参数量、激活显存和
+    RTX 5070 Ti、$B=4096$ 下 retained path 的 p95 延迟。
+    """
+
+    frontend: SO2AnchorFrontendCfg = SO2AnchorFrontendCfg()  # 点/旋量—anchor 与 owner 内聚合
+    backbone: GraphBiasedTransformerCfg = GraphBiasedTransformerCfg()  # 全连接图偏置整手上下文
+    heads: GeometryLatentHeadsCfg = GeometryLatentHeadsCfg()  # $Z^{(0)}$ 与 $z_i^{(1)}$
 
 
 @dataclass(frozen=True)
@@ -491,11 +487,11 @@ class ImplicitGeometryEncoder(nn.Module):
     必须随参数更新重新计算。
     """
 
-    def __init__(self, config: GeometryEncoderConfig) -> None:
+    def __init__(self, config: GeometryEncoderCfg) -> None:
         r"""组装部署保留的点—锚点前端、整手主干与零/一阶输出头。
 
         Args:
-            config (GeometryEncoderConfig): 容量、固定米制数值尺度与图距离桶配置。
+            config (GeometryEncoderCfg): 前端、graph-biased backbone 与类型化 heads 配置。
 
         模块生命周期：本类全部参数随 SSL 检查点迁入 PPO；密度和灵敏度解码器不在本类中，
         因而导出保留检查点时无需根据参数名字猜测哪些层应删除。
@@ -506,43 +502,40 @@ class ImplicitGeometryEncoder(nn.Module):
 
         super().__init__()
         self.config = config
-        self.point_anchor_encoder = SO2AnchorRelationEncoder(config.relation_width, config.length_scale_m)
+        frontend = config.frontend  # 点/旋量—anchor 与 owner 内聚合容量
+        backbone = config.backbone  # 全手上下文容量与图偏置桶
+        heads = config.heads  # 零阶/一阶输出类型宽度
+        self.point_anchor_encoder = SO2AnchorRelationEncoder(frontend.relation_width, frontend.length_scale_m)
         self.home_point_projection = nn.Sequential(
-            nn.Linear(config.relation_width, config.home_width),
+            nn.Linear(frontend.relation_width, frontend.home_width),
             nn.GELU(),
         )
-        self.home_attention_score = nn.Linear(config.home_width, 1)  # 每个归属体内共享的表面点打分
+        self.home_attention_score = nn.Linear(frontend.home_width, 1)  # 每个归属体内共享的表面点打分
         self.screw_relation_projection = nn.Sequential(
-            nn.Linear(9, config.relation_width),
+            nn.Linear(9, frontend.relation_width),
             nn.GELU(),
-            nn.Linear(config.relation_width, config.relation_width),
+            nn.Linear(frontend.relation_width, frontend.relation_width),
             nn.GELU(),
         )  # 每个 screw–anchor pair 共用的九标量学习式投影
-        self.screw_attention_score = nn.Linear(config.relation_width, 1)  # 沿完整实际 K 轴共享打分
-        self.screw_projection = nn.Linear(config.relation_width, config.screw_width)  # 唯一 $f_i^{screw}$
+        self.screw_attention_score = nn.Linear(frontend.relation_width, 1)  # 沿完整实际 K 轴共享打分
+        self.screw_projection = nn.Linear(frontend.relation_width, frontend.screw_width)  # 唯一 $f_i^{screw}$
         self.joint_motion_projection = nn.Sequential(
-            nn.Linear(1 + config.screw_width, config.home_width),
+            nn.Linear(1 + frontend.screw_width, frontend.home_width),
             nn.GELU(),
-            nn.Linear(config.home_width, config.home_width),
+            nn.Linear(frontend.home_width, frontend.home_width),
             nn.GELU(),
         )
-        role_width = 8  # 三种归属体角色的轻量学习式标识，不编码手指身份
-        self.role_embedding = nn.Embedding(3, role_width)
-        entity_input_width = config.home_width + config.home_width + config.screw_width + role_width
-        self.entity_projection = nn.Linear(entity_input_width, config.hidden_width)  # 属性拼接到共享表征宽度
-        self.backbone = GraphBiasedTransformer(
-            hidden_width=config.hidden_width,
-            layers=config.transformer_layers,
-            attention_heads=config.attention_heads,
-            feedforward_width=config.feedforward_width,
-            dropout=config.dropout,
-            max_graph_distance=config.max_graph_distance,
-        )
-        self.zero_order_head = nn.Linear(config.hidden_width, config.zero_order_width)  # $Z^{(0)}$ 投影
+        self.role_embedding = nn.Embedding(3, frontend.role_width)  # 角色不编码 finger identity
+        entity_input_width = frontend.home_width * 2 + frontend.screw_width + frontend.role_width
+        self.entity_projection = nn.Linear(
+            entity_input_width, backbone.hidden_width
+        )  # 属性拼接到共享表征宽度
+        self.backbone = GraphBiasedTransformer(backbone)
+        self.zero_order_head = nn.Linear(backbone.hidden_width, heads.zero_order_width)  # $Z^{(0)}$ 投影
         self.first_order_head = nn.Sequential(
-            nn.Linear(config.zero_order_width + config.screw_width, config.first_order_width),
+            nn.Linear(heads.zero_order_width + frontend.screw_width, heads.first_order_width),
             nn.GELU(),
-            nn.Linear(config.first_order_width, config.first_order_width),
+            nn.Linear(heads.first_order_width, heads.first_order_width),
         )  # 所有 JOINT 共享的 canonical residual $H_1([z_i^{(0)}\Vert f_i^{screw}])$
 
     def encode_points(self, points: torch.Tensor, evidence: StaticGeometryEvidence) -> torch.Tensor:
@@ -621,8 +614,8 @@ class ImplicitGeometryEncoder(nn.Module):
         directed_relations = torch.cat(
             (
                 omega_height.unsqueeze(-2).expand(*omega_height.shape[:-2], omega_height.shape[-2], anchor_count, 1),
-                dot / self.config.length_scale_m,
-                cross / self.config.length_scale_m,
+                dot / self.config.frontend.length_scale_m,
+                cross / self.config.frontend.length_scale_m,
             ),
             dim=-1,
         )  # `[...,N_J,K,3]`，无量纲有向旋量—锚点关系
@@ -687,19 +680,21 @@ class ImplicitGeometryEncoder(nn.Module):
         joint_motion_feature = self.joint_motion_projection(motion_input)  # `[B,N_J,D_home]`
 
         entity_motion = torch.zeros(
-            batch_size, owner_count, self.config.home_width, device=q.device, dtype=q.dtype
+            batch_size, owner_count, self.config.frontend.home_width, device=q.device, dtype=q.dtype
         )  # PALM/TIP 合法零值
         entity_screw = torch.zeros(
-            batch_size, owner_count, self.config.screw_width, device=q.device, dtype=q.dtype
+            batch_size, owner_count, self.config.frontend.screw_width, device=q.device, dtype=q.dtype
         )  # PALM/TIP 无 JOINT 旋量
         if evidence.joint_entity_index.ndim == 1:
             entity_motion[:, evidence.joint_entity_index] = joint_motion_feature  # 同结构共享 routing
             entity_screw[:, evidence.joint_entity_index] = screw_batch
         else:
-            routing = evidence.joint_entity_index.clamp_min(0).unsqueeze(-1).expand(-1, -1, self.config.home_width)
+            routing = evidence.joint_entity_index.clamp_min(0).unsqueeze(-1).expand(
+                -1, -1, self.config.frontend.home_width
+            )
             entity_motion.scatter_(1, routing, joint_motion_feature * joint_valid.unsqueeze(-1))
             screw_routing = evidence.joint_entity_index.clamp_min(0).unsqueeze(-1).expand(
-                -1, -1, self.config.screw_width
+                -1, -1, self.config.frontend.screw_width
             )
             entity_screw.scatter_(1, screw_routing, screw_batch)
 
@@ -722,7 +717,7 @@ class ImplicitGeometryEncoder(nn.Module):
             joint_zero_order = zero_order.index_select(1, evidence.joint_entity_index)  # 同结构共享 routing
         else:
             gather_routing = evidence.joint_entity_index.clamp_min(0).unsqueeze(-1).expand(
-                -1, -1, self.config.zero_order_width
+                -1, -1, self.config.heads.zero_order_width
             )
             joint_zero_order = torch.gather(zero_order, 1, gather_routing)
         first_order_input = torch.cat(
@@ -745,7 +740,7 @@ def build_static_geometry_evidence(
 
     Args:
         semantics (HandGeometrySemanticsCfg): owner、joint、role 与静态 frame 事实。
-        spec (EmbodimentGeometrySpec): robots lower 的 screw、home pose 与图关系。
+        spec (EmbodimentGeometrySpec): representations source lower 的 screw、home pose 与图关系。
         home_surface (HomeSurfaceSamples): owner-local boundary points，shape `[G,M,3]`，m。
         anchors (AnchorSamples): 已变换到 `{h}` 的完整 anchor realization，shape `[K,3]`，m。
         device (torch.device | str): encoder 输入设备。
@@ -961,11 +956,13 @@ def pad_static_geometry_evidence(
 
 
 __all__ = [
-    "GeometryEncoderConfig",
+    "GeometryEncoderCfg",
+    "GeometryLatentHeadsCfg",
     "GeometryPaddingCfg",
     "GeometryLatents",
     "ImplicitGeometryEncoder",
     "SO2AnchorRelationEncoder",
+    "SO2AnchorFrontendCfg",
     "StaticGeometryEvidence",
     "build_static_geometry_evidence",
     "pad_static_geometry_evidence",

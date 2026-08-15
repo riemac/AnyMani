@@ -68,42 +68,49 @@ from torch import nn
 
 
 @dataclass(frozen=True)
-class ImplicitFieldDecoderConfig:
-    r"""训练期场解码器的类型宽度与容量。
+class ScalarSigmaFiLMDensityDecoderCfg:
+    r"""逐 `(owner,query,sigma)` 标量密度 reader 的 FiLM 容量与尺度条件。"""
 
-    Attributes:
-        zero_order_width (int): 归属体零阶表征宽度 $D_0$。
-        first_order_width (int): JOINT 一阶表征宽度 $D_1$。
-        query_width (int): 共享点—锚点查询特征宽度 $D_q$。
-        hidden_width (int): FiLM/灵敏度解码器的中间宽度。
-        sigma_reference_m (float): 显式 sigma 对数比例的参考长度，单位 m。
-        residual_blocks (int): 密度解码器中连续 FiLM 残差块数量。
-
-    数值默认 ``hidden_width=128``、``sigma_reference_m=0.016``、``residual_blocks=3`` 是首个
-    可运行容量锚点，不是已经由跨手型消融接受的最终容量。
-    """
-
-    zero_order_width: int
-    first_order_width: int
-    query_width: int
     hidden_width: int = 128
-    sigma_reference_m: float = 0.016
     residual_blocks: int = 3
+    sigma_reference_m: float = 0.016  # 16 mm；只定义无量纲 $\log(\sigma/\sigma_{ref})$
 
     def __post_init__(self) -> None:
-        r"""验证 decoder 的所有宽度和带宽通道数严格为正。"""
+        r"""验证 FiLM 主路径容量和参考带宽均严格为正。"""
 
-        values = (
-            self.zero_order_width,
-            self.first_order_width,
-            self.query_width,
-            self.hidden_width,
-            self.residual_blocks,
-        )
-        if any(value <= 0 for value in values):
-            raise ValueError("all implicit decoder widths/counts must be positive")
+        if self.hidden_width < 1 or self.residual_blocks < 1:
+            raise ValueError("density decoder hidden width and residual blocks must be positive")
         if self.sigma_reference_m <= 0.0:
             raise ValueError("sigma_reference_m must be strictly positive")
+
+
+@dataclass(frozen=True)
+class DistanceSensitivityDecoderCfg:
+    r"""距离灵敏度 coefficient reader 的容量与结构性奇读取合同。
+
+    ``readout_bias=False`` 与 ``carrier_scale='inverse_sqrt'`` 暂不是可自由切换的候选：二者明确
+    记录 canonical 结构，解析时拒绝其他值，避免偶偏置破坏 joint-sign parity。
+    """
+
+    coefficient_hidden_width: int = 128  # 偶上下文到 $D_1$ coefficient 的中间宽度
+    readout_bias: bool = False  # 最终输出必须由 coefficient 与奇 carrier 的纯内积产生
+    carrier_scale: str = "inverse_sqrt"  # 按 $1/\sqrt{D_1}$ 稳定初始点积尺度
+
+    def __post_init__(self) -> None:
+        r"""拒绝空 coefficient 网络及破坏严格奇性的读取形式。"""
+
+        if self.coefficient_hidden_width < 1:
+            raise ValueError("sensitivity coefficient hidden width must be positive")
+        if self.readout_bias or self.carrier_scale != "inverse_sqrt":
+            raise ValueError("sensitivity reader requires unbiased inverse-sqrt carrier readout")
+
+
+@dataclass(frozen=True)
+class GeometrySSLDecoderCfg:
+    r"""聚合训练期密度与距离灵敏度 readers；整个配置不进入 retained checkpoint。"""
+
+    density: ScalarSigmaFiLMDensityDecoderCfg = ScalarSigmaFiLMDensityDecoderCfg()
+    sensitivity: DistanceSensitivityDecoderCfg = DistanceSensitivityDecoderCfg()
 
 
 class _FiLMResidualBlock(nn.Module):
@@ -161,21 +168,33 @@ class ConditionalDensityDecoder(nn.Module):
     shape 仍为 ``[B,G,N_Q,N_sigma]``，但最后一轴是可变的采样轴，不是线性层固定输出宽度。
     """
 
-    def __init__(self, config: ImplicitFieldDecoderConfig) -> None:
+    def __init__(
+        self,
+        config: ScalarSigmaFiLMDensityDecoderCfg,
+        *,
+        zero_order_width: int,
+        query_width: int,
+    ) -> None:
         r"""构造 query--sigma 投影、连续 owner FiLM 残差块和标量输出层。
 
         Args:
-            config (ImplicitFieldDecoderConfig): 输入类型宽度、sigma reference、隐藏宽度与残差块数量。
+            config (ScalarSigmaFiLMDensityDecoderCfg): sigma reference、隐藏宽度与残差块数量。
+            zero_order_width (int): encoder 派生的 owner latent 宽度 $D_0$。
+            query_width (int): 共享点—anchor 前端派生的查询宽度 $D_q$。
         """
 
         super().__init__()
         self.config = config
+        if zero_order_width < 1 or query_width < 1:
+            raise ValueError("density decoder latent/query widths must be positive")
+        self.zero_order_width = zero_order_width  # 派生宽度不在实验配置中重复声明
+        self.query_width = query_width
         self.query_projection = nn.Linear(  # $[u(x)\Vert\log(\sigma/\sigma_{ref})]$ -> decoder width
-            config.query_width + 1,
+            query_width + 1,
             config.hidden_width,
         )
         self.blocks = nn.ModuleList(
-            _FiLMResidualBlock(config.hidden_width, config.zero_order_width)
+            _FiLMResidualBlock(config.hidden_width, zero_order_width)
             for _ in range(config.residual_blocks)
         )
         self.output = nn.Linear(config.hidden_width, 1)  # 每个 `(owner,query,sigma)` 只输出一个标量 $\rho$
@@ -196,9 +215,9 @@ class ConditionalDensityDecoder(nn.Module):
             raise ValueError("zero_order/query_features must have shapes [B,G,D_0] and [B,G,N_Q,D_q]")
         if zero_order.shape[:2] != query_features.shape[:2]:
             raise ValueError("zero_order and query_features must share [B,G] axes")
-        if zero_order.shape[-1] != self.config.zero_order_width:
+        if zero_order.shape[-1] != self.zero_order_width:
             raise ValueError("zero_order width does not match decoder config")
-        if query_features.shape[-1] != self.config.query_width:
+        if query_features.shape[-1] != self.query_width:
             raise ValueError("query feature width does not match decoder config")
         bandwidths = bandwidths.detach()  # sigma 是外生物理条件，不建立优化或 q->sigma 梯度路径
         if bandwidths.ndim == 1:
@@ -238,11 +257,21 @@ class DistanceSensitivityDecoder(nn.Module):
     解析 $\kappa$ 教师监督。
     """
 
-    def __init__(self, config: ImplicitFieldDecoderConfig) -> None:
+    def __init__(
+        self,
+        config: DistanceSensitivityDecoderCfg,
+        *,
+        zero_order_width: int,
+        first_order_width: int,
+        query_width: int,
+    ) -> None:
         r"""构造只产生符号偶读取系数的灵敏度网络。
 
         Args:
-            config (ImplicitFieldDecoderConfig): 零阶、一阶、查询与隐藏宽度。
+            config (DistanceSensitivityDecoderCfg): coefficient 容量与结构性读取形式。
+            zero_order_width (int): encoder 派生的 $D_0$。
+            first_order_width (int): encoder 派生的 $D_1$。
+            query_width (int): 点—anchor 前端派生的 $D_q$。
 
         本构造函数不创建带偏置的一阶输出层。最终标量只能由偶系数与 $z_i^{(1)}$ 内积产生，
         从结构上排除“偏置项在符号翻转后保持不变”的奇偶违约。
@@ -250,10 +279,14 @@ class DistanceSensitivityDecoder(nn.Module):
 
         super().__init__()
         self.config = config
+        widths = (zero_order_width, first_order_width, query_width)
+        if min(widths) < 1:
+            raise ValueError("sensitivity decoder latent/query widths must be positive")
+        self.first_order_width = first_order_width  # 决定无偏置 carrier 内积及 $1/\sqrt{D_1}$ 尺度
         self.coefficient = nn.Sequential(
-            nn.Linear(config.zero_order_width + config.query_width, config.hidden_width),
+            nn.Linear(zero_order_width + query_width, config.coefficient_hidden_width),
             nn.GELU(),
-            nn.Linear(config.hidden_width, config.first_order_width),
+            nn.Linear(config.coefficient_hidden_width, first_order_width),
         )  # sign 偶上下文 -> 对一阶 carrier 的读取系数
 
     def forward(
@@ -283,11 +316,13 @@ class DistanceSensitivityDecoder(nn.Module):
             batch_index = torch.arange(zero_order.shape[0], device=zero_order.device).unsqueeze(1)
             selected_query = query_features[batch_index, owner_index, query_index]  # `[B,E,D_q]`
         coefficient = self.coefficient(torch.cat((owner_latent, selected_query), dim=-1))  # `[B,E,D_1]` 偶
-        return torch.sum(coefficient * joint_latent, dim=-1) / math.sqrt(self.config.first_order_width)  # 偶·奇=奇
+        return torch.sum(coefficient * joint_latent, dim=-1) / math.sqrt(self.first_order_width)  # 偶·奇=奇
 
 
 __all__ = [
     "ConditionalDensityDecoder",
+    "DistanceSensitivityDecoderCfg",
     "DistanceSensitivityDecoder",
-    "ImplicitFieldDecoderConfig",
+    "GeometrySSLDecoderCfg",
+    "ScalarSigmaFiLMDensityDecoderCfg",
 ]

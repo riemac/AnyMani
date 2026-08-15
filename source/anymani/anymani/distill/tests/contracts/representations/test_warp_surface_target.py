@@ -7,13 +7,13 @@ from pathlib import Path
 import pytest
 import torch
 from anymani.assets.bank import HandContainer, HandContainerCfg
-from anymani.distill.representations.targets.warp_surface import query_owner_surfaces_warp
-from anymani.robots.geometry_kinematics import lower_hand_geometry_semantics
-from anymani.robots.owner_geometry import (
+from anymani.distill.representations.sources.collision_geometry import (
     materialize_owner_geometry_cache,
     materialize_warp_owner_geometry_cache,
     sample_owner_home_surfaces,
 )
+from anymani.distill.representations.sources.kinematics import lower_hand_geometry_semantics
+from anymani.distill.representations.targets.warp_surface import query_owner_surfaces_warp
 
 pytestmark = pytest.mark.contract
 

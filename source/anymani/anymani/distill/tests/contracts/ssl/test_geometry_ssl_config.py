@@ -3,21 +3,32 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
-from anymani.distill.representations.targets.geometry_field import GeometryFieldTargetCfg
+from anymani.distill.representations.geometry import GeometryRepresentationCfg
+from anymani.distill.representations.sources.collision_geometry import (
+    AnchorSamples,
+    HomeSurfaceSamples,
+    OwnerGeometryCache,
+)
+from anymani.distill.representations.targets.geometry_field import GaussianProximityFieldCfg
 from anymani.distill.ssl.config import (
     GeometrySSLAssetCfg,
     GeometrySSLAssetManifest,
     GeometrySSLExperimentCfg,
-    GeometrySSLTrainLoopCfg,
+    GeometrySSLTrainerCfg,
+    derive_geometry_ssl_training_budget,
     experiment_config_from_dict,
     resolved_config_dict,
 )
+from anymani.distill.ssl.experiments import CanonicalResidualFamilyCfg
+from anymani.distill.ssl.runtime import GeometrySSLExperiment
 from anymani.distill.ssl.runtime.assets import anchor_realization_record, home_surface_realization_record
 from anymani.distill.ssl.split import GeometryAssetIdentityRecord, split_geometry_asset_groups
-from anymani.robots.owner_geometry import AnchorSamples, HomeSurfaceSamples, OwnerGeometryCache
+from hydra import compose, initialize_config_module
+from omegaconf import OmegaConf
 
 
 def test_omegaconf_payload_round_trip_rebuilds_validated_dataclasses() -> None:
@@ -30,17 +41,49 @@ def test_omegaconf_payload_round_trip_rebuilds_validated_dataclasses() -> None:
 
     assert rebuilt == original
     assert isinstance(rebuilt.assets.train_paths, tuple)
-    assert isinstance(rebuilt.target.bandwidth_centers_m, tuple)
-    assert isinstance(rebuilt.target.validation_bandwidths_m, tuple)
+    assert isinstance(rebuilt.representation.field.bandwidth_centers_m, tuple)
+    assert isinstance(rebuilt.representation.field.validation_bandwidths_m, tuple)
+
+
+def test_concrete_canonical_class_composes_trainer_yaml_and_cli_override() -> None:
+    """Hydra group 必须进入具体 experiment，且无需 builder function 或 experiment registry。"""
+
+    import anymani.distill.ssl.pretrain  # noqa: F401  # import 时只注册 ConfigStore，不执行 run
+
+    assert CanonicalResidualFamilyCfg.defaults == ({"trainer": "single_gpu_16gb"}, "_self_")
+    with initialize_config_module(config_module="anymani.distill.presets.ssl", version_base="1.3"):
+        composed = compose(
+            config_name="geometry_ssl_canonical_residual_family",
+            overrides=["trainer.learning_rate=0.0007"],
+        )
+    payload = OmegaConf.to_container(composed, resolve=True)
+    assert isinstance(payload, dict)
+    rebuilt = experiment_config_from_dict(payload)
+
+    assert rebuilt.schema_version == "2.0.0"
+    assert rebuilt.trainer.learning_rate == pytest.approx(7.0e-4)
+    assert rebuilt.model.encoder.backbone.layers == 2
+    assert resolved_config_dict(rebuilt) == payload
+
+
+def test_experiment_constructor_has_no_filesystem_or_cuda_side_effect(tmp_path: Path) -> None:
+    """配置对象到 runtime object 的构造边界不得提前创建 run 或 materialize source。"""
+
+    output_dir = tmp_path / "not-created-until-run"
+    experiment = GeometrySSLExperiment(GeometrySSLExperimentCfg(), output_dir=output_dir)
+
+    assert experiment.config.schema_version == "2.0.0"
+    assert experiment.output_dir == output_dir
+    assert not output_dir.exists()
 
 
 def test_legacy_resolved_config_fails_with_an_explicit_contract_error() -> None:
     """旧 fixed-bandwidth/AABB 配置不做兼容迁移，但必须给出可审计的 fail-closed 原因。"""
 
     payload = resolved_config_dict(GeometrySSLExperimentCfg())
-    del payload["target"]["validation_bandwidths_m"]
+    payload["schema_version"] = "1.1.0"
 
-    with pytest.raises(ValueError, match="predates the online-query/explicit-sigma contract"):
+    with pytest.raises(ValueError, match="schema must be exactly 2.0.0"):
         experiment_config_from_dict(payload)
 
 
@@ -106,9 +149,25 @@ def test_model_does_not_freeze_target_sigma_sample_count() -> None:
     """sigma 数量属于 target 数据轴，改变中心数不应重建或拒绝 scalar decoder。"""
 
     config = GeometrySSLExperimentCfg(
-        target=GeometryFieldTargetCfg(bandwidth_centers_m=(0.004, 0.008, 0.016, 0.032, 0.064))
+        representation=GeometryRepresentationCfg(
+            field=GaussianProximityFieldCfg(bandwidth_centers_m=(0.004, 0.008, 0.016, 0.032, 0.064))
+        )
     )
-    assert len(config.target.bandwidth_centers_m) == 5
+    assert len(config.representation.field.bandwidth_centers_m) == 5
+
+
+def test_canonical_17_asset_budget_reports_actual_tail_group_and_updates() -> None:
+    """17 项训练 split 的尾组应保留真实样本数，而不是用名义 batch_size 掩盖。"""
+
+    budget = derive_geometry_ssl_training_budget(GeometrySSLExperimentCfg(), train_asset_count=17)
+
+    assert budget.microbatches_per_epoch == 1152
+    assert budget.optimizer_updates_per_epoch == 288
+    assert budget.total_optimizer_updates == 5760
+    assert budget.total_q_samples == 87040
+    assert budget.nominal_microbatch_q == 4
+    assert budget.nominal_effective_q == 16
+    assert budget.mean_effective_q == pytest.approx(15.11111111111111)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda:not-an-index"])
@@ -116,14 +175,14 @@ def test_warp_training_config_rejects_non_cuda_device(device: str) -> None:
     """resolved 配置不得接受 Warp 在线 teacher 无法执行的 device。"""
 
     with pytest.raises(ValueError, match="device.*cuda"):
-        GeometrySSLTrainLoopCfg(device=device)
+        GeometrySSLTrainerCfg(device=device)
 
 
 def test_warp_training_config_rejects_float64() -> None:
     """Warp PyTorch bridge 主路径只接受 CUDA float32，不声明伪 float64 路线。"""
 
     with pytest.raises(ValueError, match="dtype.*float32"):
-        GeometrySSLTrainLoopCfg(dtype="float64")
+        GeometrySSLTrainerCfg(dtype="float64")
 
 
 def test_asset_manifest_rejects_content_hash_leakage_across_splits() -> None:

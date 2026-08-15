@@ -18,12 +18,12 @@ from anymani.distill.representations.queries.spatial_sampling import (
     materialize_owner_surface_sampling_cache,
     sample_spatial_queries,
 )
-from anymani.distill.representations.targets.field_samples import QueryStratum
-from anymani.robots.geometry_kinematics import lower_hand_geometry_semantics
-from anymani.robots.owner_geometry import (
+from anymani.distill.representations.sources.collision_geometry import (
     materialize_owner_geometry_cache,
     sample_palm_anchor_supports,
 )
+from anymani.distill.representations.sources.kinematics import lower_hand_geometry_semantics
+from anymani.distill.representations.targets.field_samples import QueryStratum
 
 _MOTHER_ROOT = (
     Path(__file__).resolve().parents[4]

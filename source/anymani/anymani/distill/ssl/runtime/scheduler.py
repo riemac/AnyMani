@@ -14,18 +14,20 @@ from time import perf_counter
 import torch
 
 from anymani.distill.models.input_adapters.geometry import GeometryPaddingCfg
-from anymani.distill.representations.queries.spatial_sampling import SpatialQuerySamplerCfg
-from anymani.distill.representations.targets.geometry_field import GeometryFieldTargetCfg
-from anymani.distill.ssl.dataset import (
-    GeometryAssetDeviceState,
-    GeometryAssetRuntime,
+from anymani.distill.representations.geometry import (
+    GeometryRepresentationState,
     PaddedOnlineGeometryBatch,
     SobolJointSampler,
     pad_online_geometry_samples,
     sample_online_geometry,
     split_online_geometry_sample,
 )
-from anymani.robots.owner_geometry import WarpOwnerGeometryCache, release_warp_owner_geometry_cache
+from anymani.distill.representations.queries.spatial_sampling import SpatialQuerySamplerCfg
+from anymani.distill.representations.sources.geometry_source import GeometrySource
+from anymani.distill.representations.targets.geometry_field import (
+    GaussianProximityFieldCfg,
+    GeometryFieldTargetCfg,
+)
 
 
 @dataclass(frozen=True)
@@ -64,19 +66,19 @@ class GeometrySSLRuntimeState:
 class ResidentGeometryAssetWindow:
     r"""把 CPU catalog 映射为有界 GPU asset window。
 
-    ``loader`` 在正式运行中是 ``move_geometry_asset_to_device``；参数注入使纯 contract 可以用
+    ``loader`` 在正式运行中是 ``GeometryRepresentation.to_device``；参数注入使纯 contract 可以用
     synthetic loader 验证 resident cap 与 eviction，而不启动 Warp/Isaac Sim。
     """
 
     def __init__(
         self,
-        runtimes: tuple[GeometryAssetRuntime, ...] | list[GeometryAssetRuntime],
+        runtimes: tuple[GeometrySource, ...] | list[GeometrySource],
         *,
         device: str,
         dtype,
         max_resident_assets: int,
-        loader: Callable[..., GeometryAssetDeviceState],
-        releaser: Callable[[WarpOwnerGeometryCache], bool] = release_warp_owner_geometry_cache,
+        loader: Callable[..., GeometryRepresentationState],
+        releaser: Callable[[GeometryRepresentationState], bool] | None = None,
     ) -> None:
         if not runtimes:
             raise ValueError("resident window requires a non-empty CPU catalog")
@@ -91,15 +93,15 @@ class ResidentGeometryAssetWindow:
         self.dtype = dtype
         self.max_resident_assets = max_resident_assets
         self.loader = loader
-        self.releaser = releaser
-        self._resident: dict[str, GeometryAssetDeviceState] = {}
+        self.releaser = releaser or (lambda state: state.device_source.release())
+        self._resident: dict[str, GeometryRepresentationState] = {}
         self._telemetry_events: list[dict[str, object]] = []  # 窗口/BVH 生命周期的 append-only 事件
 
     @property
     def resident_asset_ids(self) -> tuple[str, ...]:
         return tuple(self._resident)
 
-    def ensure(self, asset_ids: tuple[str, ...] | list[str]) -> tuple[GeometryAssetDeviceState, ...]:
+    def ensure(self, asset_ids: tuple[str, ...] | list[str]) -> tuple[GeometryRepresentationState, ...]:
         r"""确保一个完整 resident window 已驻留，并记录 lease/BVH/memory 生命周期证据。"""
 
         requested = tuple(asset_ids)
@@ -244,7 +246,7 @@ class ResidentGeometryAssetWindow:
         """执行不产生额外 telemetry 的底层 eviction。"""
 
         state = self._resident.pop(asset_id)
-        self.releaser(state.warp_cache)
+        self.releaser(state)
 
     def _resident_owner_bvh_count(self) -> int:
         """返回当前 window 中真实上传的 owner-local BVH 数。"""
@@ -313,11 +315,12 @@ class WindowedOnlineGeometryBatcher:
 
     def __init__(
         self,
-        runtimes: tuple[GeometryAssetRuntime, ...] | list[GeometryAssetRuntime],
+        runtimes: tuple[GeometrySource, ...] | list[GeometrySource],
         window: ResidentGeometryAssetWindow,
         *,
         seed: int,
         runtime_config: GeometrySSLRuntimeCfg,
+        field_config: GaussianProximityFieldCfg,
         query_config: SpatialQuerySamplerCfg,
         target_config: GeometryFieldTargetCfg,
         padding: GeometryPaddingCfg,
@@ -327,6 +330,7 @@ class WindowedOnlineGeometryBatcher:
         self.runtime_config = runtime_config
         self.window = window
         self.seed = int(seed)
+        self.field_config = field_config
         self.query_config = query_config
         self.target_config = target_config
         self.padding = padding
@@ -375,7 +379,7 @@ class WindowedOnlineGeometryBatcher:
         window_end = min(window_start + self.runtime_config.max_resident_assets, len(self._catalog_ids))
         window_ids = self._catalog_ids[window_start:window_end]
         resident_states = self.window.ensure(window_ids)
-        resident_by_id = {state.runtime.asset_id: state for state in resident_states}
+        resident_by_id = {state.source.asset_id: state for state in resident_states}
         states = tuple(resident_by_id[asset_id] for asset_id in asset_ids)
         samples = []
         for asset_index, state in zip(asset_indices, states):
@@ -388,6 +392,7 @@ class WindowedOnlineGeometryBatcher:
             block = sample_online_geometry(
                 state,
                 q_block,
+                field_config=self.field_config,
                 query_config=self.query_config,
                 target_config=self.target_config,
                 sampling_seed=self.seed + self.epoch * self.blocks_per_epoch + self.block_index,

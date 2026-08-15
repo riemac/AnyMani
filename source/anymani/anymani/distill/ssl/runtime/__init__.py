@@ -5,6 +5,7 @@ r"""Geometry SSL runtime 的稳定公开接口。
 HandBank、模型、TensorBoard 或训练器生命周期。
 """
 
+from .experiment import GeometrySSLExperiment
 from .scheduler import (
     GeometrySSLRuntimeCfg,
     GeometrySSLRuntimeState,
@@ -14,6 +15,7 @@ from .scheduler import (
 )
 
 __all__ = [
+    "GeometrySSLExperiment",
     "GeometrySSLRuntimeCfg",
     "GeometrySSLRuntimeState",
     "ResidentGeometryAssetWindow",

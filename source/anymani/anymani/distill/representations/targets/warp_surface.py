@@ -66,7 +66,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-from anymani.robots.owner_geometry import WarpOwnerGeometryCache
+
+from anymani.distill.representations.sources.collision_geometry import WarpOwnerGeometryCache
 
 
 @dataclass(frozen=True)

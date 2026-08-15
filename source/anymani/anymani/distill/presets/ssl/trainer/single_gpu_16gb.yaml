@@ -1,0 +1,11 @@
+# RTX 5070 Ti 16 GB：训练期资源/优化配置，不声明 q realization 的科学相关结构。
+learning_rate: 3.0e-4
+weight_decay: 1.0e-4
+max_gradient_norm: 10.0
+assets_per_microbatch: 2
+gradient_accumulation_steps: 4
+max_resident_assets: 20
+device: cuda:0
+dtype: float32
+log_every_updates: 10
+checkpoint_every_updates: 1000

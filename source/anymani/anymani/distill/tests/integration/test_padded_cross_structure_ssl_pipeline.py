@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import torch
-from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelConfig
+from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
+from anymani.distill.models.decoders.representations.implicit_field import (
+    DistanceSensitivityDecoderCfg,
+    GeometrySSLDecoderCfg,
+    ScalarSigmaFiLMDensityDecoderCfg,
+)
+from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelCfg
 from anymani.distill.models.input_adapters.geometry import (
-    GeometryEncoderConfig,
+    GeometryEncoderCfg,
+    GeometryLatentHeadsCfg,
     GeometryPaddingCfg,
+    SO2AnchorFrontendCfg,
     StaticGeometryEvidence,
 )
-from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLObjective, GeometrySSLWeights
+from anymani.distill.objectives.representations.field_reconstruction import (
+    GeometryFieldObjective,
+    GeometryFieldObjectiveCfg,
+)
+from anymani.distill.representations.geometry import OnlineGeometrySample, pad_online_geometry_samples
 from anymani.distill.representations.queries.spatial_sampling import SpatialQueryBatch
 from anymani.distill.representations.targets.field_samples import FieldTargetBatch, SensitivityTargetBatch
-from anymani.distill.ssl.dataset import OnlineGeometrySample, pad_online_geometry_samples
 
 
 def _evidence(joint_count: int) -> StaticGeometryEvidence:
@@ -104,23 +115,28 @@ def test_padded_cross_structure_model_objective_and_backward() -> None:
     batch = pad_online_geometry_samples([_sample(1, "one"), _sample(2, "two")], padding=padding)
     q = batch.q.detach().requires_grad_(True)
     model = GeometrySSLModel(
-        GeometrySSLModelConfig(
-            encoder=GeometryEncoderConfig(
-                relation_width=16,
-                home_width=16,
-                screw_width=12,
-                hidden_width=32,
-                zero_order_width=24,
-                first_order_width=12,
-                transformer_layers=1,
-                attention_heads=4,
-                feedforward_width=64,
-                dropout=0.0,
-                length_scale_m=0.1,
-                max_graph_distance=4,
+        GeometrySSLModelCfg(
+            encoder=GeometryEncoderCfg(
+                frontend=SO2AnchorFrontendCfg(
+                    relation_width=16,
+                    home_width=16,
+                    screw_width=12,
+                    length_scale_m=0.1,
+                ),
+                backbone=GraphBiasedTransformerCfg(
+                    hidden_width=32,
+                    layers=1,
+                    attention_heads=4,
+                    feedforward_width=64,
+                    dropout=0.0,
+                    max_graph_distance=4,
+                ),
+                heads=GeometryLatentHeadsCfg(zero_order_width=24, first_order_width=12),
             ),
-            decoder_hidden_width=32,
-            decoder_residual_blocks=1,
+            ssl_decoders=GeometrySSLDecoderCfg(
+                density=ScalarSigmaFiLMDensityDecoderCfg(hidden_width=32, residual_blocks=1),
+                sensitivity=DistanceSensitivityDecoderCfg(coefficient_hidden_width=32),
+            ),
         ),
     ).to(dtype=torch.float64)
     prediction = model(
@@ -132,7 +148,7 @@ def test_padded_cross_structure_model_objective_and_backward() -> None:
         query_index=batch.sensitivity_targets.query_index,
         joint_index=batch.sensitivity_targets.joint_index,
     )
-    terms = GeometrySSLObjective(GeometrySSLWeights())(
+    terms = GeometryFieldObjective(GeometryFieldObjectiveCfg())(
         q=q,
         density_prediction=prediction.density,
         kappa_prediction=prediction.kappa,

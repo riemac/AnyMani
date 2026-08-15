@@ -24,7 +24,7 @@ from anymani.distill.models.input_adapters.geometry import (  # retained latent/
     GeometryLatents,
     StaticGeometryEvidence,
 )
-from anymani.distill.ssl.dataset import PaddedOnlineGeometryBatch
+from anymani.distill.representations.geometry import PaddedOnlineGeometryBatch
 
 GeometrySSLAblation = Literal[
     "query_only",

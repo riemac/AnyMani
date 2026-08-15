@@ -37,7 +37,7 @@ g_{\sigma_\ell,g,i}(x;q)
 \quad[\mathrm{rad}^{-1}].
 $$
 
-第一版场重建训练五项，trainer 另传入 latent paired parity 项：
+第一版场重建训练六项，其中 paired parity 直接作为同一 objective 的第六项：
 
 $$
 \mathcal L_{SSL}
@@ -101,7 +101,7 @@ from ...representations.targets.field_samples import FieldTargetBatch, Sensitivi
 
 
 @dataclass(frozen=True)
-class GeometrySSLWeights:
+class GeometryFieldObjectiveCfg:
     r"""第一版联合物理目标的无量纲权重。
 
     六项在正式首版中均为正；默认 ``1.0`` 只提供可运行的解析/集成测试锚点，不表示不同单位与
@@ -141,7 +141,7 @@ class GeometrySSLWeights:
 
 
 @dataclass(frozen=True)
-class GeometrySSLTerms:
+class GeometryFieldObjectiveTerms:
     r"""联合损失及两条场灵敏度预测路径的审计输出。
 
     各标量项保持独立字段，训练记录器可以分别报告优化动态、梯度量级与关闭消融；不能只记录
@@ -289,7 +289,7 @@ def _select_owner_queries(
     return values[batch_index, owner_index, query_index]
 
 
-class GeometrySSLObjective(nn.Module):
+class GeometryFieldObjective(nn.Module):
     r"""协同计算密度、显式 κ、派生 g、Sobolev 与链式一致性。
 
     本类不持有带宽、查询点采样器或监督后端；带宽来自 ``FieldTargetBatch``，保证预测与
@@ -297,15 +297,15 @@ class GeometrySSLObjective(nn.Module):
     合同测试中独立验证。
     """
 
-    def __init__(self, weights: GeometrySSLWeights) -> None:
+    def __init__(self, config: GeometryFieldObjectiveCfg) -> None:
         r"""保存已经解析并冻结的联合损失权重。
 
         Args:
-            weights (GeometrySSLWeights): 本次实验的无量纲损失权重。
+            config (GeometryFieldObjectiveCfg): 本次实验声明的六项无量纲损失权重。
         """
 
         super().__init__()
-        self.weights = weights  # 运行期间保持不变；动态校准在训练器启动前完成
+        self.config = config  # declared config 不被 calibration evidence 原地覆盖
 
     def forward(
         self,
@@ -318,7 +318,7 @@ class GeometrySSLObjective(nn.Module):
         paired_loss: torch.Tensor | None = None,
         paired_components: tuple[torch.Tensor, torch.Tensor] | None = None,
         paired_additive_components: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> GeometrySSLTerms:
+    ) -> GeometryFieldObjectiveTerms:
         r"""计算第一版完整联合目标，并返回可分别记录的各项。
 
         Args:
@@ -331,7 +331,7 @@ class GeometrySSLObjective(nn.Module):
                 field contract 可省略，此时使用与 prediction graph 相连的零值。
 
         Returns:
-            GeometrySSLTerms: 五个标量损失、总损失和两条 ``[B,E,L]`` 场灵敏度路径。
+            GeometryFieldObjectiveTerms: 六个标量损失、总损失和两条 ``[B,E,L]`` 场灵敏度路径。
 
         Raises:
             ValueError: 预测/目标形状不一致，或 Sobolev 路径无法从物理 $q$ 求导时抛出。
@@ -416,14 +416,14 @@ class GeometrySSLObjective(nn.Module):
             pair_additive_denominators = (zero_denominator, first_denominator)
 
         total = (
-            self.weights.density * density_loss
-            + self.weights.kappa * kappa_loss
-            + self.weights.derived_field * derived_field_loss
-            + self.weights.sobolev * sobolev_loss
-            + self.weights.chain * chain_loss
-            + self.weights.paired * pair_loss
+            self.config.density * density_loss
+            + self.config.kappa * kappa_loss
+            + self.config.derived_field * derived_field_loss
+            + self.config.sobolev * sobolev_loss
+            + self.config.chain * chain_loss
+            + self.config.paired * pair_loss
         )  # 第一版联合标量目标
-        return GeometrySSLTerms(
+        return GeometryFieldObjectiveTerms(
             total=total,
             density=density_loss,
             kappa=kappa_loss,
@@ -455,8 +455,8 @@ class GeometrySSLObjective(nn.Module):
 
 
 __all__ = [
-    "GeometrySSLObjective",
-    "GeometrySSLTerms",
-    "GeometrySSLWeights",
+    "GeometryFieldObjective",
+    "GeometryFieldObjectiveCfg",
+    "GeometryFieldObjectiveTerms",
     "selected_density_coordinate_derivative",
 ]

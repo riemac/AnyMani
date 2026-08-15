@@ -22,13 +22,14 @@ from anymani.distill.diagnostics.evaluation.geometry_ssl import (
 )
 from anymani.distill.diagnostics.recording.geometry_ssl import GeometrySSLRunLogger
 from anymani.distill.models.geometry_ssl import GeometrySSLForward, GeometrySSLModel
-from anymani.distill.representations.targets.geometry_field import fixed_validation_geometry_field_config
-from anymani.distill.ssl.config import GeometrySSLExperimentCfg
-from anymani.distill.ssl.dataset import (
-    GeometryAssetRuntime,
+from anymani.distill.representations.geometry import (
+    GeometryRepresentation,
+    GeometryRepresentationCfg,
     PaddedOnlineGeometryBatch,
-    move_geometry_asset_to_device,
 )
+from anymani.distill.representations.sources.geometry_source import GeometrySource
+from anymani.distill.representations.targets.geometry_field import fixed_validation_gaussian_field_config
+from anymani.distill.ssl.config import GeometrySSLExperimentCfg
 from anymani.distill.ssl.runtime import (
     GeometrySSLRuntimeCfg,
     ResidentGeometryAssetWindow,
@@ -179,7 +180,7 @@ def fixed_validation_ablation_evidence(
 
 def stream_training_morphology_q_bank(
     model: GeometrySSLModel,
-    runtimes: tuple[GeometryAssetRuntime, ...],
+    runtimes: tuple[GeometrySource, ...],
     *,
     config: GeometrySSLExperimentCfg,
     device: torch.device,
@@ -193,29 +194,39 @@ def stream_training_morphology_q_bank(
     共同进入 SHA-256。bank 不常驻训练期 GPU，只在 initial/final 各流式执行一次。
     """
 
-    bank_seed = config.train.seed + 3_000_003  # 与 train/held-out/bootstrap seed 空间分离
+    bank_seed = config.protocol.reproducibility.seed + 3_000_003  # 与 train/held-out/bootstrap seed 空间分离
     runtime_config = GeometrySSLRuntimeCfg(
-        max_resident_assets=config.train.max_resident_assets,
-        assets_per_microbatch=min(config.train.assets_per_microbatch, len(runtimes)),
-        q_per_asset_per_microbatch=config.train.q_per_asset_per_microbatch,
-        q_per_asset_per_epoch=config.train.validation_q_per_asset,
+        max_resident_assets=config.trainer.max_resident_assets,
+        assets_per_microbatch=min(config.trainer.assets_per_microbatch, len(runtimes)),
+        q_per_asset_per_microbatch=config.protocol.coverage.q_per_asset_per_realization,
+        q_per_asset_per_epoch=config.protocol.validation.q_per_asset,
         epochs=1,
     )
+    representation = GeometryRepresentation(
+        GeometryRepresentationCfg(
+            source=config.representation.source,
+            field=config.representation.field,
+            query=config.representation.query,
+            target=config.representation.target,
+            layout=config.representation.layout,
+        )
+    )  # independent q bank 与训练使用同一 representation contract
     window = ResidentGeometryAssetWindow(
         runtimes,
         device=str(device),
         dtype=dtype,
         max_resident_assets=runtime_config.max_resident_assets,
-        loader=move_geometry_asset_to_device,
+        loader=representation.to_device,
     )
     batcher = WindowedOnlineGeometryBatcher(
         runtimes,
         window,
         seed=bank_seed,
         runtime_config=runtime_config,
-        query_config=config.query,
-        target_config=fixed_validation_geometry_field_config(config.target),
-        padding=config.padding,
+        field_config=fixed_validation_gaussian_field_config(config.representation.field),
+        query_config=config.representation.query,
+        target_config=config.representation.target,
+        padding=config.representation.layout,
     )
     digest = hashlib.sha256()  # q/query/teacher byte-level identity
     digest.update(b"geometry-ssl-train-morphology-q-bank-v2\0")
@@ -261,7 +272,7 @@ def stream_training_morphology_q_bank(
     return {
         "split": "training_morphology_independent_q",
         "seed": bank_seed,
-        "q_per_asset": config.train.validation_q_per_asset,
+        "q_per_asset": config.protocol.validation.q_per_asset,
         "asset_count": len(runtimes),
         "record_count": len(records),
         "bank_digest_sha256": digest.hexdigest(),

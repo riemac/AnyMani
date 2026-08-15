@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import pytest
 import torch
+from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.decoders.representations.implicit_field import (
     ConditionalDensityDecoder,
     DistanceSensitivityDecoder,
-    ImplicitFieldDecoderConfig,
+    DistanceSensitivityDecoderCfg,
+    ScalarSigmaFiLMDensityDecoderCfg,
 )
 from anymani.distill.models.input_adapters.geometry import (
-    GeometryEncoderConfig,
+    GeometryEncoderCfg,
+    GeometryLatentHeadsCfg,
     ImplicitGeometryEncoder,
+    SO2AnchorFrontendCfg,
     StaticGeometryEvidence,
 )
 from anymani.distill.objectives.representations.field_reconstruction import (
-    GeometrySSLObjective,
-    GeometrySSLWeights,
+    GeometryFieldObjective,
+    GeometryFieldObjectiveCfg,
 )
 from anymani.distill.representations.fields.density import gaussian_density_from_distance
 from anymani.distill.representations.targets.field_samples import FieldTargetBatch, QueryStratum, SensitivityTargetBatch
@@ -51,30 +55,36 @@ def test_synthetic_geometry_ssl_forward_joint_jvp_and_backward() -> None:
         parent_direction=torch.tensor([[0, 1, 2], [0, 0, 1], [0, 0, 0]], dtype=torch.long),
         child_direction=torch.tensor([[0, 0, 0], [1, 0, 0], [2, 1, 0]], dtype=torch.long),
     )
-    encoder_config = GeometryEncoderConfig(
-        relation_width=16,
-        home_width=16,
-        screw_width=12,
-        hidden_width=32,
-        zero_order_width=24,
-        first_order_width=12,
-        transformer_layers=1,
-        attention_heads=4,
-        feedforward_width=64,
-        dropout=0.0,
-        length_scale_m=0.1,
-        max_graph_distance=4,
+    encoder_config = GeometryEncoderCfg(
+        frontend=SO2AnchorFrontendCfg(
+            relation_width=16,
+            home_width=16,
+            screw_width=12,
+            length_scale_m=0.1,
+        ),
+        backbone=GraphBiasedTransformerCfg(
+            hidden_width=32,
+            layers=1,
+            attention_heads=4,
+            feedforward_width=64,
+            dropout=0.0,
+            max_graph_distance=4,
+        ),
+        heads=GeometryLatentHeadsCfg(zero_order_width=24, first_order_width=12),
     )
     encoder = ImplicitGeometryEncoder(encoder_config).to(dtype=dtype)
-    decoder_config = ImplicitFieldDecoderConfig(
+    density_decoder = ConditionalDensityDecoder(
+        ScalarSigmaFiLMDensityDecoderCfg(hidden_width=32, residual_blocks=2),
+        zero_order_width=24,
+        query_width=16,
+    ).to(dtype=dtype)
+    sensitivity_decoder = DistanceSensitivityDecoder(
+        DistanceSensitivityDecoderCfg(coefficient_hidden_width=32),
         zero_order_width=24,
         first_order_width=12,
         query_width=16,
-        hidden_width=32,
-        residual_blocks=2,
     )
-    density_decoder = ConditionalDensityDecoder(decoder_config).to(dtype=dtype)
-    sensitivity_decoder = DistanceSensitivityDecoder(decoder_config).to(dtype=dtype)
+    sensitivity_decoder = sensitivity_decoder.to(dtype=dtype)
 
     batch_size, owner_count, query_count = 2, 3, 4
     q = torch.tensor([[0.17], [-0.29]], dtype=dtype, requires_grad=True)
@@ -137,8 +147,8 @@ def test_synthetic_geometry_ssl_forward_joint_jvp_and_backward() -> None:
         valid_mask=torch.ones(batch_size, 2, dtype=torch.bool),
     )
 
-    objective = GeometrySSLObjective(
-        GeometrySSLWeights(density=1.0, kappa=1.0, derived_field=1.0, sobolev=1.0, chain=1.0)
+    objective = GeometryFieldObjective(
+        GeometryFieldObjectiveCfg(density=1.0, kappa=1.0, derived_field=1.0, sobolev=1.0, chain=1.0)
     )
     terms = objective(
         q=q,

@@ -27,7 +27,7 @@ g_{\sigma,g,i}
 -\frac{d_g}{\sigma^2}\rho_{\sigma,g}\kappa_{g,i}.
 $$
 
-一阶监督只在 owner-shell query 上抽样少量边；非祖先边由 robots 拓扑掩码产生精确零。当前 Warp
+一阶监督只在 owner-shell query 上抽样少量边；非祖先边由 source 拓扑掩码产生精确零。当前 Warp
 后端提供最近 face、barycentric 和三角面内物理 margin。该 margin 是局部光滑保守证据，不冒充
 全局第二近点间隔；provenance 明确记录这一能力边界，后续 CPU/Kaolin oracle 可独立加强。
 
@@ -54,7 +54,7 @@ $r=x-y^*$，$n=r/\|r\|$。由于 query 对 q 停止梯度，$\partial r/\partial
 $\kappa_i=-n^T J_i$。若 query 跟着 owner 共动，这个公式会多出 query velocity 并退化；因此 workspace
 realization 固定于同资产 q 子批次的 `{h}`，target 计算显式使用 detached query coordinates。
 
-最近点先由 Warp 以 owner-local 坐标返回，再变回 `{h}`。为了调用 robots 的解析 point Jacobian，
+最近点先由 Warp 以 owner-local 坐标返回，再变回 `{h}`。为了调用 source 的解析 point Jacobian，
 本模块把 selected closest point 反变换回对应 owner reference link。这里使用当前 owner transform，
 而不是 home transform；否则 q 不为 home 时物质点会映射到错误局部位置。
 
@@ -87,12 +87,12 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from anymani.robots.geometry_kinematics import (
+from anymani.distill.representations.sources.collision_geometry import OwnerGeometryCache, WarpOwnerGeometryCache
+from anymani.distill.representations.sources.kinematics import (
     EmbodimentGeometrySpec,
     forward_owner_transforms,
     selected_point_jacobian,
 )
-from anymani.robots.owner_geometry import OwnerGeometryCache, WarpOwnerGeometryCache
 
 from ..fields.density import field_sensitivity_from_distance, gaussian_density_from_distance
 from ..queries.spatial_sampling import SpatialQueryBatch
@@ -101,8 +101,8 @@ from .warp_surface import query_owner_surfaces_warp
 
 
 @dataclass(frozen=True)
-class GeometryFieldTargetCfg:
-    r"""显式 sigma Monte-Carlo 场教师与 sampled-edge mask 配置。
+class GaussianProximityFieldCfg:
+    r"""多尺度 unsigned Gaussian proximity field 的显式 sigma 测量配置。
 
     三个中心带宽 $\bar\sigma=(4,16,64)$ mm 定义近/中/远测量尺度。训练时在 log-space 有界均匀
     采样，默认相对范围为 $[0.9\bar\sigma,1.1\bar\sigma]$；同一资产 q 子批次共享一次 realization。
@@ -112,12 +112,8 @@ class GeometryFieldTargetCfg:
     bandwidth_centers_m: tuple[float, ...] = (0.004, 0.016, 0.064)  # 4/16/64 mm 训练中心
     bandwidth_jitter_relative: float = 0.10  # log-space 有界采样的相对半宽，默认 ±10%
     validation_bandwidths_m: tuple[float, ...] = (0.004, 0.008, 0.016, 0.032, 0.064)  # 固定 4--64 mm 网格
-    edges_per_owner: int = 2  # 每个 owner 至少覆盖祖先/非祖先候选
-    distance_epsilon_m: float = 1.0e-6  # $d\approx0$ 时 UDF 方向未定义
-    feature_margin_min_m: float = 1.0e-5  # 最近投影点远离当前三角面边界的阈值
-
     def __post_init__(self) -> None:
-        """拒绝无带宽、非递增带宽与失去 sampled-edge 监督的配置。"""
+        """拒绝无带宽、非递增带宽与越界的 log-space jitter。"""
 
         if not self.bandwidth_centers_m or any(value <= 0.0 for value in self.bandwidth_centers_m):
             raise ValueError("bandwidth_centers_m must contain strictly positive values")
@@ -131,6 +127,19 @@ class GeometryFieldTargetCfg:
             raise ValueError("validation_bandwidths_m must be strictly increasing")
         if not 0.0 <= self.bandwidth_jitter_relative < 1.0:
             raise ValueError("bandwidth_jitter_relative must lie in [0,1)")
+
+
+@dataclass(frozen=True)
+class GeometryFieldTargetCfg:
+    r"""sampled $\kappa$ edge 数与 UDF 非光滑区域有效性阈值。"""
+
+    edges_per_owner: int = 2  # 每个 owner 至少覆盖祖先/非祖先候选
+    distance_epsilon_m: float = 1.0e-6  # $d\approx0$ 时 UDF 方向未定义
+    feature_margin_min_m: float = 1.0e-5  # 最近投影点远离当前三角面边界的阈值
+
+    def __post_init__(self) -> None:
+        r"""拒绝失去 sampled-edge 监督或不合法的米制 mask 阈值。"""
+
         if self.edges_per_owner < 1:
             raise ValueError("edges_per_owner must be positive")
         if self.distance_epsilon_m <= 0.0 or self.feature_margin_min_m < 0.0:
@@ -138,7 +147,7 @@ class GeometryFieldTargetCfg:
 
 
 def sample_geometry_bandwidths(
-    config: GeometryFieldTargetCfg,
+    config: GaussianProximityFieldCfg,
     *,
     batch_size: int,
     device: torch.device,
@@ -170,7 +179,7 @@ def sample_geometry_bandwidths(
     return realization.unsqueeze(0).expand(batch_size, -1)  # `[B,N_σ]` shared q-subbatch view
 
 
-def fixed_validation_geometry_field_config(config: GeometryFieldTargetCfg) -> GeometryFieldTargetCfg:
+def fixed_validation_gaussian_field_config(config: GaussianProximityFieldCfg) -> GaussianProximityFieldCfg:
     r"""返回使用固定 sigma 网格、完全关闭 jitter 的 validation teacher 配置。"""
 
     return replace(
@@ -187,7 +196,8 @@ def generate_geometry_field_targets(
     warp_cache: WarpOwnerGeometryCache,
     queries: SpatialQueryBatch,
     *,
-    config: GeometryFieldTargetCfg = GeometryFieldTargetCfg(),
+    field_config: GaussianProximityFieldCfg = GaussianProximityFieldCfg(),
+    target_config: GeometryFieldTargetCfg = GeometryFieldTargetCfg(),
     edge_sampling_seed: int = 0,
 ) -> tuple[FieldTargetBatch, SensitivityTargetBatch]:
     r"""生成多带宽零阶目标与 sampled-edge 一阶目标。
@@ -198,7 +208,8 @@ def generate_geometry_field_targets(
         geometry_cache (OwnerGeometryCache): owner role 与静态 cache provenance。
         warp_cache (WarpOwnerGeometryCache): 同资产 GPU BVH。
         queries (SpatialQueryBatch): ``[B,G,N_Q,3]`` 当前 `{h}` queries。
-        config (GeometryFieldTargetCfg): 带宽、edge 数与局部光滑 mask 阈值。
+        field_config (GaussianProximityFieldCfg): train sigma realization 的测量尺度。
+        target_config (GeometryFieldTargetCfg): edge 数与局部光滑 mask 阈值。
         edge_sampling_seed (int): 可复现 edge/query/JOINT 选择种子。
 
     Returns:
@@ -210,7 +221,7 @@ def generate_geometry_field_targets(
     owner_transforms = forward_owner_transforms(spec, q.detach())  # teacher/query 路径停止 q 梯度
     surface = query_owner_surfaces_warp(queries.query_points_h, owner_transforms, warp_cache)
     bandwidths = sample_geometry_bandwidths(  # `[B,N_σ]` 实际 sigma，不是固定输出 channel identity
-        config,
+        field_config,
         batch_size=q.shape[0],
         device=q.device,
         dtype=q.dtype,
@@ -244,7 +255,7 @@ def generate_geometry_field_targets(
     owner_index, query_index, joint_index = _sample_sensitivity_edges(
         spec,
         queries,
-        edges_per_owner=config.edges_per_owner,
+        edges_per_owner=target_config.edges_per_owner,
         sampling_seed=edge_sampling_seed,
     )
     closest_h = surface.closest_point_h_m[:, owner_index, query_index]
@@ -265,7 +276,7 @@ def generate_geometry_field_targets(
         closest_local,
     )  # `[B,E,3]`，m/rad；非祖先严格为零
     radial_direction = (selected_query_h - closest_h) / selected_distance.clamp_min(
-        config.distance_epsilon_m
+        target_config.distance_epsilon_m
     ).unsqueeze(-1)
     kappa = -(radial_direction * point_jacobian).sum(dim=-1)  # $-n^TJ$，m/rad
     ancestor_mask = spec.owner_ancestor_mask[owner_index, joint_index]
@@ -278,8 +289,8 @@ def generate_geometry_field_targets(
         kappa.unsqueeze(-1),
     ).squeeze(-1)  # `[B,E,L]`，1/rad
     selected_valid = field_valid[:, owner_index, query_index]
-    selected_valid &= selected_distance > config.distance_epsilon_m
-    selected_valid &= selected_feature_margin >= config.feature_margin_min_m
+    selected_valid &= selected_distance > target_config.distance_epsilon_m
+    selected_valid &= selected_feature_margin >= target_config.feature_margin_min_m
     selected_valid &= queries.query_stratum[:, owner_index, query_index] == int(QueryStratum.OWNER_SHELL)
     closest_source = (
         owner_index.to(torch.int64).view(1, -1).bitwise_left_shift(32)
@@ -348,4 +359,10 @@ def _sample_sensitivity_edges(
     )
 
 
-__all__ = ["GeometryFieldTargetCfg", "generate_geometry_field_targets"]
+__all__ = [
+    "GaussianProximityFieldCfg",
+    "GeometryFieldTargetCfg",
+    "fixed_validation_gaussian_field_config",
+    "generate_geometry_field_targets",
+    "sample_geometry_bandwidths",
+]

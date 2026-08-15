@@ -1,23 +1,46 @@
-r"""21-asset same-topology canonical residual Geometry SSL pilot。
+r"""21-asset same-topology canonical residual Geometry SSL 声明式实验。
 
-这是一个完整、自包含的声明式实验组合：资产 family、physical-group split、query/target、
-canonical residual model、paired objective、window/q/epoch budget、calibration 与 evidence
-规则在一个模块中可核对。runtime 只消费该 resolved config，不在运行时选择实验语义。
+本模块只声明资产 family、物理表征、模型、目标、协议与 run identity。Hydra defaults 选择
+``trainer/single_gpu_16gb``；导入本模块不会扫描资产、初始化 CUDA 或创建输出目录。
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 
-from anymani.distill.models.geometry_ssl import GeometrySSLModelConfig
-from anymani.distill.models.input_adapters.geometry import GeometryEncoderConfig
-from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLWeights
+from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
+from anymani.distill.models.decoders.representations.implicit_field import (
+    DistanceSensitivityDecoderCfg,
+    GeometrySSLDecoderCfg,
+    ScalarSigmaFiLMDensityDecoderCfg,
+)
+from anymani.distill.models.geometry_ssl import GeometrySSLModelCfg
+from anymani.distill.models.input_adapters.geometry import (
+    GeometryEncoderCfg,
+    GeometryLatentHeadsCfg,
+    GeometryPaddingCfg,
+    SO2AnchorFrontendCfg,
+)
+from anymani.distill.objectives.representations.field_reconstruction import GeometryFieldObjectiveCfg
+from anymani.distill.representations.geometry import GeometryRepresentationCfg
 from anymani.distill.representations.queries.spatial_sampling import SpatialQuerySamplerCfg
-from anymani.distill.representations.targets.geometry_field import GeometryFieldTargetCfg
+from anymani.distill.representations.sources.geometry_source import GeometrySourceCfg
+from anymani.distill.representations.targets.geometry_field import (
+    GaussianProximityFieldCfg,
+    GeometryFieldTargetCfg,
+)
 from anymani.distill.ssl.config import (
+    GeometryCalibrationCfg,
+    GeometryCoverageCfg,
+    GeometryReproducibilityCfg,
     GeometrySSLAssetCfg,
     GeometrySSLExperimentCfg,
-    GeometrySSLTrainLoopCfg,
+    GeometrySSLProtocolCfg,
+    GeometrySSLRunCfg,
+    GeometrySSLTrainerCfg,
+    GeometryValidationCfg,
 )
 
 FORMAL_MOTHER = Path(
@@ -48,79 +71,249 @@ FORMAL_VARIANT_IDS = (
     "ed6de294",
     "f25ede87",
 )
+FORMAL_FAMILY_PATHS = (
+    str(FORMAL_MOTHER),
+    *(str(FORMAL_FAMILY / asset_id) for asset_id in FORMAL_VARIANT_IDS),
+)
 
 
-def canonical_residual_family_experiment() -> GeometrySSLExperimentCfg:
-    r"""返回正式 mother+20 variants 的 canonical residual pilot 配置。
+@dataclass(frozen=True)
+class CanonicalAssetsCfg(GeometrySSLAssetCfg):
+    r"""固定 mother+20 variants，并按 physical geometry hash 留出 4 项 validation。"""
 
-    该配置只覆盖 right LEAP、同 topology、16 DOF family；不包含 official、PPO、cross-DOF
-    或 cross-topology 语义。bundle 清单显式冻结，不在 import/runtime 阶段扫描目录猜资产。
-    """
+    family_paths: tuple[str, ...] = FORMAL_FAMILY_PATHS
+    mother_asset_id: str = MOTHER_ASSET_ID
+    validation_asset_count: int = 4
+    split_seed: int = 20260813
+    train_paths: tuple[str, ...] = ()
+    validation_paths: tuple[str, ...] = ()
+    official_evaluation_paths: tuple[str, ...] = ()
 
-    return GeometrySSLExperimentCfg(
-        schema_version="1.1.0",
-        assets=GeometrySSLAssetCfg(
-            family_paths=(str(FORMAL_MOTHER), *(str(FORMAL_FAMILY / asset_id) for asset_id in FORMAL_VARIANT_IDS)),
-            mother_asset_id=MOTHER_ASSET_ID,
-            validation_asset_count=4,
-            split_seed=20260813,
-        ),
-        query=SpatialQuerySamplerCfg(query_count=64),
-        target=GeometryFieldTargetCfg(
-            bandwidth_centers_m=(0.004, 0.016, 0.064),
-            bandwidth_jitter_relative=0.10,
-            edges_per_owner=2,
-        ),
-        model=GeometrySSLModelConfig(
-            encoder=GeometryEncoderConfig(
-                relation_width=64,
-                home_width=64,
-                screw_width=64,
-                hidden_width=128,
-                zero_order_width=128,
-                first_order_width=64,
-                transformer_layers=2,
-                attention_heads=4,
-                feedforward_width=256,
-                dropout=0.0,
-            ),
-            decoder_hidden_width=128,
-            decoder_residual_blocks=3,
-            sigma_reference_m=0.016,
-        ),
-        objective=GeometrySSLWeights(
-            density=1.0,
-            kappa=1.0,
-            derived_field=1.0,
-            sobolev=1.0,
-            chain=1.0,
-            paired=1.0,
-        ),
-        train=GeometrySSLTrainLoopCfg(
-            steps=30_000,
-            batch_size=4,
-            assets_per_microbatch=2,
-            q_per_asset_per_microbatch=2,
-            max_resident_assets=20,
-            q_per_asset_per_epoch=256,
-            epochs=20,
-            validation_q_per_asset=64,
-            calibration_batches=8,
-            gradient_accumulation_steps=4,
-            seed=20260813,
-            deterministic_algorithms=True,
-            device="cuda:0",
-            dtype="float32",
-            experiment_name="canonical_residual_right_leap_family_20260813",
-            resume_checkpoint="",
-        ),
+
+@dataclass(frozen=True)
+class CanonicalSourceCfg(GeometrySourceCfg):
+    r"""固定 owner boundary evidence 与 palm-seed anchor realization。"""
+
+    home_points_per_owner: int = 64
+    home_surface_oversample_factor: int = 8
+    anchors_per_finger: int = 10
+    anchor_radius_m: float = 0.05
+    anchor_radial_decay_scale_m: float = 0.025
+    anchor_surface_fraction: float = 0.5
+    static_sampling_seed: int = 0
+
+
+@dataclass(frozen=True)
+class CanonicalFieldCfg(GaussianProximityFieldCfg):
+    r"""固定 4/16/64 mm train centers、±10% jitter 与五尺度 validation grid。"""
+
+    bandwidth_centers_m: tuple[float, ...] = (0.004, 0.016, 0.064)
+    bandwidth_jitter_relative: float = 0.10
+    validation_bandwidths_m: tuple[float, ...] = (0.004, 0.008, 0.016, 0.032, 0.064)
+
+
+@dataclass(frozen=True)
+class CanonicalQueryCfg(SpatialQuerySamplerCfg):
+    r"""每 owner 64 点的 workspace/shell/adjacent = 32/16/16 测度。"""
+
+    query_count: int = 64
+    workspace_fraction: float = 0.50
+    owner_shell_fraction: float = 0.25
+    adjacent_fraction: float = 0.25
+    workspace_radius_m: float = 0.05
+    shell_offset_min_m: float = 0.0005
+    shell_offset_max_m: float = 0.004
+    adjacent_candidate_count: int = 4
+
+
+@dataclass(frozen=True)
+class CanonicalTargetCfg(GeometryFieldTargetCfg):
+    r"""每 owner 两条 sampled κ edges 与保守局部非光滑 mask。"""
+
+    edges_per_owner: int = 2
+    distance_epsilon_m: float = 1.0e-6
+    feature_margin_min_m: float = 1.0e-5
+
+
+@dataclass(frozen=True)
+class CanonicalLayoutCfg(GeometryPaddingCfg):
+    r"""最多 20 JOINT、5 TIP、26 owners 的跨结构稠密容器。"""
+
+    max_joint_count: int = 20
+    max_tip_count: int = 5
+    max_graph_distance: int = 8
+
+
+@dataclass(frozen=True)
+class CanonicalRepresentationCfg(GeometryRepresentationCfg):
+    r"""组合 physical source、Gaussian field、query measure、target 与 layout。"""
+
+    source: CanonicalSourceCfg = dataclass_field(default_factory=CanonicalSourceCfg)
+    field: CanonicalFieldCfg = dataclass_field(default_factory=CanonicalFieldCfg)
+    query: CanonicalQueryCfg = dataclass_field(default_factory=CanonicalQueryCfg)
+    target: CanonicalTargetCfg = dataclass_field(default_factory=CanonicalTargetCfg)
+    layout: CanonicalLayoutCfg = dataclass_field(default_factory=CanonicalLayoutCfg)
+
+
+@dataclass(frozen=True)
+class CanonicalFrontendCfg(SO2AnchorFrontendCfg):
+    r"""共享点/旋量—anchor 前端与 owner 内集合聚合容量。"""
+
+    relation_width: int = 64
+    home_width: int = 64
+    screw_width: int = 64
+    role_width: int = 8
+    length_scale_m: float = 0.1
+
+
+@dataclass(frozen=True)
+class CanonicalBackboneCfg(GraphBiasedTransformerCfg):
+    r"""2 层 encoder-only 全连接 Transformer 与三种每头加性 graph bias。"""
+
+    hidden_width: int = 128
+    layers: int = 2
+    attention_heads: int = 4
+    feedforward_width: int = 256
+    dropout: float = 0.0
+    max_graph_distance: int = 8
+
+
+@dataclass(frozen=True)
+class CanonicalLatentHeadsCfg(GeometryLatentHeadsCfg):
+    r"""每 owner $D_0=128$ 与逐 JOINT residual-screw $D_1=64$。"""
+
+    zero_order_width: int = 128
+    first_order_width: int = 64
+    first_order_source: str = "residual_screw"
+
+
+@dataclass(frozen=True)
+class CanonicalDensityDecoderCfg(ScalarSigmaFiLMDensityDecoderCfg):
+    r"""128 hidden、3 FiLM blocks、16 mm sigma reference 的 SSL-only scalar reader。"""
+
+    hidden_width: int = 128
+    residual_blocks: int = 3
+    sigma_reference_m: float = 0.016
+
+
+@dataclass(frozen=True)
+class CanonicalSensitivityDecoderCfg(DistanceSensitivityDecoderCfg):
+    r"""128 hidden coefficient 与无偏置 $1/\sqrt{D_1}$ 奇读取。"""
+
+    coefficient_hidden_width: int = 128
+    readout_bias: bool = False
+    carrier_scale: str = "inverse_sqrt"
+
+
+@dataclass(frozen=True)
+class CanonicalDecoderCfg(GeometrySSLDecoderCfg):
+    r"""聚合两个训练期 readers；两者均不进入 retained transfer。"""
+
+    density: CanonicalDensityDecoderCfg = dataclass_field(default_factory=CanonicalDensityDecoderCfg)
+    sensitivity: CanonicalSensitivityDecoderCfg = dataclass_field(default_factory=CanonicalSensitivityDecoderCfg)
+
+
+@dataclass(frozen=True)
+class CanonicalEncoderCfg(GeometryEncoderCfg):
+    r"""组合 canonical frontend、graph-biased backbone 与 latent heads。"""
+
+    frontend: CanonicalFrontendCfg = dataclass_field(default_factory=CanonicalFrontendCfg)
+    backbone: CanonicalBackboneCfg = dataclass_field(default_factory=CanonicalBackboneCfg)
+    heads: CanonicalLatentHeadsCfg = dataclass_field(default_factory=CanonicalLatentHeadsCfg)
+
+
+@dataclass(frozen=True)
+class CanonicalModelCfg(GeometrySSLModelCfg):
+    r"""retained encoder 与 disposable SSL decoders 的完整模型配置。"""
+
+    encoder: CanonicalEncoderCfg = dataclass_field(default_factory=CanonicalEncoderCfg)
+    ssl_decoders: CanonicalDecoderCfg = dataclass_field(default_factory=CanonicalDecoderCfg)
+
+
+@dataclass(frozen=True)
+class CanonicalObjectiveCfg(GeometryFieldObjectiveCfg):
+    r"""声明六项全部开启；runtime calibration 另存 evidence，不覆盖本对象。"""
+
+    density: float = 1.0
+    kappa: float = 1.0
+    derived_field: float = 1.0
+    sobolev: float = 1.0
+    chain: float = 1.0
+    paired: float = 1.0
+
+
+@dataclass(frozen=True)
+class CanonicalCoverageCfg(GeometryCoverageCfg):
+    epochs: int = 20
+    q_per_asset_per_epoch: int = 256
+    q_per_asset_per_realization: int = 2
+
+
+@dataclass(frozen=True)
+class CanonicalCalibrationCfg(GeometryCalibrationCfg):
+    batches: int = 8
+    min_weight: float = 1.0e-2
+    max_weight: float = 1.0e3
+
+
+@dataclass(frozen=True)
+class CanonicalValidationCfg(GeometryValidationCfg):
+    q_per_asset: int = 64
+    every_optimizer_updates: int = 250
+    selection_metrics: tuple[str, ...] = ("density", "kappa", "derived_field")
+    final_ablations: tuple[str, ...] = (
+        "query_only",
+        "same_asset_q_shuffle",
+        "cross_asset_shuffle",
+        "first_order_zero",
+        "first_order_joint_shuffle",
+        "first_order_sign_flip",
     )
+    bootstrap_replicates: int = 2_000
+
+
+@dataclass(frozen=True)
+class CanonicalReproducibilityCfg(GeometryReproducibilityCfg):
+    seed: int = 20260813
+    deterministic_algorithms: bool = True
+    seed_domains: tuple[str, ...] = ("model", "sobol_q", "query", "sigma", "edge", "validation", "bootstrap")
+
+
+@dataclass(frozen=True)
+class CanonicalProtocolCfg(GeometrySSLProtocolCfg):
+    coverage: CanonicalCoverageCfg = dataclass_field(default_factory=CanonicalCoverageCfg)
+    calibration: CanonicalCalibrationCfg = dataclass_field(default_factory=CanonicalCalibrationCfg)
+    validation: CanonicalValidationCfg = dataclass_field(default_factory=CanonicalValidationCfg)
+    reproducibility: CanonicalReproducibilityCfg = dataclass_field(default_factory=CanonicalReproducibilityCfg)
+    run_safety_step_limit: int = 30_000
+
+
+@dataclass(frozen=True)
+class CanonicalRunCfg(GeometrySSLRunCfg):
+    output_dir: str = "logs/geometry_ssl"
+    experiment_name: str = "canonical_residual_right_leap_family_20260813"
+    resume_checkpoint: str = ""
+
+
+@dataclass(frozen=True)
+class CanonicalResidualFamilyCfg(GeometrySSLExperimentCfg):
+    r"""right LEAP 同 topology/16-DOF family 的最高声明式实验身份。"""
+
+    defaults = ({"trainer": "single_gpu_16gb"}, "_self_")
+    schema_version: str = "2.0.0"
+    assets: CanonicalAssetsCfg = dataclass_field(default_factory=CanonicalAssetsCfg)
+    representation: CanonicalRepresentationCfg = dataclass_field(default_factory=CanonicalRepresentationCfg)
+    model: CanonicalModelCfg = dataclass_field(default_factory=CanonicalModelCfg)
+    objective: CanonicalObjectiveCfg = dataclass_field(default_factory=CanonicalObjectiveCfg)
+    protocol: CanonicalProtocolCfg = dataclass_field(default_factory=CanonicalProtocolCfg)
+    trainer: GeometrySSLTrainerCfg = dataclass_field(default_factory=GeometrySSLTrainerCfg)
+    run: CanonicalRunCfg = dataclass_field(default_factory=CanonicalRunCfg)
 
 
 __all__ = [
+    "CanonicalResidualFamilyCfg",
     "FORMAL_FAMILY",
     "FORMAL_MOTHER",
     "FORMAL_VARIANT_IDS",
     "MOTHER_ASSET_ID",
-    "canonical_residual_family_experiment",
 ]

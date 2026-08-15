@@ -17,7 +17,7 @@ import torch  # tensor/optimizer state 使用官方 state_dict 序列化
 from anymani.distill.models.geometry_ssl import GeometrySSLModel  # 完整 retained+disposable 组装
 from anymani.distill.models.input_adapters.geometry import ImplicitGeometryEncoder  # PPO/IL transfer 目标
 
-CHECKPOINT_SCHEMA_VERSION = "1.0.0"  # 顶层 payload schema；与资产语义 schema 独立
+CHECKPOINT_SCHEMA_VERSION = "2.0.0"  # schema 1.x 不兼容声明式 experiment/calibration evidence
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,7 @@ class GeometrySSLCheckpointMetadata:
     geometry_semantics_schema: str  # assets 静态语义 schema 版本
     asset_manifest: Mapping[str, Any]  # train/validation/official 内容哈希 split
     resolved_config: Mapping[str, Any]  # Hydra/OmegaConf interpolation 后完整配置
+    calibrated_objective: Mapping[str, float]  # runtime evidence；不覆盖 declared objective config
     frame_contract: str = "query/closest/surface in hand frame {h}"  # 全部几何点 frame
     unit_contract: str = "length=m,joint=rad,density=dimensionless,kappa=m/rad,g=1/rad"  # SI 量纲
     retained_namespaces: tuple[str, ...] = ("encoder.",)  # 迁入 PPO/IL

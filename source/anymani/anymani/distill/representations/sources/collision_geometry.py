@@ -1,6 +1,6 @@
 r"""按 owner 构造 collision surface、可选 solid 与基准表面采样缓存。
 
-输入是 ``assets.bank.HandContainer`` 的类型化几何语义，以及 ``robots`` 已 lower 的
+输入是 ``assets.bank.HandContainer`` 的类型化几何语义，以及 source 层已 lower 的
 ``EmbodimentGeometrySpec``。每个碰撞片先从自身局部坐标严格变换到 owner reference link。surface
 与 solid 是两类不同的物理证据：unsigned UDF、最近点和 home point 只要求三角表面；同 owner 多个
 闭合 solid 才调用 ``trimesh.boolean.union(..., engine="manifold")``。任何 Boolean 失败均拒绝，
@@ -79,7 +79,7 @@ from anymani.assets.asset_schema_geometry import (
 )
 from anymani.assets.bank import HandContainer
 
-from .geometry_kinematics import EmbodimentGeometrySpec
+from .kinematics import EmbodimentGeometrySpec
 
 
 @dataclass(frozen=True)

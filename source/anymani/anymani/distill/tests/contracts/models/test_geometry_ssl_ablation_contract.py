@@ -8,8 +8,20 @@ from anymani.distill.diagnostics.evaluation.geometry_ssl import (
     geometry_ssl_ablation_forward,
     same_asset_q_permutation,
 )
-from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelConfig
-from anymani.distill.models.input_adapters.geometry import GeometryEncoderConfig, StaticGeometryEvidence
+from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
+from anymani.distill.models.decoders.representations.implicit_field import (
+    ConditionalDensityDecoder,
+    DistanceSensitivityDecoderCfg,
+    GeometrySSLDecoderCfg,
+    ScalarSigmaFiLMDensityDecoderCfg,
+)
+from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelCfg
+from anymani.distill.models.input_adapters.geometry import (
+    GeometryEncoderCfg,
+    GeometryLatentHeadsCfg,
+    SO2AnchorFrontendCfg,
+    StaticGeometryEvidence,
+)
 from anymani.distill.objectives.representations.field_reconstruction import selected_density_coordinate_derivative
 
 
@@ -43,21 +55,22 @@ def _model() -> GeometrySSLModel:
     """返回无 dropout 的确定性小模型。"""
 
     return GeometrySSLModel(
-        GeometrySSLModelConfig(
-            encoder=GeometryEncoderConfig(
-                relation_width=8,
-                home_width=8,
-                screw_width=8,
-                hidden_width=16,
-                zero_order_width=12,
-                first_order_width=8,
-                transformer_layers=1,
-                attention_heads=4,
-                feedforward_width=24,
-                dropout=0.0,
+        GeometrySSLModelCfg(
+            encoder=GeometryEncoderCfg(
+                frontend=SO2AnchorFrontendCfg(relation_width=8, home_width=8, screw_width=8),
+                backbone=GraphBiasedTransformerCfg(
+                    hidden_width=16,
+                    layers=1,
+                    attention_heads=4,
+                    feedforward_width=24,
+                    dropout=0.0,
+                ),
+                heads=GeometryLatentHeadsCfg(zero_order_width=12, first_order_width=8),
             ),
-            decoder_hidden_width=16,
-            decoder_residual_blocks=1,
+            ssl_decoders=GeometrySSLDecoderCfg(
+                density=ScalarSigmaFiLMDensityDecoderCfg(hidden_width=16, residual_blocks=1),
+                sensitivity=DistanceSensitivityDecoderCfg(coefficient_hidden_width=16),
+            ),
         )
     ).to(dtype=torch.float64)
 
@@ -201,6 +214,23 @@ def test_density_decoder_treats_sigma_as_a_variable_data_axis() -> None:
     assert torch.max(torch.abs(five_sigma[..., 0] - five_sigma[..., -1])) > 1.0e-8
     repeated.sum().backward()
     assert repeated_sigma.grad is None
+
+
+def test_every_density_residual_block_reads_owner_latent_through_film() -> None:
+    r"""三层 canonical FiLM 路径必须各自拥有 $z_g^{(0)}\to(\gamma,\beta)$ 投影。"""
+
+    decoder = ConditionalDensityDecoder(
+        ScalarSigmaFiLMDensityDecoderCfg(hidden_width=16, residual_blocks=3),
+        zero_order_width=12,
+        query_width=8,
+    )
+
+    assert len(decoder.blocks) == 3
+    assert all(block.modulation.in_features == 12 for block in decoder.blocks)
+    assert all(block.modulation.out_features == 32 for block in decoder.blocks)
+    assert {
+        name for name in decoder.state_dict() if name.endswith("modulation.weight")
+    } == {f"blocks.{index}.modulation.weight" for index in range(3)}
 
 
 def test_density_q_jvp_holds_explicit_sigma_fixed() -> None:

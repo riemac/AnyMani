@@ -1,7 +1,7 @@
-r"""多资产在线几何 SSL 数据物化、Sobol q 采样与跨结构 padding。
+r"""物理 source、空间场、query 与 target 的在线 Geometry Representation 组合。
 
 该模块不把 $(asset,q,query,target)$ 全量离线固化。每项资产只物化一次静态证据：owner union、
-home boundary、anchors、owner triangle sampling table、robots kinematic spec 与 Warp BVH；训练 step
+    home boundary、anchors、owner triangle sampling table、kinematic spec 与 Warp BVH；训练 step
 再从 joint limits 用 scrambled Sobol 采样合法 q，生成 workspace/shell/adjacent query 和 Warp teacher。
 
 跨结构 batch 使用明确上限：最多 20 个 JOINT、5 个 TIP、26 个 owner。padding 只是 GPU 稠密容器：
@@ -17,11 +17,11 @@ official 资产是否进入训练不由本模块猜测；实验配置必须在 H
 
 from __future__ import annotations  # 前向类型引用不在 import 时求值
 
-from dataclasses import dataclass  # 静态资产状态、在线样本与 padding batch 均冻结
+from dataclasses import dataclass  # 避免 ``field`` 配置槽遮蔽 helper
+from dataclasses import field as dataclass_field
 
 import torch  # Sobol、张量 padding、GPU evidence 与 target
 
-from anymani.assets.bank import HandContainer  # assets -> robots/distill 唯一 bundle 边界
 from anymani.distill.models.input_adapters.geometry import (  # retained 静态输入与 padding
     GeometryPaddingCfg,  # 20 JOINT/5 TIP/26 owner 上限
     StaticGeometryEvidence,  # anchors/home/screws/graph/masks
@@ -35,94 +35,125 @@ from anymani.distill.representations.queries.spatial_sampling import (  # 50/25/
     materialize_owner_surface_sampling_cache,  # owner union -> GPU 在线 proposal 测度
     sample_spatial_queries,  # 当前 q owner-shell/adjacent
 )
+from anymani.distill.representations.sources.geometry_source import (
+    DeviceGeometrySource,
+    GeometrySource,
+    GeometrySourceCfg,
+)
+from anymani.distill.representations.sources.kinematics import EmbodimentGeometrySpec
 from anymani.distill.representations.targets.field_samples import (  # 类型化 $d/\\rho/\\kappa/g$ targets
     FieldTargetBatch,
     SensitivityTargetBatch,
 )
 from anymani.distill.representations.targets.geometry_field import (  # Warp teacher assembly
-    GeometryFieldTargetCfg,  # 带宽、edges/mask thresholds
+    GaussianProximityFieldCfg,  # train/validation sigma measure
+    GeometryFieldTargetCfg,  # edges/mask thresholds
     generate_geometry_field_targets,  # online target 主路径
 )
-from anymani.robots.geometry_kinematics import (  # 静态语义 -> 动态 POE spec
-    EmbodimentGeometrySpec,
-    lower_hand_geometry_semantics,
-)
-from anymani.robots.owner_geometry import (  # owner union 与 CPU/GPU geometry caches
-    AnchorSamples,  # palm surface/interior supports
-    GeometryIdentity,  # physical mapping 与 q-domain 双重身份
-    HomeSurfaceSamples,  # owner boundary-only samples
-    OwnerGeometryCache,  # CPU strict Manifold union
-    WarpOwnerGeometryCache,  # GPU owner BVHs
-    geometry_identity,  # 实际 surface+kinematics -> leakage identity
-    materialize_owner_geometry_cache,  # collision components -> owner union
-    materialize_warp_owner_geometry_cache,  # owner union -> Warp mesh
-    sample_owner_home_surfaces,  # area candidates + farthest point
-    sample_palm_anchor_supports,  # seed-neighborhood palm supports
-)
 
 
-@dataclass(frozen=True)  # resolved 后禁止训练中修改静态采样测度
-class GeometryAssetMaterializationCfg:  # CPU cache 数值配置
-    r"""每项资产固定一次的 static geometry 采样配置。
+@dataclass(frozen=True)
+class GeometryRepresentationCfg:
+    r"""source、field、query、target 与跨结构 layout 的正交组合配置。"""
 
-    数值锚点：每 owner 64 个 boundary points、每 finger 10 个 palm anchors、anchor 支持半径 5 cm，
-    surface/interior 各半。workspace 球云半径属于 online query config，不与 anchor 支持半径隐式绑定。
-    """
-
-    home_points_per_owner: int = 64  # $M_g$
-    anchors_per_finger: int = 10  # 首个可运行 anchor 数值锚点
-    anchor_radius_m: float = 0.05  # palm seed 支持半径，m
-    anchor_radial_decay_scale_m: float = 0.025  # $\tau_a=R_a/2$，挂载 seed 径向衰减尺度，m
-    anchor_surface_fraction: float = 0.5  # surface/interior 各半
-    static_sampling_seed: int = 0  # owner-aware 派生后逐资产固定
-
-    def __post_init__(self) -> None:
-        r"""验证静态点预算、米制半径与 surface/interior 混合比例。"""
-
-        if self.home_points_per_owner < 1 or self.anchors_per_finger < 1:  # 点集不可为空
-            raise ValueError("home/anchor point budgets must be positive")  # encoder 集合合同
-        if not 0.0 < self.anchor_radial_decay_scale_m <= self.anchor_radius_m:  # $0<\tau_a\le R_a$
-            raise ValueError("anchor radial decay scale must lie in (0, anchor_radius_m]")  # fail-fast
-        if not 0.0 <= self.anchor_surface_fraction <= 1.0:  # convex mixture 权重
-            raise ValueError("anchor_surface_fraction must lie in [0,1]")  # 不 clamp 改变测度
+    source: GeometrySourceCfg = dataclass_field(default_factory=GeometrySourceCfg)  # q-independent physical oracle
+    field: GaussianProximityFieldCfg = dataclass_field(default_factory=GaussianProximityFieldCfg)  # sigma measure
+    query: SpatialQuerySamplerCfg = dataclass_field(default_factory=SpatialQuerySamplerCfg)  # query measure
+    target: GeometryFieldTargetCfg = dataclass_field(default_factory=GeometryFieldTargetCfg)  # edge/mask teacher
+    layout: GeometryPaddingCfg = dataclass_field(default_factory=GeometryPaddingCfg)  # dense cross-structure axes
 
 
-@dataclass(frozen=True)  # CPU 静态证据按资产内容冻结
-class GeometryAssetRuntime:  # q-independent asset state
-    r"""一项资产的 CPU 静态物化结果。
+@dataclass(frozen=True)
+class GeometryRepresentationState:
+    r"""一项资产在指定 device 上供 query、target 与 retained adapter 共用的状态。"""
 
-    该对象与 q/step 无关，可跨所有训练 step 复用；CPU meshes 保留真实 triangles/provenance，只有
-    ``spec/evidence`` 张量在上传时转换 dtype/device；workspace realization 属于在线 Monte-Carlo query。
-    """
-
-    container: HandContainer  # bank bundle + geometry semantics
-    spec_cpu: EmbodimentGeometrySpec  # CPU float64 POE/graph/component transforms，identity 数值真值
-    geometry_cache: OwnerGeometryCache  # owner-local strict unions
-    home_surface: HomeSurfaceSamples  # `[G,M,3]` boundary-only owner local
-    anchors: AnchorSamples  # `[K,3]` hand-frame palm supports
-    evidence_cpu: StaticGeometryEvidence  # CPU retained evidence reference
-    identity: GeometryIdentity  # physical group 与 configuration-domain provenance
+    source: GeometrySource  # CPU physical truth 与 provenance
+    device_source: DeviceGeometrySource  # GPU POE 与 Warp BVH lease
+    surface_sampling: OwnerSurfaceSamplingCache  # owner triangle/normal/area proposal tables
+    evidence: StaticGeometryEvidence  # GPU retained encoder 静态输入
 
     @property
-    def asset_id(self) -> str:
-        r"""返回 bank 稳定资产 ID，供 batch routing/logging 使用。"""
+    def spec(self) -> EmbodimentGeometrySpec:
+        r"""返回与模型、query 和 target 同 device/dtype 的动态运动学规格。"""
 
-        return self.container.asset_id  # 不以路径 basename 重新推断
+        return self.device_source.spec
+
+    @property
+    def warp_cache(self):
+        r"""返回 closest-surface target 使用的 GPU owner BVH cache。"""
+
+        return self.device_source.warp_cache
 
 
-@dataclass(frozen=True)  # GPU cache identity 不随 step 变化
-class GeometryAssetDeviceState:  # device-resident asset state
-    r"""一项资产驻留指定 GPU 的训练状态。
+class GeometryRepresentation:
+    r"""把 physical source、query measure 与 field teacher 组合成类型化训练样本。
 
-    ``runtime`` 继续持有 CPU meshes；``spec/evidence`` 是 PyTorch CUDA tensors；``warp_cache`` 持有
-    Warp vertices/indices/BVH 强引用。该对象不含当前 q 或 learned activation。
+    本类拥有 representation 行为但不拥有 q coverage、optimizer 或 checkpoint。所有随机 realization
+    通过显式 seed 传入，不在对象内维护隐藏 RNG state。
     """
 
-    runtime: GeometryAssetRuntime  # CPU provenance/cache owner
-    spec: EmbodimentGeometrySpec  # GPU POE/graph tensors
-    warp_cache: WarpOwnerGeometryCache  # GPU owner BVHs
-    surface_sampling: OwnerSurfaceSamplingCache  # GPU triangle/normal/area proposal cache
-    evidence: StaticGeometryEvidence  # GPU retained static inputs
+    def __init__(self, config: GeometryRepresentationCfg) -> None:
+        r"""保存纯声明配置；构造阶段不读取资产、不初始化 CUDA。"""
+
+        self.config = config  # 完整 source/query/target/layout 科研合同
+
+    def materialize_source(self, container) -> GeometrySource:
+        r"""按 source config 物化一项 q-independent CPU physical oracle。"""
+
+        return GeometrySource.materialize(container, config=self.config.source)
+
+    def to_device(
+        self,
+        source: GeometrySource,
+        *,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> GeometryRepresentationState:
+        r"""构造一项资产的 device source、surface proposal 与 retained evidence。"""
+
+        device_source = source.to_device(device=device, dtype=dtype)  # POE/Warp lease 一次 materialize
+        try:
+            target_device = torch.device(device)  # query/model 共用规范化 device
+            surface_sampling = materialize_owner_surface_sampling_cache(
+                source.geometry_cache,
+                device=target_device,
+                dtype=dtype,
+            )
+            semantics = source.container.geometry_semantics  # owner roles 与 palm normal 的唯一真源
+            if semantics is None:
+                raise ValueError("geometry source lost its typed semantics")
+            evidence = build_static_geometry_evidence(
+                semantics,
+                device_source.spec,
+                source.home_surface,
+                source.anchors,
+                device=target_device,
+                dtype=dtype,
+            )
+            return GeometryRepresentationState(source, device_source, surface_sampling, evidence)
+        except Exception:
+            device_source.release()  # proposal/evidence 任一失败都归还已取得的 Warp lease
+            raise
+
+    def sample(
+        self,
+        state: GeometryRepresentationState,
+        q: torch.Tensor,
+        *,
+        sampling_seed: int,
+        q_index: torch.Tensor | None = None,
+    ) -> OnlineGeometrySample:
+        r"""按当前配置为同资产 q realization 生成未 padding query/teacher sample。"""
+
+        return sample_online_geometry(
+            state,
+            q,
+            field_config=self.config.field,
+            query_config=self.config.query,
+            target_config=self.config.target,
+            sampling_seed=sampling_seed,
+            q_index=q_index,
+        )
 
 
 @dataclass(frozen=True)  # 单 q teacher 样本构造后只读
@@ -221,101 +252,11 @@ class SobolJointSampler:  # 每资产独立低差异 q 序列
         self.cursor = cursor
 
 
-def materialize_geometry_asset_runtime(
-    container: HandContainer,  # require_geometry_semantics=True 的 bank bundle
-    *,
-    query_config: SpatialQuerySamplerCfg = SpatialQuerySamplerCfg(),  # workspace $N_W$
-    config: GeometryAssetMaterializationCfg = GeometryAssetMaterializationCfg(),  # 点预算
-    ) -> GeometryAssetRuntime:  # CPU static asset materialization
-    r"""从 bank container 构造一项资产全部 CPU 静态 cache。
-
-    顺序是静态语义 lowering → owner Boolean union → boundary home points → palm anchors → retained
-    evidence。workspace query 由固定 anchors 在每个同资产 q 子批次在线重采，不再静态物化 AABB bank。
-
-    Returns:
-        GeometryAssetRuntime: 与 q/step 无关、可复用的 CPU 静态状态。
-    """
-
-    semantics = container.geometry_semantics  # assets 层唯一静态语义入口
-    if semantics is None:  # distill 不允许自己解析 hand.yaml/URDF
-        raise ValueError("container must be resolved with require_geometry_semantics=True")  # bank 配置错误
-    spec = lower_hand_geometry_semantics(semantics, dtype=torch.float64)  # identity/cache 使用 CPU float64 真值
-    geometry_cache = materialize_owner_geometry_cache(container, spec)  # 严格 owner union
-    identity = geometry_identity(semantics, spec, geometry_cache)  # limits 与物理映射身份显式分离
-    home_surface = sample_owner_home_surfaces(  # 真实 union boundary，不含 interior
-        geometry_cache,  # `[G]` owner unions
-        points_per_owner=config.home_points_per_owner,  # 每 owner 固定 $M$
-        sampling_seed=config.static_sampling_seed,  # owner ID 派生可复现 seed
-    )
-    anchors = sample_palm_anchor_supports(  # 每 finger seed 邻域内 palm surface/interior supports
-        geometry_cache,  # palm union solid
-        semantics,  # anchor seeds 与 `{a}->{h}`
-        spec,  # palm owner home transform
-        anchors_per_finger=config.anchors_per_finger,  # 每 seed 固定数量
-        sampling_seed=config.static_sampling_seed,  # 可复现实例
-        radial_support_radius_m=config.anchor_radius_m,  # 球形支持半径，m
-        radial_decay_scale_m=config.anchor_radial_decay_scale_m,  # 截断 Gaussian $\tau_a$，m
-        surface_fraction=config.anchor_surface_fraction,  # surface/interior 比例
-    )
-    evidence = build_static_geometry_evidence(  # retained encoder 的全部静态输入
-        semantics,  # owner roles/normal
-        spec,  # screws/q_home/graph
-        home_surface,  # `[G,M,3]`
-        anchors,  # `[K,3]`
-        device="cpu",  # CPU reference/caching
-        dtype=torch.float32,  # 正式训练基础 dtype
-    )
-    return GeometryAssetRuntime(  # 把同一内容哈希下各静态证据绑定
-        container,
-        spec,
-        geometry_cache,
-        home_surface,
-        anchors,
-        evidence,
-        identity,
-    )
-
-
-def move_geometry_asset_to_device(
-    runtime: GeometryAssetRuntime,  # CPU 静态状态
-    *,
-    device: torch.device | str = "cuda:0",  # GPU/Warp target device
-    dtype: torch.dtype = torch.float32,  # model/spec/evidence dtype
-    ) -> GeometryAssetDeviceState:  # GPU/Warp resident state
-    r"""上传 kinematic/evidence 张量并构造一次 GPU Warp BVH。
-
-    Warp cache 按 ``(asset_content_hash,device)`` 在 robots 层复用；本函数不复制 CPU triangles，也不在
-    每个训练 batch 重建 BVH。
-    """
-
-    target_device = torch.device(device)  # 规范化 `cuda`/`cuda:0`
-    spec = runtime.spec_cpu.to(device=target_device, dtype=dtype)  # POE/graph 张量上传
-    warp_cache = materialize_warp_owner_geometry_cache(  # owner BVH 上传或 hash cache hit
-        runtime.geometry_cache, device=str(target_device)
-    )
-    surface_sampling = materialize_owner_surface_sampling_cache(  # 同一 owner surface 的在线 query proposal
-        runtime.geometry_cache,
-        device=target_device,
-        dtype=dtype,
-    )
-    semantics = runtime.container.geometry_semantics  # evidence roles/normal 来源
-    if semantics is None:  # frozen runtime 理论上不应丢失 container 语义
-        raise ValueError("runtime container lost geometry semantics")  # 防御性一致性闸门
-    evidence = build_static_geometry_evidence(  # 直接在目标 device 构造，避免每 batch H2D
-        semantics,  # roles/normal
-        spec,  # GPU screws/q_home/graph
-        runtime.home_surface,  # CPU numpy -> GPU tensor
-        runtime.anchors,  # CPU numpy -> GPU tensor
-        device=target_device,  # resident device
-        dtype=dtype,  # 与 model 一致
-    )
-    return GeometryAssetDeviceState(runtime, spec, warp_cache, surface_sampling, evidence)  # 完整 GPU asset state
-
-
 def sample_online_geometry(
-    state: GeometryAssetDeviceState,  # 当前资产 GPU state
+    state: GeometryRepresentationState,  # 当前资产 representation device state
     q: torch.Tensor,  # `[Q,N_J]`，同一资产的构型 block，rad
     *,
+    field_config: GaussianProximityFieldCfg = GaussianProximityFieldCfg(),  # sigma measure
     query_config: SpatialQuerySamplerCfg = SpatialQuerySamplerCfg(),  # 50/25/25
     target_config: GeometryFieldTargetCfg = GeometryFieldTargetCfg(),  # teacher
     sampling_seed: int = 0,  # shell/adjacent/edge sampling realization
@@ -342,14 +283,15 @@ def sample_online_geometry(
     field_targets, sensitivity_targets = generate_geometry_field_targets(  # GPU Warp teacher
         q,  # 当前 owner transforms/Jacobian；同一资产一次处理 Q 个构型
         state.spec,  # POE/ancestor masks
-        state.runtime.geometry_cache,  # CPU face/component provenance
+        state.source.geometry_cache,  # CPU face/component provenance
         state.warp_cache,  # GPU BVHs
         queries,  # 当前 query batch
-        config=target_config,  # $\\sigma_\\ell$/edges/margins
+        field_config=field_config,  # $\\sigma_\\ell$ centers/jitter
+        target_config=target_config,  # sampled edges/margins
         edge_sampling_seed=sampling_seed,  # sampled `(g,r,i)` realization
     )
     return OnlineGeometrySample(  # 保留真实 variable lengths，padding 延后
-        asset_id=state.runtime.asset_id,  # batch route
+        asset_id=state.source.asset_id,  # batch route
         q=q,  # `[1,N_J]`
         evidence=state.evidence,  # unbatched static evidence
         queries=queries,  # `[1,G,N_Q,...]`
@@ -592,9 +534,10 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
 
     def __init__(
         self,
-        states: list[GeometryAssetDeviceState],  # 预物化 generated GPU assets
+        states: list[GeometryRepresentationState],  # 预物化 generated representation device states
         *,
         seed: int,  # Sobol/query/edge 总种子
+        field_config: GaussianProximityFieldCfg = GaussianProximityFieldCfg(),  # sigma measure
         query_config: SpatialQuerySamplerCfg = SpatialQuerySamplerCfg(),  # 50/25/25
         target_config: GeometryFieldTargetCfg = GeometryFieldTargetCfg(),  # Warp teacher
         padding: GeometryPaddingCfg = GeometryPaddingCfg(),  # 20/5/26 上限
@@ -609,12 +552,13 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
             raise ValueError("OnlineGeometryBatcher requires at least one asset state")  # 防止 modulo 0
         self.states = tuple(states)  # 冻结 routing 顺序，与 manifest 一致
         self.seed = int(seed)  # Python int 复现锚点
+        self.field_config = field_config  # actual sigma realization 规则
         self.query_config = query_config  # stratum 与 shell 数值
-        self.target_config = target_config  # bandwidth/edge/margin
+        self.target_config = target_config  # sampled edge/margin
         self.padding = padding  # 稠密容器上限
         self.samplers = tuple(  # 每资产独立维度/limits/Sobol state
             SobolJointSampler(  # CPU engine，只把 draw 结果上传
-                state.runtime.spec_cpu, seed=self.seed + asset_index  # 稳定派生 seed
+                state.source.spec_cpu, seed=self.seed + asset_index  # 稳定派生 seed
             )
             for asset_index, state in enumerate(states)  # manifest/routing 顺序
         )
@@ -646,6 +590,7 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
                 sample_online_geometry(  # Warp GPU main path
                     state,  # 当前 asset
                     q,  # `[1,N_J]` rad
+                    field_config=self.field_config,  # actual sigma realization
                     query_config=self.query_config,  # 50/25/25
                     target_config=self.target_config,  # $d/\\rho/\\kappa/g$
                     sampling_seed=self.seed + step * batch_size + batch_offset,  # 唯一 realization
@@ -683,6 +628,7 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
             block = sample_online_geometry(
                 state,
                 q_block,
+                field_config=self.field_config,
                 query_config=self.query_config,
                 target_config=self.target_config,
                 sampling_seed=self.seed + step * assets_per_microbatch + asset_offset,
@@ -696,7 +642,7 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
 
         return {
             "seed": self.seed,
-            "asset_ids": tuple(state.runtime.asset_id for state in self.states),
+            "asset_ids": tuple(state.source.asset_id for state in self.states),
             "samplers": tuple(sampler.state_dict() for sampler in self.samplers),
         }
 
@@ -710,7 +656,7 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
         if not isinstance(raw_asset_ids, (tuple, list)):
             raise ValueError("batcher checkpoint asset IDs must be a sequence")
         asset_ids = tuple(str(asset_id) for asset_id in raw_asset_ids)
-        expected_ids = tuple(asset.runtime.asset_id for asset in self.states)
+        expected_ids = tuple(asset.source.asset_id for asset in self.states)
         if asset_ids != expected_ids:
             raise ValueError("batcher checkpoint asset order does not match manifest")
         sampler_states = state.get("samplers", ())
@@ -723,15 +669,13 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
 
 
 __all__ = [  # SSL data stage 稳定公开面
-    "GeometryAssetDeviceState",  # GPU static asset
-    "GeometryAssetMaterializationCfg",  # CPU sampling config
-    "GeometryAssetRuntime",  # CPU static asset
+    "GeometryRepresentation",  # source/query/target runtime façade
+    "GeometryRepresentationCfg",  # 正交组合配置
+    "GeometryRepresentationState",  # GPU source + retained evidence
     "OnlineGeometryBatcher",  # online routing/teacher
     "OnlineGeometrySample",  # variable-length single sample
     "PaddedOnlineGeometryBatch",  # heterogeneous batch
     "SobolJointSampler",  # limits-only q sampler
-    "materialize_geometry_asset_runtime",  # bank -> CPU state
-    "move_geometry_asset_to_device",  # CPU -> GPU/Warp state
     "pad_online_geometry_samples",  # variable -> dense masks
     "sample_online_geometry",  # q -> query/teacher
     "split_online_geometry_sample",  # Q block -> current padding oracle

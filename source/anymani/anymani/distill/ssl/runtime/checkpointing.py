@@ -16,15 +16,12 @@ from anymani.distill.ssl.runtime import ResidentGeometryAssetWindow, WindowedOnl
 
 
 def resume_scientific_config(config: GeometrySSLExperimentCfg) -> dict[str, object]:
-    r"""返回 resume 必须一致的科学配置，不含 run 定位和 calibration 前 objective 占位值。"""
+    r"""返回 resume 必须一致的科学配置，只排除 output/resume 定位。"""
 
     payload = resolved_config_dict(config)
-    payload.pop("objective", None)  # calibration 后权重由 checkpoint 单独恢复
-    train = payload.get("train")
-    if not isinstance(train, dict):
-        raise ValueError("resolved geometry SSL config lacks train mapping")
-    for name in ("output_dir", "experiment_name", "resume_checkpoint"):
-        train.pop(name, None)  # 只定位新 run，不改变采样、优化或验收过程
+    run = payload.pop("run", None)  # 整个 run 槽只定位 artifact/resume，不改变科学轨迹
+    if not isinstance(run, dict):
+        raise ValueError("resolved geometry SSL config lacks run mapping")
     return payload
 
 
@@ -34,8 +31,9 @@ def require_resume_scientific_config(
 ) -> None:
     r"""拒绝当前 CLI 与 checkpoint 的任一 scientific config 漂移。"""
 
-    checkpoint_train = checkpoint_resolved.get("train")
-    if not isinstance(checkpoint_train, dict) or "deterministic_algorithms" not in checkpoint_train:
+    checkpoint_protocol = checkpoint_resolved.get("protocol")
+    reproducibility = checkpoint_protocol.get("reproducibility") if isinstance(checkpoint_protocol, dict) else None
+    if not isinstance(reproducibility, dict) or "deterministic_algorithms" not in reproducibility:
         raise ValueError("resume checkpoint predates the explicit deterministic-algorithm contract")
     checkpoint_config = experiment_config_from_dict(checkpoint_resolved)
     expected = resume_scientific_config(checkpoint_config)

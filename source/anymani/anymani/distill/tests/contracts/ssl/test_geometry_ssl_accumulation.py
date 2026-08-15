@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pytest
 import torch
-from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLTerms, GeometrySSLWeights
+from anymani.distill.objectives.representations.field_reconstruction import (
+    GeometryFieldObjectiveCfg,
+    GeometryFieldObjectiveTerms,
+)
 from anymani.distill.ssl.runtime.objective import accumulated_objective
 
 pytestmark = pytest.mark.contract
@@ -17,7 +20,7 @@ def _terms(
     zero_denominator: float,
     first_numerator: float,
     first_denominator: float,
-) -> GeometrySSLTerms:
+) -> GeometryFieldObjectiveTerms:
     """构造六项中只激活 density 与 paired 的可微标量包。"""
 
     density = torch.tensor(field_numerator, dtype=torch.float64, requires_grad=True)
@@ -25,7 +28,7 @@ def _terms(
     first = torch.tensor(first_numerator, dtype=torch.float64, requires_grad=True)
     field_zero = density * 0.0
     pair_loss = zero / zero_denominator + first / first_denominator
-    return GeometrySSLTerms(
+    return GeometryFieldObjectiveTerms(
         total=density / field_denominator + pair_loss,
         density=density / field_denominator,
         kappa=field_zero,
@@ -50,7 +53,14 @@ def test_accumulation_uses_global_field_and_separate_paired_denominators() -> No
 
     first = _terms(8.0, 4.0, 4.0, 4.0, 18.0, 6.0)
     second = _terms(10.0, 2.0, 8.0, 2.0, 8.0, 2.0)
-    weights = GeometrySSLWeights(density=1.0, kappa=0.0, derived_field=0.0, sobolev=0.0, chain=0.0, paired=1.0)
+    weights = GeometryFieldObjectiveCfg(
+        density=1.0,
+        kappa=0.0,
+        derived_field=0.0,
+        sobolev=0.0,
+        chain=0.0,
+        paired=1.0,
+    )
     field_totals = tuple(torch.tensor(value, dtype=torch.float64) for value in (6.0, 2.0, 2.0, 2.0, 2.0))
     paired_totals = (torch.tensor(6.0, dtype=torch.float64), torch.tensor(8.0, dtype=torch.float64))
 

@@ -12,20 +12,23 @@ import torch
 import yaml
 
 from anymani.distill.models.geometry_ssl import GeometrySSLModel
-from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLObjective, GeometrySSLWeights
-from anymani.distill.ssl.dataset import PaddedOnlineGeometryBatch
+from anymani.distill.objectives.representations.field_reconstruction import (
+    GeometryFieldObjective,
+    GeometryFieldObjectiveCfg,
+)
+from anymani.distill.representations.geometry import PaddedOnlineGeometryBatch
 
 
 def calibrate_geometry_ssl_weights(
     model: GeometrySSLModel,
-    objective_factory: Callable[[GeometrySSLWeights], GeometrySSLObjective],
+    objective_factory: Callable[[GeometryFieldObjectiveCfg], GeometryFieldObjective],
     batches: tuple[PaddedOnlineGeometryBatch, ...],
-    forward_terms: Callable[[GeometrySSLModel, GeometrySSLObjective, PaddedOnlineGeometryBatch], Any],
+    forward_terms: Callable[[GeometrySSLModel, GeometryFieldObjective, PaddedOnlineGeometryBatch], Any],
     *,
     output_path: Path,
     min_weight: float = 1.0e-2,
     max_weight: float = 1.0e3,
-) -> GeometrySSLWeights:
+) -> GeometryFieldObjectiveCfg:
     r"""在固定 generated train batches 上测量六项共享 encoder gradient，并冻结权重。
 
     每项独立建立 objective、清零梯度并反传；只读取模型 encoder 参数的梯度范数。参考项为
@@ -43,7 +46,9 @@ def calibrate_geometry_ssl_weights(
     for batch in batches:
         for name in names:
             model.zero_grad(set_to_none=True)
-            objective = objective_factory(GeometrySSLWeights(**{term: 1.0 if term == name else 0.0 for term in names}))
+            objective = objective_factory(
+                GeometryFieldObjectiveCfg(**{term: 1.0 if term == name else 0.0 for term in names})
+            )
             terms = forward_terms(model, objective, batch)
             value = getattr(terms, name)
             if not isinstance(value, torch.Tensor) or value.ndim != 0:
@@ -62,7 +67,7 @@ def calibrate_geometry_ssl_weights(
         name: min(max(reference / value, min_weight), max_weight) if value > 0.0 else max_weight
         for name, value in medians.items()
     }
-    resolved_weights = GeometrySSLWeights(**weights)
+    resolved_weights = GeometryFieldObjectiveCfg(**weights)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         yaml.safe_dump(

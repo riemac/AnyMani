@@ -1,7 +1,8 @@
 r"""几何 SSL 的结构化 Hydra/OmegaConf 实验合同。
 
 配置只声明资产路径、静态物化、online sampling、模型、目标、优化与记录策略。资产里的 owner、
-运动学、q_home、limits 和 frame 仍由 sidecar/robots 决定，不能被训练 YAML 覆盖。
+运动学、q_home、limits 和 frame 由 ``assets`` 的 typed semantics 交付，动态 lower 由
+``representations.sources`` 完成，不能被训练 YAML 覆盖。
 """
 
 from __future__ import annotations
@@ -13,15 +14,27 @@ from typing import Any  # OmegaConf 基础容器的嵌套 value 类型
 import yaml  # resolved config/manifest 使用人类可读 YAML
 from omegaconf import OmegaConf  # Hydra interpolation 与结构化 dataclass 桥接
 
-from anymani.distill.models.geometry_ssl import GeometrySSLModelConfig  # retained/disposable 容量
-from anymani.distill.models.input_adapters.geometry import (  # encoder 与跨结构上限
-    GeometryEncoderConfig,
-    GeometryPaddingCfg,
+from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
+from anymani.distill.models.decoders.representations.implicit_field import (
+    DistanceSensitivityDecoderCfg,
+    GeometrySSLDecoderCfg,
+    ScalarSigmaFiLMDensityDecoderCfg,
 )
-from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLWeights  # 六项权重
+from anymani.distill.models.geometry_ssl import GeometrySSLModelCfg  # retained/disposable 容量
+from anymani.distill.models.input_adapters.geometry import (
+    GeometryEncoderCfg,
+    GeometryLatentHeadsCfg,
+    GeometryPaddingCfg,
+    SO2AnchorFrontendCfg,
+)
+from anymani.distill.objectives.representations.field_reconstruction import GeometryFieldObjectiveCfg  # 六项权重
+from anymani.distill.representations.geometry import GeometryRepresentationCfg  # source->query->target->layout
 from anymani.distill.representations.queries.spatial_sampling import SpatialQuerySamplerCfg  # 50/25/25 query
-from anymani.distill.representations.targets.geometry_field import GeometryFieldTargetCfg  # 带宽/edge/mask
-from anymani.distill.ssl.dataset import GeometryAssetMaterializationCfg  # home/anchor/workspace cache
+from anymani.distill.representations.sources.geometry_source import GeometrySourceCfg  # home/anchor physical source
+from anymani.distill.representations.targets.geometry_field import (
+    GaussianProximityFieldCfg,  # sigma measure
+    GeometryFieldTargetCfg,  # differential target
+)
 
 
 @dataclass(frozen=True)
@@ -58,105 +71,201 @@ class GeometrySSLAssetCfg:
 
 
 @dataclass(frozen=True)
-class GeometrySSLOptimizerCfg:
-    r"""AdamW 与梯度裁剪配置。
+class GeometryCoverageCfg:
+    r"""每资产 q coverage 与同一 sigma realization 内的 q 相关结构。"""
 
-    默认 $\eta=3\times10^{-4}$、解耦权重衰减 $10^{-4}$；梯度总范数上限 10 只防止非有限爆炸，
-    不替代各物理损失项的 generated-only 梯度范数校准。
-    """
-
-    learning_rate: float = 3.0e-4  # AdamW 学习率 $\eta$
-    weight_decay: float = 1.0e-4  # 解耦参数衰减系数
-    max_gradient_norm: float = 10.0  # clip 前全参数 L2 范数上限
+    epochs: int = 20
+    q_per_asset_per_epoch: int = 256
+    q_per_asset_per_realization: int = 2  # 同一 q 子批次共享 sigma，不能只当显存旋钮
 
     def __post_init__(self) -> None:
-        r"""验证学习率严格为正，weight decay 非负，gradient norm 上限严格为正。"""
-
-        if self.learning_rate <= 0.0 or self.weight_decay < 0.0 or self.max_gradient_norm <= 0.0:  # 数值域
-            raise ValueError("optimizer learning rate/weight decay/gradient norm are invalid")  # fail before run
+        if min(self.epochs, self.q_per_asset_per_epoch, self.q_per_asset_per_realization) < 1:
+            raise ValueError("coverage epochs and q budgets must be positive")
+        if self.q_per_asset_per_epoch % self.q_per_asset_per_realization:
+            raise ValueError("q_per_asset_per_epoch must divide into q realization blocks")
 
 
 @dataclass(frozen=True)
-class GeometrySSLTrainLoopCfg:
-    r"""训练步数、微批次、复现实验与输出频率。
+class GeometryCalibrationCfg:
+    r"""train-only encoder-gradient calibration 的固定预算与裁剪域。"""
 
-    `assets_per_microbatch` 与 `q_per_asset_per_microbatch` 声明逻辑 batch 轴；有效 batch 为
-    $B_{eff}=A_{mb}Q_{mb}N_{acc}$。gradient accumulation 按 microbatch loss 除以 $N_{acc}$，因此不改变
-    总梯度均值。`batch_size` 只保留为两条逻辑轴的乘积校验。validation 使用固定的 Sobol q/query/teacher bank。
-    """
-
-    steps: int = 30_000  # optimizer 更新次数上限；实际完成由资产 q coverage 决定
-    batch_size: int = 4  # 兼容旧入口；必须等于 A_mb*Q_mb
-    assets_per_microbatch: int = 2  # 一次 microbatch 的资产数 $A_{mb}$
-    q_per_asset_per_microbatch: int = 2  # 每资产 batched FK/target 的 q 数 $Q_{mb}$
-    max_resident_assets: int = 20  # GPU resident asset window 上限
-    q_per_asset_per_epoch: int = 256  # 每个训练资产每 epoch 的新 Sobol q 数
-    epochs: int = 20  # epoch coverage 由每资产 q cursor 定义
-    validation_q_per_asset: int = 64  # held-out morphology 固定 q bank 数
-    calibration_batches: int = 8  # 训练资产固定 calibration microbatch 数
-    calibration_min_weight: float = 1.0e-2  # 一次性梯度归一化下界
-    calibration_max_weight: float = 1.0e3  # 一次性梯度归一化上界
-    gradient_accumulation_steps: int = 4  # 每次 optimizer step 的 microbatches，有效 batch=16
-    seed: int = 0  # model、Sobol、query/edge 路由总种子
-    deterministic_algorithms: bool = True  # resume/seed 对照要求 CUDA backward 使用确定实现
-    device: str = "cuda:0"  # Warp 主路径要求 CUDA
-    dtype: str = "float32"  # OmegaConf 1.3 structured config 不支持 Literal
-    log_every_steps: int = 10  # TensorBoard/JSONL 标量周期
-    checkpoint_every_steps: int = 1_000  # 完整+retained checkpoint 周期
-    validation_every_steps: int = 250  # 固定 generated held-out bank 周期
-    output_dir: str = "logs/geometry_ssl"  # 项目运行证据根
-    experiment_name: str = "multi_anchor_geometry_ssl"  # 稳定实验目录名
-    resume_checkpoint: str = ""  # 可选完整 SSL checkpoint；空字符串表示从头开始
+    batches: int = 8
+    min_weight: float = 1.0e-2
+    max_weight: float = 1.0e3
 
     def __post_init__(self) -> None:
-        r"""拒绝空训练、空 batch、空累积或不可触发的记录周期。"""
+        if self.batches < 1 or self.min_weight <= 0.0 or self.max_weight < self.min_weight:
+            raise ValueError("calibration batches or weight bounds are invalid")
 
-        counts = (  # 全部为离散正整数语义
-            self.steps,  # optimizer steps
-            self.batch_size,  # microbatch B
-            self.assets_per_microbatch,  # A_mb
-            self.q_per_asset_per_microbatch,  # Q_mb
-            self.calibration_batches,  # calibration batch count
-            self.gradient_accumulation_steps,  # accumulation count
-            self.log_every_steps,  # logging interval
-            self.checkpoint_every_steps,  # checkpoint interval
-            self.validation_every_steps,  # validation interval
+
+@dataclass(frozen=True)
+class GeometryValidationCfg:
+    r"""固定 held-out morphology bank、checkpoint cadence 与选择指标。"""
+
+    q_per_asset: int = 64
+    every_optimizer_updates: int = 250
+    selection_metrics: tuple[str, ...] = ("density", "kappa", "derived_field")
+    final_ablations: tuple[str, ...] = (
+        "query_only",
+        "same_asset_q_shuffle",
+        "cross_asset_shuffle",
+        "first_order_zero",
+        "first_order_joint_shuffle",
+        "first_order_sign_flip",
+    )
+    bootstrap_replicates: int = 2_000
+
+    def __post_init__(self) -> None:
+        if self.q_per_asset < 1 or self.every_optimizer_updates < 1 or self.bootstrap_replicates < 1:
+            raise ValueError("validation q/cadence/bootstrap budget must be positive")
+        if self.selection_metrics != ("density", "kappa", "derived_field"):
+            raise ValueError("runtime currently requires density/kappa/derived_field selection metrics")
+        expected_ablations = (
+            "query_only",
+            "same_asset_q_shuffle",
+            "cross_asset_shuffle",
+            "first_order_zero",
+            "first_order_joint_shuffle",
+            "first_order_sign_flip",
         )
-        if any(value < 1 for value in counts):  # 0 会让生命周期分支不可达或除零
-            raise ValueError("all training counts and intervals must be positive")  # 配置闸门
-        if self.batch_size != self.assets_per_microbatch * self.q_per_asset_per_microbatch:
-            raise ValueError("batch_size must equal assets_per_microbatch*q_per_asset_per_microbatch")
-        if self.max_resident_assets < self.assets_per_microbatch or self.q_per_asset_per_epoch < 1:
-            raise ValueError("resident asset cap must fit one microbatch and epoch q budget must be positive")
-        if self.calibration_min_weight <= 0.0 or self.calibration_max_weight < self.calibration_min_weight:
-            raise ValueError("calibration weight bounds are invalid")
-        cuda_device = self.device == "cuda" or (
-            self.device.startswith("cuda:") and self.device.removeprefix("cuda:").isdigit()
-        )
-        if not cuda_device:  # online nearest-surface teacher 不提供 CPU fallback
-            raise ValueError("geometry SSL training device must be 'cuda' or 'cuda:<index>'")
-        if self.dtype != "float32":  # Warp PyTorch bridge 的主路径只接受 CUDA float32
-            raise ValueError("geometry SSL training dtype must be 'float32'")  # 禁止声明无法执行的配置
+        if self.final_ablations != expected_ablations:
+            raise ValueError("runtime currently requires the six declared canonical final ablations")
+
+
+@dataclass(frozen=True)
+class GeometryReproducibilityCfg:
+    r"""seed domain 与 deterministic backend 合同。"""
+
+    seed: int = 0
+    deterministic_algorithms: bool = True
+    seed_domains: tuple[str, ...] = ("model", "sobol_q", "query", "sigma", "edge", "validation", "bootstrap")
+
+    def __post_init__(self) -> None:
+        expected = ("model", "sobol_q", "query", "sigma", "edge", "validation", "bootstrap")
+        if self.seed < 0 or self.seed_domains != expected:
+            raise ValueError("reproducibility seed and all runtime seed domains must be explicit")
+
+
+@dataclass(frozen=True)
+class GeometrySSLProtocolCfg:
+    r"""coverage、calibration、validation、reproducibility 与 safety limit 的协议组合。"""
+
+    coverage: GeometryCoverageCfg = field(default_factory=GeometryCoverageCfg)
+    calibration: GeometryCalibrationCfg = field(default_factory=GeometryCalibrationCfg)
+    validation: GeometryValidationCfg = field(default_factory=GeometryValidationCfg)
+    reproducibility: GeometryReproducibilityCfg = field(default_factory=GeometryReproducibilityCfg)
+    run_safety_step_limit: int = 30_000  # safety limit，不是 canonical 正式 optimizer budget
+
+    def __post_init__(self) -> None:
+        if self.run_safety_step_limit < 1:
+            raise ValueError("run_safety_step_limit must be positive")
+
+
+@dataclass(frozen=True)
+class GeometrySSLTrainerCfg:
+    r"""Hydra trainer preset 注入的优化器、microbatch、resident window 与记录 cadence。"""
+
+    learning_rate: float = 3.0e-4
+    weight_decay: float = 1.0e-4
+    max_gradient_norm: float = 10.0
+    assets_per_microbatch: int = 2  # $A_{mb}$
+    gradient_accumulation_steps: int = 4  # $N_{acc}$
+    max_resident_assets: int = 20
+    device: str = "cuda:0"
+    dtype: str = "float32"
+    log_every_updates: int = 10
+    checkpoint_every_updates: int = 1_000
+
+    def __post_init__(self) -> None:
+        if self.learning_rate <= 0.0 or self.weight_decay < 0.0 or self.max_gradient_norm <= 0.0:
+            raise ValueError("trainer optimizer values are invalid")
+        if self.assets_per_microbatch < 1 or self.gradient_accumulation_steps < 1 or self.max_resident_assets < 1:
+            raise ValueError("trainer batch/accumulation/resident counts must be positive")
+        if self.log_every_updates < 1 or self.checkpoint_every_updates < 1:
+            raise ValueError("trainer logging/checkpoint intervals must be positive")
+        if not (self.device == "cuda" or (self.device.startswith("cuda:") and self.device[5:].isdigit())):
+            raise ValueError("geometry SSL trainer device must be 'cuda' or 'cuda:<index>'")
+        if self.dtype != "float32":
+            raise ValueError("geometry SSL trainer dtype must be 'float32'")
+
+
+@dataclass(frozen=True)
+class GeometrySSLRunCfg:
+    r"""只负责 output identity 与完整 checkpoint resume，不拥有训练超参。"""
+
+    output_dir: str = "logs/geometry_ssl"
+    experiment_name: str = "multi_anchor_geometry_ssl"
+    resume_checkpoint: str = ""
+
+
+@dataclass(frozen=True)
+class GeometrySSLTrainingBudget:
+    r"""由资产数、coverage 与 trainer 派生的可审计离散训练预算。"""
+
+    train_asset_count: int
+    microbatches_per_epoch: int
+    optimizer_updates_per_epoch: int
+    total_optimizer_updates: int
+    total_q_samples: int
+    nominal_microbatch_q: int
+    nominal_effective_q: int
+    mean_effective_q: float
+
+
+def derive_geometry_ssl_training_budget(
+    config: GeometrySSLExperimentCfg,
+    *,
+    train_asset_count: int,
+) -> GeometrySSLTrainingBudget:
+    r"""按 resident-window 分组规则解析实际 microbatch/update/q 预算。"""
+
+    if train_asset_count < 1:
+        raise ValueError("train_asset_count must be positive")
+    assets_per_microbatch = config.trainer.assets_per_microbatch
+    resident = config.trainer.max_resident_assets
+    full_windows, remainder = divmod(train_asset_count, resident)
+    groups_per_epoch_pass = full_windows * ((resident + assets_per_microbatch - 1) // assets_per_microbatch)
+    if remainder:
+        groups_per_epoch_pass += (remainder + assets_per_microbatch - 1) // assets_per_microbatch
+    realization_q = config.protocol.coverage.q_per_asset_per_realization
+    repeats = config.protocol.coverage.q_per_asset_per_epoch // realization_q
+    microbatches = groups_per_epoch_pass * repeats
+    accumulation = config.trainer.gradient_accumulation_steps
+    if microbatches % accumulation:
+        raise ValueError("microbatches_per_epoch must be divisible by gradient_accumulation_steps")
+    updates = microbatches // accumulation
+    epochs = config.protocol.coverage.epochs
+    total_q = train_asset_count * config.protocol.coverage.q_per_asset_per_epoch * epochs
+    nominal_microbatch_q = assets_per_microbatch * realization_q
+    nominal_effective_q = nominal_microbatch_q * accumulation
+    return GeometrySSLTrainingBudget(
+        train_asset_count=train_asset_count,
+        microbatches_per_epoch=microbatches,
+        optimizer_updates_per_epoch=updates,
+        total_optimizer_updates=updates * epochs,
+        total_q_samples=total_q,
+        nominal_microbatch_q=nominal_microbatch_q,
+        nominal_effective_q=nominal_effective_q,
+        mean_effective_q=(train_asset_count * config.protocol.coverage.q_per_asset_per_epoch) / updates,
+    )
 
 
 @dataclass(frozen=True)
 class GeometrySSLExperimentCfg:
-    r"""首版完整可运行几何 SSL resolved config。
+    r"""schema 2.0.0 的完整声明式 geometry SSL resolved config。
 
     该对象是 checkpoint、``resolved_config.yaml`` 与 CLI 的共同事实源。它不允许配置 owner、link、
     q_home 或 limits；这些静态物理事实只来自 ``HandContainer.geometry_semantics``。
     """
 
-    schema_version: str = "1.0.0"  # 实验配置 schema
+    schema_version: str = "2.0.0"  # 实验配置 schema
     assets: GeometrySSLAssetCfg = field(default_factory=GeometrySSLAssetCfg)  # split paths
-    materialization: GeometryAssetMaterializationCfg = field(default_factory=GeometryAssetMaterializationCfg)  # cache
-    query: SpatialQuerySamplerCfg = field(default_factory=SpatialQuerySamplerCfg)  # query 测度
-    target: GeometryFieldTargetCfg = field(default_factory=GeometryFieldTargetCfg)  # teacher 物理超参
-    padding: GeometryPaddingCfg = field(default_factory=GeometryPaddingCfg)  # 20 JOINT/26 owner 上限
-    model: GeometrySSLModelConfig = field(default_factory=GeometrySSLModelConfig)  # 网络容量
-    objective: GeometrySSLWeights = field(default_factory=GeometrySSLWeights)  # 六项损失权重
-    optimizer: GeometrySSLOptimizerCfg = field(default_factory=GeometrySSLOptimizerCfg)  # AdamW
-    train: GeometrySSLTrainLoopCfg = field(default_factory=GeometrySSLTrainLoopCfg)  # 生命周期
+    representation: GeometryRepresentationCfg = field(default_factory=GeometryRepresentationCfg)  # source->field->query->target
+    model: GeometrySSLModelCfg = field(default_factory=GeometrySSLModelCfg)  # retained + SSL-only readers
+    objective: GeometryFieldObjectiveCfg = field(default_factory=GeometryFieldObjectiveCfg)  # 六项损失权重
+    protocol: GeometrySSLProtocolCfg = field(default_factory=GeometrySSLProtocolCfg)  # scientific sampling/evidence
+    trainer: GeometrySSLTrainerCfg = field(default_factory=GeometrySSLTrainerCfg)  # Hydra runtime preset
+    run: GeometrySSLRunCfg = field(default_factory=GeometrySSLRunCfg)  # output/resume only
 
     def __post_init__(self) -> None:
         r"""验证 model sigma reference 位于 target 正带宽域内。
@@ -165,8 +274,10 @@ class GeometrySSLExperimentCfg:
         物理尺度，避免 ``log(sigma/sigma_reference)`` 接收退化配置。
         """
 
-        if self.model.sigma_reference_m <= 0.0:  # 双层 fail-fast 使独立 config round-trip 也保持物理域
-            raise ValueError("model sigma_reference_m must be strictly positive")
+        if self.schema_version != "2.0.0":
+            raise ValueError("geometry SSL experiment schema must be exactly 2.0.0")
+        if self.trainer.max_resident_assets < self.trainer.assets_per_microbatch:
+            raise ValueError("resident asset cap must fit one asset microbatch")
 
 
 @dataclass(frozen=True)
@@ -228,11 +339,17 @@ def experiment_config_from_dict(payload: dict[str, Any]) -> GeometrySSLExperimen
     ``__post_init__`` 数值/轴合同重新执行。
     """
 
+    if str(payload.get("schema_version", "")) != "2.0.0":
+        raise ValueError(
+            "geometry SSL resolved config schema must be exactly 2.0.0; "
+            "schema 1.x/checkpoints are intentionally fail-closed"
+        )
     required_contract_fields = {
-        "materialization": {"anchor_radial_decay_scale_m"},
-        "query": {"workspace_radius_m"},
-        "target": {"bandwidth_centers_m", "bandwidth_jitter_relative", "validation_bandwidths_m"},
-        "model": {"sigma_reference_m"},
+        "representation": {"source", "field", "query", "target", "layout"},
+        "model": {"encoder", "ssl_decoders"},
+        "protocol": {"coverage", "calibration", "validation", "reproducibility", "run_safety_step_limit"},
+        "trainer": {"assets_per_microbatch", "gradient_accumulation_steps", "max_resident_assets"},
+        "run": {"output_dir", "experiment_name", "resume_checkpoint"},
     }
     missing = {
         section: tuple(sorted(names - set(dict(payload.get(section, {})))))
@@ -255,24 +372,62 @@ def experiment_config_from_dict(payload: dict[str, Any]) -> GeometrySSLExperimen
         validation_paths=tuple(assets_payload["validation_paths"]),  # generated held-out
         official_evaluation_paths=tuple(assets_payload["official_evaluation_paths"]),  # official only
     )
-    target_payload = dict(payload["target"])  # teacher mapping
-    target_payload["bandwidth_centers_m"] = tuple(target_payload["bandwidth_centers_m"])  # sigma 中心轴
-    target_payload["validation_bandwidths_m"] = tuple(
-        target_payload["validation_bandwidths_m"]
-    )  # 固定 validation sigma 网格
-    model_payload = dict(payload["model"])  # retained/disposable model mapping
-    model_payload["encoder"] = GeometryEncoderConfig(**dict(model_payload["encoder"]))  # nested encoder
+    representation_payload = dict(payload["representation"])
+    field_payload = dict(representation_payload["field"])
+    field_payload["bandwidth_centers_m"] = tuple(field_payload["bandwidth_centers_m"])
+    field_payload["validation_bandwidths_m"] = tuple(field_payload["validation_bandwidths_m"])
+    representation = GeometryRepresentationCfg(
+        source=GeometrySourceCfg(**dict(representation_payload["source"])),
+        field=GaussianProximityFieldCfg(**field_payload),
+        query=SpatialQuerySamplerCfg(**dict(representation_payload["query"])),
+        target=GeometryFieldTargetCfg(**dict(representation_payload["target"])),
+        layout=GeometryPaddingCfg(**dict(representation_payload["layout"])),
+    )
+    model_payload = dict(payload["model"])
+    encoder_payload = dict(model_payload["encoder"])
+    encoder = GeometryEncoderCfg(
+        frontend=SO2AnchorFrontendCfg(**dict(encoder_payload["frontend"])),
+        backbone=GraphBiasedTransformerCfg(**dict(encoder_payload["backbone"])),
+        heads=GeometryLatentHeadsCfg(**dict(encoder_payload["heads"])),
+    )
+    decoder_payload = dict(model_payload["ssl_decoders"])
+    model = GeometrySSLModelCfg(
+        encoder=encoder,
+        ssl_decoders=GeometrySSLDecoderCfg(
+            density=ScalarSigmaFiLMDensityDecoderCfg(**dict(decoder_payload["density"])),
+            sensitivity=DistanceSensitivityDecoderCfg(**dict(decoder_payload["sensitivity"])),
+        ),
+    )
+    protocol_payload = dict(payload["protocol"])
+    validation_payload = dict(protocol_payload["validation"])
+    reproducibility_payload = dict(protocol_payload["reproducibility"])
+    protocol = GeometrySSLProtocolCfg(
+        coverage=GeometryCoverageCfg(**dict(protocol_payload["coverage"])),
+        calibration=GeometryCalibrationCfg(**dict(protocol_payload["calibration"])),
+        validation=GeometryValidationCfg(
+            **{
+                **validation_payload,
+                "selection_metrics": tuple(validation_payload["selection_metrics"]),
+                "final_ablations": tuple(validation_payload["final_ablations"]),
+            }
+        ),
+        reproducibility=GeometryReproducibilityCfg(
+            **{
+                **reproducibility_payload,
+                "seed_domains": tuple(reproducibility_payload["seed_domains"]),
+            }
+        ),
+        run_safety_step_limit=int(protocol_payload["run_safety_step_limit"]),
+    )
     return GeometrySSLExperimentCfg(  # 构造顺序触发全部子配置验证
         schema_version=str(payload["schema_version"]),  # 实验 schema
         assets=assets,  # split 路径
-        materialization=GeometryAssetMaterializationCfg(**dict(payload["materialization"])),  # CPU cache
-        query=SpatialQuerySamplerCfg(**dict(payload["query"])),  # 50/25/25
-        target=GeometryFieldTargetCfg(**target_payload),  # $d/\\rho/\\kappa/g$
-        padding=GeometryPaddingCfg(**dict(payload["padding"])),  # 20/5/26
-        model=GeometrySSLModelConfig(**model_payload),  # encoder+decoder
-        objective=GeometrySSLWeights(**dict(payload["objective"])),  # 六项权重
-        optimizer=GeometrySSLOptimizerCfg(**dict(payload["optimizer"])),  # AdamW
-        train=GeometrySSLTrainLoopCfg(**dict(payload["train"])),  # loop/logging
+        representation=representation,  # source/field/query/target/layout
+        model=model,  # encoder+SSL-only readers
+        objective=GeometryFieldObjectiveCfg(**dict(payload["objective"])),  # 六项权重
+        protocol=protocol,  # coverage/calibration/validation/reproducibility
+        trainer=GeometrySSLTrainerCfg(**dict(payload["trainer"])),  # Hydra preset
+        run=GeometrySSLRunCfg(**dict(payload["run"])),  # output/resume
     )
 
 
@@ -301,10 +456,17 @@ def write_resolved_experiment_files(
 __all__ = [  # SSL 结构化配置公开面
     "GeometrySSLAssetCfg",  # split paths
     "GeometrySSLAssetManifest",  # resolved split evidence
+    "GeometryCalibrationCfg",
+    "GeometryCoverageCfg",
     "GeometrySSLExperimentCfg",  # 根配置
-    "GeometrySSLOptimizerCfg",  # optimizer
-    "GeometrySSLTrainLoopCfg",  # loop
+    "GeometrySSLProtocolCfg",
+    "GeometrySSLRunCfg",
+    "GeometrySSLTrainerCfg",
+    "GeometrySSLTrainingBudget",
+    "GeometryReproducibilityCfg",
+    "GeometryValidationCfg",
     "experiment_config_from_dict",  # Hydra bridge
+    "derive_geometry_ssl_training_budget",
     "resolved_config_dict",  # checkpoint/YAML bridge
     "write_resolved_experiment_files",  # run artifacts
 ]

@@ -29,10 +29,10 @@ from torch import nn  # 模型组装基类
 from .decoders.representations.implicit_field import (  # SSL-only readers
     ConditionalDensityDecoder,  # $\hat\rho_{g,\ell}(x;q)$
     DistanceSensitivityDecoder,  # $\hat\kappa_{g,i}(x;q)$
-    ImplicitFieldDecoderConfig,  # 两头共享宽度合同
+    GeometrySSLDecoderCfg,  # 两个训练期 readers 的公开容量配置
 )
 from .input_adapters.geometry import (  # 部署期 retained 路径
-    GeometryEncoderConfig,  # adapter/backbone/head 容量
+    GeometryEncoderCfg,  # frontend/backbone/latent heads
     GeometryLatents,  # $Z^{(0)},Z^{(1)}$
     ImplicitGeometryEncoder,  # task-free hand conditioning encoder
     StaticGeometryEvidence,  # anchors/home/screws/graph/masks
@@ -40,39 +40,15 @@ from .input_adapters.geometry import (  # 部署期 retained 路径
 
 
 @dataclass(frozen=True)
-class GeometrySSLModelConfig:
+class GeometrySSLModelCfg:
     r"""retained encoder 与 disposable decoder 的显式组装配置。
 
     decoder 输入宽度只从 encoder 输出类型派生，禁止训练配置单独复制 $D_0/D_1/D_q$ 后发生漂移。
     sigma 数量属于 target 的动态采样轴；model 只保存对数比例的参考长度，不保存固定输出通道数。
     """
 
-    encoder: GeometryEncoderConfig = field(default_factory=GeometryEncoderConfig)  # retained 容量
-    decoder_hidden_width: int = 128  # training-only FiLM/κ reader 宽度
-    decoder_residual_blocks: int = 3  # density FiLM residual blocks
-    sigma_reference_m: float = 0.016  # $\log(\sigma/\sigma_{ref})$ 的 16 mm 参考尺度
-
-    def __post_init__(self) -> None:
-        r"""拒绝退化 decoder 容量、零 residual block 与空带宽轴。"""
-
-        if self.decoder_hidden_width < 1 or self.decoder_residual_blocks < 1 or self.sigma_reference_m <= 0.0:
-            raise ValueError("decoder width, residual blocks and sigma reference must be positive")
-
-    def decoder_config(self) -> ImplicitFieldDecoderConfig:
-        r"""从 retained 类型宽度派生唯一 decoder 输入合同。
-
-        Returns:
-            ImplicitFieldDecoderConfig: $D_0,D_1,D_q,L$ 与 encoder/target 同轴的 SSL-only 配置。
-        """
-
-        return ImplicitFieldDecoderConfig(  # 不允许 caller 覆盖派生宽度
-            zero_order_width=self.encoder.zero_order_width,  # $D_0$
-            first_order_width=self.encoder.first_order_width,  # $D_1$
-            query_width=self.encoder.relation_width,  # $D_q$
-            hidden_width=self.decoder_hidden_width,  # disposable 内部宽度
-            sigma_reference_m=self.sigma_reference_m,  # 显式 sigma 的无量纲 log-ratio reference
-            residual_blocks=self.decoder_residual_blocks,  # density FiLM 深度
-        )
+    encoder: GeometryEncoderCfg = field(default_factory=GeometryEncoderCfg)  # retained 参数与输出类型
+    ssl_decoders: GeometrySSLDecoderCfg = field(default_factory=GeometrySSLDecoderCfg)  # disposable readers
 
 
 @dataclass(frozen=True)
@@ -96,19 +72,30 @@ class GeometrySSLModel(nn.Module):
     对物理 q 的 Sobolev 导数沿 ``encoder -> density_decoder`` 同一图计算；query 采样路径停止梯度。
     """
 
-    def __init__(self, config: GeometrySSLModelConfig = GeometrySSLModelConfig()) -> None:
+    def __init__(self, config: GeometrySSLModelCfg = GeometrySSLModelCfg()) -> None:
         r"""构造 retained encoder 和两个 disposable decoder。
 
         Args:
-            config (GeometrySSLModelConfig): 类型宽度、Transformer 容量与训练期 decoder 容量。
+            config (GeometrySSLModelCfg): retained encoder 与训练期 readers 的显式配置。
         """
 
         super().__init__()  # 注册 PyTorch parameter/module 生命周期
         self.config = config  # resolved config 应随完整 checkpoint 保存
         self.encoder = ImplicitGeometryEncoder(config.encoder)  # SSL 后迁入 PPO
-        decoder_config = config.decoder_config()  # 两个 decoder 共享类型宽度合同
-        self.density_decoder = ConditionalDensityDecoder(decoder_config)  # SSL-only
-        self.sensitivity_decoder = DistanceSensitivityDecoder(decoder_config)  # SSL-only
+        zero_order_width = config.encoder.heads.zero_order_width  # decoder 类型轴只从 encoder 派生
+        first_order_width = config.encoder.heads.first_order_width
+        query_width = config.encoder.frontend.relation_width
+        self.density_decoder = ConditionalDensityDecoder(
+            config.ssl_decoders.density,
+            zero_order_width=zero_order_width,
+            query_width=query_width,
+        )  # SSL-only FiLM density reader
+        self.sensitivity_decoder = DistanceSensitivityDecoder(
+            config.ssl_decoders.sensitivity,
+            zero_order_width=zero_order_width,
+            first_order_width=first_order_width,
+            query_width=query_width,
+        )  # SSL-only unbiased odd sensitivity reader
 
     def forward(
         self,
@@ -201,5 +188,5 @@ class GeometrySSLModel(nn.Module):
 __all__ = [  # 模型层稳定公开面
     "GeometrySSLForward",  # typed prediction
     "GeometrySSLModel",  # retained+disposable assembly
-    "GeometrySSLModelConfig",  # assembly config
+    "GeometrySSLModelCfg",  # assembly config
 ]

@@ -12,14 +12,14 @@ from anymani.distill.representations.queries.spatial_sampling import (
     materialize_owner_surface_sampling_cache,
     sample_spatial_queries,
 )
-from anymani.distill.representations.targets.geometry_field import generate_geometry_field_targets
-from anymani.distill.representations.targets.warp_surface import query_owner_surfaces_warp
-from anymani.robots.geometry_kinematics import forward_owner_transforms, lower_hand_geometry_semantics
-from anymani.robots.owner_geometry import (
+from anymani.distill.representations.sources.collision_geometry import (
     materialize_owner_geometry_cache,
     materialize_warp_owner_geometry_cache,
     sample_palm_anchor_supports,
 )
+from anymani.distill.representations.sources.kinematics import forward_owner_transforms, lower_hand_geometry_semantics
+from anymani.distill.representations.targets.geometry_field import generate_geometry_field_targets
+from anymani.distill.representations.targets.warp_surface import query_owner_surfaces_warp
 
 pytestmark = pytest.mark.contract
 

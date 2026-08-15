@@ -47,9 +47,38 @@ NOTE: 图偏置是软先验而不是物理约束。非祖先灵敏度精确为�
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import torch
 from torch import nn
+
+
+@dataclass(frozen=True)
+class GraphBiasedTransformerCfg:
+    r"""全连接整手 Transformer 的容量与离散运动学图偏置配置。
+
+    canonical 数值锚点为 $D=128$、2 个 Pre-LN blocks、4 heads、FFN width 256、dropout 0，
+    图距离统一截断到 8。层数和宽度是待消融容量，不是物理常数；最短路径、parent 与 child
+    三种 bias 则属于当前 backbone 的结构定义。
+    """
+
+    hidden_width: int = 128  # 实体 token 宽度 $D$
+    layers: int = 2  # Pre-LN attention/FFN residual blocks 数
+    attention_heads: int = 4  # 多头数 $H$，每头宽度 $D_h=D/H$
+    feedforward_width: int = 256  # 每层逐实体 FFN 中间宽度
+    dropout: float = 0.0  # retained geometry contract 默认确定性前向
+    max_graph_distance: int = 8  # 最短/父/子关系的末距离桶
+
+    def __post_init__(self) -> None:
+        r"""验证 attention 分头、残差深度与图桶均可形成合法网络。"""
+
+        widths = (self.hidden_width, self.layers, self.attention_heads, self.feedforward_width)
+        if any(value < 1 for value in widths) or self.max_graph_distance < 1:  # 空主干/空桶无物理意义
+            raise ValueError("graph-biased transformer widths/layers/distance must be positive")
+        if self.hidden_width % self.attention_heads:  # $D_h$ 必须为整数
+            raise ValueError("hidden_width must be divisible by attention_heads")
+        if not 0.0 <= self.dropout < 1.0:  # PyTorch Dropout 的概率域
+            raise ValueError("dropout must lie in [0,1)")
 
 
 class _GraphTransformerLayer(nn.Module):
@@ -156,41 +185,34 @@ class GraphBiasedTransformer(nn.Module):
 
     def __init__(
         self,
-        *,
-        hidden_width: int,
-        layers: int,
-        attention_heads: int,
-        feedforward_width: int,
-        dropout: float,
-        max_graph_distance: int,
+        config: GraphBiasedTransformerCfg,
     ) -> None:
         r"""构造图关系嵌入与若干整手自注意力层。
 
         Args:
-            hidden_width (int): 实体表征宽度 $D$。
-            layers (int): 前置 LayerNorm Transformer 层数。
-            attention_heads (int): 注意力头数 $H$。
-            feedforward_width (int): 逐实体前馈网络宽度。
-            dropout (float): 随机失活概率；几何合同默认 0。
-            max_graph_distance (int): 最远图距离桶，所有更大距离截断到该值。
+            config (GraphBiasedTransformerCfg): 实体宽度、层数、多头、FFN、dropout 与图桶。
 
         每种图关系为每个注意力头维护独立标量嵌入；参数量为
         $3(max\_distance+1)H$，不随实体数或手指数增长。
         """
 
         super().__init__()
-        if layers <= 0:
-            raise ValueError("GraphBiasedTransformer requires at least one layer")
-        self.max_graph_distance = max_graph_distance  # 超过该值的图距离统一落入末桶
-        bucket_count = max_graph_distance + 1  # 包含 0/self 与截断后的最远桶
-        self.shortest_path_bias = nn.Embedding(bucket_count, attention_heads)  # 无向最短路径偏置
-        self.parent_direction_bias = nn.Embedding(bucket_count, attention_heads)  # parent 方向距离偏置
-        self.child_direction_bias = nn.Embedding(bucket_count, attention_heads)  # child 方向距离偏置
+        self.config = config  # checkpoint 外由 resolved experiment 保存完整 architecture contract
+        self.max_graph_distance = config.max_graph_distance  # 超过该值的图距离统一落入末桶
+        bucket_count = config.max_graph_distance + 1  # 包含 0/self 与截断后的最远桶
+        self.shortest_path_bias = nn.Embedding(bucket_count, config.attention_heads)  # 无向最短路径偏置
+        self.parent_direction_bias = nn.Embedding(bucket_count, config.attention_heads)  # parent 方向距离偏置
+        self.child_direction_bias = nn.Embedding(bucket_count, config.attention_heads)  # child 方向距离偏置
         self.layers = nn.ModuleList(
-            _GraphTransformerLayer(hidden_width, attention_heads, feedforward_width, dropout)
-            for _ in range(layers)
+            _GraphTransformerLayer(
+                config.hidden_width,
+                config.attention_heads,
+                config.feedforward_width,
+                config.dropout,
+            )
+            for _ in range(config.layers)
         )
-        self.final_norm = nn.LayerNorm(hidden_width)  # 所有残差块后的最终规范化
+        self.final_norm = nn.LayerNorm(config.hidden_width)  # 所有残差块后的最终规范化
 
     def _graph_bias(
         self,
@@ -252,4 +274,4 @@ class GraphBiasedTransformer(nn.Module):
         return tokens if entity_valid_mask is None else tokens * entity_valid_mask.unsqueeze(-1)
 
 
-__all__ = ["GraphBiasedTransformer"]
+__all__ = ["GraphBiasedTransformer", "GraphBiasedTransformerCfg"]

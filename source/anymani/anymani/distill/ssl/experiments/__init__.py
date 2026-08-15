@@ -5,29 +5,18 @@ r"""Geometry SSL 的声明式实验组合。
 residual family pilot。
 """
 
-from anymani.distill.ssl.config import GeometrySSLExperimentCfg
-
 from .canonical_residual_family import (
     FORMAL_FAMILY,
     FORMAL_MOTHER,
     FORMAL_VARIANT_IDS,
     MOTHER_ASSET_ID,
-    canonical_residual_family_experiment,
+    CanonicalResidualFamilyCfg,
 )
 
-
-def experiment_configs() -> dict[str, GeometrySSLExperimentCfg]:
-    r"""返回 Hydra ConfigStore 使用的完整实验名到 frozen config 映射。"""
-
-    return {
-        "geometry_ssl_canonical_residual_family": canonical_residual_family_experiment(),
-    }
-
 __all__ = [
+    "CanonicalResidualFamilyCfg",
     "FORMAL_FAMILY",
     "FORMAL_MOTHER",
     "FORMAL_VARIANT_IDS",
     "MOTHER_ASSET_ID",
-    "canonical_residual_family_experiment",
-    "experiment_configs",
 ]

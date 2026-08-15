@@ -48,7 +48,7 @@ pre-made `mixed` topology 的装配边界固定为：thumb 与 base palm 共享 
 
 `asset_schema_geometry.py` 定义版本化 `{a}->{h}`、完整 fixed/revolute 链、显式 $q_{home}$、limits、PALM/JOINT/TIP owner、collision component 与 anchor seed。exporter 在 `HandCfg` 真源仍在内存时写入 `hand.yaml.geometry_semantics`；bank 只在 `require_geometry_semantics=True` 时解析，新 generated sidecar 直接读取，旧 generated sidecar 确定性迁移，official 缺人工核验字段时严格拒绝。
 
-`HandBank` 是 tasks 与 distill 共用的资产集合/选择/交付入口。不要让下游重新处理 pre-made 根、post-mutate shared meshes 或 mixed-family 路径，也不要把 robots 的动态 FK/Jacobian 或 distill 的 field/query 放进 bank。
+`HandBank` 是 tasks 与 distill 共用的资产集合/选择/交付入口。不要让下游重新处理 pre-made 根、post-mutate shared meshes 或 mixed-family 路径，也不要把 distill source 的动态 FK/Jacobian 或 field/query 放进 bank。
 
 ### 4. 自包含性
 

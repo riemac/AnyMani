@@ -1,4 +1,4 @@
-"""robots owner-local collision union 与表面采样合同。"""
+"""representation source owner-local collision union 与表面采样合同。"""
 
 from __future__ import annotations
 
@@ -10,8 +10,7 @@ import pytest
 import torch
 import trimesh
 from anymani.assets.bank import HandContainer, HandContainerCfg
-from anymani.robots.geometry_kinematics import lower_hand_geometry_semantics
-from anymani.robots.owner_geometry import (
+from anymani.distill.representations.sources.collision_geometry import (
     GeometryIdentity,
     OwnerGeometryCache,
     OwnerSurfaceRecord,
@@ -26,9 +25,10 @@ from anymani.robots.owner_geometry import (
     strict_owner_union,
     warp_owner_geometry_cache_stats,
 )
+from anymani.distill.representations.sources.kinematics import lower_hand_geometry_semantics
 
 _MOTHER_ROOT = (
-    Path(__file__).resolve().parents[3]
+    Path(__file__).resolve().parents[4]
     / "assets"
     / "generated"
     / "2026-06-10_11-30-08"

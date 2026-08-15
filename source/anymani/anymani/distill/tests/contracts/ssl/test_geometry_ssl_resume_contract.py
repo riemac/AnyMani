@@ -20,8 +20,8 @@ def test_resume_allows_only_run_location_fields_to_change() -> None:
     checkpoint_config = GeometrySSLExperimentCfg()
     current = replace(
         checkpoint_config,
-        train=replace(
-            checkpoint_config.train,
+        run=replace(
+            checkpoint_config.run,
             output_dir="/tmp/new-run-root",
             experiment_name="resumed-run",
             resume_checkpoint="/tmp/source/checkpoints/step_00000003.pt",
@@ -31,7 +31,7 @@ def test_resume_allows_only_run_location_fields_to_change() -> None:
     require_resume_scientific_config(current, resolved_config_dict(checkpoint_config))
 
 
-@pytest.mark.parametrize("section", ["query", "train"])
+@pytest.mark.parametrize("section", ["query", "coverage"])
 def test_resume_rejects_query_or_q_budget_drift(section: str) -> None:
     r"""query 测度或每资产 q coverage 改变都不是同一训练轨迹。"""
 
@@ -39,12 +39,18 @@ def test_resume_rejects_query_or_q_budget_drift(section: str) -> None:
     if section == "query":
         current = replace(
             checkpoint_config,
-            query=replace(checkpoint_config.query, shell_offset_max_m=0.003),
+            representation=replace(
+                checkpoint_config.representation,
+                query=replace(checkpoint_config.representation.query, shell_offset_max_m=0.003),
+            ),
         )
     else:
         current = replace(
             checkpoint_config,
-            train=replace(checkpoint_config.train, q_per_asset_per_epoch=128),
+            protocol=replace(
+                checkpoint_config.protocol,
+                coverage=replace(checkpoint_config.protocol.coverage, q_per_asset_per_epoch=128),
+            ),
         )
 
     with pytest.raises(ValueError, match="resume scientific config mismatch"):

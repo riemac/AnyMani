@@ -18,7 +18,7 @@ from __future__ import annotations
 import os  # cuBLAS deterministic workspace 必须在首次 CUDA 运算前声明
 import shutil  # resume 时继承源 run 的 immutable historical best
 import subprocess  # Git revision 只读查询
-from dataclasses import asdict, replace  # manifest metadata 与 calibrated config 冻结
+from dataclasses import asdict  # manifest metadata 与 calibrated evidence 冻结
 from datetime import UTC, datetime  # run directory 使用 UTC 绝对时间
 from importlib.metadata import PackageNotFoundError, version  # installed/editable 包版本证据
 from pathlib import Path  # run/checkpoint/evidence 路径
@@ -32,11 +32,16 @@ from anymani.distill.diagnostics.analysis.geometry_ssl import write_geometry_ssl
 from anymani.distill.diagnostics.recording.geometry_ssl import GeometrySSLRunLogger
 from anymani.distill.models.geometry_ssl import GeometrySSLForward, GeometrySSLModel
 from anymani.distill.objectives.representations.field_reconstruction import (
-    GeometrySSLObjective,
-    GeometrySSLTerms,
-    GeometrySSLWeights,
+    GeometryFieldObjective,
+    GeometryFieldObjectiveCfg,
+    GeometryFieldObjectiveTerms,
 )
-from anymani.distill.representations.targets.geometry_field import fixed_validation_geometry_field_config
+from anymani.distill.representations.geometry import (
+    GeometryRepresentation,
+    GeometryRepresentationCfg,
+    PaddedOnlineGeometryBatch,
+)
+from anymani.distill.representations.targets.geometry_field import fixed_validation_gaussian_field_config
 from anymani.distill.ssl.calibration import calibrate_geometry_ssl_weights
 from anymani.distill.ssl.checkpoint import (
     GeometrySSLCheckpointMetadata,
@@ -45,7 +50,6 @@ from anymani.distill.ssl.checkpoint import (
     save_geometry_ssl_checkpoint,
 )
 from anymani.distill.ssl.config import GeometrySSLExperimentCfg, resolved_config_dict, write_resolved_experiment_files
-from anymani.distill.ssl.dataset import PaddedOnlineGeometryBatch, move_geometry_asset_to_device
 from anymani.distill.ssl.runtime import (
     GeometrySSLRuntimeCfg,
     ResidentGeometryAssetWindow,
@@ -115,7 +119,7 @@ def _package_version() -> str:
         return "editable-unknown"
 
 
-def run_geometry_ssl_pretraining(
+def _run_geometry_ssl_lifecycle(
     config: GeometrySSLExperimentCfg,
     *,
     output_dir_override: Path | None = None,
@@ -144,18 +148,18 @@ def run_geometry_ssl_pretraining(
     # 运行前先冻结可复现性与设备合同；online Warp teacher 不提供 CPU fallback。
     if not config.assets.family_paths and not config.assets.train_paths:
         raise ValueError("geometry SSL requires family_paths or at least one generated train asset path")
-    if config.train.deterministic_algorithms:
+    if config.protocol.reproducibility.deterministic_algorithms:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)  # 无确定 CUDA kernel 时 fail-closed
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
     else:
         torch.use_deterministic_algorithms(False)
-    torch.manual_seed(config.train.seed)  # model 初始化与 PyTorch 路径复现锚点
-    device = torch.device(config.train.device)
+    torch.manual_seed(config.protocol.reproducibility.seed)  # model 初始化与 PyTorch 路径复现锚点
+    device = torch.device(config.trainer.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError(f"configured CUDA device is unavailable: {device}")
-    dtype = _torch_dtype(config.train.dtype)
+    dtype = _torch_dtype(config.trainer.dtype)
 
     # 解析 generated physical split 与隔离 official identity，先写 manifest 再初始化 GPU/runtime。
     train_runtime, validation_runtime, grouped_split = resolve_generated_runtime_splits(config)
@@ -168,42 +172,52 @@ def run_geometry_ssl_pretraining(
         grouped_split=grouped_split,
     )
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    output_dir = output_dir_override or Path(config.train.output_dir) / config.train.experiment_name / timestamp
+    output_dir = output_dir_override or Path(config.run.output_dir) / config.run.experiment_name / timestamp
     write_resolved_experiment_files(output_dir, config=config, manifest=manifest)
 
     # 训练 runtime 只持有有界 resident window；epoch 由每资产 Sobol q coverage 定义。
+    representation = GeometryRepresentation(
+        GeometryRepresentationCfg(
+            source=config.representation.source,
+            field=config.representation.field,
+            query=config.representation.query,
+            target=config.representation.target,
+            layout=config.representation.layout,
+        )
+    )  # source/query/target/layout 的唯一 runtime consumer
     runtime_config = GeometrySSLRuntimeCfg(
-        max_resident_assets=config.train.max_resident_assets,
-        assets_per_microbatch=config.train.assets_per_microbatch,
-        q_per_asset_per_microbatch=config.train.q_per_asset_per_microbatch,
-        q_per_asset_per_epoch=config.train.q_per_asset_per_epoch,
-        epochs=config.train.epochs,
+        max_resident_assets=config.trainer.max_resident_assets,
+        assets_per_microbatch=config.trainer.assets_per_microbatch,
+        q_per_asset_per_microbatch=config.protocol.coverage.q_per_asset_per_realization,
+        q_per_asset_per_epoch=config.protocol.coverage.q_per_asset_per_epoch,
+        epochs=config.protocol.coverage.epochs,
     )
     train_window = ResidentGeometryAssetWindow(
         train_runtime,
         device=str(device),
         dtype=dtype,
         max_resident_assets=runtime_config.max_resident_assets,
-        loader=move_geometry_asset_to_device,
+        loader=representation.to_device,
     )
     train_batcher = WindowedOnlineGeometryBatcher(
         train_runtime,
         train_window,
-        seed=config.train.seed,
+        seed=config.protocol.reproducibility.seed,
         runtime_config=runtime_config,
-        query_config=config.query,
-        target_config=config.target,
-        padding=config.padding,
+        field_config=config.representation.field,
+        query_config=config.representation.query,
+        target_config=config.representation.target,
+        padding=config.representation.layout,
     )
     required_steps = (
-        train_batcher.blocks_per_epoch * runtime_config.epochs + config.train.gradient_accumulation_steps - 1
-    ) // config.train.gradient_accumulation_steps
-    if config.train.steps < required_steps:
+        train_batcher.blocks_per_epoch * runtime_config.epochs + config.trainer.gradient_accumulation_steps - 1
+    ) // config.trainer.gradient_accumulation_steps
+    if config.protocol.run_safety_step_limit < required_steps:
         raise ValueError(
-            f"train.steps={config.train.steps} cannot cover configured epochs; "
+            f"run_safety_step_limit={config.protocol.run_safety_step_limit} cannot cover configured epochs; "
             f"required at least {required_steps} optimizer steps for {len(train_runtime)} assets"
         )
-    if train_batcher.blocks_per_epoch % config.train.gradient_accumulation_steps:
+    if train_batcher.blocks_per_epoch % config.trainer.gradient_accumulation_steps:
         raise ValueError("blocks_per_epoch must be divisible by gradient_accumulation_steps")
 
     # Held-out morphology bank 在启动时完整 materialize teacher tensors，随后立即释放 validation BVHs。
@@ -214,7 +228,7 @@ def run_geometry_ssl_pretraining(
             max_resident_assets=runtime_config.max_resident_assets,
             assets_per_microbatch=min(runtime_config.assets_per_microbatch, len(validation_runtime)),
             q_per_asset_per_microbatch=runtime_config.q_per_asset_per_microbatch,
-            q_per_asset_per_epoch=config.train.validation_q_per_asset,
+            q_per_asset_per_epoch=config.protocol.validation.q_per_asset,
             epochs=1,
         )
         validation_window = ResidentGeometryAssetWindow(
@@ -222,16 +236,17 @@ def run_geometry_ssl_pretraining(
             device=str(device),
             dtype=dtype,
             max_resident_assets=validation_runtime_config.max_resident_assets,
-            loader=move_geometry_asset_to_device,
+            loader=representation.to_device,
         )
         validation_batcher = WindowedOnlineGeometryBatcher(
             validation_runtime,
             validation_window,
-            seed=config.train.seed + 1_000_003,
+            seed=config.protocol.reproducibility.seed + 1_000_003,
             runtime_config=validation_runtime_config,
-            query_config=config.query,
-            target_config=fixed_validation_geometry_field_config(config.target),
-            padding=config.padding,
+            field_config=fixed_validation_gaussian_field_config(config.representation.field),
+            query_config=config.representation.query,
+            target_config=config.representation.target,
+            padding=config.representation.layout,
         )
         try:
             validation_batches = validation_batcher.sample_epoch()
@@ -242,8 +257,8 @@ def run_geometry_ssl_pretraining(
     model = GeometrySSLModel(config.model).to(device=device, dtype=dtype)
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=config.optimizer.learning_rate,
-        weight_decay=config.optimizer.weight_decay,
+        lr=config.trainer.learning_rate,
+        weight_decay=config.trainer.weight_decay,
     )
     start_step = 0
     checkpoint_path: Path | None = None
@@ -251,8 +266,8 @@ def run_geometry_ssl_pretraining(
     initial_validation_strata: dict[str, object] | None = None
     best_validation_score = float("inf")
     selection_history: list[dict[str, object]] = []
-    if config.train.resume_checkpoint:
-        checkpoint_path = Path(config.train.resume_checkpoint).expanduser().resolve()
+    if config.run.resume_checkpoint:
+        checkpoint_path = Path(config.run.resume_checkpoint).expanduser().resolve()
         start_step, loaded_metadata = load_geometry_ssl_checkpoint(
             checkpoint_path,
             model=model,
@@ -262,12 +277,13 @@ def run_geometry_ssl_pretraining(
         runtime_payload = load_geometry_ssl_runtime_state(checkpoint_path, map_location="cpu")
         train_batcher.load_state_dict(runtime_state_from_dict(runtime_payload))
         resolved_checkpoint = loaded_metadata.get("resolved_config")
-        if not isinstance(resolved_checkpoint, dict) or not isinstance(resolved_checkpoint.get("objective"), dict):
-            raise ValueError("resume checkpoint lacks resolved objective weights")
+        calibrated_objective = loaded_metadata.get("calibrated_objective")
+        if not isinstance(resolved_checkpoint, dict) or not isinstance(calibrated_objective, dict):
+            raise ValueError("resume checkpoint lacks resolved config or calibrated objective evidence")
         if loaded_metadata.get("asset_manifest") != asdict(manifest):
             raise ValueError("resume asset manifest does not match current resolved physical split")
         require_resume_scientific_config(config, resolved_checkpoint)
-        calibrated_weights = GeometrySSLWeights(**resolved_checkpoint["objective"])
+        calibrated_weights = GeometryFieldObjectiveCfg(**calibrated_objective)
         (
             initial_validation_metrics,
             initial_validation_strata,
@@ -286,10 +302,12 @@ def run_geometry_ssl_pretraining(
     else:
         calibration_state = train_batcher.state_dict()  # calibration 不消费正式 q coverage
         try:
-            calibration_batches = tuple(train_batcher.sample() for _ in range(config.train.calibration_batches))
+            calibration_batches = tuple(
+                train_batcher.sample() for _ in range(config.protocol.calibration.batches)
+            )
             calibrated_weights = calibrate_geometry_ssl_weights(
                 model,
-                GeometrySSLObjective,
+                GeometryFieldObjective,
                 calibration_batches,
                 lambda calibration_model, calibration_objective, calibration_batch: forward_objective(
                     calibration_model,
@@ -298,8 +316,8 @@ def run_geometry_ssl_pretraining(
                     pair_step=0,
                 )[1],
                 output_path=output_dir / "loss_calibration.yaml",
-                min_weight=config.train.calibration_min_weight,
-                max_weight=config.train.calibration_max_weight,
+                min_weight=config.protocol.calibration.min_weight,
+                max_weight=config.protocol.calibration.max_weight,
             )
             train_batcher.load_state_dict(calibration_state)
             del calibration_batches
@@ -307,23 +325,22 @@ def run_geometry_ssl_pretraining(
         finally:
             train_window.release_all()  # calibration 成败都不把临时 resident BVH 带到正式训练生命周期
 
-    # Calibration 后 config/metadata 才是 checkpoint 与 downstream transfer 的最终事实源。
-    config = replace(config, objective=calibrated_weights)
-    write_resolved_experiment_files(output_dir, config=config, manifest=manifest)
-    objective = GeometrySSLObjective(config.objective)
+    # Declared objective 保持不变；校准结果作为 runtime evidence 独立进入 artifact/checkpoint。
+    objective = GeometryFieldObjective(calibrated_weights)
     metadata = GeometrySSLCheckpointMetadata(
         code_revision=_code_revision(),
         package_version=_package_version(),
         geometry_semantics_schema=SEMANTICS_SCHEMA_VERSION,
         asset_manifest=asdict(manifest),
         resolved_config=resolved_config_dict(config),
+        calibrated_objective=asdict(calibrated_weights),
     )
     logger = GeometrySSLRunLogger(output_dir)
     for event in validation_window.drain_telemetry_events() if validation_window is not None else ():
         logger.log_runtime_event({**event, "phase": "fixed_held_out_morphology_bank"})
     for event in train_window.drain_telemetry_events():
         logger.log_runtime_event(
-            {**event, "phase": "resume" if config.train.resume_checkpoint else "loss_calibration"}
+            {**event, "phase": "resume" if config.run.resume_checkpoint else "loss_calibration"}
         )
 
     # Training-morphology independent-q bank 的 initialization evidence 在中断前即可审计。
@@ -347,9 +364,9 @@ def run_geometry_ssl_pretraining(
             raise ValueError("resume source training morphology q bank lacks initial evidence")
         initial_training_q_bank = source_q_bank["initial"]
         if (
-            initial_training_q_bank.get("seed") != config.train.seed + 3_000_003
+            initial_training_q_bank.get("seed") != config.protocol.reproducibility.seed + 3_000_003
             or initial_training_q_bank.get("asset_count") != len(train_runtime)
-            or initial_training_q_bank.get("q_per_asset") != config.train.validation_q_per_asset
+            or initial_training_q_bank.get("q_per_asset") != config.protocol.validation.q_per_asset
         ):
             raise ValueError("resume source training morphology q bank does not match resolved experiment")
     training_q_bank_path.write_text(
@@ -386,8 +403,8 @@ def run_geometry_ssl_pretraining(
         step = start_step
         while train_batcher.epoch < runtime_config.epochs:
             step += 1
-            if step > config.train.steps:
-                raise RuntimeError("configured train.steps exhausted before runtime epochs completed")
+            if step > config.protocol.run_safety_step_limit:
+                raise RuntimeError("run_safety_step_limit exhausted before configured coverage epochs completed")
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
                 torch.cuda.reset_peak_memory_stats(device)
@@ -398,7 +415,7 @@ def run_geometry_ssl_pretraining(
 
             # 先取得本 optimizer step 的全部 masks，再按 global denominator 逐 microbatch backward。
             accumulated_batches = tuple(
-                train_batcher.sample() for _ in range(config.train.gradient_accumulation_steps)
+                train_batcher.sample() for _ in range(config.trainer.gradient_accumulation_steps)
             )
             denominator_components = tuple(
                 objective_denominators_from_batch(batch, model) for batch in accumulated_batches
@@ -428,7 +445,7 @@ def run_geometry_ssl_pretraining(
                     model,
                     objective,
                     batch,
-                    pair_step=(step - 1) * config.train.gradient_accumulation_steps + accumulation_index,
+                    pair_step=(step - 1) * config.trainer.gradient_accumulation_steps + accumulation_index,
                 )
                 accumulated_objective(
                     terms,
@@ -439,7 +456,7 @@ def run_geometry_ssl_pretraining(
                 q_sample_count += len(batch.asset_ids)
                 last_batch, last_prediction = batch, prediction
 
-            gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.optimizer.max_gradient_norm)
+            gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.trainer.max_gradient_norm)
             if not torch.isfinite(gradient_norm):
                 raise FloatingPointError(f"non-finite gradient norm at step={step}: {float(gradient_norm)}")
             optimizer.step()
@@ -473,7 +490,7 @@ def run_geometry_ssl_pretraining(
             for event in train_window.drain_telemetry_events():
                 logger.log_runtime_event({**event, "phase": "training", "step": step})
 
-            if step % config.train.log_every_steps == 0 or step == 1:
+            if step % config.trainer.log_every_updates == 0 or step == 1:
                 logger.log_terms(
                     step=step,
                     split="train",
@@ -485,10 +502,11 @@ def run_geometry_ssl_pretraining(
 
             # Held-out morphology 只使用启动时固定 bank；score 由 morphology/bin/axis/metric 四级等权聚合。
             if validation_batches and (
-                step % config.train.validation_every_steps == 0 or train_batcher.epoch == runtime_config.epochs
+                step % config.protocol.validation.every_optimizer_updates == 0
+                or train_batcher.epoch == runtime_config.epochs
             ):
                 model.eval()
-                validation_term_blocks: list[GeometrySSLTerms] = []
+                validation_term_blocks: list[GeometryFieldObjectiveTerms] = []
                 validation_prediction_blocks: list[GeometrySSLForward] = []
                 for validation_index, validation_batch in enumerate(validation_batches):
                     validation_prediction, validation_terms = forward_objective(
@@ -550,7 +568,7 @@ def run_geometry_ssl_pretraining(
                     publish_best_checkpoint(output_dir / "checkpoints" / "best.pt", immutable_best_path)
                 del validation_term_blocks, validation_prediction_blocks
 
-            if step % config.train.checkpoint_every_steps == 0 or train_batcher.epoch == runtime_config.epochs:
+            if step % config.trainer.checkpoint_every_updates == 0 or train_batcher.epoch == runtime_config.epochs:
                 save_geometry_ssl_checkpoint(
                     output_dir / "checkpoints" / f"step_{step:08d}.pt",
                     model=model,
@@ -577,8 +595,8 @@ def run_geometry_ssl_pretraining(
             write_geometry_ssl_ablation_analysis(
                 ablation_path,
                 output_dir / "validation_ablation_analysis.yaml",
-                bootstrap_samples=2_000,
-                seed=config.train.seed + 2_000_003,
+                bootstrap_samples=config.protocol.validation.bootstrap_replicates,
+                seed=config.protocol.reproducibility.seed + 2_000_003,
             )
 
         final_training_q_bank = stream_training_morphology_q_bank(
@@ -649,4 +667,4 @@ def run_geometry_ssl_pretraining(
     return output_dir
 
 
-__all__ = ["run_geometry_ssl_pretraining"]
+__all__: list[str] = []

@@ -8,17 +8,17 @@ from types import SimpleNamespace
 import pytest
 import torch
 from anymani.distill.models.input_adapters.geometry import GeometryPaddingCfg, StaticGeometryEvidence
+from anymani.distill.representations.geometry import (
+    OnlineGeometrySample,
+    SobolJointSampler,
+    pad_online_geometry_samples,
+    split_online_geometry_sample,
+)
 from anymani.distill.representations.queries.spatial_sampling import SpatialQueryBatch
 from anymani.distill.representations.targets.field_samples import (
     FieldTargetBatch,
     QueryStratum,
     SensitivityTargetBatch,
-)
-from anymani.distill.ssl.dataset import (
-    OnlineGeometrySample,
-    SobolJointSampler,
-    pad_online_geometry_samples,
-    split_online_geometry_sample,
 )
 from anymani.distill.ssl.runtime import (
     GeometrySSLRuntimeCfg,
@@ -170,10 +170,10 @@ def test_resident_window_evicts_old_asset_and_enforces_cap() -> None:
     released: list[str] = []
 
     def loader(runtime, *, device, dtype):
-        return SimpleNamespace(warp_cache=SimpleNamespace(asset_id=runtime.asset_id))
+        return SimpleNamespace(source=runtime, warp_cache=SimpleNamespace(asset_id=runtime.asset_id))
 
-    def releaser(cache):
-        released.append(cache.asset_id)
+    def releaser(state):
+        released.append(state.warp_cache.asset_id)
         return True
 
     window = ResidentGeometryAssetWindow(
@@ -228,6 +228,7 @@ def test_epoch_scheduler_finishes_each_resident_window_before_switching() -> Non
             q_per_asset_per_epoch=2,
             epochs=1,
         ),
+        field_config=SimpleNamespace(),
         query_config=SimpleNamespace(),
         target_config=SimpleNamespace(),
         padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),

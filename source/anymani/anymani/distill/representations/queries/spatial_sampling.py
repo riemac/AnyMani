@@ -59,7 +59,7 @@ anchors、surface sampling cache 与 online seed 必须逐元素复现，便于�
 
 该模块只产生坐标与 provenance，不产生 field label，也不假设 owner surface 是凸体。凸 hull 只会
 填充真实凹槽，不能作为 workspace/shell/adjacent 的 geometry source。所有 boundary 真值来自
-robots 的严格 owner union，所有动态位姿来自 robots 的 POE lowering。
+source 的严格 owner union，所有动态位姿来自 typed semantics 的 POE lowering。
 """
 
 from __future__ import annotations
@@ -69,8 +69,8 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from anymani.robots.geometry_kinematics import EmbodimentGeometrySpec, forward_owner_transforms
-from anymani.robots.owner_geometry import OwnerGeometryCache
+from anymani.distill.representations.sources.collision_geometry import OwnerGeometryCache
+from anymani.distill.representations.sources.kinematics import EmbodimentGeometrySpec, forward_owner_transforms
 
 from ..targets.field_samples import QueryStratum
 
@@ -204,7 +204,7 @@ def sample_spatial_queries(
 
     Args:
         q (torch.Tensor): ``[B,N_J]`` 当前物理关节角，rad；这里只读取 ``q.detach()`` 生成 query。
-        spec (EmbodimentGeometrySpec): robots lower 的动态运动学规格。
+        spec (EmbodimentGeometrySpec): representations source lower 的动态运动学规格。
         surface_sampling (OwnerSurfaceSamplingCache): GPU owner-local triangle、normal 与 area CDF。
         anchors_hand_m (torch.Tensor): ``[K,3]`` 固定 physical anchors，`{h}`，m。
         config (SpatialQuerySamplerCfg): query 比例和壳层参数。

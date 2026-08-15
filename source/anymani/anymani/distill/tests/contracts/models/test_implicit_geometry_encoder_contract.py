@@ -5,10 +5,13 @@ from dataclasses import fields
 
 import pytest
 import torch
+from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.input_adapters.geometry import (
-    GeometryEncoderConfig,
+    GeometryEncoderCfg,
+    GeometryLatentHeadsCfg,
     GeometryPaddingCfg,
     ImplicitGeometryEncoder,
+    SO2AnchorFrontendCfg,
     StaticGeometryEvidence,
     pad_static_geometry_evidence,
     stack_static_geometry_evidence,
@@ -64,19 +67,23 @@ def _static_evidence(*, dtype: torch.dtype = torch.float64) -> StaticGeometryEvi
 def _encoder() -> ImplicitGeometryEncoder:
     r"""使用小宽度但完整结构的 deterministic contract encoder。"""
 
-    config = GeometryEncoderConfig(
-        relation_width=24,
-        home_width=24,
-        screw_width=16,
-        hidden_width=48,
-        zero_order_width=32,
-        first_order_width=16,
-        transformer_layers=2,
-        attention_heads=4,
-        feedforward_width=96,
-        dropout=0.0,
-        length_scale_m=0.1,
-        max_graph_distance=4,
+    config = GeometryEncoderCfg(
+        frontend=SO2AnchorFrontendCfg(
+            relation_width=24,
+            home_width=24,
+            screw_width=16,
+            role_width=8,
+            length_scale_m=0.1,
+        ),
+        backbone=GraphBiasedTransformerCfg(
+            hidden_width=48,
+            layers=2,
+            attention_heads=4,
+            feedforward_width=96,
+            dropout=0.0,
+            max_graph_distance=4,
+        ),
+        heads=GeometryLatentHeadsCfg(zero_order_width=32, first_order_width=16),
     )
     return ImplicitGeometryEncoder(config).to(dtype=torch.float64)
 

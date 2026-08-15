@@ -1,10 +1,10 @@
-"""robots 纯张量 POE、当前轴线与物质点 Jacobian 合同。"""
+"""representation source 纯张量 POE、当前轴线与物质点 Jacobian 合同。"""
 
 from __future__ import annotations
 
 import pytest
 import torch
-from anymani.robots.geometry_kinematics import (
+from anymani.distill.representations.sources.kinematics import (
     EmbodimentGeometrySpec,
     forward_owner_transforms,
     selected_point_jacobian,

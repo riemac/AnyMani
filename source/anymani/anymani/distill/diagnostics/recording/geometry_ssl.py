@@ -15,8 +15,8 @@ import numpy as np  # dense latent/mask/error 使用压缩 NPZ
 from torch.utils.tensorboard import SummaryWriter  # 在线曲线不替代 JSONL 事实源
 
 from anymani.distill.models.geometry_ssl import GeometrySSLForward  # latent/density/κ 预测包
-from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLTerms  # 六项损失包
-from anymani.distill.ssl.dataset import PaddedOnlineGeometryBatch  # target、mask 与资产身份
+from anymani.distill.objectives.representations.field_reconstruction import GeometryFieldObjectiveTerms  # 六项损失包
+from anymani.distill.representations.geometry import PaddedOnlineGeometryBatch  # target、mask 与资产身份
 
 
 class GeometrySSLRunLogger:
@@ -70,7 +70,7 @@ class GeometrySSLRunLogger:
         *,
         step: int,  # optimizer step，从 1 开始
         split: str,  # `train` 或 `validation`
-        terms: GeometrySSLTerms,  # 当前 batch 的六项标量损失
+        terms: GeometryFieldObjectiveTerms,  # 当前 batch 的六项标量损失
         asset_ids: tuple[str, ...],  # `[B]` 路由身份
         gradient_norm: float | None = None,  # train-only clip 前总范数
         batch: PaddedOnlineGeometryBatch | None = None,  # q cursor provenance

@@ -1,4 +1,4 @@
-"""真实 mother cache -> Warp teacher -> SSL model -> 五项目标 -> backward 集成合同。"""
+"""真实 mother cache -> Warp teacher -> SSL model -> 六项目标 -> backward 集成合同。"""
 
 from __future__ import annotations
 
@@ -7,22 +7,36 @@ from pathlib import Path
 import pytest
 import torch
 from anymani.assets.bank import HandContainer, HandContainerCfg
-from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelConfig
-from anymani.distill.models.input_adapters.geometry import GeometryEncoderConfig, build_static_geometry_evidence
-from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLObjective, GeometrySSLWeights
+from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
+from anymani.distill.models.decoders.representations.implicit_field import (
+    DistanceSensitivityDecoderCfg,
+    GeometrySSLDecoderCfg,
+    ScalarSigmaFiLMDensityDecoderCfg,
+)
+from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelCfg
+from anymani.distill.models.input_adapters.geometry import (
+    GeometryEncoderCfg,
+    GeometryLatentHeadsCfg,
+    SO2AnchorFrontendCfg,
+    build_static_geometry_evidence,
+)
+from anymani.distill.objectives.representations.field_reconstruction import (
+    GeometryFieldObjective,
+    GeometryFieldObjectiveCfg,
+)
 from anymani.distill.representations.queries.spatial_sampling import (
     SpatialQuerySamplerCfg,
     materialize_owner_surface_sampling_cache,
     sample_spatial_queries,
 )
-from anymani.distill.representations.targets.geometry_field import generate_geometry_field_targets
-from anymani.robots.geometry_kinematics import lower_hand_geometry_semantics
-from anymani.robots.owner_geometry import (
+from anymani.distill.representations.sources.collision_geometry import (
     materialize_owner_geometry_cache,
     materialize_warp_owner_geometry_cache,
     sample_owner_home_surfaces,
     sample_palm_anchor_supports,
 )
+from anymani.distill.representations.sources.kinematics import lower_hand_geometry_semantics
+from anymani.distill.representations.targets.geometry_field import generate_geometry_field_targets
 
 pytestmark = pytest.mark.contract
 
@@ -30,7 +44,7 @@ _MOTHER_ROOT = (
     Path(__file__).resolve().parents[3]
     / "assets"
     / "generated"
-    / "2026-06-10_11-30-08"
+    / "2026-08-12_18-16-48"
     / "single_palm_leap"
     / "right_t4_i4_m4_r4"
 )
@@ -94,24 +108,25 @@ def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
         edge_sampling_seed=71,
     )
 
-    encoder_config = GeometryEncoderConfig(
-        relation_width=16,
-        home_width=16,
-        screw_width=12,
-        hidden_width=32,
-        zero_order_width=24,
-        first_order_width=12,
-        transformer_layers=1,
-        attention_heads=4,
-        feedforward_width=64,
-        dropout=0.0,
-        max_graph_distance=8,
+    encoder_config = GeometryEncoderCfg(
+        frontend=SO2AnchorFrontendCfg(relation_width=16, home_width=16, screw_width=12),
+        backbone=GraphBiasedTransformerCfg(
+            hidden_width=32,
+            layers=1,
+            attention_heads=4,
+            feedforward_width=64,
+            dropout=0.0,
+            max_graph_distance=8,
+        ),
+        heads=GeometryLatentHeadsCfg(zero_order_width=24, first_order_width=12),
     )
     model = GeometrySSLModel(
-        GeometrySSLModelConfig(
+        GeometrySSLModelCfg(
             encoder=encoder_config,
-            decoder_hidden_width=32,
-            decoder_residual_blocks=2,
+            ssl_decoders=GeometrySSLDecoderCfg(
+                density=ScalarSigmaFiLMDensityDecoderCfg(hidden_width=32, residual_blocks=2),
+                sensitivity=DistanceSensitivityDecoderCfg(coefficient_hidden_width=32),
+            ),
         )
     ).to(device="cuda:0", dtype=torch.float32)
     prediction = model(
@@ -123,7 +138,7 @@ def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
         sensitivity_targets.query_index,
         sensitivity_targets.joint_index,
     )
-    terms = GeometrySSLObjective(GeometrySSLWeights())(
+    terms = GeometryFieldObjective(GeometryFieldObjectiveCfg())(
         q=q,
         density_prediction=prediction.density,
         kappa_prediction=prediction.kappa,

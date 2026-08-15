@@ -6,9 +6,19 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelConfig
-from anymani.distill.models.input_adapters.geometry import GeometryEncoderConfig
-from anymani.distill.objectives.representations.field_reconstruction import GeometrySSLObjective
+from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
+from anymani.distill.models.decoders.representations.implicit_field import (
+    DistanceSensitivityDecoderCfg,
+    GeometrySSLDecoderCfg,
+    ScalarSigmaFiLMDensityDecoderCfg,
+)
+from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelCfg
+from anymani.distill.models.input_adapters.geometry import (
+    GeometryEncoderCfg,
+    GeometryLatentHeadsCfg,
+    SO2AnchorFrontendCfg,
+)
+from anymani.distill.objectives.representations.field_reconstruction import GeometryFieldObjective
 from anymani.distill.ssl.calibration import calibrate_geometry_ssl_weights
 
 
@@ -16,21 +26,22 @@ def test_calibration_uses_density_as_reference_and_writes_frozen_clipped_weights
     """固定 synthetic terms 的梯度量级应产生可审计 median、reference 与裁剪权重。"""
 
     model = GeometrySSLModel(
-        GeometrySSLModelConfig(
-            encoder=GeometryEncoderConfig(
-                relation_width=8,
-                home_width=8,
-                screw_width=8,
-                hidden_width=16,
-                zero_order_width=8,
-                first_order_width=4,
-                transformer_layers=1,
-                attention_heads=4,
-                feedforward_width=24,
-                dropout=0.0,
+        GeometrySSLModelCfg(
+            encoder=GeometryEncoderCfg(
+                frontend=SO2AnchorFrontendCfg(relation_width=8, home_width=8, screw_width=8),
+                backbone=GraphBiasedTransformerCfg(
+                    hidden_width=16,
+                    layers=1,
+                    attention_heads=4,
+                    feedforward_width=24,
+                    dropout=0.0,
+                ),
+                heads=GeometryLatentHeadsCfg(zero_order_width=8, first_order_width=4),
             ),
-            decoder_hidden_width=8,
-            decoder_residual_blocks=1,
+            ssl_decoders=GeometrySSLDecoderCfg(
+                density=ScalarSigmaFiLMDensityDecoderCfg(hidden_width=8, residual_blocks=1),
+                sensitivity=DistanceSensitivityDecoderCfg(coefficient_hidden_width=8),
+            ),
         )
     )
     parameter = model.encoder.screw_projection.weight
@@ -50,7 +61,7 @@ def test_calibration_uses_density_as_reference_and_writes_frozen_clipped_weights
     path = tmp_path / "loss_calibration.yaml"
     weights = calibrate_geometry_ssl_weights(
         model,
-        GeometrySSLObjective,
+        GeometryFieldObjective,
         batches,
         forward_terms,
         output_path=path,

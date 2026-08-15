@@ -16,8 +16,8 @@ from anymani.distill.representations.targets.field_samples import (
     SensitivityTargetBatch,
 )
 from anymani.distill.representations.targets.geometry_field import (
-    GeometryFieldTargetCfg,
-    fixed_validation_geometry_field_config,
+    GaussianProximityFieldCfg,
+    fixed_validation_gaussian_field_config,
     sample_geometry_bandwidths,
 )
 
@@ -63,7 +63,7 @@ def test_multiband_density_and_field_sensitivity_obey_chain_and_scale_laws() -> 
 def test_log_uniform_sigma_sampling_is_bounded_shared_and_reproducible() -> None:
     """同资产 q 子批次共享 4/16/64 mm 的 log-space ±10% realization。"""
 
-    config = GeometryFieldTargetCfg(
+    config = GaussianProximityFieldCfg(
         bandwidth_centers_m=(0.004, 0.016, 0.064),
         bandwidth_jitter_relative=0.10,
     )
@@ -89,7 +89,7 @@ def test_log_uniform_sigma_sampling_is_bounded_shared_and_reproducible() -> None
     assert torch.all(sampled[0] >= 0.9 * centers)
     assert torch.all(sampled[0] <= 1.1 * centers)
 
-    validation_config = fixed_validation_geometry_field_config(config)
+    validation_config = fixed_validation_gaussian_field_config(config)
     validation_sigma = sample_geometry_bandwidths(
         validation_config,
         batch_size=3,

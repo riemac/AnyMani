@@ -1,109 +1,81 @@
 # Self-Supervised Geometry Pretraining
 
-`ssl` 是可运行的 task-free physical-representation pretraining stage。它组合 assets/robots 提供的静态手型与运动学、在线 Warp target、retained geometry encoder、SSL-only decoder 和六项联合目标；不拥有资产生成、Isaac Lab MDP、PPO update 或 policy action semantics。
+策略监督把几何、接触和任务目标纠缠在同一回报中，很难判断网络究竟学会了手的物理结构，还是只记住了某个任务与某种手型的统计捷径。Geometry SSL 因而先提出一个更窄的命题：不启动环境、不观察物体，只凭当前关节构型与静态手型证据，能否恢复整只手的局部空间占据及其对关节运动的一阶响应？
 
-## 运行入口
+## 学习问题
 
-在仓库根目录激活 AnyMani/Isaac Lab Python 环境后运行；该进程不启动 Isaac Sim：
+每项手资产被表示为 PALM、JOINT 与 TIP owners 的有序集合。对 owner $g$、固定 hand-frame query $x$ 和当前构型 $q$，teacher 从真实碰撞表面计算 unsigned distance $d_g(x;q)$。训练场不是离散 occupancy class，而是由物理尺度 $\sigma$ 参数化的连续邻近函数：
+
+$$
+\rho_{\sigma,g}(x;q)=\exp\!\left[-\frac{d_g(x;q)^2}{2\sigma^2}\right].
+$$
+
+其构型导数由距离灵敏度
+
+$$
+\kappa_{g,i}(x;q)=\frac{\partial d_g(x;q)}{\partial q_i}
+$$
+
+和链式法则共同决定：
+
+$$
+g_{\sigma,g,i}(x;q)
+=\frac{\partial\rho_{\sigma,g}}{\partial q_i}
+=-\frac{d_g}{\sigma^2}\rho_{\sigma,g}\kappa_{g,i}.
+$$
+
+$d$ 与 $\kappa$ 的单位分别为 m 与 m/rad，$\rho$ 无量纲，$g$ 的单位为 rad$^{-1}$。保留这些单位使模型能区分真实几何尺度；它不会把每只手独立归一化到相同大小。
+
+## 在线构造监督
+
+`GeometrySource` 先从资产 sidecar 的 typed semantics 构造 q-independent physical oracle：float64 POE 规格、owner ancestry、严格 collision union、boundary-only home points、palm-seed anchors、physical identity 与可显式释放的 Warp BVH。它不包含当前 q、query 或 label。
+
+训练时，每项资产拥有独立 scrambled Sobol 序列。对每个 q realization，`GeometryRepresentation` 在线生成三种互补 query：一半来自固定 physical anchors 周围的 5 cm 工作空间球，四分之一来自 current owner surface 两侧 0.5--4 mm 壳层，四分之一来自运动学图相邻 owners 之间的局部间隙。三种来源只改变采样测度，不作为 decoder 输入。
+
+每个 owner 使用 64 个 query。训练 sigma centers 为 4、16、64 mm，并作 log-space ±10% jitter；同一资产的两项 q 共享一次实际 sigma realization。validation 则固定使用 4、8、16、32、64 mm。Warp teacher 返回距离、closest-source provenance 与局部三角面 margin；$\kappa$ 只在 sampled owner-query-JOINT edges 上物化，非祖先边保留为精确结构零。UDF 在 $d\approx0$ 或最近源切换处不可微，这些位置通过显式 mask 排除一阶损失，但仍保留零阶 density 与诊断记录。
+
+## 表示与读取器
+
+retained encoder 的输入只有当前物理 q 与静态 evidence。多锚点前端把 home surface points 与空间旋量都表达成相对完整 anchor constellation 的关系，并对 anchor permutation 聚合；hand frame 绕 palm normal 的面内旋转被视为 $SO(2)$ gauge，而 reflection 被保留为物理差异。
+
+这些 owner tokens 进入两层、四头、hidden width 128 的 encoder-only Transformer。attention 在全部有效 entities 间保持全连接，运动学无向最短路径、parent distance 与 child distance 仅形成每头可学习的加性 bias，不是 hard mask，也不输入 current all-pairs $SE(3)$ 答案。输出 heads 产生逐 owner 的 $Z^{(0)}\in\mathbb R^{128}$ 与逐 JOINT 的 $z_i^{(1)}\in\mathbb R^{64}$；后者由 owner contextual latent 与唯一的 residual screw carrier 共同形成。
+
+训练期 density reader 对每个 `(owner, query, sigma)` 输出一个 scalar。query feature 与 $\log(\sigma/\sigma_{ref})$ 走主路径，owner latent 在三个 residual blocks 的每一层通过
+
+$$
+\widetilde h=(1+\gamma(z_g^{(0)}))\operatorname{LN}(h)+\beta(z_g^{(0)})
+$$
+
+调制；$\sigma_{ref}=16$ mm。sensitivity reader 先从 $z_g^{(0)}$ 与 query 产生偶 coefficient，再与 $z_i^{(1)}$ 作无偏置内积并除以 $\sqrt{D_1}$，从结构上保证 joint-sign rewrite 下输出严格为奇。两个 readers 都只服务 SSL，retained checkpoint 只保存 `encoder.` namespace。
+
+## 为什么联合六项目标
+
+仅重建 density 允许 decoder 绕开 morphology latent，或让 latent 对 q 的局部变化缺乏可用结构。当前目标因此同时约束：density 重建、显式 $\kappa$、由预测 density/$\kappa$ 派生的 $g$、同一个 density predictor 对物理 q 的 Sobolev/JVP、自导数与显式链式路径的一致性，以及 joint-axis sign 成对改写下 $Z^{(0)}$ 偶/$z_i^{(1)}$ 奇的 parity。
+
+六项权重首先在 8 个固定 train microbatches 上按共享 encoder 梯度范数校准。校准结果是 runtime evidence，单独进入 `loss_calibration.yaml` 与 checkpoint metadata；它不会改写实验声明中的 objective。由此可以区分“研究者声明了哪些项”与“本次数值运行采用了什么校准权重”。
+
+## 实验协议
+
+canonical family 含一项 mother 与 20 个 variants，按 `physical_geometry_hash` 整组划分为 17 train / 4 validation。每个 epoch 每项训练资产消费 256 个新 q，共 20 epochs。2 assets × 2 q 构成一个 microbatch，累积 4 次后更新；尾组不伪造 padding asset，因此 17 项训练集对应每 epoch 1152 microbatches、288 updates，完整预算为 5760 updates 与 87040 q samples。30000 只是异常 safety limit。
+
+held-out bank 每项资产固定 64 q，每 250 updates 评估。checkpoint score 以 initialization density、$\kappa$ 与 derived-field 误差归一化。训练结束后固定执行 query-only、same-asset q shuffle、cross-asset shuffle、first-order zero、JOINT shuffle 与 sign flip，并对 asset/q 配对差异做 2000 次 bootstrap。
+
+整个实验由 schema 2.0.0 的 `CanonicalResidualFamilyCfg` 声明；Hydra 只注入 `single_gpu_16gb` trainer preset。`GeometrySSLExperiment` 构造阶段无 IO，`run()` 才拥有 materialization、training、validation、checkpoint 与 lease release。schema/checkpoint 1.x 被明确拒绝。
+
+## 已有证据与尚未回答的问题
+
+当前 contracts 已覆盖 source realization、query/sigma 重放、graph-bias 公式、全连接 attention、padding masks、$SO(2)$、joint-sign parity、FiLM 条件、variable sigma、sigma detach、checkpoint key 与跨结构输出/梯度；synthetic 和真实 LEAP integration 都闭合到 backward。
+
+在 RTX 5070 Ti 上，canonical retained encoder 的 $B=4096$ p95 为 20.13 ms，满足 40 ms 子预算。这个测试从 GPU-resident q/static evidence 开始，刻意排除 teacher、decoder、policy 和环境，因此不能回答完整 PPO 是否达到 20 Hz。正式 20-epoch pilot 尚未启动；official zero-shot、cross-topology/cross-DOF、Isaac pose parity 与 PPO transfer 也仍是开放问题。
+
+## 复现入口
 
 ```bash
 source /home/hac/isaac/env_isaaclab/bin/activate
-python -m anymani.distill.ssl.pretrain \
-  'assets.train_paths=[/absolute/path/to/generated/hand_bundle]'
+python -m anymani.distill.ssl.pretrain
+
+# Hydra override 示例
+python -m anymani.distill.ssl.pretrain trainer.learning_rate=1e-4 representation.query.query_count=128
 ```
 
-正式 21-asset canonical residual pilot 使用自包含 experiment：
-
-```bash
-python -m anymani.distill.ssl.pretrain --config-name geometry_ssl_canonical_residual_family
-```
-
-`assets.train_paths` 与 `assets.validation_paths` 接受显式 generated bundle 列表，可同时包含 pre-made mother、post-mutate variants、跨 family 与不同 DOF。`HandBank` 自身支持 `pre_made` discovery 和 `mixed` manifest；当前 SSL CLI 尚未把 collection discovery 作为独立字段暴露。`assets.official_evaluation_paths` 只解析并写入隔离 manifest，不进入 cache、optimizer、损失校准或 checkpoint 选择。
-
-## 当前生命周期
-
-```text
-HandBank geometry semantics
-    -> CPU POE spec + strict owner Manifold union
-    -> boundary-only home samples + radial-decay palm anchors + owner triangle sampling tables
-    -> CPU catalog + bounded GPU resident asset window + reusable Warp BVH leases
-    -> scrambled Sobol q within joint limits
-    -> online 50/25/25 anchor-workspace / current owner-shell / owner-adjacent queries
-    -> explicit sigma-conditioned online d / rho / kappa / g teacher
-    -> optional 20-JOINT / 26-owner heterogeneous padding
-    -> retained encoder + SSL-only density/kappa decoders
-    -> fixed train-only gradient calibration
-    -> density + kappa + derived-g + Sobolev + chain + paired parity loss
-    -> deterministic full resume + retained-only encoder state
-```
-
-静态 cache 每项资产只物化一次；physical anchors 固定，workspace offsets、current-surface shell/adjacent 与 sigma 在每个同资产 q 子批次在线重采。在线主路径必须使用 GPU Warp，失败即报错，不自动回退 trimesh。CPU trimesh/manifold3d 只负责离线 Boolean、闭合性验证、surface/anchor sampling table 和 reference truth。
-
-## Input 与 Target 分离
-
-retained encoder 只读取部署可获得的当前物理 $q$ 与静态手型证据：显式 $q_{home}$、ordered screws、topology graph、PALM/JOINT/TIP home boundary samples、palm normal 与完整无序 physical anchors。joint limits 只用于 Sobol q 采样，不进入 encoder。
-
-以下信息不得进入 retained encoder：current distance、closest point、surface Jacobian、query stratum、target field、contact、action、history、object state 或 future state。training-only decoder 读取 detached `{h}` query coordinates、显式 sigma 与 retained latent，SSL 后整体删除。
-
-## 隐式 Gaussian 主线
-
-逐 owner unsigned distance 为 $d_g(x;q)$，物理带宽为 $\sigma_\ell$，零阶 target 为：
-
-$$
-\rho_{\sigma_\ell,g}(x;q)=\exp\left[-\frac{d_g(x;q)^2}{2\sigma_\ell^2}\right].
-$$
-
-一阶距离灵敏度为 $\kappa_{g,i}=\partial d_g/\partial q_i$，单位 m/rad；链式 field target 为：
-
-$$
-g_{\sigma_\ell,g,i}=-\frac{d_g}{\sigma_\ell^2}\rho_{\sigma_\ell,g}\kappa_{g,i},
-$$
-
-单位 $\mathrm{rad}^{-1}$。联合目标同时训练 density、显式 $\kappa$、由预测 $\rho/\kappa$ 派生的 $g$、同一 density predictor 对物理 q 的 Sobolev 自导数，以及两条预测灵敏度路径的 chain consistency。
-
-训练 sigma 中心为 4/16/64 mm，并施加 log-space 有界 ±10% jitter；validation 固定使用 4/8/16/32/64 mm。decoder 对每个 `(owner,query,sigma)` 输出一个 scalar，$N_Q$ 与 $N_\sigma$ 都只是数据轴。每 owner query 默认 64 个，按 32 workspace、16 owner-shell、16 adjacent 分解。模型默认 padding 上限为 20 JOINT、5 TIP、26 owner；无效槽由 entity/joint/field/edge masks 屏蔽，不具有可学习 identity。
-
-## Validation 与诊断
-
-validation generated assets 必须与 train 按 `physical_geometry_hash` 整组隔离；limit-only configuration domains 不得跨 split。held-out morphology 使用固定 Sobol q/query/teacher bank，并按 morphology、bin、axis、metric 依次等权选择 best checkpoint；训练形态另有独立 q bank，在初始化和最终模型上确定性流式重放并核对完整 teacher SHA-256。固定 ablation 包含 query-only、同手跨 q/跨手 latent shuffle，以及 $z^{(1)}$ 置零、跨 JOINT 打乱和符号翻转。
-
-## Checkpoint 与运行证据
-
-默认输出：
-
-```text
-logs/geometry_ssl/<experiment>/<UTC timestamp>/
-├── resolved_config.yaml
-├── asset_manifest.yaml
-├── tensorboard/
-├── metrics.jsonl
-├── runtime.jsonl
-├── loss_calibration.yaml
-├── checkpoint_selection.yaml
-├── training_morphology_q_bank.yaml
-├── validation_ablations.yaml
-├── validation_ablation_analysis.yaml
-├── train_dense_step_*.npz
-├── validation_dense_step_*.npz
-└── checkpoints/{step_*.pt,best_step_*.pt,best.pt,last.pt}
-```
-
-checkpoint 保存完整模型、optimizer、step、代码/包/资产 schema、resolved config 与 split manifest；`retained_state` 只含 `encoder.` namespace。迁入 PPO/IL 时严格报告 missing/unexpected keys，density/sensitivity decoders 不进入部署图。
-
-`metrics.jsonl` 保存 asset/q provenance、六项 loss 及 numerator/denominator；`runtime.jsonl` 保存 resident asset/owner/triangle、load/release 时间、设备 memory delta、训练 peak memory 与 q/s。NPZ 保存 $Z^{(0)}$、$Z^{(1)}$、query stratum、owner role、bandwidth、distance shell、ancestor selectors 与 dense error。selection evidence 按 owner role、50:25:25 stratum、bandwidth、distance shell、ancestor/non-ancestor 分层；ablation analysis 使用 asset/q 两级 paired bootstrap。
-
-## 当前边界
-
-- `pretrain.py` 只保留 Hydra CLI façade；`runtime/assets.py`、`scheduler.py`、`objective.py`、`validation.py`、`checkpointing.py`、`trainer.py` 分别拥有运行时职责，`runtime/__init__.py` 只导出稳定接口。
-- `experiments/canonical_residual_family.py` 是正式 21-asset same-topology pilot 的声明式配置；20-epoch sustained run 尚未执行，当前 artifact 只证明 runner 与诊断闭环。
-- 正式 generated 广混合 manifest、topology/family/handedness 分层抽样、官方 sidecar 实例和 importer pose smoke 尚未闭合。
-- AMP/distributed 尚未接线；resume CLI 已严格校验 scientific config/manifest，并恢复 epoch/window/Sobol/RNG/initial baseline/historical best lineage。
-- Isaac Sim 相关证据未来放在 `source/anymani/anymani/smokes/distill/`，不进入默认 pytest。
-
-## 相关目录
-
-- 物理 target：[`../representations/`](../representations/README.md)
-- learnable components：[`../models/`](../models/README.md)
-- reconstruction loss：`../objectives/representations/`
-- recording/evaluation：[`../diagnostics/`](../diagnostics/README.md)
-- PPO 生命周期：沿用当前 tracked `anymani.distill.train/play` 与 task/agent 配置；本目录不拥有 RL 入口迁移
+输出目录保存 resolved config、asset manifest、calibration、分层 metrics、q-bank digest、ablation、selection history、完整 resume checkpoint 与 retained-only encoder state。具体统计语义见 [`../diagnostics/README.md`](../diagnostics/README.md)。

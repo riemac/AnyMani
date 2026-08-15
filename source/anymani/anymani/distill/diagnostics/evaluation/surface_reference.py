@@ -14,12 +14,12 @@ from statistics import median  # latency 使用中位数抵抗偶发调度抖动
 
 import torch  # GPU faces、queries、CUDA Event 与数值误差
 
-from anymani.distill.representations.targets.warp_surface import (  # 正式 online teacher backend
-    query_owner_surfaces_warp,
-)
-from anymani.robots.owner_geometry import (  # 同一资产 CPU triangles 与 GPU BVH
+from anymani.distill.representations.sources.collision_geometry import (  # 同一资产 CPU triangles 与 GPU BVH
     OwnerGeometryCache,
     WarpOwnerGeometryCache,
+)
+from anymani.distill.representations.targets.warp_surface import (  # 正式 online teacher backend
+    query_owner_surfaces_warp,
 )
 
 

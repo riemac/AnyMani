@@ -107,9 +107,9 @@ component permutation 当成监督错误。
 
 ## Source 与 cache
 
-source 层应保留 primitive/mesh truth，并按 capability 暴露 surface sampling、unsigned distance、inside/outside、
-signed distance、scale 与 watertightness。推荐静态 cache + online query：把当前 query 变换到缓存的 local
-geometry，而不是每个 batch 重建或移动 mesh。
+`representations/sources` 现在是 learning geometry 的唯一事实源。`kinematics.py` 从 `HandContainer.geometry_semantics` lower simulator-independent POE/FK/Jacobian、owner ancestry 与 semantic routing；`collision_geometry.py` 构造严格 owner surface/solid union、home/anchor realization、Warp cache 与 physical identity；`geometry_source.py` 用 `GeometrySourceCfg -> GeometrySource -> DeviceGeometrySource` 管理 CPU/GPU 生命周期与 lease release。`robots` 不保留同名 geometry 真源，只拥有 Isaac spawn/articulation adapter。
+
+source 保留 primitive/mesh truth，并按 capability 暴露 surface sampling、unsigned distance、inside/outside、scale 与 watertightness。owner solid Boolean 不补洞、不做 convex hull，也不伪造 fallback；无合法 volume 时显式失败。静态 cache + online query 把 query 变换到 owner-local BVH，而不是每个 batch 重建或移动 mesh。
 
 动态 command、contact、object state、history 与当前 posed-field label 不属于纯 geometry source 的最小输入。
 它们可以进入下游 policy observation，但不能因为 policy 需要就泄漏到 SSL partial input。
@@ -131,6 +131,4 @@ link-local URDF gauge、joint-axis sign/zero rewrite、`{h}` origin rewrite 与 
 - learnable adapter/backbone/decoder 位于 [`../models/`](../models/README.md)；
 - scalar loss 位于 `../objectives/`，stage orchestration 位于 `../ssl/`、`../rl/`、`../il/`；
 - 纯公式、gauge pair、semantic coverage、query/target shape 与 cache key 使用 deterministic contract test；
-- heavy target generator 可以只用于预训练；RTX 5070 Ti、$B=4096$、单结构组下，隐式主线完整在线
-  $X\rightarrow(Z^{(0)},\{z_i^{(1)}\})$ 要求 50 次计时 p95 不超过 40 ms。未来若激活解析直接候选，
-  同一门槛必须包含批量 FK/刚体支撑点变换；离线 cache materialization、decoder、policy 与 Isaac Sim 不计入。
+- heavy target generator 可以只用于预训练；retained encoder 的性能边界与实测证据由 [`../models/README.md`](../models/README.md) 解释。未来若激活解析直接候选，同一门槛必须包含其批量 FK/刚体支撑点变换。

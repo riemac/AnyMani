@@ -1,104 +1,78 @@
-# Shared Models
+# Geometry Representation Model
 
-`models` 保存 SSL、RL 与 IL 共用的可学习组件。它的目标不是为每一种 geometry target 建一套独立 policy，
-而是让不同 target 训练同一条可部署表示路径。
+跨手型模型面临两个同时存在的变化：entity 集合随手指与链长改变，关节坐标又携带方向和局部运动语义。把整只手压成一个全局向量会丢失 owner/joint 对齐；为每种手型建立独立网络则无法区分表示迁移与参数记忆。当前模型因此把整手状态拆成逐物理 owner 的零阶包与逐活动关节的一阶包，并让所有手型共享前端、上下文主干和读取规则。
 
-## Retained boundary
+## Retained 表示
 
-```text
-X = route-valid deployable geometry evidence
-    -> route-specific input adapter + retained backbone
-        -> Z^(0) = entity zeroth-order latents
-        -> Z^(1) = actuated-joint first-order latents
-            -> action / value / history modules    # RL deployment side
-            -> representation decoder              # pretraining only by default
-```
+对一项手型 $\mathfrak m$，encoder 接收当前物理关节角 q 与静态 evidence：$q_{home}$、ordered space screws、运动学图、PALM/JOINT/TIP home boundary、palm normal 和完整 physical anchor 集合。输出为
 
-**input adapter + backbone + $z^{(0)}/z^{(1)}$ heads** 共同构成 retained geometry encoder，也是 SSL
-checkpoint 迁入 PPO 的默认边界。$Z^{(0)}=\{z_i^{(0)}\}$ 与 physical entity 对齐，$Z^{(1)}=\{z_j^{(1)}\}$
-与 actuated joint 对齐；二者不是把一个 latent 任意切成两半，而是分别承载 configuration-level state 与
-joint-sensitive local differential state。
+$$
+Z^{(0)}\in\mathbb R^{B\times G\times D_0},
+\qquad
+Z^{(1)}\in\mathbb R^{B\times N_J\times D_1},
+$$
 
-更换 BPS、SDF、density 或 Gaussian-field target，不应顺便更换 policy trunk，否则无法判断收益来自 target
-还是模型容量。
+其中 canonical $D_0=128$、$D_1=64$。$Z^{(0)}_g$ 与第 $g$ 个 surface owner 同索引，表达当前构型下该实体的 configuration-level geometry；$z_i^{(1)}$ 与第 $i$ 个活动 JOINT 同索引，提供 joint-sensitive differential carrier。PALM 与 TIP 参与整手上下文但不伪造独立关节轴。
 
-## 目录
+current distance、closest point、surface Jacobian、query stratum、contact、object state 与 teacher field 都不属于输入。joint limits 只定义 q sampling domain；两个只有限位不同而物理映射相同的资产，在相同 q 下必须得到相同表示。
 
-| 路径 | 职责 | 生命周期 |
-| --- | --- | --- |
-| `input_adapters/` | 把当前 $q$ 与静态手型证据投影为 owner-aware entity/joint features | retained |
-| `backbones/` | 处理同结构组 PALM/JOINT/TIP entity sequence 并输出 latent | retained |
-| `decoders/representations/` | 从 latent 重建 field、FK 或 Gaussian-induced field | 默认 training-only |
-| `heads/` | JOINT action、value 与非 field-specific auxiliary output | retained 或按 stage 选择 |
-| `policy.py` | stage-independent model assembly contract | executable draft |
-| `tokens.py`、`config.py` | 已有 grouped-token/config draft | executable draft，API 尚未冻结 |
-| `temporal_encoder.py` | single-asset tactile TCN baseline | 可运行 baseline |
-| `relations.py`、`attention_bias.py` | relation 与 dynamic bias 候选 | deferred，不是公共默认 |
+## 多锚点关系前端
 
-`backbones/candidates/spatial_transformer.py` 只是候选位置。Transformer、GRU、TCN、时空顺序、pooling 和
-attention bias 均未被选为跨实验默认方案。
+hand frame `{h}` 只固定有向 palm normal；origin 与面内 x/y basis 是 gauge。网络不读取 raw hand-frame 坐标作为绝对方向标签，而是把 home points、queries 和空间旋量表达为相对完整 anchor constellation 的关系。每个 point-anchor pair 使用面内径向、切向、height 与 handed scalar 等 $SO(2)$-compatible quantities，共享 MLP 后沿无序 anchor 集合聚合。
 
-## Retained input 与 latent contract
+home surface 先沿 anchors 编码，再在每个 owner 的真实 boundary points 上做 masked attention pooling。对 JOINT，空间旋量 $[\omega_i,v_i]$ 被转换为 axis point 与有向 screw-anchor relations，形成唯一的 $f_i^{screw}$。该 feature 同时进入 JOINT entity token 和一阶 residual head，不建立 `screw_even/screw_odd` 两套网络，也不输入裸 sign bit。
 
-当前隐式主线只读取当前 $q$ 与静态手型证据：基准 screw、$q_{home}$、topology、按 PALM/JOINT/TIP
-归属组织的基准表面采样点、palm normal 与 physical anchors。解析直接压缩仅作保留候选；若后续激活，
-可读取缓存支撑点经当前 FK/刚体位姿得到的 physical points。current distance、最近点、surface Jacobian
-或场标签不得进入 retained encoder。home geometry 的磁盘读取、CPU 解析和 GPU materialization 可以缓存；
-PPO full fine-tune 时，依赖 learnable weights 的 activation 不能永久缓存。
+## Graph-biased 整手上下文
 
-contact、command、history 与 object state 可以由下游 policy 模块消费，但不属于当前 geometry SSL 的
-$X\rightarrow(Z^{(0)},Z^{(1)})$ 命题。current $\rho/\kappa/g$ label、current posed surface 与未来状态均不得进入
-retained encoder。
+owner tokens 进入 encoder-only、Pre-LN、全连接 self-attention。运动学图不作为 hard mask；任意两个有效 entities 都能交换信息。图结构只通过每个 attention head 的加性 bias 注入：
 
-当前共同 owner 角色是 `PALM`、`JOINT` 与 `TIP`；第 $g$ 个实体、表面归属体与 SSL 解码轴直接同索引：
+$$
+b_{ij}^{(h)}
+=b_{shortest}^{(h)}(d_{ij})
++b_{parent}^{(h)}(d_{ij}^{p})
++b_{child}^{(h)}(d_{ij}^{c}).
+$$
 
-- 网络原生支持可变 $N_E/N_J/K$；跨结构同一次前向可填充到 20 JOINT、5 TIP、26 owner，并以 entity/joint masks 严格屏蔽无效槽；逐结构独立前向保留为数值与梯度 oracle；
-- owner、asset routing 与 action routing 来自 metadata，而不是固定 tensor slice；
-- 只有 `JOINT` token 直接产生 joint action；
-- `PALM` 与 `TIP` 参加整手上下文，但不输出动作；
-- current target field、future state 与其他仅训练期 privileged label 不得进入 retained adapter。
+三种距离分别查表并相加，超过 8 的距离进入末桶。canonical backbone 使用 hidden width 128、2 layers、4 heads、FFN width 256、dropout 0。它不读取 current dynamic all-pairs $SE(3)$ pose answer；当前构型变化必须通过 q 与 screw-conditioned entity features进入模型。
 
-## 位姿与方向输入
+跨结构 batch 可 padding 到最多 20 JOINT、5 TIP、26 owners。entity mask 同时屏蔽 key/value、query row、projection bias 与最终输出；joint mask 屏蔽运动与一阶 head。逐结构独立前向是 padded valid outputs 和参数梯度的数值 oracle。
 
-每组 pose feature 都应说明它是绝对姿态、相对变换、局部误差还是移动 reference 下的量。几何 composition
-先在 $SE(3)$ 中定义，再选择 matrix、rot6d、quaternion 或 local $se(3)$ coordinates 作为网络编码。
+## 类型化一阶 head
 
-- quaternion 必须注明 `(w,x,y,z)`、归一化与 $q\sim -q$ 的符号策略；
-- Euler/RPY 不作为匿名 feature；
-- 隐藏且移动的 goal/reference 会制造部分可观测，不应靠换一种旋转编码掩盖；
-- 当前 teacher action 是 joint-space scalar，不因输入含 orientation 就自动变成 Cartesian action。
+整手主干先产生 owner zero-order latent。第 i 个 JOINT 的一阶包由共享 residual head 构造：
 
-hand frame `{h}` 只固定有向 palm normal $n_p=z_h$；绕 $n_p$ 的 $x/y$ 选择是 gauge，而不是可依赖的类人手方向语义。
-$Z^{(0)}$ 与 $z_i^{(1)}$ 都对这一 $SO(2)$ 重写不变；在 joint-sign 成对改写下，$Z^{(0)}$ 为偶，
-$z_i^{(1)}$ 对自身 $s_i$ 为奇。reflection/chirality、link-local URDF reparameterization 与 hand-frame gauge
-必须分别测试；文献证据由独立 research dossier 维护，不作为源码运行依赖。
+$$
+z_i^{(1)}=H_1\!\left([z_i^{(0)}\Vert f_i^{screw}]\right).
+$$
 
-## Checkpoint lifecycle
+这里不把 parity 写死进普通 MLP，而是用成对坐标改写监督它：joint-axis sign 改写同步作用于 q、$q_{home}$ 与 space screw 后，$Z^{(0)}$ 应保持偶，$z_i^{(1)}$ 应按对应 sign 变为奇。reflection/chirality 不是同一 gauge，模型必须允许镜像形态得到不同零阶表示。
 
-默认迁移：
+## SSL-only readers
 
-```text
-SSL checkpoint
-    -> load input adapter + backbone + z0/z1 heads
-    -> drop representation decoder
-    -> attach history encoder + action/value heads
-    -> PPO full fine-tune
-```
+密度 reader 对每个 `(owner, query, sigma)` 输出一个 scalar，因此 query 数与 sigma 数都是可变数据轴，不是固定输出通道。query feature 和 $\log(\sigma/16\,\mathrm{mm})$ 进入 hidden width 128 的主路径；三个 residual blocks 的每一层都由同一 owner 的 $z_g^{(0)}$ 通过 FiLM 调制：
 
-冻结、部分冻结、保留 decoder 或 joint auxiliary 都必须成为显式消融，而不是 checkpoint loader 的隐藏行为。
-当前硬门槛是在 RTX 5070 Ti、$B=4096$、单结构组下，隐式主线完整在线 retained geometry encoder
-50 次计时 p95 不超过 40 ms，计时从 GPU-resident $q$ 与静态证据开始。未来若激活解析直接候选，
-同一门槛还必须计入批量 FK/刚体支撑点变换。离线 cache materialization、decoder、policy、
-host-to-device copy 与 Isaac Sim 不计入。
+$$
+\widetilde h=(1+\gamma(z_g^{(0)}))\operatorname{LN}(h)+\beta(z_g^{(0)}).
+$$
 
-## 最小验证
+sensitivity reader 从 $z_g^{(0)}$ 与 query 产生偶 coefficient，再与 $z_i^{(1)}$ 作无偏置内积：
 
-- 同结构组的 entity/joint/anchor shape、owner、type id 与标准顺序；
-- batch permutation 与归属体/锚点集合聚合合同；
-- paired $SO(2)$ gauge invariance、axis sign/zero rewrite 与 scale law；
-- $Z^{(0)}$ entity routing、$Z^{(1)}$ joint routing 与 decoder query contract；
-- JOINT-only action routing；
-- decoder 不进入 PPO forward；
-- checkpoint key 与 retained/discarded parameter 集合；
-- temporal history 的顺序、长度、episode reset 与 causal contract；
-- 真实性能命题再使用 rollout smoke 或短训练，而不是只看单元测试。
+$$
+\hat\kappa_{g,i}=\frac{a(z_g^{(0)},u(x))^Tz_i^{(1)}}{\sqrt{D_1}}.
+$$
+
+无偏置读取使 joint-sign parity 成为结构合同。两个 readers 只在 SSL 中存在；它们不进入 retained checkpoint，也不计入部署延迟门槛。
+
+## 生命周期与性能边界
+
+SSL checkpoint 的迁移边界是 input adapter、graph-biased backbone 和 zero/first-order heads。PPO/IL loader 只接受 `encoder.` namespace，并严格报告 missing/unexpected keys；density/sensitivity readers、Warp teacher 与 objective 全部删除。若 full fine-tune encoder，依赖 learned weights 的 activation 不得跨 policy steps 永久缓存。
+
+canonical 完整模型有 590856 个参数，其中 retained encoder 350407 个、SSL-only readers 240449 个；state-dict key 集合由 contract digest 固定。RTX 5070 Ti 上，retained encoder 在 $B=4096$、单结构、20 次预热和 50 次 CUDA Event 下测得 median 19.79 ms、p95 20.13 ms、max 20.22 ms，peak allocated memory 843.55 MiB。正式 $B=4,G=21,N_Q=64,N_\sigma=3,E=42$ 的 disposable readers forward 另测得 median 1.22 ms、p95 1.37 ms、peak 60.51 MiB。
+
+40 ms 门槛只从 GPU-resident q/static evidence 计到 $Z^{(0)}/Z^{(1)}$，排除 source materialization、H2D、decoder、policy、Isaac Sim 与 `env.step`。因此它是 20 Hz 控制周期中的 retained 子预算，不是完整 PPO/env latency 结论。
+
+## 证据与未决边界
+
+contracts 已检查三种 graph-bias 的精确 lookup 与相加、末距离桶仍参与全连接 attention、anchor permutation、$SO(2)$ rewrite、joint-sign parity、variable sigma、sigma detach、每层 FiLM、跨结构 output/gradient 和 retained/disposable keys。真实 LEAP integration 已完成 encoder、readers、六项目标与 backward。
+
+这些证据尚未选择最优容量；2 layers、128/64 latent 和 FiLM width 128 只是 canonical 可执行锚点。任何缩小网络以满足吞吐的候选都必须在相同 q/query/target 与训练预算下比较，不能通过改变物理监督或缓存 stale learned activation 获得表面加速。正式 PPO transfer、cross-topology/cross-DOF 与 official hands 仍待实验。

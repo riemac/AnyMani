@@ -11,9 +11,9 @@ import torch  # q-autograd、Sobolev 二阶图与 denominator tensors
 
 from anymani.distill.models.geometry_ssl import GeometrySSLForward, GeometrySSLModel
 from anymani.distill.objectives.representations.field_reconstruction import (
-    GeometrySSLObjective,
-    GeometrySSLTerms,
-    GeometrySSLWeights,
+    GeometryFieldObjective,
+    GeometryFieldObjectiveCfg,
+    GeometryFieldObjectiveTerms,
 )
 from anymani.distill.objectives.representations.gauge_consistency import (
     deterministic_partial_joint_sign,
@@ -21,15 +21,15 @@ from anymani.distill.objectives.representations.gauge_consistency import (
     joint_sign_paired_loss_components,
     rewrite_joint_sign_coordinates,
 )
-from anymani.distill.ssl.dataset import PaddedOnlineGeometryBatch
+from anymani.distill.representations.geometry import PaddedOnlineGeometryBatch
 
 
 def forward_objective(
     model: GeometrySSLModel,
-    objective: GeometrySSLObjective,
+    objective: GeometryFieldObjective,
     batch: PaddedOnlineGeometryBatch,
     pair_step: int = 0,
-) -> tuple[GeometrySSLForward, GeometrySSLTerms]:
+) -> tuple[GeometrySSLForward, GeometryFieldObjectiveTerms]:
     r"""在物理 q 上保留 Sobolev 图，并用真实 sign rewrite 计算 paired parity。
 
     sampler 与 Warp teacher 停止梯度；新建 leaf q 后通过 encoder/decoder 对物理 rad 求导：
@@ -92,14 +92,14 @@ def forward_objective(
 
 
 def accumulated_objective(
-    terms: GeometrySSLTerms,
+    terms: GeometryFieldObjectiveTerms,
     denominator_totals: tuple[torch.Tensor, ...],
     paired_denominator_totals: tuple[torch.Tensor, torch.Tensor],
-    weights: GeometrySSLWeights,
+    weights: GeometryFieldObjectiveCfg,
 ) -> torch.Tensor:
     r"""把一个 microbatch 的 numerators 按整个 optimizer step 的 denominator 缩放。
 
-    前五项使用 $\sum_bN_{t,b}/\sum_bD_{t,b}$；paired 项保持
+    六项 field/objective 使用 $\sum_bN_{t,b}/\sum_bD_{t,b}$；paired 项保持
     $\sum_bN_{0,b}/\sum_bD_{0,b}+\sum_bN_{1,b}/\sum_bD_{1,b}$。调用方逐 microbatch
     backward，显存仍只持有一份 Sobolev 图。
     """
@@ -131,7 +131,7 @@ def objective_denominators_from_batch(
     batch: PaddedOnlineGeometryBatch,
     model: GeometrySSLModel,
 ) -> tuple[tuple[float, ...], tuple[float, float]]:
-    r"""由 masks 与 latent widths 预计算五项 field 及 paired 两支有效标量数。"""
+    r"""由 masks 与 latent widths 预计算六项 field/objective 及 paired 两支有效标量数。"""
 
     bandwidth_count = batch.field_targets.bandwidths.shape[-1]  # $N_\sigma$ 数据采样轴
     field_count = float(batch.field_targets.valid_mask.sum()) * bandwidth_count
@@ -141,8 +141,8 @@ def objective_denominators_from_batch(
     joint_valid = batch.evidence.joint_valid_mask
     if entity_valid is None or joint_valid is None:
         raise ValueError("accumulation denominator preflight requires padded entity/joint masks")
-    zero_count = float(entity_valid.sum()) * model.config.encoder.zero_order_width
-    first_count = float(joint_valid.sum()) * model.config.encoder.first_order_width
+    zero_count = float(entity_valid.sum()) * model.config.encoder.heads.zero_order_width
+    first_count = float(joint_valid.sum()) * model.config.encoder.heads.first_order_width
     values = (field_count, edge_count, edge_band_count, edge_band_count, edge_band_count)
     if min(*values, zero_count, first_count) <= 0.0:
         raise ValueError("accumulation denominator preflight found an empty objective term")

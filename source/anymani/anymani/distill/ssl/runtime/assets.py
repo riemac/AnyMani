@@ -1,6 +1,6 @@
 r"""Geometry SSL runtime 的资产解析、CPU 物化与 physical-group split。
 
-本模块是 ``assets -> robots -> ssl`` 的运行边界：只通过 ``HandBank`` 获取类型化静态语义，
+本模块是 ``assets -> representations.sources -> ssl`` 的运行边界：只通过 ``HandBank`` 获取类型化静态语义，
 再物化 CPU geometry runtime、物理映射身份与 manifest。它不创建模型、GPU resident window、
 optimizer 或 validation metric，也不解析 URDF/hand.yaml。
 """
@@ -15,21 +15,21 @@ import torch  # official identity-only lowering 使用 CPU float64
 from anymani.assets.bank.hand_bank import HandBank, HandBankCfg  # 资产集合唯一入口
 from anymani.assets.bank.hand_container import HandContainer, HandContainerCfg  # 显式 bundle 选择
 from anymani.distill.representations.queries.spatial_sampling import SURFACE_QUERY_SAMPLING_VERSION
-from anymani.distill.ssl.config import GeometrySSLAssetManifest, GeometrySSLExperimentCfg
-from anymani.distill.ssl.dataset import GeometryAssetRuntime, materialize_geometry_asset_runtime
-from anymani.distill.ssl.split import (
-    GeometryAssetIdentityRecord,
-    GroupedGeometryAssetSplit,
-    split_geometry_asset_groups,
-)
-from anymani.robots.geometry_kinematics import lower_hand_geometry_semantics
-from anymani.robots.owner_geometry import (
+from anymani.distill.representations.sources.collision_geometry import (
     AnchorSamples,
     GeometryIdentity,
     HomeSurfaceSamples,
     OwnerGeometryCache,
     geometry_identity,
     materialize_owner_geometry_cache,
+)
+from anymani.distill.representations.sources.geometry_source import GeometrySource
+from anymani.distill.representations.sources.kinematics import lower_hand_geometry_semantics
+from anymani.distill.ssl.config import GeometrySSLAssetManifest, GeometrySSLExperimentCfg
+from anymani.distill.ssl.split import (
+    GeometryAssetIdentityRecord,
+    GroupedGeometryAssetSplit,
+    split_geometry_asset_groups,
 )
 
 
@@ -178,8 +178,8 @@ def manifest_record(
 
 
 def build_manifest(
-    train_assets: tuple[GeometryAssetRuntime, ...],
-    validation_assets: tuple[GeometryAssetRuntime, ...],
+    train_assets: tuple[GeometrySource, ...],
+    validation_assets: tuple[GeometrySource, ...],
     official_assets: tuple[tuple[HandContainer, GeometryIdentity], ...],
     *,
     grouped_split: GroupedGeometryAssetSplit | None = None,
@@ -220,7 +220,7 @@ def build_manifest(
     )
 
 
-def identity_record(runtime: GeometryAssetRuntime) -> GeometryAssetIdentityRecord:
+def identity_record(runtime: GeometrySource) -> GeometryAssetIdentityRecord:
     r"""把 CPU runtime 规约成 physical-group split 所需的最小身份记录。"""
 
     semantics = runtime.container.geometry_semantics
@@ -239,14 +239,13 @@ def materialize_assets(
     assets: tuple[HandContainer, ...],
     *,
     config: GeometrySSLExperimentCfg,
-) -> tuple[GeometryAssetRuntime, ...]:
+) -> tuple[GeometrySource, ...]:
     r"""按 resolved 静态采样配置物化 CPU geometry runtime 与双重 identity。"""
 
     return tuple(
-        materialize_geometry_asset_runtime(
+        GeometrySource.materialize(
             asset,
-            query_config=config.query,
-            config=config.materialization,
+            config=config.representation.source,
         )
         for asset in assets
     )
@@ -270,7 +269,7 @@ def materialize_identity_only(
 
 def resolve_generated_runtime_splits(
     config: GeometrySSLExperimentCfg,
-) -> tuple[tuple[GeometryAssetRuntime, ...], tuple[GeometryAssetRuntime, ...], GroupedGeometryAssetSplit | None]:
+) -> tuple[tuple[GeometrySource, ...], tuple[GeometrySource, ...], GroupedGeometryAssetSplit | None]:
     r"""解析显式 split，或从完整 family catalog 构造 physical-geometry grouped split。"""
 
     if config.assets.family_paths:

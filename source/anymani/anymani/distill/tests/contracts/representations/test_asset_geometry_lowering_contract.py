@@ -1,4 +1,4 @@
-"""assets 静态几何语义到 robots 动态运动学规格的职责边界合同。"""
+"""assets 静态几何语义到 representation source 运动学规格的职责边界合同。"""
 
 from __future__ import annotations
 
@@ -7,10 +7,13 @@ from pathlib import Path
 import pytest
 import torch
 from anymani.assets.bank import HandContainer, HandContainerCfg
-from anymani.robots.geometry_kinematics import forward_owner_transforms, lower_hand_geometry_semantics
+from anymani.distill.representations.sources.kinematics import (
+    forward_owner_transforms,
+    lower_hand_geometry_semantics,
+)
 
 _MOTHER_ROOT = (
-    Path(__file__).resolve().parents[3]
+    Path(__file__).resolve().parents[4]
     / "assets"
     / "generated"
     / "2026-06-10_11-30-08"

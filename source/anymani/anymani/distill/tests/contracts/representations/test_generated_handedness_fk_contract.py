@@ -1,7 +1,7 @@
 r"""Generated 左右手在非零广义坐标下的严格镜像 FK 合同。
 
 静态 builder 字段满足镜像并不自动保证导出后的完整运动链仍正确。首关节 mount
-需要在 exporter 中折叠，sidecar 需要保存同一 joint/owner 顺序，robots lowering
+需要在 exporter 中折叠，sidecar 需要保存同一 joint/owner 顺序，representation source lowering
 还需要把 fixed descendants、空间旋量和祖先掩码组合成动态位姿。因此本文件验证
 完整的跨层路径：
 
@@ -38,7 +38,10 @@ import pytest
 import torch
 from anymani.assets.bank import HandBank, HandBankCfg
 from anymani.assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
-from anymani.robots.geometry_kinematics import forward_owner_transforms, lower_hand_geometry_semantics
+from anymani.distill.representations.sources.kinematics import (
+    forward_owner_transforms,
+    lower_hand_geometry_semantics,
+)
 
 pytestmark = pytest.mark.contract
 

@@ -37,16 +37,16 @@ HandCfg / generator truth
     -> HandGeometrySemanticsCfg
     -> exporter: hand.yaml.geometry_semantics
     -> bank: HandContainer.geometry_semantics
-    -> robots: EmbodimentGeometrySpec
+    -> distill.representations.sources: EmbodimentGeometrySpec + owner collision source
     -> distill: field/query/encoder targets
 ```
 
 `HandGeometrySemanticsCfg` 是跨目录的静态事实合同，不是训练配置。它不保存当前 batch 的 q、
 query、最近点、signed distance、场标签或任何 learned activation。它保存的是“如果给定任意
-合法或参考 q，robots 能否无歧义地解释这只手”的最小充分信息。
+合法或参考 q，下游 simulator/learning adapter 能否无歧义地解释这只手”的最小充分信息。
 
 完整 kinematic joint 轴包含 fixed joint。原因是 fixed root、fixed spacer 与 fixed tip 会改变
-后续 child link frame；如果只保存 revolute 名称，robots 只能回头读取 URDF 才能恢复 owner home
+后续 child link frame；如果只保存 revolute 名称，下游只能回头读取 URDF 才能恢复 owner home
 transform，进而产生第二个隐式运动学真源。每个 revolute 的 axis 位于 joint frame，origin 是
 parent link 到 joint frame 的固定 $SE(3)$ 变换；首 joint 的 mount folding 已在 exporter contract
 中按逐分量平移/RPY 叠加落实，然后下游统一使用严格刚体复合。
@@ -683,7 +683,7 @@ def _derive_finger_owners(
                     f"fixed joint '{joint.name}' lies between active joints and carries collision geometry; "
                     "generated owner assignment requires an explicit sidecar"
                 )
-            continue  # 无几何 fixed spacer 只影响 robots 运动学链，不产生 surface owner
+            continue  # 无几何 fixed spacer 只影响下游运动学链，不产生 surface owner
 
         for collision_index, collision in enumerate(joint.collisions):
             component = _make_component(

@@ -57,9 +57,9 @@ $$
 若 JOINT $i$ 不是归属体 $g$ 的祖先，拓扑掩码把该列精确置零。这是模型必须学习或被结构
 约束的物理零，不能用“没有抽到该边”代替。
 
-本模块是 ``robots`` 的动态 embodiment 真源；``distill`` 只调用公开规格与批量函数，不重新解析
-sidecar/URDF 或复制指数积。全部函数只依赖 PyTorch，不导入 Isaac Sim。Isaac Sim 仅在独立运行时测试中比较 importer
-刚体位姿；普通 SSL 训练和默认 pytest 不启动 Kit、USD 或 PhysX。
+本模块是 ``representations.sources`` 的动态 embodiment 真源；它只消费 assets 交付的类型化
+sidecar 语义，不重新解析 URDF。全部函数只依赖 PyTorch，不导入 Isaac Sim；普通 SSL 训练和默认
+pytest 不启动 Kit、USD 或 PhysX。
 
 静态 lowering 数据流：
 
