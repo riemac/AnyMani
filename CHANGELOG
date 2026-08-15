@@ -1,3 +1,12 @@
+0.5.5 - 2026-08-15
+==================
+
+- 将 Geometry SSL 提升为 schema 2.0.0 的声明式 façade：`CanonicalResidualFamilyCfg` 显式组合 assets、representation、model、objective、protocol、Hydra trainer 与 run，`GeometrySSLExperiment.run()` 成为唯一执行入口；schema/checkpoint 1.x 明确 fail-closed。
+- 将 simulator-independent POE/FK/Jacobian、owner collision union、home/anchor realization、Warp cache 与 physical identity 从 `robots` 迁入 `distill.representations.sources`，并建立 `GeometrySourceCfg -> GeometrySource` 与 `GeometryRepresentationCfg -> GeometryRepresentation` 生命周期；robots 收缩为 Isaac spawn/articulation adapter。
+- 把 Gaussian sigma measure 与 sampled κ target 分离，并将网络配置展开为多锚点前端、2-layer graph-biased encoder-only Transformer、类型化 latent heads 和 density/sensitivity readers；canonical 参数量、state-dict keys、gauge/parity、FiLM 与跨结构 output/gradient 合同保持固定。
+- 新增 RTX 5070 Ti retained encoder 性能 suite：`B=4096`、20 次预热、50 次 CUDA Event 实测 median 19.79 ms、p95 20.13 ms、max 20.22 ms、peak 843.55 MiB，满足 40 ms retained 子预算；SSL-only readers 训练微批次前向另行报告，不把该结果外推为完整 PPO/env 20 Hz。
+- 同步迁移 source/test 所有权，并更新 representations、models、SSL、diagnostics 与 robots 的局部边界文档和 contract 入口。正式 21-asset、20-epoch pilot、official/cross-topology 泛化与 PPO transfer 仍未执行。
+
 0.5.4 - 2026-08-15
 ==================
 
