@@ -159,7 +159,10 @@ def test_post_mutate_config_is_direct_hand_generator_cfg():
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG, HandGeneratorCfg)
     assert asset_cfg_module.POST_MUTATE_CFG.mode == "mutate"
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG.Validate, HandValidatorCfg)
-    assert "tip_replace" in tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms())
+    term_names = tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms())
+    assert "tip_replace" in term_names
+    assert "link_proximal_overlap" in term_names
+    assert term_names.index("link_scale") < term_names.index("link_proximal_overlap")
 
 
 def test_post_mutate_runner_resolves_topology_root_path(tmp_path):

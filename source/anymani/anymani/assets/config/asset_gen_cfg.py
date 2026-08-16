@@ -30,6 +30,7 @@ from ..generator.hand_generator import HandGeneratorCfg
 from ..generator.mutate import (
     HandMutatorCfg,
     LimitTweakCfg,
+    LinkProximalOverlapCfg,
     LinkScaleCfg,
     MountPerturbCfg,
     TipReplaceCfg,
@@ -237,6 +238,13 @@ class QuickPostMutateCfg(HandMutatorCfg):
         clip=(0.8, 1.2),  # 防止极端采样把 link 拉到明显脱离原家族的尺度
         distrib="uniform",  # 首版默认使用均匀分布
         boundary_policy="clip",  # 越界样本直接裁剪回合法区间
+    )
+    link_proximal_overlap = LinkProximalOverlapCfg(
+        self_mode={"identity": 0.2, "disturb": 0.5, "homologous_non_thumb": 0.3},
+        overhang_delta_ratio=(-0.1, 0.2),
+        max_parent_overlap_ratio=0.5,
+        distrib="uniform",
+        boundary_policy="clip",
     )
     mount_perturb = MountPerturbCfg(
         disturb_unit="deg",  # 这里保留原配置的角度输入语义

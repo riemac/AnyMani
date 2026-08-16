@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 
 import pytest
-
+from assets.asset_schema_core import SphereGeometryCfg
 from assets.builder.hand_builders import HumanLikeHandBuilder
 from assets.generator.mutate import (
     HandMutator,
@@ -12,6 +12,8 @@ from assets.generator.mutate import (
     LinkProximalOverlapMutator,
     LinkScaleCfg,
 )
+from assets.generator.premade.connectivity_lowering import JointDeleteCfg, JointDeleteMutator
+from assets.handedness import mirror_pose_about_yz
 from assets.presets import make_human_like_builder_cfg
 
 
@@ -110,6 +112,12 @@ def test_positive_ratio_extends_only_the_child_proximal_boundary() -> None:
     assert _joint_by_name(mutated, "index_tip") == before_tip  # fixed tip 不参与
     assert after_target.visuals[0].geometry == after_target.collisions[0].geometry
     assert after_target.visuals[0].origin == after_target.collisions[0].origin
+    provenance = mutated.metadata["post_mutate_samples"]["link_proximal_overlap"]["owner_results"]["index_j1"]
+    assert math.isclose(provenance["delta_ratio"], 0.2, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(provenance["parent_span_before_m"], before_target.origin.pos[1], rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(provenance["scaled_child_span_m"], child_span, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(provenance["final_overhang_m"], expected_overhang, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(provenance["max_parent_overlap_ratio"], 0.5, rel_tol=0.0, abs_tol=1e-12)
 
 
 def test_negative_ratio_reduces_existing_allegro_overhang_without_making_gap() -> None:
@@ -263,3 +271,120 @@ def test_overlap_cfg_rejects_invalid_parent_ratio_and_mode_probabilities() -> No
             self_mode={"identity": 0.2, "disturb": 0.2},
             overhang_delta_ratio=(-0.1, 0.2),
         )
+
+
+def test_homologous_mode_groups_non_thumb_by_semantic_slot_and_keeps_thumb_independent() -> None:
+    r"""同源 mode 应共享 normalized proposal，而不是共享毫米制最终 overhang。
+
+    当前 Allegro full topology 中，首 active `mcp1` 被排除，因此 non-thumb
+    同源组应只包含 `mcp2/pip/dip`。thumb 没有跨 finger homolog，必须保留
+    逐 owner payload。
+    """
+
+    hand = _build_hand(family="allegro")
+    runtime = LinkProximalOverlapMutator(
+        _overlap_cfg(self_mode="homologous_non_thumb", ratio=(0.1, 0.1))
+    )
+
+    sample = runtime.sample_one_for_mode(hand, resolved_mode="homologous_non_thumb")
+
+    assert set(sample["homologous_groups"]) == {"allegro:mcp2", "allegro:pip", "allegro:dip"}
+    assert sample["homologous_groups"]["allegro:pip"]["joint_names"] == [
+        "index_j2",
+        "middle_j2",
+        "ring_j2",
+    ]
+    assert set(sample["thumb_joint_delta_ratio"]) == {"thumb_j1", "thumb_j2", "thumb_j3"}
+    assert "index_j0" not in sample["joint_delta_ratio"]
+    assert "thumb_j0" not in sample["joint_delta_ratio"]
+
+
+def test_missing_topology_skips_the_first_surviving_active_joint() -> None:
+    r"""删除 canonical root joint 后，应按实际 surviving chain 重新判定首 active 排除项。"""
+
+    source = _build_hand(family="allegro")
+    lowered = JointDeleteMutator(
+        JointDeleteCfg(
+            target_finger="index",
+            deleted_joints=("index_j0",),
+            regroup_strategy="drop",
+            respect_preset=False,
+        )
+    ).mutate(source)
+    assert lowered is not None
+    first_surviving = _joint_by_name(lowered, "index_j0")  # child semantic 已变为原 `mcp2`
+    target = _joint_by_name(lowered, "index_j1")  # actual chain 中第二个 active child
+    before_first_support = _axial_support(first_surviving)
+    before_target_support = _axial_support(target)
+
+    mutated = LinkProximalOverlapMutator(_overlap_cfg(ratio=(0.1, 0.1))).mutate(
+        lowered,
+        sampled_params={
+            "sample": {
+                "resolved_self_mode": "disturb",
+                "joint_delta_ratio": {"index_j1": 0.1},
+            }
+        },
+    )
+
+    assert mutated is not None
+    assert _axial_support(_joint_by_name(mutated, "index_j0")) == before_first_support
+    assert _axial_support(_joint_by_name(mutated, "index_j1"))[0] < before_target_support[0]
+
+
+def test_eligible_non_axial_geometry_fails_closed() -> None:
+    r"""eligible revolute child 若变成 sphere，proposal 必须失败而不是伪装成已变异。"""
+
+    hand = _build_hand(family="leap")
+    target = _joint_by_name(hand, "index_j1")
+    sphere = SphereGeometryCfg(radius=0.01)
+    target.collisions[0] = target.collisions[0].replace(geometry=sphere)
+    target.visuals[0] = target.visuals[0].replace(geometry=sphere)
+
+    mutated = LinkProximalOverlapMutator(_overlap_cfg()).mutate(
+        hand,
+        sampled_params={
+            "sample": {
+                "resolved_self_mode": "disturb",
+                "joint_delta_ratio": {"index_j1": 0.1},
+            }
+        },
+    )
+
+    assert mutated is None
+
+
+class _OverlapOnlyCfg(HandMutatorCfg):
+    r"""锁住同一 canonical sample 在左右手上的严格镜像 contract。"""
+
+    link_proximal_overlap = _overlap_cfg(ratio=(0.1, 0.1))
+
+
+def test_same_overlap_sample_preserves_strict_left_right_geometry_mirror() -> None:
+    r"""局部 $-y$ overhang 不应破坏 YZ handedness lowering 与 same-q identity。"""
+
+    right = _build_hand(family="leap", handedness="right")
+    left = _build_hand(family="leap", handedness="left")
+    sampled = {
+        "link_proximal_overlap": {
+            "sample": {
+                "resolved_self_mode": "disturb",
+                "joint_delta_ratio": {"index_j1": 0.1, "thumb_j1": 0.1},
+            }
+        }
+    }
+    runtime = HandMutator(_OverlapOnlyCfg())
+
+    mutated_right = runtime.mutate(right, sampled_params=sampled)
+    mutated_left = runtime.mutate(left, sampled_params=sampled)
+
+    assert mutated_right is not None
+    assert mutated_left is not None
+    for joint_name in ("index_j1", "thumb_j1"):
+        right_joint = _joint_by_name(mutated_right, joint_name)
+        left_joint = _joint_by_name(mutated_left, joint_name)
+        assert left_joint.collisions[0].geometry == right_joint.collisions[0].geometry
+        expected = mirror_pose_about_yz(right_joint.collisions[0].origin)
+        for actual_value, expected_value in zip(left_joint.collisions[0].origin.pos, expected.pos, strict=True):
+            assert math.isclose(actual_value, expected_value, rel_tol=0.0, abs_tol=1e-9)
+        assert left_joint.origin == mirror_pose_about_yz(right_joint.origin)

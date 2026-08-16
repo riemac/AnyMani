@@ -189,15 +189,19 @@ class HandMutator:
             )
         sampled_params = sampled_params or {}
         composed = HandPatch()
-        touched_paths: set[tuple[Any, ...]] = set()
+        op_index_by_path: dict[tuple[Any, ...], int] = {}
         for name, cfg in self.cfg.ordered_terms():
             runtime = self._make_runtime(cfg)
             patch = runtime.plan_patch(target, sampled_params=sampled_params.get(name, {}))
             for op in patch.ops:
-                if op.path in touched_paths:
-                    raise ValueError(f"post-mutate patch conflict at path {op.path!r}")
-                touched_paths.add(op.path)
-            composed.extend(patch)
+                existing_index = op_index_by_path.get(op.path)
+                if existing_index is None:
+                    op_index_by_path[op.path] = len(composed.ops)
+                    composed.add_op(op)
+                    continue
+                # 同一路径只有显式声明同一 composer 的 typed op 才能合并；普通 patch 仍严格拒绝冲突。
+                composed.ops[existing_index] = composed.ops[existing_index].merged_with(op)
+            composed.merge_metadata(patch.metadata)
         return composed
 
     def mutate(

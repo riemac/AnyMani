@@ -14,15 +14,24 @@ r"""连杆长度缩放变异算子：在已有 `HandCfg` 上对 link 两岸距�
 
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass, field
 import math
 import random
+from dataclasses import MISSING, dataclass, field
 from typing import Any, Literal
 
 from ...asset_base import HandCfg
-from ...asset_schema_core import EllipticCylinderGeometryCfg, PoseCfg, Vector2, Vector6
+from ...asset_schema_core import PoseCfg, Vector2, Vector6
+from .axial_geometry import (
+    AxialGeometryEdit,
+    make_axial_geometry_patch_op,
+)
+from .axial_geometry import (
+    joint_cross_section as _joint_cross_section,
+)
+from .axial_geometry import (
+    joint_primary_length as _joint_primary_length,
+)
 from .base import HandPatch, MutatorBase, MutatorBaseCfg, _make_range_sampler
-
 
 _MODE_IDENTITY = "identity"
 _MODE_GENERAL = "general"
@@ -58,7 +67,7 @@ class LinkScaleCfg(MutatorBaseCfg):
     避免把视觉语义和运动语义混成一团。
     """
 
-    class_type: type["LinkScaleMutator"] | None = field(init=False, default=None, repr=False)
+    class_type: type[LinkScaleMutator] | None = field(init=False, default=None, repr=False)
     r"""关联的运行时类；由配置层把 schema 绑定到真正的执行器。"""
 
     link_scale: Vector2 | Vector6 = field(default=MISSING)
@@ -295,30 +304,23 @@ class LinkScaleMutator(MutatorBase):
             )  # shared 宽高先按 semantic 语义采样，再按当前 joint 是否为 thumb 映射到 local $(x,z)$
             is_cmc1 = str(joint.child).endswith("_cmc1")
 
-            def apply_link(
-                hand: HandCfg,
-                *,
-                fi=finger_index,
-                ji=joint_index,
-                old=old_length,
-                new=new_length,
-                old_cross=old_cross_section,
-                new_cross=new_cross_section,
-                cmc1=is_cmc1,
-            ) -> None:
-                r"""写回当前 joint child link 的新有效长度。"""
-
-                mutated_joint = hand.fingers[fi].joints[ji]
-                _set_joint_primary_geometry(
-                    mutated_joint,
-                    old_length=old,
-                    new_length=new,
-                    old_cross_section=old_cross,
-                    new_cross_section=new_cross,
-                    keep_center=cmc1,
+            # geometry 本体先表示为 typed axial edit；若同一 joint 还有 proximal-overlap term，
+            # pipeline 会在 apply 前合并两者，并保持这里只由 link_scale 提供 scaled length/cross-section。
+            patch.add_op(
+                make_axial_geometry_patch_op(
+                    AxialGeometryEdit(
+                        finger_index=finger_index,
+                        joint_index=joint_index,
+                        joint_name=joint.name,
+                        child_link=str(joint.child),
+                        source_length=old_length,
+                        source_cross_section=old_cross_section,
+                        keep_center=is_cmc1,
+                        scaled_length=new_length,
+                        scaled_cross_section=new_cross_section,
+                    )
                 )
-
-            patch.add(("finger", finger_index, "joint", joint_index, "link_geometry"), apply_link)
+            )
 
             next_index = joint_index + 1
             if next_index < len(target.fingers[finger_index].joints):
@@ -611,52 +613,6 @@ def _shared_cross_section_ranges(
     return width_range, height_range
 
 
-def _joint_primary_length(joint) -> float | None:
-    r"""从 joint 的 collision / visual 主体几何中读取有效长度 $L_i$。"""
-
-    # 首先看 collision，因为它更接近物理接触和碰撞语义；
-    # 如果没有 collision，再退回 visual，保证在更稀疏的资产上也能工作。
-    geometry = None
-    if joint.collisions:
-        geometry = joint.collisions[0].geometry
-    elif joint.visuals:
-        geometry = joint.visuals[0].geometry
-    if geometry is None:
-        return None
-    if geometry.kind == "box":
-        return float(geometry.size[1])
-    if geometry.kind == "cylinder":
-        return float(geometry.length)
-    if geometry.kind == "elliptic_cylinder":
-        return float(geometry.length)
-    return None
-
-
-def _joint_cross_section(joint) -> tuple[float, float] | None:
-    r"""返回 joint 主体几何在局部 $(x, z)$ 平面上的横截面全尺寸。
-
-    这里统一返回“全尺寸”而不是半轴，是为了和 `Vector6=(l,w,h)` 的公开语义对齐。
-    对圆柱/椭圆柱而言，内部几何仍然可以用半径/半轴存储，但 mutate 层只关心
-    当前横截面的可见宽度与高度。
-    """
-
-    geometry = None
-    if joint.collisions:
-        geometry = joint.collisions[0].geometry
-    elif joint.visuals:
-        geometry = joint.visuals[0].geometry
-    if geometry is None:
-        return None
-    if geometry.kind == "box":
-        return float(geometry.size[0]), float(geometry.size[2])
-    if geometry.kind == "cylinder":
-        diameter = 2.0 * float(geometry.radius)
-        return diameter, diameter
-    if geometry.kind == "elliptic_cylinder":
-        return 2.0 * float(geometry.radius_x), 2.0 * float(geometry.radius_z)
-    return None
-
-
 def _is_thumb_joint(joint) -> bool:
     r"""判断当前 joint 是否属于 thumb 链。
 
@@ -756,79 +712,6 @@ def _mutated_cross_section(
     if new_width <= 1e-6 or new_height <= 1e-6:
         return old_cross_section  # 极端非法尺度直接回退原尺寸，避免几何退化成负值或零
     return new_width, new_height
-
-
-def _set_joint_primary_geometry(
-    joint,
-    *,
-    old_length: float,
-    new_length: float,
-    old_cross_section: tuple[float, float] | None,
-    new_cross_section: tuple[float, float] | None,
-    keep_center: bool,
-) -> None:
-    r"""写回 joint child link 的主体几何尺寸，并保持 mesh offset $d_i$ 不被缩放。
-
-    若 `keep_center=False`，则会按旧中心偏移量重新计算 origin；
-    若 `keep_center=True`，则保留几何中心，仅调整长度。这一分支主要
-    服务于 CMC1 这类需要特殊中心保持语义的关节。
-
-    宽度/高度缩放遵守 `长度和宽度变异示意.jpg` 的语义：只改横截面尺寸，
-    不改 `element.origin` 与 `joint.origin`。这意味着 non-thumb 的 box/cylinder
-    截面只是在局部 $(x,z)$ 平面上做对称放缩，而不会把整段 link 横向平移走。
-    """
-
-    # collision 和 visual 要同步更新，否则视觉和接触皮肤会在局部产生
-    # 不一致的长度语义。
-    for collection_name in ("collisions", "visuals"):
-        collection = getattr(joint, collection_name)
-        for index, element in enumerate(collection):
-            geometry = element.geometry
-            if geometry.kind == "box":
-                size = geometry.size
-                width = float(size[0]) if new_cross_section is None else float(new_cross_section[0])  # box 局部 $x$ 全尺寸
-                height = float(size[2]) if new_cross_section is None else float(new_cross_section[1])  # box 局部 $z$ 全尺寸
-                geometry = geometry.replace(size=(width, new_length, height))
-            elif geometry.kind == "cylinder":
-                if new_cross_section is None:
-                    geometry = geometry.replace(length=new_length)
-                else:
-                    radius_x = 0.5 * float(new_cross_section[0])  # 从公开的全尺寸宽度恢复成局部 $x$ 半轴
-                    radius_z = 0.5 * float(new_cross_section[1])  # 从公开的全尺寸高度恢复成局部 $z$ 半轴
-                    if math.isclose(radius_x, radius_z, rel_tol=0.0, abs_tol=1e-12):
-                        geometry = geometry.replace(radius=radius_x, length=new_length)  # 等径时保持标准圆柱
-                    else:
-                        geometry = EllipticCylinderGeometryCfg(radius_x=radius_x, radius_z=radius_z, length=new_length)
-            elif geometry.kind == "elliptic_cylinder":
-                if new_cross_section is None:
-                    geometry = geometry.replace(length=new_length)
-                else:
-                    radius_x = 0.5 * float(new_cross_section[0])  # 椭圆柱局部 $x$ 半轴
-                    radius_z = 0.5 * float(new_cross_section[1])  # 椭圆柱局部 $z$ 半轴
-                    if math.isclose(radius_x, radius_z, rel_tol=0.0, abs_tol=1e-12):
-                        from ...asset_schema_core import CylinderGeometryCfg
-
-                        geometry = CylinderGeometryCfg(radius=radius_x, length=new_length)  # 再次收敛到等径时允许规范化回标准圆柱
-                    else:
-                        geometry = geometry.replace(radius_x=radius_x, radius_z=radius_z, length=new_length)
-            else:
-                continue
-
-            origin = element.origin
-            if keep_center:
-                new_origin = origin.copy()
-            else:
-                offset_y = origin.pos[1] - old_length / 2.0
-                new_origin = PoseCfg(
-                    pos=(origin.pos[0], new_length / 2.0 + offset_y, origin.pos[2]),
-                    rpy=origin.rpy,
-                )
-            collection[index] = element.replace(geometry=geometry, origin=new_origin)
-            # 若当前 joint 已携带 inertial，则只把惯性参考原点同步到新的主体几何中心。
-            # 真正的质量 / 惯量重建已统一上收至 `asset_physics.py` 的 physics closure，
-            # 避免同一套几何语义在 mutator 内部和 generator 主链里重复实现。
-            if joint.inertial is not None and index == 0:
-                joint.inertial = joint.inertial.replace(origin=new_origin)
 
 
 def _next_origin_from_link_scale(

@@ -7,10 +7,9 @@ r"""后序变异工具的公共基础协议。
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable
 from dataclasses import dataclass, field
-import math
-import random
 from typing import Any
 
 from ...asset_base import AssetCfgBase, HandCfg
@@ -34,7 +33,7 @@ class MutatorBaseCfg(AssetCfgBase):
         - 一个约定，内部属性用 "_" 下划线前缀，用户配置接口后，可由 `__post_init__()` 解析
         - 用户好友的对外接口属性则不用 "_"
     """
-    class_type: type["MutatorBase"] | None = field(init=False, default=None, repr=False)
+    class_type: type[MutatorBase] | None = field(init=False, default=None, repr=False)
     r"""内部运行时绑定字段，不作为研究配置接口的一部分。"""
 
 
@@ -74,6 +73,39 @@ class PatchOp:
 
     path: tuple[Any, ...]
     apply: Callable[[HandCfg], None] = field(repr=False)
+    composer: str | None = None
+    r"""可选的语义合成器身份；`None` 表示重复 path 必须继续 fail-fast。"""
+
+    payload: Any = field(default=None, repr=False)
+    r"""供同类 composer 合并的 typed 语义载荷；普通 patch 不消费该字段。"""
+
+    compose: Callable[[PatchOp], PatchOp] | None = field(default=None, repr=False)
+    r"""把同一路径的另一条同类 patch 合成为唯一写入操作。"""
+
+    finalize_metadata: Callable[[dict[str, Any]], None] | None = field(default=None, repr=False)
+    r"""在 apply 前把合成后的派生量写回 patch provenance。"""
+
+    def merged_with(self, other: PatchOp) -> PatchOp:
+        r"""合并两条声明写入同一语义路径的 patch。
+
+        普通 patch 没有 composer，仍按原 contract 拒绝重复路径。只有双方显式声明
+        同一个 composer，且当前 op 提供 compose 函数时，pipeline 才允许合成。
+
+        Args:
+            other (PatchOp): 另一条具有相同 `path` 的 deferred patch。
+
+        Returns:
+            PatchOp: 已收敛成一次 apply 的组合 patch。
+
+        Raises:
+            ValueError: path、composer 或 compose 能力不满足显式合成合同。
+        """
+
+        if self.path != other.path:
+            raise ValueError(f"cannot merge patch paths {self.path!r} and {other.path!r}")
+        if self.composer is None or self.composer != other.composer or self.compose is None:
+            raise ValueError(f"post-mutate patch conflict at path {self.path!r}")
+        return self.compose(other)
 
 
 @dataclass
@@ -99,9 +131,19 @@ class HandPatch:
     def add(self, path: tuple[Any, ...], apply: Callable[[HandCfg], None]) -> None:
         self.ops.append(PatchOp(path=path, apply=apply))
 
-    def extend(self, other: "HandPatch") -> None:
+    def add_op(self, op: PatchOp) -> None:
+        r"""加入一条已经携带 composer/payload 的完整 patch op。"""
+
+        self.ops.append(op)
+
+    def extend(self, other: HandPatch) -> None:
         self.ops.extend(other.ops)
-        for key, value in other.metadata.items():
+        self.merge_metadata(other.metadata)
+
+    def merge_metadata(self, metadata: dict[str, Any]) -> None:
+        r"""按既有一层 term-name 语义合并 patch provenance。"""
+
+        for key, value in metadata.items():
             if isinstance(self.metadata.get(key), dict) and isinstance(value, dict):
                 merged = dict(self.metadata[key])  # type: ignore[index]
                 merged.update(value)  # 当前只需要一层 term-name -> payload 的浅合并
@@ -109,7 +151,15 @@ class HandPatch:
             else:
                 self.metadata[key] = value
 
+    def _finalize_metadata(self) -> None:
+        r"""用最终合成 op 补齐依赖多个 term 的派生 provenance。"""
+
+        for op in self.ops:
+            if op.finalize_metadata is not None:
+                op.finalize_metadata(self.metadata)
+
     def apply(self, target: HandCfg) -> HandCfg:
+        self._finalize_metadata()  # 先记录组合后的真实几何量，再把 provenance 写入输出 HandCfg
         mutated = target.copy()
         for op in self.ops:
             op.apply(mutated)

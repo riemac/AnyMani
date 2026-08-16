@@ -4,6 +4,7 @@ r"""手部资产生成器的后序变异工具包。
 
 - ``base``          → MutatorBase（最小基类协议）
 - ``link_scale``    → LinkScaleCfg, LinkScaleMutator（连杆长度缩放）
+- ``link_proximal_overlap`` → LinkProximalOverlapCfg, LinkProximalOverlapMutator（连杆近端重叠）
 - ``tip_replace``   → TipReplaceCfg, TipReplaceMutator（指尖几何替换）
 - ``limit_tweak``   → LimitTweakCfg, LimitTweakMutator（关节限位微调）
 - ``mount_perturb`` → MountPerturbCfg, MountPerturbMutator（挂载点扰动）
@@ -12,6 +13,7 @@ r"""手部资产生成器的后序变异工具包。
 
 from .base import MutatorBase, MutatorBaseCfg
 from .limit_tweak import LimitTweakCfg, LimitTweakMutator
+from .link_proximal_overlap import LinkProximalOverlapCfg, LinkProximalOverlapMutator
 from .link_scale import LinkScaleCfg, LinkScaleMutator
 from .mount_perturb import MountPerturbCfg, MountPerturbMutator
 from .pipeline import HandMutator, HandMutatorCfg
@@ -30,6 +32,8 @@ __all__ = [
     # 参数类
     "LinkScaleCfg",
     "LinkScaleMutator",
+    "LinkProximalOverlapCfg",
+    "LinkProximalOverlapMutator",
     "LimitTweakCfg",
     "LimitTweakMutator",
     "MountPerturbCfg",

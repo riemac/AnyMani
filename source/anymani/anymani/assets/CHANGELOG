@@ -1,3 +1,12 @@
+0.3.4 - 2026-08-16
+==================
+
+- 新增 `LinkProximalOverlapCfg` / `LinkProximalOverlapMutator`，以 signed ratio 变异 eligible child-link 的 proximal overhang；正值增加重叠，负值只缩减既有重叠且不会制造 gap。
+- 对 `box`、`cylinder` 与 `elliptic-cylinder` 使用统一轴向几何 lowering，同步 collision、visual 与临时 inertial origin；sphere/custom mesh 明确 fail closed。
+- 新增 `axial_geometry_v1` typed composer，使 `link_scale + link_proximal_overlap` 的结果与 term 声明顺序无关，并保持 downstream joint/tip origin 只由 link scale 更新。
+- 新增 identity、逐 owner disturb、non-thumb homologous grouping、首 surviving active revolute child / fixed root / fixed tip 排除、parent-relative cap、handedness 与 provenance contract 测试。
+- 正式配置接入新算子；使用真实 LEAP mother 生成 4 个 post-mutate bundle，4 个通过 physics closure、导出和 SDF validator，另有 1 个候选按 finger-spacing gate 拒绝后重采样。
+
 0.3.3 - 2026-08-12
 ==================
 

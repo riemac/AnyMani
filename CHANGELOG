@@ -1,3 +1,10 @@
+0.5.6 - 2026-08-16
+==================
+
+- assets 新增 signed `link_proximal_overlap` post-mutate 算子：在保持 joint frame、axis、distal boundary、下游 origin 与拓扑不变的前提下，对 eligible child-link 的 proximal overhang 做受控几何变异。
+- 将 `link_scale` 与 proximal overlap 收敛到 typed `axial_geometry_v1` 合成器，collision/visual/inertial origin 只写入一次最终几何，动力学质量与惯量继续由 physics closure 重算。
+- 正式 post-mutate 配置加入 `identity=0.2 / disturb=0.5 / homologous_non_thumb=0.3`、`overhang_delta_ratio=(-0.1, 0.2)` 与 parent-relative overlap cap；真实 LEAP mother 的 4-sample run 完成 physics、export、provenance 与 SDF validator 验证。
+
 0.5.5 - 2026-08-15
 ==================
 

@@ -82,7 +82,8 @@ def test_finger_presets_store_measurement_anchors_via_explicit_cm_helpers():
         math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-12)
         for actual, expected in zip(allegro.length, [0.018, 0.054, 0.038, 0.022], strict=True)
     )
-    assert math.isclose(allegro.mesh_offsets[2], -0.006, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(allegro.mesh_offsets[2], 0.0, rel_tol=0.0, abs_tol=1e-12)
+    assert math.isclose(allegro.mesh_offsets[3], -0.006, rel_tol=0.0, abs_tol=1e-12)
     assert math.isclose(allegro.tip["radius"], 0.012, rel_tol=0.0, abs_tol=1e-12)
     assert math.isclose(allegro.tip["height"], 0.010, rel_tol=0.0, abs_tol=1e-12)
 

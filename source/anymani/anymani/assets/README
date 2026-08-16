@@ -3,7 +3,7 @@ AnyMani Assets
 
 `source/anymani/anymani/assets/` 是 AnyMani 的手资产生成子项目。
 
-当前版本：`0.3.3`
+当前版本：`0.3.4`
 
 它负责的不是单一 URDF 导出，而是一整条可追溯的资产生产链：
 
@@ -29,6 +29,39 @@ AnyMani Assets
 11. `summary.stats.rejected_by_reason` 按稳定 validator error-code 集合计数；多规则同时命中的样本只占一个组合键，因此原因计数总和等于 `rejected`。
 12. generated left 由 canonical right 关于 palm YZ 平面做完整物理反射：位置、姿态、revolute 轴、惯量和非对称 mesh 同步 lowering，左右共享 joint identity、limits 与相同 $q$ 功能语义。
 13. 新 generated bundle 在 `hand.yaml.handedness_contract` 中声明 `same_q=true` 与 `physical_lowering_complete=true`；缺少严格证书的历史 left bundle 默认拒绝加载，只能通过显式 legacy audit override 读取。
+14. `link_proximal_overlap` 在 child link 局部 `+y` 轴上只改变 proximal boundary；它使用 link-scale 后的 child span 与变异前 parent 净 span 计算 signed overhang，并通过 `axial_geometry_v1` 与 `link_scale` 合成一次最终 geometry patch。
+
+近端重叠变异
+------------
+
+对第 $i$ 个 eligible child link，基础 overhang 为 $o_i^0$，link-scale 后 child span 为 $s_i^\star$，变异前 parent 净 span 为 $E_{i-1}^0$。配置采样的 signed ratio 为 $\eta_i$，parent cap 为 $\kappa$，则：
+
+$$
+o_i'=\operatorname{clip}(o_i^0+\eta_i s_i^\star,\ 0,\ \kappa E_{i-1}^0),\qquad
+\delta_i=o_i'-o_i^0.
+$$
+
+最终 link geometry 为 $L_i^{final}=L_i^{scale}+\delta_i$、$c_{y,i}^{final}=c_{y,i}^{scale}-\delta_i/2$。因此 distal boundary、joint frame、joint axis、下游 joint/tip origin 和拓扑不变；`link_scale` 唯一负责 downstream origin，overlap 只负责最终 link 长度与中心。
+
+```text
+child local +y axis
+
+before:       parent             child
+              |=================|[-----------]
+              ^                 ^             ^
+              a                 b             distal boundary
+              |<-- overhang -->|
+
+after (+delta): parent       child
+              |=============|[---------------]
+              ^             ^                 ^
+              a-delta       b                 same distal boundary
+              |<-- final overhang -->|
+```
+
+`identity` 产生整手 no-op；`disturb` 对 eligible owner 独立采样；`homologous_non_thumb` 按 `(slot family, semantic suffix)` 在 non-thumb finger 间共享 ratio，而 thumb 仍逐 owner 独立。首个 surviving active revolute child、前置 fixed root、fixed tip 与 unsupported sphere/custom mesh 不参与变异；后者显式拒绝而不是静默跳过。
+
+每个 post-mutate sidecar 在 `post_mutate_samples.link_proximal_overlap` 与顶层 provenance 中记录 resolved mode、homologous groups、`delta_ratio`、`source_child_span_m`、`scaled_child_span_m`、`parent_span_before_m`、`base_overhang_m`、`final_overhang_m`、`max_overhang_m`、`geometry_delta_m` 与 `max_parent_overlap_ratio`，便于从数值证据复算最终 geometry。
 
 常看入口
 --------
