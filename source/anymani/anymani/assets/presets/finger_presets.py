@@ -39,7 +39,7 @@ ALLEGRO_FINGER_PRESET = AllegroFingerBuilderCfg(
     width=cm(2.7),  # 默认人工测量锚点仍按 cm 录入，更符合手部资产调参直觉
     height=cm(2.0),  # builder 侧最终只看到 SI(m)，这里的 `cm(...)` 只承担显式换算
     length=[cm(1.8), cm(5.4), cm(3.8), cm(2.2)],
-    mesh_offsets=[0.0, 0.0, cm(-0.6), 0.0],
+    mesh_offsets=[0.0, 0.0, 0.0, cm(-0.6)],
     axes=[(0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
     tip={"type": "cs", "radius": cm(1.2), "height": cm(1.0)},
 )
