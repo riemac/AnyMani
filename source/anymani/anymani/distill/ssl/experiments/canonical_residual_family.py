@@ -1,4 +1,4 @@
-r"""21-asset same-topology canonical residual Geometry SSL 声明式实验。
+r"""manifest-driven cross-mother canonical residual Geometry SSL 声明式实验。
 
 本模块只声明资产 family、物理表征、模型、目标、协议与 run identity。Hydra defaults 选择
 ``trainer/single_gpu_16gb``；导入本模块不会扫描资产、初始化 CUDA 或创建输出目录。
@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from pathlib import Path
 
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.decoders.representations.implicit_field import (
@@ -35,7 +34,6 @@ from anymani.distill.ssl.config import (
     GeometryCalibrationCfg,
     GeometryCoverageCfg,
     GeometryReproducibilityCfg,
-    GeometrySSLAssetCfg,
     GeometrySSLExperimentCfg,
     GeometrySSLProtocolCfg,
     GeometrySSLRunCfg,
@@ -43,51 +41,8 @@ from anymani.distill.ssl.config import (
     GeometryValidationCfg,
 )
 
-FORMAL_MOTHER = Path(
-    "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-12_18-16-48/"
-    "single_palm_leap/right_t4_i4_m4_r4"
-)
-FORMAL_FAMILY = FORMAL_MOTHER / "2026-08-13_02-05-29"
-MOTHER_ASSET_ID = "f5d8c069"
-FORMAL_VARIANT_IDS = (
-    "05c1db5c",
-    "15c82d3f",
-    "25496b19",
-    "34266899",
-    "4540d627",
-    "49e9b654",
-    "56c628f9",
-    "624b70e9",
-    "71cc91d9",
-    "8e433022",
-    "99272bfa",
-    "ab3d4b97",
-    "b22a3f60",
-    "b336924f",
-    "c2508da5",
-    "c4f25d2e",
-    "d84108ac",
-    "ea1c252d",
-    "ed6de294",
-    "f25ede87",
-)
-FORMAL_FAMILY_PATHS = (
-    str(FORMAL_MOTHER),
-    *(str(FORMAL_FAMILY / asset_id) for asset_id in FORMAL_VARIANT_IDS),
-)
-
-
-@dataclass(frozen=True)
-class CanonicalAssetsCfg(GeometrySSLAssetCfg):
-    r"""固定 mother+20 variants，并按 physical geometry hash 留出 4 项 validation。"""
-
-    family_paths: tuple[str, ...] = FORMAL_FAMILY_PATHS
-    mother_asset_id: str = MOTHER_ASSET_ID
-    validation_asset_count: int = 4
-    split_seed: int = 20260813
-    train_paths: tuple[str, ...] = ()
-    validation_paths: tuple[str, ...] = ()
-    official_evaluation_paths: tuple[str, ...] = ()
+FORMAL_ASSET_DATASET_MANIFEST = "source/anymani/anymani/assets/datasets/canonical_cross_mother_v1.yaml"
+"""正式 cross-mother pilot 的唯一资产选择文件。"""
 
 
 @dataclass(frozen=True)
@@ -290,7 +245,7 @@ class CanonicalProtocolCfg(GeometrySSLProtocolCfg):
 
 @dataclass(frozen=True)
 class CanonicalRunCfg(GeometrySSLRunCfg):
-    output_dir: str = "logs/geometry_ssl"
+    output_dir: str = "logs/ssl"
     experiment_name: str = "canonical_residual_right_leap_family_20260813"
     resume_checkpoint: str = ""
 
@@ -301,7 +256,7 @@ class CanonicalResidualFamilyCfg(GeometrySSLExperimentCfg):
 
     defaults = ({"trainer": "single_gpu_16gb"}, "_self_")
     schema_version: str = "2.0.0"
-    assets: CanonicalAssetsCfg = dataclass_field(default_factory=CanonicalAssetsCfg)
+    asset_dataset_manifest: str = FORMAL_ASSET_DATASET_MANIFEST
     representation: CanonicalRepresentationCfg = dataclass_field(default_factory=CanonicalRepresentationCfg)
     model: CanonicalModelCfg = dataclass_field(default_factory=CanonicalModelCfg)
     objective: CanonicalObjectiveCfg = dataclass_field(default_factory=CanonicalObjectiveCfg)
@@ -312,8 +267,5 @@ class CanonicalResidualFamilyCfg(GeometrySSLExperimentCfg):
 
 __all__ = [
     "CanonicalResidualFamilyCfg",
-    "FORMAL_FAMILY",
-    "FORMAL_MOTHER",
-    "FORMAL_VARIANT_IDS",
-    "MOTHER_ASSET_ID",
+    "FORMAL_ASSET_DATASET_MANIFEST",
 ]

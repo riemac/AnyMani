@@ -1,4 +1,4 @@
-r"""Geometry SSL runtime 的资产解析、CPU 物化与 physical-group split。
+r"""Geometry SSL runtime 的 dataset resolve、CPU 物化与 expanded asset manifest。
 
 本模块是 ``assets -> representations.sources -> ssl`` 的运行边界：只通过 ``HandBank`` 获取类型化静态语义，
 再物化 CPU geometry runtime、物理映射身份与 manifest。它不创建模型、GPU resident window、
@@ -8,12 +8,17 @@ optimizer 或 validation metric，也不解析 URDF/hand.yaml。
 from __future__ import annotations
 
 import hashlib  # static anchor/home-surface realization 的 byte-level fingerprint
-from typing import Literal  # generated/official 决定 bank 的迁移与 fail-closed 路由
+from dataclasses import dataclass
 
 import torch  # official identity-only lowering 使用 CPU float64
 
-from anymani.assets.bank.hand_bank import HandBank, HandBankCfg  # 资产集合唯一入口
-from anymani.assets.bank.hand_container import HandContainer, HandContainerCfg  # 显式 bundle 选择
+from anymani.assets.bank.dataset import (
+    HandAssetDataset,
+    HandAssetProvenance,
+    ResolvedHandAssetDataset,
+    ResolvedHandAssetPartition,
+)
+from anymani.assets.bank.hand_container import HandContainer
 from anymani.distill.representations.queries.spatial_sampling import SURFACE_QUERY_SAMPLING_VERSION
 from anymani.distill.representations.sources.collision_geometry import (
     AnchorSamples,
@@ -26,40 +31,16 @@ from anymani.distill.representations.sources.collision_geometry import (
 from anymani.distill.representations.sources.geometry_source import GeometrySource
 from anymani.distill.representations.sources.kinematics import lower_hand_geometry_semantics
 from anymani.distill.ssl.config import GeometrySSLAssetManifest, GeometrySSLExperimentCfg
-from anymani.distill.ssl.split import (
-    GeometryAssetIdentityRecord,
-    GroupedGeometryAssetSplit,
-    split_geometry_asset_groups,
-)
 
 
-def resolve_assets(
-    paths: tuple[str, ...],
-    *,
-    source_kind: Literal["generated", "official"],
-) -> tuple[HandContainer, ...]:
-    r"""通过 HandBank explicit route 解析资产，不在 SSL 重读 sidecar/URDF 细节。
+@dataclass(frozen=True)
+class GeometrySSLResolvedAssets:
+    r"""通用 dataset 进入 SSL 后的 train/validation runtime 与 evaluation identities。"""
 
-    Args:
-        paths (tuple[str, ...]): 已由 resolved experiment 冻结的 bundle roots。
-        source_kind (Literal["generated", "official"]): generated 允许版本化迁移；official
-            缺人工核验几何语义时严格失败。
-
-    Returns:
-        tuple[HandContainer, ...]: 与声明路径同序、包含 ``geometry_semantics`` 的资产。
-    """
-
-    if not paths:  # validation/official split 可以为空
-        return ()
-    selection = HandBank(
-        HandBankCfg(
-            source_mode="post_mutate",  # explicit route 下只作 provenance，不触发目录 discovery
-            selection_mode="explicit",  # 资产身份由 resolved config 精确冻结
-            containers=tuple(HandContainerCfg(path=path, source_kind=source_kind) for path in paths),
-            require_geometry_semantics=True,  # owner/运动学/anchor 语义必须由 assets 层交付
-        )
-    ).resolve()
-    return selection.assets  # HandBank 保持配置声明顺序
+    dataset: ResolvedHandAssetDataset  # 原始 YAML identity 与全部 partition provenance
+    train: tuple[GeometrySource, ...]  # optimizer/calibration 使用的完整 geometry sources
+    validation: tuple[GeometrySource, ...]  # checkpoint selection 使用的完整 held-out sources
+    evaluation: dict[str, tuple[tuple[HandContainer, GeometryIdentity], ...]]  # 仅 identity，不执行 forward
 
 
 def anchor_realization_record(anchors: AnchorSamples | None) -> dict[str, str]:
@@ -155,12 +136,24 @@ def manifest_record(
     anchors: AnchorSamples | None = None,
     home_surface: HomeSurfaceSamples | None = None,
     geometry_cache: OwnerGeometryCache | None = None,
+    provenance: HandAssetProvenance | None = None,
 ) -> dict[str, str]:
     r"""提取 content、physical mapping 与 configuration-domain 三层身份。"""
 
     semantics = container.geometry_semantics  # bank 已验证的静态语义真源
     if semantics is None:
         raise ValueError("manifest asset is missing geometry semantics")
+    lineage = provenance or HandAssetProvenance(
+        partition="",
+        run_alias="",
+        run_dir="",
+        collection_kind="official",
+        group_name="",
+        mother_name="",
+        mother_path="",
+        variant_set="",
+        asset_role="official",
+    )
     return {
         "asset_id": container.asset_id,
         "content_hash": semantics.content_hash,
@@ -172,22 +165,32 @@ def manifest_record(
         "handedness": semantics.handedness,
         "joint_count": str(len(semantics.active_joint_names)),
         "owner_count": str(len(semantics.owners)),
+        "dataset_partition": lineage.partition,
+        "run_alias": lineage.run_alias,
+        "run_dir": lineage.run_dir,
+        "collection_kind": lineage.collection_kind,
+        "group_name": lineage.group_name,
+        "mother_name": lineage.mother_name,
+        "mother_path": lineage.mother_path,
+        "variant_set": lineage.variant_set,
+        "asset_role": lineage.asset_role,
         **anchor_realization_record(anchors),
         **home_surface_realization_record(home_surface, geometry_cache),
     }
 
 
-def build_manifest(
-    train_assets: tuple[GeometrySource, ...],
-    validation_assets: tuple[GeometrySource, ...],
-    official_assets: tuple[tuple[HandContainer, GeometryIdentity], ...],
-    *,
-    grouped_split: GroupedGeometryAssetSplit | None = None,
-) -> GeometrySSLAssetManifest:
-    r"""冻结三类 split，并通过 manifest 构造拒绝 content/physical identity 泄漏。"""
+def build_manifest(resolved: GeometrySSLResolvedAssets) -> GeometrySSLAssetManifest:
+    r"""把 dataset provenance 与 geometry identity 合并成唯一 expanded asset manifest。"""
 
+    train_provenance = _provenance_by_asset_id(resolved.dataset.train)
+    validation_provenance = _provenance_by_asset_id(resolved.dataset.validation)
+    evaluation_provenance = {
+        name: _provenance_by_asset_id(partition) for name, partition in resolved.dataset.evaluation.items()
+    }
     return GeometrySSLAssetManifest(
-        schema_version="1.1.0",
+        schema_version="2.0.0",
+        dataset_source_path=str(resolved.dataset.source_path),
+        dataset_source_sha256=resolved.dataset.source_sha256,
         train=tuple(
             manifest_record(
                 asset.container,
@@ -195,8 +198,9 @@ def build_manifest(
                 asset.anchors,
                 asset.home_surface,
                 asset.geometry_cache,
+                train_provenance[asset.asset_id],
             )
-            for asset in train_assets
+            for asset in resolved.train
         ),
         validation=tuple(
             manifest_record(
@@ -205,34 +209,24 @@ def build_manifest(
                 asset.anchors,
                 asset.home_surface,
                 asset.geometry_cache,
+                validation_provenance[asset.asset_id],
             )
-            for asset in validation_assets
+            for asset in resolved.validation
         ),
-        official_evaluation=tuple(manifest_record(container, identity) for container, identity in official_assets),
-        split_strategy="physical_group" if grouped_split is not None else "explicit",
-        split_seed=0 if grouped_split is None else grouped_split.split_seed,
-        requested_validation_asset_count=(
-            0 if grouped_split is None else grouped_split.requested_validation_asset_count
-        ),
-        actual_validation_asset_count=(
-            len(validation_assets) if grouped_split is None else grouped_split.actual_validation_asset_count
-        ),
+        evaluation={
+            name: tuple(
+                manifest_record(container, identity, provenance=evaluation_provenance[name][container.asset_id])
+                for container, identity in identities
+            )
+            for name, identities in resolved.evaluation.items()
+        },
     )
 
 
-def identity_record(runtime: GeometrySource) -> GeometryAssetIdentityRecord:
-    r"""把 CPU runtime 规约成 physical-group split 所需的最小身份记录。"""
+def _provenance_by_asset_id(partition: ResolvedHandAssetPartition) -> dict[str, HandAssetProvenance]:
+    r"""把 dataset partition 的稳定 asset axis 转成 manifest join index。"""
 
-    semantics = runtime.container.geometry_semantics
-    if semantics is None:
-        raise ValueError("identity record asset is missing geometry semantics")
-    return GeometryAssetIdentityRecord(
-        asset_id=runtime.asset_id,
-        path=str(runtime.container.urdf_path.parent),
-        content_hash=semantics.content_hash,
-        physical_geometry_hash=runtime.identity.physical_geometry_hash,
-        configuration_domain_hash=runtime.identity.configuration_domain_hash,
-    )
+    return {record.container.asset_id: record.provenance for record in partition.records}
 
 
 def materialize_assets(
@@ -267,39 +261,28 @@ def materialize_identity_only(
     return tuple(records)
 
 
-def resolve_generated_runtime_splits(
-    config: GeometrySSLExperimentCfg,
-) -> tuple[tuple[GeometrySource, ...], tuple[GeometrySource, ...], GroupedGeometryAssetSplit | None]:
-    r"""解析显式 split，或从完整 family catalog 构造 physical-geometry grouped split。"""
+def resolve_geometry_ssl_assets(config: GeometrySSLExperimentCfg) -> GeometrySSLResolvedAssets:
+    r"""加载通用 dataset YAML，并按 SSL 生命周期物化 train/validation/evaluation。"""
 
-    if config.assets.family_paths:
-        family_assets = resolve_assets(config.assets.family_paths, source_kind="generated")
-        family_runtime = materialize_assets(family_assets, config=config)
-        grouped = split_geometry_asset_groups(
-            tuple(identity_record(runtime) for runtime in family_runtime),
-            mother_asset_id=config.assets.mother_asset_id,
-            validation_asset_count=config.assets.validation_asset_count,
-            split_seed=config.assets.split_seed,
-        )
-        runtime_by_id = {runtime.asset_id: runtime for runtime in family_runtime}
-        train = tuple(runtime_by_id[record.asset_id] for record in grouped.train)
-        validation = tuple(runtime_by_id[record.asset_id] for record in grouped.validation)
-        return train, validation, grouped
-
-    train_assets = resolve_assets(config.assets.train_paths, source_kind="generated")
-    validation_assets = resolve_assets(config.assets.validation_paths, source_kind="generated")
-    return (
-        materialize_assets(train_assets, config=config),
-        materialize_assets(validation_assets, config=config),
-        None,
+    if not config.asset_dataset_manifest:
+        raise ValueError("geometry SSL requires asset_dataset_manifest")
+    dataset = HandAssetDataset.from_yaml(config.asset_dataset_manifest).resolve(require_geometry_semantics=True)
+    train = materialize_assets(dataset.train.assets, config=config)
+    validation = materialize_assets(dataset.validation.assets, config=config)
+    evaluation = {name: materialize_identity_only(partition.assets) for name, partition in dataset.evaluation.items()}
+    return GeometrySSLResolvedAssets(
+        dataset=dataset,
+        train=train,
+        validation=validation,
+        evaluation=evaluation,
     )
 
 
 __all__ = [
+    "GeometrySSLResolvedAssets",
     "anchor_realization_record",
     "build_manifest",
     "home_surface_realization_record",
     "materialize_identity_only",
-    "resolve_assets",
-    "resolve_generated_runtime_splits",
+    "resolve_geometry_ssl_assets",
 ]

@@ -3,7 +3,7 @@ r"""Task-free multi-anchor Geometry SSL 的完整运行生命周期。
 本模块是训练 façade 的执行内核，只编排已经分离的 runtime 组件：
 
 ```text
-runtime.assets        HandBank -> CPU runtime -> physical split/manifest
+runtime.assets        HandAssetDataset -> resolved roles -> physical manifest
 runtime.objective     physical q forward + paired rewrite + accumulation reduction
 runtime.validation    fixed morphology bank + ablation + independent-q replay
 runtime.checkpointing resume contract + selection lineage + runtime payload
@@ -58,9 +58,7 @@ from anymani.distill.ssl.runtime import (
 )
 from anymani.distill.ssl.runtime.assets import (
     build_manifest,
-    materialize_identity_only,
-    resolve_assets,
-    resolve_generated_runtime_splits,
+    resolve_geometry_ssl_assets,
 )
 from anymani.distill.ssl.runtime.checkpointing import (
     best_step_from_selection_history,
@@ -124,11 +122,11 @@ def _run_geometry_ssl_lifecycle(
     *,
     output_dir_override: Path | None = None,
 ) -> Path:
-    r"""执行 asset split、calibration、online train、fixed validation 与 checkpoint 生命周期。
+    r"""执行 dataset resolve、calibration、online train、fixed validation 与 checkpoint 生命周期。
 
-    生命周期固定为：physical split/manifest → resident runtime → held-out teacher bank → model/optimizer →
+    生命周期固定为：dataset roles/physical manifest → resident runtime → held-out teacher bank → model/optimizer →
     train-only calibration 或 strict resume → initialization evidence → online optimizer loop → final ablations、
-    independent-q replay、best/last checkpoint 与 cache release。official assets 在 manifest 后不进入任何
+    independent-q replay、best/last checkpoint 与 cache release。evaluation suites 在 manifest 后不进入
     teacher、model 或 optimizer 路径。
 
     Args:
@@ -146,8 +144,8 @@ def _run_geometry_ssl_lifecycle(
     """
 
     # 运行前先冻结可复现性与设备合同；online Warp teacher 不提供 CPU fallback。
-    if not config.assets.family_paths and not config.assets.train_paths:
-        raise ValueError("geometry SSL requires family_paths or at least one generated train asset path")
+    if not config.asset_dataset_manifest:
+        raise ValueError("geometry SSL requires asset_dataset_manifest")
     if config.protocol.reproducibility.deterministic_algorithms:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)  # 无确定 CUDA kernel 时 fail-closed
@@ -161,19 +159,20 @@ def _run_geometry_ssl_lifecycle(
         raise RuntimeError(f"configured CUDA device is unavailable: {device}")
     dtype = _torch_dtype(config.trainer.dtype)
 
-    # 解析 generated physical split 与隔离 official identity，先写 manifest 再初始化 GPU/runtime。
-    train_runtime, validation_runtime, grouped_split = resolve_generated_runtime_splits(config)
-    official_assets = resolve_assets(config.assets.official_evaluation_paths, source_kind="official")
-    official_runtime = materialize_identity_only(official_assets)
-    manifest = build_manifest(
-        train_runtime,
-        validation_runtime,
-        official_runtime,
-        grouped_split=grouped_split,
-    )
+    # 通用 dataset YAML 先展开 train/validation/evaluation；evaluation 本 patch 只物化 identity，
+    # 不进入 teacher、model 或 optimizer 路径。
+    resolved_assets = resolve_geometry_ssl_assets(config)
+    train_runtime = resolved_assets.train
+    validation_runtime = resolved_assets.validation
+    manifest = build_manifest(resolved_assets)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     output_dir = output_dir_override or Path(config.run.output_dir) / config.run.experiment_name / timestamp
-    write_resolved_experiment_files(output_dir, config=config, manifest=manifest)
+    write_resolved_experiment_files(
+        output_dir,
+        config=config,
+        dataset=resolved_assets.dataset,
+        manifest=manifest,
+    )
 
     # 训练 runtime 只持有有界 resident window；epoch 由每资产 Sobol q coverage 定义。
     representation = GeometryRepresentation(
@@ -281,7 +280,7 @@ def _run_geometry_ssl_lifecycle(
         if not isinstance(resolved_checkpoint, dict) or not isinstance(calibrated_objective, dict):
             raise ValueError("resume checkpoint lacks resolved config or calibrated objective evidence")
         if loaded_metadata.get("asset_manifest") != asdict(manifest):
-            raise ValueError("resume asset manifest does not match current resolved physical split")
+            raise ValueError("resume asset manifest does not match current resolved dataset roles")
         require_resume_scientific_config(config, resolved_checkpoint)
         calibrated_weights = GeometryFieldObjectiveCfg(**calibrated_objective)
         (
@@ -296,15 +295,15 @@ def _run_geometry_ssl_lifecycle(
         torch.set_rng_state(torch_rng_state.cpu())
         cuda_rng_state = runtime_payload.get("cuda_rng_state_all")
         if torch.cuda.is_available():
-            if not isinstance(cuda_rng_state, list) or not all(isinstance(item, torch.Tensor) for item in cuda_rng_state):
+            if not isinstance(cuda_rng_state, list) or not all(
+                isinstance(item, torch.Tensor) for item in cuda_rng_state
+            ):
                 raise ValueError("resume checkpoint lacks CUDA RNG states")
             torch.cuda.set_rng_state_all(cuda_rng_state)
     else:
         calibration_state = train_batcher.state_dict()  # calibration 不消费正式 q coverage
         try:
-            calibration_batches = tuple(
-                train_batcher.sample() for _ in range(config.protocol.calibration.batches)
-            )
+            calibration_batches = tuple(train_batcher.sample() for _ in range(config.protocol.calibration.batches))
             calibrated_weights = calibrate_geometry_ssl_weights(
                 model,
                 GeometryFieldObjective,
@@ -339,9 +338,7 @@ def _run_geometry_ssl_lifecycle(
     for event in validation_window.drain_telemetry_events() if validation_window is not None else ():
         logger.log_runtime_event({**event, "phase": "fixed_held_out_morphology_bank"})
     for event in train_window.drain_telemetry_events():
-        logger.log_runtime_event(
-            {**event, "phase": "resume" if config.run.resume_checkpoint else "loss_calibration"}
-        )
+        logger.log_runtime_event({**event, "phase": "resume" if config.run.resume_checkpoint else "loss_calibration"})
 
     # Training-morphology independent-q bank 的 initialization evidence 在中断前即可审计。
     training_q_bank_path = output_dir / "training_morphology_q_bank.yaml"

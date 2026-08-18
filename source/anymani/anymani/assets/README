@@ -3,7 +3,7 @@ AnyMani Assets
 
 `source/anymani/anymani/assets/` 是 AnyMani 的手资产生成子项目。
 
-当前版本：`0.3.4`
+当前版本：`0.3.6`
 
 它负责的不是单一 URDF 导出，而是一整条可追溯的资产生产链：
 
@@ -30,6 +30,7 @@ AnyMani Assets
 12. generated left 由 canonical right 关于 palm YZ 平面做完整物理反射：位置、姿态、revolute 轴、惯量和非对称 mesh 同步 lowering，左右共享 joint identity、limits 与相同 $q$ 功能语义。
 13. 新 generated bundle 在 `hand.yaml.handedness_contract` 中声明 `same_q=true` 与 `physical_lowering_complete=true`；缺少严格证书的历史 left bundle 默认拒绝加载，只能通过显式 legacy audit override 读取。
 14. `link_proximal_overlap` 在 child link 局部 `+y` 轴上只改变 proximal boundary；它使用 link-scale 后的 child span 与变异前 parent 净 span 计算 signed overhang，并通过 `axial_geometry_v1` 与 `link_scale` 合成一次最终 geometry patch。
+15. `bank/dataset.py` 提供通用 hand asset dataset manifest：generation run、production group、mixed composition、mother、variant set 与 partition provenance 由同一 YAML 合同解析，供 SSL/PPO/task 复用。
 
 近端重叠变异
 ------------
@@ -68,6 +69,7 @@ after (+delta): parent       child
 
 - 配置入口：`config/asset_gen_cfg.py`
 - 最高生成入口：`generator/hand_generator.py`
+- dataset manifest：`datasets/*.yaml`，schema/resolver：`bank/dataset.py`
 - 物理闭包：`asset_physics.py`
 - 版本记录：`VERSION`
 - 变更记录：`CHANGELOG`

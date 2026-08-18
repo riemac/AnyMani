@@ -31,4 +31,4 @@ initial baseline、历史 best 与完整 selection history 都属于 resume stat
 
 上述诊断可以证伪输入泄漏、latent bypass、错误 routing、mask coverage 退化和 checkpoint lineage 漂移，但不能单独证明 official zero-shot、cross-topology 泛化或 PPO transfer。任何结论至少应共同引用 code revision、resolved config、asset manifest、calibrated objective、selection history 与 checkpoint；TensorBoard 曲线或最终平均值不能替代这些事实源。
 
-一次 run 的原始证据写入 `logs/geometry_ssl/<experiment>/<UTC timestamp>/`：TensorBoard 用于在线观察，JSONL 保存 append-only 标量与 runtime 事件，NPZ 保存 dense arrays，YAML 保存 manifest、calibration、q-bank、selection 与 ablation。`recording` 负责落盘，`evaluation` 负责固定前向与分层统计，`analysis` 只读这些产物并生成 bootstrap 等派生结果；三者都不反向参与模型输入或 optimizer。
+一次 run 的原始证据写入 `logs/ssl/<experiment>/<UTC timestamp>/`：dataset/resolved YAML 保存实验与资产选择事实，TensorBoard 用于在线观察，JSONL 保存 append-only 标量与 runtime 事件，NPZ 保存 dense arrays，YAML 保存 expanded manifest、calibration、q-bank、selection 与 ablation。`recording` 负责落盘，`evaluation` 负责固定前向与分层统计，`analysis` 只读这些产物并生成 bootstrap 等派生结果；三者都不反向参与模型输入或 optimizer。

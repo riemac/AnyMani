@@ -32,8 +32,8 @@ def calibrate_geometry_ssl_weights(
     r"""在固定 generated train batches 上测量六项共享 encoder gradient，并冻结权重。
 
     每项独立建立 objective、清零梯度并反传；只读取模型 encoder 参数的梯度范数。参考项为
-    density，权重为 ``median(g_density)/median(g_term)`` 后裁剪到声明区间。validation/official
-    绝不能传入 `batches`；本函数不更新 model 参数，也不使用动态重标定。
+    density，权重为 ``median(g_density)/median(g_term)`` 后裁剪到声明区间。validation 与全部
+    evaluation suites 绝不能传入 `batches`；本函数不更新 model 参数，也不使用动态重标定。
     """
 
     if not batches:

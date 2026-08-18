@@ -56,9 +56,9 @@ $$
 
 ## 实验协议
 
-canonical family 含一项 mother 与 20 个 variants，按 `physical_geometry_hash` 整组划分为 17 train / 4 validation。每个 epoch 每项训练资产消费 256 个新 q，共 20 epochs。2 assets × 2 q 构成一个 microbatch，累积 4 次后更新；尾组不伪造 padding asset，因此 17 项训练集对应每 epoch 1152 microbatches、288 updates，完整预算为 5760 updates 与 87040 q samples。30000 只是异常 safety limit。
+canonical dataset 由 assets 层 manifest 冻结多个 mother lineages：45 train、16 validation、16 unseen-variant-set 与 17 unseen-mother assets。每个 epoch 每项训练资产消费 256 个新 q，共 20 epochs。2 assets × 2 q 构成一个 microbatch，累积 4 次后更新；resident windows 的尾组不伪造 padding asset，因此 45 项训练集对应每 epoch 2944 microbatches、736 updates，完整预算为 14720 updates 与 230400 q samples。30000 只是异常 safety limit。
 
-held-out bank 每项资产固定 64 q，每 250 updates 评估。checkpoint score 以 initialization density、$\kappa$ 与 derived-field 误差归一化。训练结束后固定执行 query-only、same-asset q shuffle、cross-asset shuffle、first-order zero、JOINT shuffle 与 sign flip，并对 asset/q 配对差异做 2000 次 bootstrap。
+validation bank 每项资产固定 64 q，每 250 updates 评估。checkpoint score 以 initialization density、$\kappa$ 与 derived-field 误差归一化。训练结束后固定执行 query-only、same-asset q shuffle、cross-asset shuffle、first-order zero、JOINT shuffle 与 sign flip，并对 asset/q 配对差异做 2000 次 bootstrap。evaluation suites 本 patch 只完成资产选择与 physical-identity 审计，不进入 checkpoint selection 或训练 forward。
 
 整个实验由 schema 2.0.0 的 `CanonicalResidualFamilyCfg` 声明；Hydra 只注入 `single_gpu_16gb` trainer preset。`GeometrySSLExperiment` 构造阶段无 IO，`run()` 才拥有 materialization、training、validation、checkpoint 与 lease release。schema/checkpoint 1.x 被明确拒绝。
 
@@ -66,7 +66,7 @@ held-out bank 每项资产固定 64 q，每 250 updates 评估。checkpoint scor
 
 当前 contracts 已覆盖 source realization、query/sigma 重放、graph-bias 公式、全连接 attention、padding masks、$SO(2)$、joint-sign parity、FiLM 条件、variable sigma、sigma detach、checkpoint key 与跨结构输出/梯度；synthetic 和真实 LEAP integration 都闭合到 backward。
 
-在 RTX 5070 Ti 上，canonical retained encoder 的 $B=4096$ p95 为 20.13 ms，满足 40 ms 子预算。这个测试从 GPU-resident q/static evidence 开始，刻意排除 teacher、decoder、policy 和环境，因此不能回答完整 PPO 是否达到 20 Hz。正式 20-epoch pilot 尚未启动；official zero-shot、cross-topology/cross-DOF、Isaac pose parity 与 PPO transfer 也仍是开放问题。
+在 RTX 5070 Ti 上，canonical retained encoder 的 $B=4096$ p95 为 20.13 ms，满足 40 ms 子预算。这个测试从 GPU-resident q/static evidence 开始，刻意排除 teacher、decoder、policy 和环境，因此不能回答完整 PPO 是否达到 20 Hz。正式 20-epoch pilot 尚未启动；unseen-variant-set/unseen-mother 的模型评估、official zero-shot、Isaac pose parity 与 PPO transfer 也仍是开放问题。
 
 ## 复现入口
 

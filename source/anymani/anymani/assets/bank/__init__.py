@@ -8,6 +8,20 @@ from anymani.assets.bank import HandBankCfg
 ```
 """
 
+from .dataset import (
+    HAND_ASSET_DATASET_SCHEMA_VERSION,
+    HandAssetDataset,
+    HandAssetDatasetCfg,
+    HandAssetEvaluationCfg,
+    HandAssetLineageCfg,
+    HandAssetOfficialPartitionCfg,
+    HandAssetPartitionCfg,
+    HandAssetProvenance,
+    HandAssetRunCfg,
+    ResolvedHandAssetDataset,
+    ResolvedHandAssetPartition,
+    ResolvedHandAssetRecord,
+)
 from .geometry_semantics import HandAssetSourceKind
 from .hand_bank import (
     HandBank,
@@ -32,6 +46,15 @@ from .path_utils import (
 )
 
 __all__ = [
+    "HAND_ASSET_DATASET_SCHEMA_VERSION",
+    "HandAssetDataset",
+    "HandAssetDatasetCfg",
+    "HandAssetEvaluationCfg",
+    "HandAssetLineageCfg",
+    "HandAssetOfficialPartitionCfg",
+    "HandAssetPartitionCfg",
+    "HandAssetProvenance",
+    "HandAssetRunCfg",
     "HandBank",
     "HandBankCfg",
     "HandContainer",
@@ -40,6 +63,9 @@ __all__ = [
     "HandSelection",
     "HandSelectionMode",
     "HandSourceMode",
+    "ResolvedHandAssetDataset",
+    "ResolvedHandAssetPartition",
+    "ResolvedHandAssetRecord",
     "HandAssetSourceKind",
     "UrdfMeshRef",
     "UrdfRgba",

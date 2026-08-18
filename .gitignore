@@ -69,6 +69,8 @@ logs/rl_games/*
 
 # Teleop Recorded Dataset
 datasets
+!source/anymani/anymani/assets/datasets/
+!source/anymani/anymani/assets/datasets/**
 
 # Docker history
 .isaac-lab-docker-history

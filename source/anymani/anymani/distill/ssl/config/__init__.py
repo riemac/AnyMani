@@ -9,7 +9,6 @@ from .geometry_ssl import (
     GeometryCalibrationCfg,
     GeometryCoverageCfg,
     GeometryReproducibilityCfg,
-    GeometrySSLAssetCfg,
     GeometrySSLAssetManifest,
     GeometrySSLExperimentCfg,
     GeometrySSLProtocolCfg,
@@ -24,7 +23,6 @@ from .geometry_ssl import (
 )
 
 __all__ = [
-    "GeometrySSLAssetCfg",
     "GeometrySSLAssetManifest",
     "GeometryCalibrationCfg",
     "GeometryCoverageCfg",

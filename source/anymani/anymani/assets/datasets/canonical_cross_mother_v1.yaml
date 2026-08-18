@@ -1,0 +1,52 @@
+schema_version: 1.0.0
+default_run_dir: source/anymani/anymani/assets/generated/2026-08-16_14-55-19
+
+train:
+  runs:
+    default:
+      groups:
+        single_palm_leap:
+          right_t4_i4_m4_r4:
+            include_mother: true
+            variant_sets:
+              - 2026-08-16_19-31-39
+          right_t4_i4_m2_r3:
+            include_mother: true
+            variant_sets:
+              - 2026-08-18_15-59-50
+          right_t4_i1_m3_r4:
+            include_mother: true
+            variant_sets:
+              - 2026-08-18_16-01-25
+
+validation:
+  runs:
+    default:
+      groups:
+        single_palm_leap:
+          right_t4_i4_m4_r4:
+            include_mother: false
+            variant_sets:
+              - 2026-08-18_16-32-34
+
+evaluation:
+  unseen_variant_set:
+    runs:
+      default:
+        groups:
+          single_palm_leap:
+            right_t4_i4_m4_r4:
+              include_mother: false
+              variant_sets:
+                - 2026-08-18_16-33-08
+  unseen_mother:
+    runs:
+      default:
+        groups:
+          single_palm_leap:
+            left_t3_i4_r2:
+              include_mother: true
+              variant_sets:
+                - 2026-08-18_16-00-42
+  official_zero_shot:
+    assets: []

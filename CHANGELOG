@@ -1,3 +1,20 @@
+0.5.8 - 2026-08-18
+==================
+
+- 新增 assets 层通用 `HandAssetDataset` manifest：以 `default_run_dir + runs.<alias>` 解析多个 generation runs、production groups、mixed compositions、mother 与完整 variant sets，并向 SSL/PPO/task 交付统一 lineage provenance。
+- Geometry SSL 删除旧 `GeometrySSLAssetCfg` 与自动 leaf split，改为 `asset_dataset_manifest` 单路径引用；run artifact 写入原始 dataset、resolved config/hash 与 expanded asset manifest，默认输出迁移到 `logs/ssl/`。
+- canonical cross-mother dataset 固定 45 train、16 validation、16 unseen-variant-set 与 17 unseen-mother assets；早期 separate-worker probe 和旧 physical-group split 实现退出主路径。
+
+0.5.7 - 2026-08-17
+==================
+
+- 新增 canonical v1 hand runtime：typed `HandCfg` lower 为统一 16-DOF、25-body PhysX artifact，保留真实活动链 FK/limits/geometry，并以 manifest/hash/active routing/ghost marker 形成可复现 cache contract。
+- 新增五 mother `AnyMani-GM-Canonical-InHand-v0` 与 `AnyMani-GM-Canonical-Unified-PPO-v0`：单一 PhysX batch、116D structured flat observation、per-env active mask、exact ghost position/velocity lock、canonical contact/reward/reset routing。
+- 新增结构化 `EmbodimentPolicy` 与本地 `anymani_masked_ppo` rl_games model/agent/player：shared JOINT action head、PALM symmetric critic、global scalar `log_std`，有效 joint log-prob/entropy/bounds contract 与 permutation/mask/backward tests。
+- 接入五 mother typed geometry evidence bank：真实 anchors/home surfaces/screws/q_home/owner graph 显式重排到 canonical axes，ragged anchors 使用有效 mask，PPO minibatch 内按唯一 asset row 做可微静态前向去重。
+- 修正 MultiAssetSpawner round-robin prototype 与 mask/evidence row 的环境路由一致性，并将 KL scheduler、bounds 和 regularisation reduction 按 active DOF 归一化；一轮真实 PPO update 与 checkpoint restore 已通过。
+- 固定五 mother IsaacSim reset/step smoke：160 env、16 actions、25 bodies、contact/reward finite，ghost tolerance 满足 $|q|<10^{-5}$ rad、$|\dot q|<10^{-3}$ rad/s；不将该 smoke 宣称为策略学习成功。
+
 0.5.6 - 2026-08-16
 ==================
 

@@ -24,15 +24,16 @@ CHECKPOINT_SCHEMA_VERSION = "2.0.0"  # schema 1.x 不兼容声明式 experiment/
 class GeometrySSLCheckpointMetadata:
     r"""随 tensor state 一起保存、可独立审计的科研合同。
 
-    ``asset_manifest`` 证明训练/validation/official split 内容哈希；``resolved_config`` 固定 target
-    带宽、query 混合、模型容量、loss 权重与 optimizer。frame/unit 字符串让脱离源码读取 checkpoint
-    的分析程序仍能拒绝米/厘米、rad/normalized-q 混淆。
+    ``asset_manifest`` 证明 train、validation 与具名 evaluation suites 的 dataset provenance、内容哈希和
+    physical identity；``resolved_config`` 固定 target 带宽、query 混合、模型容量、loss 权重与
+    optimizer。frame/unit 字符串让脱离源码读取 checkpoint 的分析程序仍能拒绝米/厘米、
+    rad/normalized-q 混淆。
     """
 
     code_revision: str  # Git commit；无法解析时显式 `unknown`
     package_version: str  # installed/editable AnyMani version
     geometry_semantics_schema: str  # assets 静态语义 schema 版本
-    asset_manifest: Mapping[str, Any]  # train/validation/official 内容哈希 split
+    asset_manifest: Mapping[str, Any]  # train/validation/evaluation 的展开 provenance 与物理身份
     resolved_config: Mapping[str, Any]  # Hydra/OmegaConf interpolation 后完整配置
     calibrated_objective: Mapping[str, float]  # runtime evidence；不覆盖 declared objective config
     frame_contract: str = "query/closest/surface in hand frame {h}"  # 全部几何点 frame

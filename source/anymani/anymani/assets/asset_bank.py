@@ -64,16 +64,20 @@ class AssetBank:
 
 
 if TYPE_CHECKING:
+    from .bank.dataset import HandAssetDataset, HandAssetDatasetCfg, ResolvedHandAssetDataset
     from .bank.hand_bank import HandBank, HandBankCfg, HandSelection, HandSelectionMode, HandSourceMode
     from .bank.hand_container import HandContainer, HandContainerCfg, HandContainerLike, UrdfMeshRef, UrdfRgba
 
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
+    "HandAssetDataset": ("anymani.assets.bank.dataset", "HandAssetDataset"),
+    "HandAssetDatasetCfg": ("anymani.assets.bank.dataset", "HandAssetDatasetCfg"),
     "HandBank": ("anymani.assets.bank.hand_bank", "HandBank"),
     "HandBankCfg": ("anymani.assets.bank.hand_bank", "HandBankCfg"),
     "HandSelection": ("anymani.assets.bank.hand_bank", "HandSelection"),
     "HandSelectionMode": ("anymani.assets.bank.hand_bank", "HandSelectionMode"),
     "HandSourceMode": ("anymani.assets.bank.hand_bank", "HandSourceMode"),
+    "ResolvedHandAssetDataset": ("anymani.assets.bank.dataset", "ResolvedHandAssetDataset"),
     "HandContainer": ("anymani.assets.bank.hand_container", "HandContainer"),
     "HandContainerCfg": ("anymani.assets.bank.hand_container", "HandContainerCfg"),
     "HandContainerLike": ("anymani.assets.bank.hand_container", "HandContainerLike"),
@@ -115,11 +119,14 @@ def __getattr__(name: str) -> Any:
 __all__ = [
     "AssetBankCfg",
     "AssetBank",
+    "HandAssetDataset",
+    "HandAssetDatasetCfg",
     "HandBank",
     "HandBankCfg",
     "HandSelection",
     "HandSelectionMode",
     "HandSourceMode",
+    "ResolvedHandAssetDataset",
     "HandContainer",
     "HandContainerCfg",
     "HandContainerLike",

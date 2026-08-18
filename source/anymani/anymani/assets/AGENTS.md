@@ -11,7 +11,7 @@
 - validator 对机械合理性的显式闸门；
 - exporter / sidecar / summary 的可追溯落盘；
 - `asset_physics.py` 对最终 collision 几何的动力学闭包；
-- asset bank 对已落盘资产集合做路径解析、bundle 校验、虚拟视图和可复现选择，供下游任务模块消费。
+- asset bank 对单项或直接 source root 做路径解析、bundle 校验和虚拟视图，asset dataset 在其上冻结跨 run 的实验 partitions 与 evaluation suites。
 
 ## 核心原则
 
@@ -36,7 +36,7 @@
 - **Validator**：显式拒绝不合法资产；
 - **Exporter**：URDF / sidecar / tree / mesh materialization；
 - **Physics Closure**：`asset_physics.py`，只负责由最终 collision 几何重建 `mass / inertial`；
-- **Asset Bank**：整理已落盘资产集合，负责路径解析、bundle 校验、虚拟视图和可复现选择；
+- **Asset Bank / Dataset**：bank 负责低层路径解析、bundle 校验与虚拟视图；dataset 负责跨 run 的 lineage 选择、partition 展开与 provenance；
 - **Generator**：最高 façade，只编排阶段，不吞并各阶段职责。
 
 尤其注意：**动力学闭包不要再塞回 builder、mutator 或 exporter**。  
@@ -48,7 +48,7 @@ pre-made `mixed` topology 的装配边界固定为：thumb 与 base palm 共享 
 
 `asset_schema_geometry.py` 定义版本化 `{a}->{h}`、完整 fixed/revolute 链、显式 $q_{home}$、limits、PALM/JOINT/TIP owner、collision component 与 anchor seed。exporter 在 `HandCfg` 真源仍在内存时写入 `hand.yaml.geometry_semantics`；bank 只在 `require_geometry_semantics=True` 时解析，新 generated sidecar 直接读取，旧 generated sidecar 确定性迁移，official 缺人工核验字段时严格拒绝。
 
-`HandBank` 是 tasks 与 distill 共用的资产集合/选择/交付入口。不要让下游重新处理 pre-made 根、post-mutate shared meshes 或 mixed-family 路径，也不要把 distill source 的动态 FK/Jacobian 或 field/query 放进 bank。
+`HandBank` 是单 bundle、单 source root 与显式 container 选择的低层交付入口；`HandAssetDataset` 读取 `assets/datasets/*.yaml`，在其上组合多个 generation runs、mother lineages 与 train/validation/evaluation partitions。两者均保持下游中立；不要让 tasks/distill 重做目录展开，也不要把动态 FK/Jacobian、field/query、spawn 或 optimizer 逻辑放进 bank。
 
 ### 4. 自包含性
 
@@ -61,7 +61,24 @@ pre-made `mixed` topology 的装配边界固定为：thumb 与 base palm 共享 
 
 涉及大批量生成流程时，优先测试局部 deterministic contract；完整生成 run 可作为较少量 smoke，不应替代底层规则测试。
 
-## 文档与版本
+## 约定
+
+### 资产命名空间
+
+| 名称 | 目录或组成 | 固定含义 |
+| --- | --- | --- |
+| **Generation run（生成批次）** | `generated/<premade_timestamp>/` | 一次 pre-made 生产运行，不代表手型 family 或训练 split。 |
+| **Production group（生产组）** | `<generation_run>/<group>/` | generator 的目录组织，如 `single_palm_leap`；不得用作实验资产集合名称。 |
+| **Mother asset（母体资产）** | `<group>/<topology>/hand.urdf` | 可直接消费的 pre-made 基准手，也是对应 post-mutate 的唯一来源资产。 |
+| **Variant set（变体集）** | `<mother>/<mutate_timestamp>/` | 同一 mother、同一次 post-mutate 配置与随机过程产生的完整批次，由 `summary.yaml` 记录 provenance。 |
+| **Variant asset（变体资产）** | `<variant_set>/<asset_id>/hand.urdf` | variant set 中一只具体且可独立消费的手资产。 |
+| **Mother lineage（母体系）** | 一只 mother 及其全部 variant sets | 生成谱系概念，不等同于某次实验实际使用的数据。 |
+| **Asset cohort（实验资产集合）** | 从多个 mother lineages 中显式选取的 mothers / variant sets | 一次训练或评估主动选择的数据集合；不用 `group` 或 `cluster` 指代。 |
+| **Dataset partition（数据划分）** | cohort 的 `train` / `validation` / `evaluation` 子集 | 训练角色，不改变资产自身的生成身份与 family 身份。 |
+
+`family` 表示来源/机制族；mixed 手的完整构成必须结合 `topology_kind` 与 `slot_family_map` 判断，不能只读顶层 `family`。dataset YAML 以完整 variant set 为配置原子，并对每条 lineage 显式声明 `include_mother`；跨 partition 先按路径、asset ID 与 `content_hash` 拒绝重复，geometry consumer 再按 `physical_geometry_hash` 拒绝相同物理映射。
+
+### 文档与版本
 
 从 **0.1** 开始，本子项目显式维护：
 

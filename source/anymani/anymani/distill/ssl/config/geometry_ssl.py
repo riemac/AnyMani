@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field  # 冻结配置与 manifest 基础类型导出
 from pathlib import Path  # resolved run artifacts 路径
-from typing import Any  # OmegaConf 基础容器的嵌套 value 类型
+from typing import TYPE_CHECKING, Any  # OmegaConf 基础容器与 runtime artifact 类型边界
 
 import yaml  # resolved config/manifest 使用人类可读 YAML
 from omegaconf import OmegaConf  # Hydra interpolation 与结构化 dataclass 桥接
@@ -36,38 +36,8 @@ from anymani.distill.representations.targets.geometry_field import (
     GeometryFieldTargetCfg,  # differential target
 )
 
-
-@dataclass(frozen=True)
-class GeometrySSLAssetCfg:
-    r"""generated train/validation 与隔离 official evaluation 资产入口。
-
-    train/validation 只允许 generated 资产；official 路径在 pretrain 中按 ``source_kind='official'``
-    fail-closed 解析，但不物化 teacher、不构建 optimizer batch。路径级检查先挡住明显复用，bank resolve
-    后 manifest 再以 SHA-256 ``content_hash`` 检查重命名/复制导致的隐蔽泄漏。
-    """
-
-    family_paths: tuple[str, ...] = ()  # mother+variants；非空时自动按 physical hash 分组
-    mother_asset_id: str = ""  # family 模式中固定进入训练的 mother ID
-    validation_asset_count: int = 4  # 期望 held-out asset 数；完整 group 可使实际数调整
-    split_seed: int = 20260813  # physical group 确定性划分 seed
-    train_paths: tuple[str, ...] = ()  # 显式 generated optimizer 数据来源
-    validation_paths: tuple[str, ...] = ()  # 显式 generated fixed held-out bank
-    official_evaluation_paths: tuple[str, ...] = ()  # 冻结后 zero-shot/adaptation 身份
-
-    def __post_init__(self) -> None:
-        r"""拒绝路径级 split 泄漏；内容哈希级检查在 bank resolve 后执行。"""
-
-        train = set(self.train_paths)  # 路径字符串去重后的训练集合
-        validation = set(self.validation_paths)  # 路径字符串 validation 集合
-        official = set(self.official_evaluation_paths)  # official 隔离集合
-        if train & validation or train & official or validation & official:  # 任意 pair 交集
-            raise ValueError("train/validation/official asset paths must be disjoint")  # 配置构造即拒绝
-        if self.family_paths and (self.train_paths or self.validation_paths):
-            raise ValueError("family_paths cannot be combined with explicit train/validation paths")
-        if self.family_paths and not self.mother_asset_id:
-            raise ValueError("family_paths require mother_asset_id for the fixed train group")
-        if self.validation_asset_count < 0:
-            raise ValueError("validation_asset_count must be non-negative")
+if TYPE_CHECKING:
+    from anymani.assets.bank.dataset import ResolvedHandAssetDataset
 
 
 @dataclass(frozen=True)
@@ -193,7 +163,7 @@ class GeometrySSLTrainerCfg:
 class GeometrySSLRunCfg:
     r"""只负责 output identity 与完整 checkpoint resume，不拥有训练超参。"""
 
-    output_dir: str = "logs/geometry_ssl"
+    output_dir: str = "logs/ssl"
     experiment_name: str = "multi_anchor_geometry_ssl"
     resume_checkpoint: str = ""
 
@@ -259,8 +229,10 @@ class GeometrySSLExperimentCfg:
     """
 
     schema_version: str = "2.0.0"  # 实验配置 schema
-    assets: GeometrySSLAssetCfg = field(default_factory=GeometrySSLAssetCfg)  # split paths
-    representation: GeometryRepresentationCfg = field(default_factory=GeometryRepresentationCfg)  # source->field->query->target
+    asset_dataset_manifest: str = ""  # assets 层通用 dataset YAML；具体列表不在 SSL cfg 重复声明
+    representation: GeometryRepresentationCfg = field(
+        default_factory=GeometryRepresentationCfg
+    )  # source->field->query->target
     model: GeometrySSLModelCfg = field(default_factory=GeometrySSLModelCfg)  # retained + SSL-only readers
     objective: GeometryFieldObjectiveCfg = field(default_factory=GeometryFieldObjectiveCfg)  # 六项损失权重
     protocol: GeometrySSLProtocolCfg = field(default_factory=GeometrySSLProtocolCfg)  # scientific sampling/evidence
@@ -282,7 +254,7 @@ class GeometrySSLExperimentCfg:
 
 @dataclass(frozen=True)
 class GeometrySSLAssetManifest:
-    r"""resolve 后按内容哈希冻结的资产 split 证据。
+    r"""dataset 展开并物化 identity 后冻结的资产证据。
 
     每条记录包含 asset ID、content/physical/configuration hashes、source kind、topology、family、
     handedness、JOINT/owner 数。physical hash 是学习映射 leakage 判据；content hash 继续防止完全相同
@@ -290,33 +262,31 @@ class GeometrySSLAssetManifest:
     """
 
     schema_version: str  # manifest schema
+    dataset_source_path: str  # 输入 asset_dataset.yaml 的 resolved 路径
+    dataset_source_sha256: str  # 输入 YAML 原始 bytes identity
     train: tuple[dict[str, str], ...]  # generated optimizer split
     validation: tuple[dict[str, str], ...]  # generated fixed held-out split
-    official_evaluation: tuple[dict[str, str], ...]  # 冻结后隔离 split
-    split_strategy: str = "explicit"  # explicit 或 physical_group
-    split_seed: int = 0  # physical_group 模式的 deterministic seed
-    requested_validation_asset_count: int = 0  # group split 目标数量
-    actual_validation_asset_count: int = 0  # 完整 group 约束后的实际数量
+    evaluation: dict[str, tuple[dict[str, str], ...]]  # 具名 unseen/official suites
 
     def __post_init__(self) -> None:
         r"""拒绝任何 content 或 physical identity 跨 split 重用。"""
 
-        groups = tuple(  # 每个 split 的唯一内容集合
-            {record["content_hash"] for record in split}  # 路径/ID 不参与判据
-            for split in (self.train, self.validation, self.official_evaluation)  # 固定三组顺序
-        )
-        if groups[0] & groups[1] or groups[0] & groups[2] or groups[1] & groups[2]:  # pairwise disjoint
-            raise ValueError("asset content hashes leak across train/validation/official splits")  # 硬停止
-        physical_groups = tuple(
-            {record["physical_geometry_hash"] for record in split if record.get("physical_geometry_hash")}
-            for split in (self.train, self.validation, self.official_evaluation)
-        )
-        if (
-            physical_groups[0] & physical_groups[1]
-            or physical_groups[0] & physical_groups[2]
-            or physical_groups[1] & physical_groups[2]
-        ):
-            raise ValueError("physical geometry hashes leak across train/validation/official splits")
+        roles = {"train": self.train, "validation": self.validation, **self.evaluation}
+        content_groups = {
+            name: {record["content_hash"] for record in records if record.get("content_hash")}
+            for name, records in roles.items()
+        }
+        physical_groups = {
+            name: {record["physical_geometry_hash"] for record in records if record.get("physical_geometry_hash")}
+            for name, records in roles.items()
+        }
+        role_names = tuple(roles)
+        for left_index, left_name in enumerate(role_names):
+            for right_name in role_names[left_index + 1 :]:
+                if content_groups[left_name] & content_groups[right_name]:
+                    raise ValueError(f"asset content hashes leak across {left_name}/{right_name} roles")
+                if physical_groups[left_name] & physical_groups[right_name]:
+                    raise ValueError(f"physical geometry hashes leak across {left_name}/{right_name} roles")
 
 
 def resolved_config_dict(config: GeometrySSLExperimentCfg) -> dict[str, Any]:
@@ -357,21 +327,10 @@ def experiment_config_from_dict(payload: dict[str, Any]) -> GeometrySSLExperimen
         if names - set(dict(payload.get(section, {})))
     }
     if missing:
-        raise ValueError(
-            "resolved config predates the online-query/explicit-sigma contract; "
-            f"missing_fields={missing}"
-        )
+        raise ValueError(f"resolved config predates the online-query/explicit-sigma contract; missing_fields={missing}")
 
-    assets_payload = dict(payload["assets"])  # Hydra ListConfig -> 基础容器
-    assets = GeometrySSLAssetCfg(  # 路径轴冻结为 tuple
-        family_paths=tuple(assets_payload.get("family_paths", ())),  # automatic grouped family
-        mother_asset_id=str(assets_payload.get("mother_asset_id", "")),  # fixed train group
-        validation_asset_count=int(assets_payload.get("validation_asset_count", 4)),  # held-out target
-        split_seed=int(assets_payload.get("split_seed", 20260813)),  # group split seed
-        train_paths=tuple(assets_payload["train_paths"]),  # generated train
-        validation_paths=tuple(assets_payload["validation_paths"]),  # generated held-out
-        official_evaluation_paths=tuple(assets_payload["official_evaluation_paths"]),  # official only
-    )
+    if "asset_dataset_manifest" not in payload:
+        raise ValueError("resolved geometry SSL config is missing asset_dataset_manifest")
     representation_payload = dict(payload["representation"])
     field_payload = dict(representation_payload["field"])
     field_payload["bandwidth_centers_m"] = tuple(field_payload["bandwidth_centers_m"])
@@ -421,7 +380,7 @@ def experiment_config_from_dict(payload: dict[str, Any]) -> GeometrySSLExperimen
     )
     return GeometrySSLExperimentCfg(  # 构造顺序触发全部子配置验证
         schema_version=str(payload["schema_version"]),  # 实验 schema
-        assets=assets,  # split 路径
+        asset_dataset_manifest=str(payload["asset_dataset_manifest"]),  # assets 层 dataset YAML
         representation=representation,  # source/field/query/target/layout
         model=model,  # encoder+SSL-only readers
         objective=GeometryFieldObjectiveCfg(**dict(payload["objective"])),  # 六项权重
@@ -435,6 +394,7 @@ def write_resolved_experiment_files(
     output_dir: Path,  # 当前 run 唯一目录
     *,
     config: GeometrySSLExperimentCfg,  # 完整 resolved 实验配置
+    dataset: ResolvedHandAssetDataset,  # 输入 YAML、hash 与 typed selection
     manifest: GeometrySSLAssetManifest,  # 内容哈希 split
 ) -> None:
     r"""在训练开始前写入 resolved config 与资产 manifest YAML。
@@ -443,10 +403,17 @@ def write_resolved_experiment_files(
     """
 
     output_dir.mkdir(parents=True, exist_ok=True)  # 只创建 resolved run 目录
+    resolved = resolved_config_dict(config)
+    resolved["resolved_asset_dataset"] = {
+        "source_path": str(dataset.source_path),
+        "source_sha256": dataset.source_sha256,
+        "config": dataset.config_dict(),
+    }
     (output_dir / "resolved_config.yaml").write_text(  # 完整配置事实源
-        yaml.safe_dump(resolved_config_dict(config), sort_keys=False, allow_unicode=True),  # 保留字段顺序/中文
+        yaml.safe_dump(resolved, sort_keys=False, allow_unicode=True),  # 保留字段顺序/中文
         encoding="utf-8",  # 跨平台确定编码
     )
+    (output_dir / "asset_dataset.yaml").write_bytes(dataset.source_path.read_bytes())  # 原始人工/算法声明副本
     (output_dir / "asset_manifest.yaml").write_text(  # split 与 morphology 身份
         yaml.safe_dump(asdict(manifest), sort_keys=False, allow_unicode=True),  # tuple 安全序列化为 YAML sequence
         encoding="utf-8",  # 明确编码
@@ -454,7 +421,6 @@ def write_resolved_experiment_files(
 
 
 __all__ = [  # SSL 结构化配置公开面
-    "GeometrySSLAssetCfg",  # split paths
     "GeometrySSLAssetManifest",  # resolved split evidence
     "GeometryCalibrationCfg",
     "GeometryCoverageCfg",

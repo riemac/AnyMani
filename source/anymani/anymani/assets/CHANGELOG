@@ -1,3 +1,18 @@
+0.3.6 - 2026-08-18
+==================
+
+- 新增通用 `HandAssetDataset` manifest schema/resolver，以 `default_run_dir + runs.<alias>` 解析多个 generation runs，并统一展开 groups、mixed composition、mother 与完整 variant sets。
+- train、validation、`unseen_variant_set`、`unseen_mother` 与 `official_zero_shot` 共享同一 asset provenance 输出；dataset 层拒绝路径/ID/content 重复，SSL 后续继续审计 physical geometry hash。
+- post-mutate runner 新增 `--post-mutate-seed`，允许为同一 mother 生成独立、可复现且不超过指定样本数的 variant set。
+
+0.3.5 - 2026-08-17
+==================
+
+- 新增版本化 `CanonicalHandSchemaCfg` / `CanonicalHandArtifact` / group manifest，将四个 semantic finger slots lower 为 16 个 depth-major revolute slots、25 个 bodies，并记录 source/canonical/physical hashes 与 source-to-canonical routing。
+- 缺失 DOF 只在真实 tip 远端补 ghost；ghost 使用最小 mass/inertia、透明无碰撞 visual marker 与 importer finite limit，供 runtime startup 写入 exact zero position/velocity limits。
+- 新增 deterministic artifact cache、canonical URDF/body/joint/hash validation、FK/ghost marker/cache contract tests；generated source bundles 保持不变。
+- canonical manifest 现在把 typed geometry `q_home` 按 joint name scatter 到 16 个 depth-major slots，并将 home pose 纳入 cache identity。
+
 0.3.4 - 2026-08-16
 ==================
 

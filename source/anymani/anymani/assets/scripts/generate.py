@@ -88,6 +88,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--source-path", default=None, help="Override post-mutate source topology path.")
     parser.add_argument("--n-samples", type=int, default=None, help="Override HandGeneratorCfg.n_samples.")
+    parser.add_argument(
+        "--post-mutate-seed",
+        type=int,
+        default=None,
+        help="Override HandGeneratorCfg.post_mutate_seed for an independent reproducible variant set.",
+    )
     parser.add_argument("--max-enumerate", type=int, default=None, help="Override pre-made max_enumerate.")
     return parser
 
@@ -161,6 +167,7 @@ def _run_post_mutate(
     *,
     source_path: str | None,
     n_samples: int | None,
+    post_mutate_seed: int | None,
 ) -> int:
     r"""执行独立 post-mutate 阶段。
 
@@ -168,6 +175,7 @@ def _run_post_mutate(
         module: 已导入的配置模块；要求暴露 `POST_MUTATE_CFG` 与来源路径常量。
         source_path (str | None): CLI 临时覆盖的 pre-made topology 根路径。
         n_samples (int | None): CLI 临时覆盖的 Monte Carlo 采样数。
+        post_mutate_seed (int | None): CLI 临时覆盖的联合 proposal 随机种子。
 
     Returns:
         int: 进程退出码；成功时返回 `0`。
@@ -178,6 +186,8 @@ def _run_post_mutate(
     # 采样预算属于最常见的实验 override，因此允许用 CLI 覆盖；其它复杂 term 仍回到 Python cfg。
     if n_samples is not None:
         cfg = cfg.replace(n_samples=n_samples)  # 只覆盖后变异样本数，不重写 term container
+    if post_mutate_seed is not None:
+        cfg = cfg.replace(post_mutate_seed=post_mutate_seed)  # 不同 set 用独立 seed，避免重复联合 proposal
 
     # 独立 post-mutate 现在只接受 topology 根；run 时间戳由 HandGenerator 运行时自动生成。
     resolved_source_path = source_path or module.POST_MUTATE_SOURCE_TOPOLOGY_PATH
@@ -232,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
         module,
         source_path=args.source_path,
         n_samples=args.n_samples,
+        post_mutate_seed=args.post_mutate_seed,
     )
 
 
