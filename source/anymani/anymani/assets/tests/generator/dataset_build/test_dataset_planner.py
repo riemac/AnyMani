@@ -15,6 +15,28 @@ from anymani.assets.generator.dataset_build.planner import build_dataset_selecti
 from anymani.assets.generator.dataset_build.schema import load_dataset_build_template
 from anymani.assets.generator.hand_generator import PostMutateVariantSetResult
 from anymani.assets.generator.runtime.recipe_loader import RecipeLoader
+from anymani.assets.scripts import dataset as dataset_cli
+
+
+@pytest.mark.parametrize("command", ["plan", "build"])
+def test_dataset_cli_requires_explicit_generator_config_module(command: str) -> None:
+    r"""会生成或执行 selection lock 的命令不得隐式假定唯一 asset generation 配置。"""
+
+    parser = dataset_cli._build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([command, "--template", "template.yaml"])
+
+    args = parser.parse_args(
+        [
+            command,
+            "--template",
+            "template.yaml",
+            "--config-module",
+            "anymani.assets.config.cross_embodiment_gen_cfg",
+        ]
+    )
+
+    assert args.config_module == "anymani.assets.config.cross_embodiment_gen_cfg"
 
 
 def test_planner_selects_disjoint_pairs_and_derives_exact_variant_budget(tmp_path: Path) -> None:

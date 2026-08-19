@@ -34,8 +34,8 @@ def _build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--template", required=True, help="Dataset build template YAML path.")
     plan.add_argument(
         "--config-module",
-        default="anymani.assets.config.asset_gen_cfg",
-        help="Python module exposing POST_MUTATE_CFG.",
+        required=True,
+        help="Explicit Python module exposing the POST_MUTATE_CFG used to freeze this dataset plan.",
     )
     plan.add_argument(
         "--lock-path",
@@ -46,8 +46,8 @@ def _build_parser() -> argparse.ArgumentParser:
     build.add_argument("--template", required=True, help="Dataset build template YAML path.")
     build.add_argument(
         "--config-module",
-        default="anymani.assets.config.asset_gen_cfg",
-        help="Python module exposing POST_MUTATE_CFG.",
+        required=True,
+        help="Explicit Python module exposing the POST_MUTATE_CFG required by the selection lock.",
     )
     build.add_argument(
         "--lock-path",
