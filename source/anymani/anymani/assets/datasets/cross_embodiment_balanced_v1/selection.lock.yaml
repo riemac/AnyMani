@@ -211,7 +211,7 @@ generator:
     missing: true
     recolored: anatomy_soft_v1
 code:
-  git_commit: 87fdeba647ef4ae9e6a3926dfffa9a3edc48b65b
+  git_commit: 51a70301123f0ac894425459d7d267fd634e30f5
   git_dirty: true
 quota_report:
   inventory:
