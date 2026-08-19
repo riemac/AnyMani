@@ -10,9 +10,9 @@ import pytest
 import yaml
 from anymani.assets.bank.dataset import HandAssetDataset
 from anymani.assets.config import asset_gen_cfg as asset_cfg_module
-from anymani.assets.dataset_build.builder import build_dataset_from_lock, derive_ppo_manifest_from_lock
-from anymani.assets.dataset_build.planner import build_dataset_selection_plan, write_selection_lock
-from anymani.assets.dataset_build.schema import load_dataset_build_template
+from anymani.assets.generator.dataset_build.builder import build_dataset_from_lock, derive_ppo_manifest_from_lock
+from anymani.assets.generator.dataset_build.planner import build_dataset_selection_plan, write_selection_lock
+from anymani.assets.generator.dataset_build.schema import load_dataset_build_template
 from anymani.assets.generator.hand_generator import PostMutateVariantSetResult
 from anymani.assets.generator.runtime.recipe_loader import RecipeLoader
 
@@ -222,6 +222,111 @@ def test_builder_quarantines_shortfall_then_retries_with_new_seed(tmp_path: Path
     assert report["tasks"][retried_task]["attempts"][1]["status"] == "accepted"
     assert (quarantined_runs[0] / "QUARANTINED.yaml").is_file()
 
+
+def test_builder_quarantines_variant_set_with_internal_geometry_collision(tmp_path: Path) -> None:
+    r"""即使 generator 闸门退化，builder 仍须拒绝同 set 内重复 fingerprint 并整套补建。"""
+
+    run_root = _write_inventory(tmp_path / "generated")
+    template_path = _write_template(tmp_path / "dataset" / "template.yaml", run_root=run_root)
+    template, template_sha = load_dataset_build_template(template_path)
+    post_cfg = asset_cfg_module.POST_MUTATE_CFG
+    plan = build_dataset_selection_plan(
+        template,
+        template_sha256=template_sha,
+        generator_config_module="anymani.assets.config.asset_gen_cfg",
+        generator_config_snapshot=RecipeLoader.dump(post_cfg),
+    )
+    lock_path = write_selection_lock(plan, template_path.parent / "selection.lock.yaml")
+    collided_once: set[str] = set()
+    quarantined_runs: list[Path] = []
+
+    def fake_run_batch(_cfg, tasks, _workers):
+        reports = []
+        for task in tasks:
+            if not collided_once:
+                collided_once.add(task.task_id)
+                report = _write_fake_variant_set(task, forced_size=0.123)
+                quarantined_runs.append(report.run_dir)
+            else:
+                report = _write_fake_variant_set(task)
+            reports.append(report)
+        return tuple(reports)
+
+    report = build_dataset_from_lock(
+        template,
+        template_sha256=template_sha,
+        lock_path=lock_path,
+        post_mutate_cfg=post_cfg,
+        workers=2,
+        run_batch=fake_run_batch,
+    )
+    retried_task = next(iter(collided_once))
+    attempts = report["tasks"][retried_task]["attempts"]
+
+    assert report["published"] is True
+    assert len(attempts) == 2
+    assert attempts[0]["status"] == "quarantined"
+    assert attempts[0]["reason"].startswith("geometry_fingerprint_collision:")
+    assert attempts[1]["status"] == "accepted"
+    assert (quarantined_runs[0] / "QUARANTINED.yaml").is_file()
+
+
+def test_builder_resume_recomputes_fingerprints_before_skipping_completed_task(tmp_path: Path) -> None:
+    r"""Resume 必须从实际 sidecars 重算 identity，不能盲信旧 build state 中的哈希列表。"""
+
+    run_root = _write_inventory(tmp_path / "generated")
+    template_path = _write_template(tmp_path / "dataset" / "template.yaml", run_root=run_root)
+    template, template_sha = load_dataset_build_template(template_path)
+    post_cfg = asset_cfg_module.POST_MUTATE_CFG
+    plan = build_dataset_selection_plan(
+        template,
+        template_sha256=template_sha,
+        generator_config_module="anymani.assets.config.asset_gen_cfg",
+        generator_config_snapshot=RecipeLoader.dump(post_cfg),
+    )
+    lock_path = write_selection_lock(plan, template_path.parent / "selection.lock.yaml")
+
+    def initial_batch(_cfg, tasks, _workers):
+        return tuple(_write_fake_variant_set(task) for task in tasks)
+
+    build_dataset_from_lock(
+        template,
+        template_sha256=template_sha,
+        lock_path=lock_path,
+        post_mutate_cfg=post_cfg,
+        workers=2,
+        run_batch=initial_batch,
+    )
+    state_path = template_path.parent / ".build_state.yaml"
+    state = yaml.safe_load(state_path.read_text(encoding="utf-8"))
+    task_id, task_state = next(iter(state["tasks"].items()))
+    sidecars = tuple(sorted(Path(task_state["active_run_dir"]).glob("*/hand.yaml")))
+    assert len(sidecars) >= 2
+
+    # 模拟中断期间的外部误改：保留第二个 asset ID，但把静态 geometry 替换为第一个 variant。
+    first_doc = yaml.safe_load(sidecars[0].read_text(encoding="utf-8"))
+    second_doc = yaml.safe_load(sidecars[1].read_text(encoding="utf-8"))
+    second_doc["geometry_semantics"] = first_doc["geometry_semantics"]
+    sidecars[1].write_text(yaml.safe_dump(second_doc, sort_keys=False), encoding="utf-8")
+    resumed_calls: list[tuple[str, ...]] = []
+
+    def resumed_batch(_cfg, tasks, _workers):
+        resumed_calls.append(tuple(task.task_id for task in tasks))
+        return tuple(_write_fake_variant_set(task) for task in tasks)
+
+    report = build_dataset_from_lock(
+        template,
+        template_sha256=template_sha,
+        lock_path=lock_path,
+        post_mutate_cfg=post_cfg,
+        workers=2,
+        run_batch=resumed_batch,
+    )
+
+    assert resumed_calls == [(task_id,)]
+    assert report["tasks"][task_id]["status"] == "completed"
+    assert len(report["tasks"][task_id]["attempts"]) == 2
+
 def _write_inventory(run_root: Path) -> Path:
     r"""写 24 个 canonical pairs、48 个 mother bundles 的受控 inventory。"""
 
@@ -343,7 +448,12 @@ def _geometry_semantics(*, asset_id: str, handedness: str, size: float) -> dict:
     }
 
 
-def _write_fake_variant_set(task, *, successful_variants: int | None = None) -> PostMutateVariantSetResult:
+def _write_fake_variant_set(
+    task,
+    *,
+    successful_variants: int | None = None,
+    forced_size: float | None = None,
+) -> PostMutateVariantSetResult:
     r"""按 source task 写 exact-count fake run，隔离 builder 与真实 mutator 数值。"""
 
     source = Path(task.source_topology_dir)
@@ -369,7 +479,7 @@ def _write_fake_variant_set(task, *, successful_variants: int | None = None) -> 
                     "geometry_semantics": _geometry_semantics(
                         asset_id=asset_id,
                         handedness=handedness,
-                        size=0.02 + int(asset_id, 16) * 1.0e-12,
+                        size=forced_size if forced_size is not None else 0.02 + int(asset_id, 16) * 1.0e-12,
                     ),
                 },
                 sort_keys=False,

@@ -24,12 +24,15 @@
 
 - `premade/`：pre-made topology / connectivity / identity / batch orchestration
 - `runtime/`：run 生命周期、recipe I/O、mutate-only restore、逐槽独立联合 proposal 与多 mother variant-set 调度
+- `dataset_build/`：typed dataset template、mother selection、variant-set build/resume 与 manifest 发布
 - `presentation/`：recolor lowering、ASCII tree 等展示层工具
 - `mutate/`：post-mutate term 与 pipeline
 
 新增模块优先进入上述语义子包；不要再在 `generator/` 根目录新增 `_xxx.py`。
 
 单 source `source_topology_dir` 服务交互式调试；批量数据集构建使用 `post_mutate_sources` 与 `generate_variant_sets()`。两者互斥。并行原子是一只 mother 的完整 variant set，worker 内仍顺序拥有 RNG、validator、physics closure、shared mesh 和 summary；不得把单个 variants 分给多个 worker 后再拼接 run。
+
+`post_mutate_require_unique_geometry` 是 variant-set 局部唯一性开关。关闭时 identity/no-op 可作为有意的重复加权样本；开启时 worker 在导出前拒绝与 mother 或本 set 已接受 variant 相同的静态几何，并只重抽当前槽位。fingerprint 排除 limits、dynamics、ID 与 metadata；跨 worker 的冲突由 `dataset_build` 主进程按 lock 顺序裁决，不在 worker 间共享锁。
 
 ## physics closure 边界
 

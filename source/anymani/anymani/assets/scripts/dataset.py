@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-from ..dataset_build import (
+from ..generator.dataset_build import (
     build_dataset_from_lock,
     build_dataset_selection_plan,
     derive_ppo_manifest_from_lock,

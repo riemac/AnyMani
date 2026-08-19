@@ -11,7 +11,7 @@ from anymani.assets.generator.hand_generator import (
     HandGeneratorCfg,
     PostMutateSourceCfg,
 )
-from anymani.assets.generator.mutate import HandMutatorCfg, MountPerturbCfg
+from anymani.assets.generator.mutate import HandMutatorCfg, LinkScaleCfg, MountPerturbCfg
 
 
 class _BatchMountMutatorCfg(HandMutatorCfg):
@@ -23,6 +23,16 @@ class _BatchMountMutatorCfg(HandMutatorCfg):
         rot_radius=0.01,
         distrib="uniform",
         boundary_policy="clip",
+    )
+
+
+class _IdentityLinkScaleMutatorCfg(HandMutatorCfg):
+    r"""进程 worker 可 pickle 的确定性 mother-geometry no-op。"""
+
+    link_scale = LinkScaleCfg(
+        self_mode="identity",
+        scale_type="rel",
+        link_scale=(1.0, 1.0),
     )
 
 
@@ -62,6 +72,43 @@ def test_generate_variant_sets_dispatches_multiple_sources_with_per_task_counts_
     assert [summary["config"]["post_mutate_seed"] for summary in summaries] == [101, 202]
     assert [summary["config"]["source_topology_dir"] for summary in summaries] == [str(path) for path in sources]
     assert all(summary["config"]["post_mutate_sources"] == [] for summary in summaries)
+
+
+@pytest.mark.parametrize("parallel", [False, True])
+def test_generate_variant_sets_preserves_per_mother_uniqueness_in_serial_and_parallel(
+    tmp_path: Path,
+    parallel: bool,
+) -> None:
+    r"""mother-level 进程并行不共享 registry，但每个 worker 都拒绝自己的 mother no-op。"""
+
+    sources = _make_two_mothers(tmp_path / "premade")
+    cfg = HandGeneratorCfg(
+        mode="mutate",
+        artifact_level="bundle",
+        source_topology_dir=None,
+        post_mutate_sources=[
+            PostMutateSourceCfg(task_id="strict:left", source_topology_dir=sources[0], n_samples=1, seed=101),
+            PostMutateSourceCfg(task_id="strict:right", source_topology_dir=sources[1], n_samples=1, seed=202),
+        ],
+        post_mutate_parallel=parallel,
+        post_mutate_parallel_workers=2,
+        post_mutate_attempts_per_variant=2,
+        post_mutate_require_unique_geometry=True,
+        Mutate=_IdentityLinkScaleMutatorCfg(),
+        Validate=None,
+        Physics=None,
+    )
+
+    reports = list(HandGenerator(cfg).generate_variant_sets())
+    summaries = [yaml.safe_load((report.run_dir / "summary.yaml").read_text(encoding="utf-8")) for report in reports]
+
+    assert [report.task_id for report in reports] == ["strict:left", "strict:right"]
+    assert all(report.successful_variants == 0 and report.shortfall == 1 for report in reports)
+    assert all(report.sidecar_paths == () and report.urdf_paths == () for report in reports)
+    assert all(
+        summary["stats"]["rejected_by_reason"] == {"post_mutate.duplicate_mother_geometry": 2}
+        for summary in summaries
+    )
 
 
 def test_post_mutate_source_modes_are_mutually_exclusive(tmp_path: Path) -> None:

@@ -21,7 +21,7 @@ from typing import Any, Literal, cast
 
 import yaml
 
-from ..bank.path_utils import resolve_bank_path
+from ...bank.path_utils import resolve_bank_path
 from .schema import DatasetBuildTemplateCfg, DatasetRoleCfg
 
 SELECTION_LOCK_SCHEMA_VERSION = "1.0.0"

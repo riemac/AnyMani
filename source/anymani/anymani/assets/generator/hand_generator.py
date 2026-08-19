@@ -43,6 +43,7 @@ from ..asset_base import AssetCfgBase, HandCfg
 from ..asset_builders import HandBuilder, HandBuilderCfg
 from ..asset_physics import AssetPhysicsCfg, close_hand_physics
 from ..exporter import HandExporter, HandExporterCfg
+from ..geometry_identity import geometry_fingerprint_from_hand
 from ..procedural_meshes import materialize_hand_procedural_meshes
 from ..validator import HandValidator, HandValidatorCfg
 from .mutate import HandMutator, HandMutatorCfg
@@ -223,6 +224,19 @@ class HandGeneratorCfg(AssetCfgBase):
     shortfall，不在其他 mode 内补采，也不占用后续槽位的预算。
     """
 
+    post_mutate_require_unique_geometry: bool = False
+    r"""是否要求每个 post-mutate variant set 内的静态几何严格唯一。
+
+    - ``False``：保留早期“identity 可作为正/负权重样本”的采样语义；validator
+      通过即可计为成功，因此允许与 mother 或同 set 其它 variant 几何相同。
+    - ``True``：把 mother 与本 set 已接受 variants 的 geometry fingerprints 作为
+      禁集；重复候选不导出、不计成功，并在当前槽位剩余 proposal 预算内重新抽样。
+
+    唯一性只比较静态运动链、$q_{home}$ 与 collision geometry；joint limits、
+    mass/inertia、ID 和 metadata 单独变化不构成新的几何样本。跨 mother 与跨
+    dataset role 的重复继续由 dataset builder 的全局闸门处理。
+    """
+
     post_mutate_sources: list[PostMutateSourceCfg] = field(default_factory=list)
     r"""多个 mother 的 source-level variant-set tasks。
 
@@ -382,6 +396,8 @@ class HandGeneratorCfg(AssetCfgBase):
             raise ValueError("premade_parallel_fallback must be either 'serial' or 'raise'")
         if int(self.post_mutate_attempts_per_variant) < 1:
             raise ValueError("post_mutate_attempts_per_variant must be >= 1")
+        if not isinstance(self.post_mutate_require_unique_geometry, bool):
+            raise TypeError("post_mutate_require_unique_geometry must be bool")
         if self.post_mutate_parallel_workers is not None and self.post_mutate_parallel_workers < 1:
             raise ValueError("post_mutate_parallel_workers must be >= 1 when provided")
         task_ids = [source.task_id for source in self.post_mutate_sources]
@@ -433,6 +449,7 @@ class HandGenerator:
         self._run_context: GenerationRunContext | None = None
         self._mutate_source: PostMutateSource | None = None
         self._last_rejection_detail: dict[str, Any] | None = None
+        self._post_mutate_geometry_registry: dict[str, str] | None = None
 
     def _ensure_run_context(self) -> GenerationRunContext:
         r"""懒创建当前 generator 对应的 run 生命周期对象。"""
@@ -469,6 +486,22 @@ class HandGenerator:
             raise ValueError("Independent post-mutate requires 'source_topology_dir'")
         self._mutate_source = load_post_mutate_source(self.cfg.source_topology_dir)
         return self._mutate_source
+
+    def _ensure_post_mutate_geometry_registry(self) -> dict[str, str]:
+        r"""建立当前 mother variant set 独占的静态几何禁集。
+
+        mother fingerprint 在第一次候选比较时从已恢复 ``HandCfg`` 计算；后续只有
+        成功导出的 variant 才加入集合。每个 multi-source worker 都创建独立 generator，
+        因而该字典不跨进程共享，也不改变 mother-level 并行模型。
+        """
+
+        if self._post_mutate_geometry_registry is None:
+            source = self._load_mutate_source()
+            mother_fingerprint = geometry_fingerprint_from_hand(source.hand_cfg)
+            self._post_mutate_geometry_registry = {
+                mother_fingerprint: f"mother:{source.origin_sample_id}",
+            }
+        return self._post_mutate_geometry_registry
 
     def _write_run_summary(self) -> None:
         r"""把当前 run summary 刷到 `<run_root>/summary.yaml`。"""
@@ -687,6 +720,7 @@ class HandGenerator:
         written_mesh_paths: tuple[Path, ...] = ()  # 仅记录当前候选新写 mesh；成功后成为 bundle 的正式组成部分
         candidate_export_root: Path | None = None  # pre-made topology 根由当前离散任务独占
         candidate_export_root_preexisted = False  # 只有本候选新建的目录才允许在 export 异常时整体回滚
+        candidate_geometry_fingerprint: str | None = None  # strict mutate 模式下导出前冻结的静态几何身份
 
         if self.cfg.mode == "mutate":
             mutate_source = self._load_mutate_source()
@@ -801,6 +835,36 @@ class HandGenerator:
                 validation_warnings.extend(post_mutate_validation.warnings)
                 validation_metadata["post_mutate"] = dict(post_mutate_validation.metadata)
 
+            # strict variant-set 模式在 sample ID 与 bundle 目录创建前拒绝 mother no-op 和 set 内重复。
+            # 候选已经完成 mesh materialization、physics closure 与 validator，因而此处看到的正是
+            # exporter/sidecar 将交付的最终 collision geometry；limits/dynamics 不进入该身份。
+            if self.cfg.post_mutate_require_unique_geometry:
+                candidate_geometry_fingerprint = geometry_fingerprint_from_hand(hand_cfg)
+                registry = self._ensure_post_mutate_geometry_registry()
+                previous = registry.get(candidate_geometry_fingerprint)
+                if previous is not None:
+                    duplicate_kind = "mother" if previous.startswith("mother:") else "variant"
+                    error_code = f"post_mutate.duplicate_{duplicate_kind}_geometry"
+                    self._last_rejection_detail = {
+                        "stage": "post_mutate_unique_geometry",
+                        "errors": [f"static geometry duplicates {previous}"],
+                        "error_codes": [error_code],
+                        "metadata": {
+                            "geometry_fingerprint": candidate_geometry_fingerprint,
+                            "duplicate_of": previous,
+                        },
+                    }
+                    rollback_written_artifacts(
+                        written_mesh_paths,
+                        boundary_dir=self._ensure_run_context().root_dir,
+                    )
+                    self._record_generation_rejection(
+                        stage="post_mutate_unique_geometry",
+                        error_codes=(error_code,),
+                        write_summary=record_summary,
+                    )
+                    return None
+
         sample_id = uuid4().hex[:8]  # mutate-only 变体目录仍以 8 位短哈希为样本根
         if self.cfg.mode != "mutate" and connectivity_preset_name is not None and enumerated:
             sample_id = stable_premade_id(
@@ -827,6 +891,8 @@ class HandGenerator:
         recolor_metadata = describe_recolor_spec(self.cfg.recolored)
         if recolor_metadata is not None:
             metadata["recolored"] = recolor_metadata
+        if candidate_geometry_fingerprint is not None:
+            metadata["geometry_fingerprint"] = candidate_geometry_fingerprint
 
         result = HandGenerationResult(
             hand_cfg=hand_cfg,
@@ -865,6 +931,8 @@ class HandGenerator:
                 raise
 
         self._record_generation_success(result, write_summary=record_summary)
+        if candidate_geometry_fingerprint is not None:
+            self._ensure_post_mutate_geometry_registry()[candidate_geometry_fingerprint] = f"variant:{sample_id}"
         self._last_rejection_detail = None
         return result
 

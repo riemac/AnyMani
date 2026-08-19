@@ -3,7 +3,7 @@ AnyMani Assets
 
 `source/anymani/anymani/assets/` 是 AnyMani 的手资产生成子项目。
 
-当前版本：`0.4.0`
+当前版本：`0.4.1`
 
 它负责的不是单一 URDF 导出，而是一整条可追溯的资产生产链：
 
@@ -34,6 +34,7 @@ AnyMani Assets
 16. dataset schema 2.0 将 validation 与 evaluation 都拆成 `unseen_variant_set` 和 `unseen_mother`；前者只包含 train mother 的新 variants，后者以 canonical left/right mirror pair 为不可拆 holdout 单位。
 17. `dataset_build` 模板使用 family composition、full/missing、missing slot、mixed composition group 与 DOF 分层选择 mother；`assets_per_lineage` 包含 mother 本体，planner 自动 lower 成实际 post-mutate variant 数。
 18. 多 mother post-mutate 以完整 variant set 为进程任务；shortfall 或 geometry fingerprint 重复只 quarantine 当前 run，有限补采成功后才发布 `ssl.yaml` / `ppo.yaml`。
+19. `HandGeneratorCfg.post_mutate_require_unique_geometry` 默认关闭以保留 identity 加权样本；正式 dataset recipe 开启后，mother no-op、limit-only 变化与同 variant set 重复都不计为新几何，并在当前槽位内重新抽取完整联合 proposal。
 
 数据集构建
 ----------
@@ -84,7 +85,7 @@ after (+delta): parent       child
 
 - 配置入口：`config/asset_gen_cfg.py`
 - 最高生成入口：`generator/hand_generator.py`
-- dataset template/manifest：`datasets/<template_id>/`，schema/resolver：`dataset_build/` 与 `bank/dataset.py`
+- dataset template/manifest：`datasets/<template_id>/`，schema/resolver：`generator/dataset_build/` 与 `bank/dataset.py`
 - 物理闭包：`asset_physics.py`
 - 版本记录：`VERSION`
 - 变更记录：`CHANGELOG`

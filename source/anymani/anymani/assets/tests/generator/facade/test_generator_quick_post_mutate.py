@@ -9,6 +9,7 @@ import yaml
 from anymani.assets.config import asset_gen_cfg as asset_cfg_module
 from anymani.assets.generator.hand_generator import HandGenerator, HandGeneratorCfg
 from anymani.assets.generator.mutate import HandMutatorCfg, LimitTweakCfg, LinkScaleCfg, MountPerturbCfg, TipReplaceCfg
+from anymani.assets.geometry_identity import geometry_fingerprint_from_sidecar
 from anymani.assets.scripts import _asset_generate_runner as runner_module
 from anymani.assets.scripts import generate as generate_module
 from anymani.assets.validator.hand_rules import HandValidatorCfg
@@ -153,16 +154,143 @@ class DemoMeshOnlyTipReplaceMutatorCfg(HandMutatorCfg):
     )
 
 
+class DemoIdentityLinkScaleMutatorCfg(HandMutatorCfg):
+    r"""显式生成与 mother 静态几何相同的 identity proposal。"""
+
+    link_scale = LinkScaleCfg(
+        self_mode="identity",
+        scale_type="rel",
+        link_scale=(1.0, 1.0),
+    )
+
+
+class DemoFixedLinkScaleMutatorCfg(HandMutatorCfg):
+    r"""每次都生成同一份非 mother 几何，用于证伪 variant-set 内重复。"""
+
+    link_scale = LinkScaleCfg(
+        self_mode="only_length",
+        scale_type="rel",
+        link_scale=(1.1, 1.1),
+        distrib="uniform",
+    )
+
+
+class DemoFixedLimitMutatorCfg(HandMutatorCfg):
+    r"""只改变 joint limits；静态 geometry fingerprint 应仍与 mother 相同。"""
+
+    limit_tweak = LimitTweakCfg(
+        self_mode="disturb",
+        disturb_object="independent",
+        disturb_type="add",
+        joint_range=(0.01, 0.01),
+    )
+
+
 def test_post_mutate_config_is_direct_hand_generator_cfg():
     r"""配置模块中的 `POST_MUTATE_CFG` 应直接是 `HandGeneratorCfg`。"""
 
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG, HandGeneratorCfg)
     assert asset_cfg_module.POST_MUTATE_CFG.mode == "mutate"
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG.Validate, HandValidatorCfg)
+    assert asset_cfg_module.POST_MUTATE_CFG.post_mutate_require_unique_geometry is True
     term_names = tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms())
     assert "tip_replace" in term_names
     assert "link_proximal_overlap" in term_names
     assert term_names.index("link_scale") < term_names.index("link_proximal_overlap")
+
+
+def test_post_mutate_default_allows_identity_geometry_for_weighted_sampling(tmp_path):
+    r"""关闭 strict uniqueness 时保留旧实验语义：identity 可以重复计入成功样本。"""
+
+    topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
+    cfg = HandGeneratorCfg(
+        mode="mutate",
+        artifact_level="bundle",
+        source_topology_dir=topology_dir,
+        n_samples=2,
+        post_mutate_attempts_per_variant=1,
+        Mutate=DemoIdentityLinkScaleMutatorCfg(),
+        Validate=None,
+        Physics=None,
+    )
+
+    results = list(HandGenerator(cfg).generate_batch())
+    summary = yaml.safe_load((_mutate_run_dirs(topology_dir)[0] / "summary.yaml").read_text(encoding="utf-8"))
+
+    assert cfg.post_mutate_require_unique_geometry is False
+    assert len(results) == 2
+    assert summary["stats"]["succeeded"] == 2
+    assert summary["stats"]["rejected"] == 0
+
+
+def test_post_mutate_strict_uniqueness_rejects_mother_and_limit_only_geometry(tmp_path):
+    r"""strict 模式把 identity 与 limit-only 候选都视为 mother geometry no-op。"""
+
+    for mutator_cfg in (DemoIdentityLinkScaleMutatorCfg(), DemoFixedLimitMutatorCfg()):
+        topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path / type(mutator_cfg).__name__)
+        cfg = HandGeneratorCfg(
+            mode="mutate",
+            artifact_level="bundle",
+            source_topology_dir=topology_dir,
+            n_samples=1,
+            post_mutate_attempts_per_variant=2,
+            post_mutate_require_unique_geometry=True,
+            Mutate=mutator_cfg,
+            Validate=None,
+            Physics=None,
+        )
+
+        results = list(HandGenerator(cfg).generate_batch())
+        run_dir = _mutate_run_dirs(topology_dir)[0]
+        summary = yaml.safe_load((run_dir / "summary.yaml").read_text(encoding="utf-8"))
+
+        assert results == []
+        assert summary["stats"]["succeeded"] == 0
+        assert summary["stats"]["rejected"] == 2
+        assert summary["stats"]["rejected_by_reason"] == {
+            "post_mutate.duplicate_mother_geometry": 2,
+        }
+        assert summary["post_mutate_sampling"]["shortfall"] == 1
+        assert all(
+            rejection["error_codes"] == ["post_mutate.duplicate_mother_geometry"]
+            for rejection in summary["post_mutate_sampling"]["slots"][0]["rejections"]
+        )
+        assert not tuple(run_dir.glob("*/hand.yaml"))  # duplicate 在 sample bundle 创建前被拒绝
+
+
+def test_post_mutate_strict_uniqueness_rejects_duplicate_within_variant_set(tmp_path):
+    r"""固定非 identity proposal 只允许首个 variant，后续同几何候选逐槽补抽直至 shortfall。"""
+
+    topology_dir, _original_sample_id = _make_pre_made_topology_dir(tmp_path)
+    cfg = HandGeneratorCfg(
+        mode="mutate",
+        artifact_level="bundle",
+        source_topology_dir=topology_dir,
+        n_samples=2,
+        post_mutate_attempts_per_variant=3,
+        post_mutate_require_unique_geometry=True,
+        Mutate=DemoFixedLinkScaleMutatorCfg(),
+        Validate=None,
+        Physics=None,
+    )
+
+    results = list(HandGenerator(cfg).generate_batch())
+    summary = yaml.safe_load((_mutate_run_dirs(topology_dir)[0] / "summary.yaml").read_text(encoding="utf-8"))
+
+    assert len(results) == 1
+    assert "geometry_fingerprint" in results[0].metadata
+    assert results[0].sidecar_path is not None
+    assert geometry_fingerprint_from_sidecar(results[0].sidecar_path) == results[0].metadata["geometry_fingerprint"]
+    assert summary["stats"]["succeeded"] == 1
+    assert summary["stats"]["rejected"] == 3
+    assert summary["stats"]["rejected_by_reason"] == {
+        "post_mutate.duplicate_variant_geometry": 3,
+    }
+    assert summary["post_mutate_sampling"]["successful_variants"] == 1
+    assert summary["post_mutate_sampling"]["shortfall"] == 1
+    assert summary["post_mutate_sampling"]["slots"][0]["accepted"] is True
+    assert summary["post_mutate_sampling"]["slots"][1]["accepted"] is False
+    assert len(tuple(_mutate_run_dirs(topology_dir)[0].glob("*/hand.yaml"))) == 1
 
 
 def test_post_mutate_runner_resolves_topology_root_path(tmp_path):

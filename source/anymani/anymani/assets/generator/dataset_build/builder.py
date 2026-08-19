@@ -17,14 +17,14 @@ from typing import Any, Literal, cast
 
 import yaml
 
-from ..bank.path_utils import resolve_bank_path
-from ..generator.hand_generator import (
+from ...bank.path_utils import resolve_bank_path
+from ...geometry_identity import geometry_fingerprint_from_sidecar
+from ..hand_generator import (
     HandGenerator,
     HandGeneratorCfg,
     PostMutateSourceCfg,
     PostMutateVariantSetResult,
 )
-from .identity import geometry_fingerprint_from_sidecar
 from .planner import (
     CanonicalMotherPair,
     MotherInventoryRecord,
@@ -386,7 +386,7 @@ def _validate_lock(
         raise ValueError("selection lock schema must be exactly '1.0.0'")
     if str(lock.get("template_id")) != template.template_id or str(lock.get("template_sha256")) != template_sha256:
         raise ValueError("selection lock does not match current dataset template")
-    from ..generator.runtime.recipe_loader import RecipeLoader
+    from ..runtime.recipe_loader import RecipeLoader
 
     snapshot = RecipeLoader.dump(post_mutate_cfg)
     digest = hashlib.sha256(yaml.safe_dump(snapshot, allow_unicode=True, sort_keys=True).encode()).hexdigest()
@@ -446,7 +446,22 @@ def _completed_task_is_valid(
     source = Path(str(summary.get("config", {}).get("source_topology_dir", ""))).resolve(strict=False)
     if source != _source_path(state, task).resolve(strict=False):
         return False
-    return len(tuple(run_dir.glob("*/hand.yaml"))) == int(task["variant_count"])
+    variant_sidecars = tuple(sorted(run_dir.glob("*/hand.yaml")))
+    if len(variant_sidecars) != int(task["variant_count"]):
+        return False
+
+    # Resume 不能只信任旧 state 中缓存的 fingerprints：bundle 可能在中断期间被改写、
+    # 删除或手工替换。重新读取实际 sidecars，并同时证明 set 内没有重复。
+    candidate_paths = list(variant_sidecars)
+    if bool(task["include_mother"]):
+        candidate_paths.insert(0, _source_path(state, task) / "hand.yaml")
+    actual_fingerprints = [geometry_fingerprint_from_sidecar(path) for path in candidate_paths]
+    stored_fingerprints = [str(value) for value in task_state.get("geometry_fingerprints", ())]
+    return (
+        len(set(actual_fingerprints)) == len(actual_fingerprints)
+        and len(set(stored_fingerprints)) == len(stored_fingerprints)
+        and set(actual_fingerprints) == set(stored_fingerprints)
+    )
 
 
 def _register_task_fingerprints(
