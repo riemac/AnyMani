@@ -3,7 +3,7 @@ AnyMani Assets
 
 `source/anymani/anymani/assets/` 是 AnyMani 的手资产生成子项目。
 
-当前版本：`0.4.1`
+当前版本：`0.5.0`
 
 它负责的不是单一 URDF 导出，而是一整条可追溯的资产生产链：
 
@@ -35,6 +35,8 @@ AnyMani Assets
 17. `dataset_build` 模板使用 family composition、full/missing、missing slot、mixed composition group 与 DOF 分层选择 mother；`assets_per_lineage` 包含 mother 本体，planner 自动 lower 成实际 post-mutate variant 数。
 18. 多 mother post-mutate 以完整 variant set 为进程任务；shortfall 或 geometry fingerprint 重复只 quarantine 当前 run，有限补采成功后才发布 `ssl.yaml` / `ppo.yaml`。
 19. `HandGeneratorCfg.post_mutate_require_unique_geometry` 默认关闭以保留 identity 加权样本；正式 dataset recipe 开启后，mother no-op、limit-only 变化与同 variant set 重复都不计为新几何，并在当前槽位内重新抽取完整联合 proposal。
+20. 正式 dataset recipe 使用 `post_mutate_sdf_execution="central_gpu_batch"`：一个 spawn GPU service 独占 PyTorch/Warp CUDA context，CPU worker 只生成一只 mother 后退出；服务错误、超时或 batch/scalar 不一致直接终止构建。
+21. `build` 使用 schema 2 build state：每个 task 的 dispatched/generated/accepted/quarantined attempt 立即原子写入；run root 创建时写 `DATASET_BUILD_ATTEMPT.yaml` ownership marker，供 crash resume 与精确 recovery 审计。
 
 数据集构建
 ----------
@@ -42,11 +44,18 @@ AnyMani Assets
 正式构建强制先冻结并审阅 selection lock，再启动多 mother post-mutate：
 
 ```bash
-python -m anymani.assets.scripts.dataset plan --template source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/template.yaml
-python -m anymani.assets.scripts.dataset build --template source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/template.yaml --workers 8 --resume
+python -m anymani.assets.scripts.dataset plan --template source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/template.yaml --config-module anymani.assets.config.asset_gen_cfg
+python -m anymani.assets.scripts.dataset build --template source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/template.yaml --config-module anymani.assets.config.asset_gen_cfg --workers 8 --resume
 ```
 
 `derive-ppo` 只从 completed SSL lineage pool 派生新的 PPO manifest，不生成或复制 variant assets。模板控制科研分布、资产数与随机域；mutator、validator 和 physics 参数继续由 `config/asset_gen_cfg.py::POST_MUTATE_CFG` 定义，worker 数仅是 CLI 执行参数。
+
+中断构建先执行默认 dry-run recovery，再由人工决定是否接管完整 run 或删除当前 invocation 的所有 marker-owned run：
+
+```bash
+python -m anymani.assets.scripts.dataset recover --template source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/template.yaml --strategy adopt
+python -m anymani.assets.scripts.dataset recover --template source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/template.yaml --strategy rollback --apply
+```
 
 近端重叠变异
 ------------

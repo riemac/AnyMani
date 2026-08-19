@@ -78,9 +78,11 @@ pre-made topology 把 family composition 与 missing slots 视为正交轴。thu
 
 `family` 表示 base palm 的来源/机制族；完整 topology 必须结合 `family_composition`、`missing_slots`、`surviving_slots` 与 `slot_family_map` 判断，不能只读顶层 `family`。`topology_kind` 只保留为历史 sidecar/summary 的派生兼容标签。dataset YAML 以完整 variant set 为配置原子，并对每条 lineage 显式声明 `include_mother`；跨 partition 先按路径、asset ID 与 `content_hash` 拒绝重复，geometry consumer 再按 `physical_geometry_hash` 拒绝相同物理映射。
 
-Dataset partition 以 canonical left/right mirror pair 为最小 morphology 分配单位；同一 pair 不得拆到 train 与 unseen-mother holdout。selection lock、generator config hash 与 build report 是正式 manifest 的 provenance，`.build_state.yaml` 仅用于本地中断恢复，不进入版本库。
+Dataset partition 以 canonical left/right mirror pair 为最小 morphology 分配单位；同一 pair 不得拆到 train 与 unseen-mother holdout。selection lock、generator config hash 与 build report 是正式 manifest 的 provenance，schema-2 `.build_state.yaml` 仅用于本地中断恢复，不进入版本库；每个 owned variant-set run 还必须有 `DATASET_BUILD_ATTEMPT.yaml` marker，rollback/adopt 只能依据 marker 与 lock/state 三方一致证据执行。
 
 Post-mutate 的 identity mode 是合法 proposal 语义，不由 mutator 自行删除。`HandGeneratorCfg.post_mutate_require_unique_geometry=False` 允许研究者保留重复 identity 加权样本；正式资产数据集 recipe 设为 `True`，以 mother 和当前 variant set 已接受样本的静态 geometry fingerprint 为禁集逐槽补抽。该局部闸门不取代 `generator/dataset_build` 的跨 mother/partition 全局唯一性检查。
+
+正式大批量 post-mutate 使用 `post_mutate_sdf_execution="central_gpu_batch"`：只有一个 spawn GPU service 可以初始化 PyTorch/Warp，CPU workers 不得初始化 CUDA，且每个 worker 处理一只 mother 后退出。central service 的通信失败、超时、GPU backend failure 或 batch/scalar parity failure 必须穿透普通 rejection sampling，立即停止整个 build；不得自动回退到 CPU 或 local CUDA validator。
 
 ### 文档与版本
 

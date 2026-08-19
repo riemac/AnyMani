@@ -12,6 +12,8 @@ from anymani.assets.generator.hand_generator import (
     PostMutateSourceCfg,
 )
 from anymani.assets.generator.mutate import HandMutatorCfg, LinkScaleCfg, MountPerturbCfg
+from anymani.assets.geometry_identity import geometry_fingerprint_from_sidecar
+from anymani.assets.validator.hand_rules import HandValidatorCfg
 
 
 class _BatchMountMutatorCfg(HandMutatorCfg):
@@ -109,6 +111,73 @@ def test_generate_variant_sets_preserves_per_mother_uniqueness_in_serial_and_par
         summary["stats"]["rejected_by_reason"] == {"post_mutate.duplicate_mother_geometry": 2}
         for summary in summaries
     )
+
+
+def test_central_gpu_variant_sets_match_local_scalar_and_recycle_cpu_workers(tmp_path: Path) -> None:
+    r"""固定 seed 下 central batch 与 scalar 接纳序列一致，且每个 mother 使用无 CUDA 的新 worker。"""
+
+    sources = _make_two_mothers(tmp_path / "premade")
+    tasks = [
+        PostMutateSourceCfg(task_id="parity:left", source_topology_dir=sources[0], n_samples=1, seed=101),
+        PostMutateSourceCfg(task_id="parity:right", source_topology_dir=sources[1], n_samples=1, seed=202),
+    ]
+    validator = HandValidatorCfg(
+        post_mutate=HandValidatorCfg.PostMutateCfg(
+            dof_min=None,
+            finger_count_min=None,
+            finger_count_max=None,
+            require_thumb=False,
+            require_non_thumb_with_min_revolute_dof=None,
+            check_finger_spacing=True,
+            min_finger_spacing=-1.0,
+            sdf_device="cuda",
+            sdf_mesh_backend="warp",
+        )
+    )
+    common = dict(
+        mode="mutate",
+        artifact_level="bundle",
+        source_topology_dir=None,
+        post_mutate_sources=tasks,
+        post_mutate_parallel_workers=2,
+        Mutate=_BatchMountMutatorCfg(),
+        Validate=validator,
+        Physics=None,
+    )
+
+    central_reports = list(
+        HandGenerator(
+            HandGeneratorCfg(
+                **common,
+                post_mutate_parallel=True,
+                post_mutate_sdf_execution="central_gpu_batch",
+            )
+        ).generate_variant_sets()
+    )
+    local_reports = list(
+        HandGenerator(
+            HandGeneratorCfg(
+                **common,
+                post_mutate_parallel=False,
+                post_mutate_sdf_execution="local",
+            )
+        ).generate_variant_sets()
+    )
+
+    central_fingerprints = [
+        [geometry_fingerprint_from_sidecar(path) for path in report.sidecar_paths]
+        for report in central_reports
+    ]
+    local_fingerprints = [
+        [geometry_fingerprint_from_sidecar(path) for path in report.sidecar_paths]
+        for report in local_reports
+    ]
+    assert central_fingerprints == local_fingerprints
+    assert all(report.successful_variants == 1 for report in central_reports)
+    assert len({report.worker_pid for report in central_reports}) == len(tasks)
+    assert all(not report.worker_cuda_initialized for report in central_reports)
+    assert len({report.sdf_service_pid for report in central_reports}) == 1
+    assert central_reports[0].sdf_service_pid > 0
 
 
 def test_post_mutate_source_modes_are_mutually_exclusive(tmp_path: Path) -> None:

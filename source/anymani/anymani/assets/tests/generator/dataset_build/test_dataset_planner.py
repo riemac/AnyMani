@@ -3,6 +3,7 @@ r"""Dataset build template、mirror-pair inventory 与分层 selection planner �
 from __future__ import annotations
 
 import hashlib
+import shutil
 from collections import Counter
 from pathlib import Path
 
@@ -426,6 +427,264 @@ def test_recovery_rollback_deletes_only_exact_legacy_invocation_runs(tmp_path: P
     assert all(not path.exists() for path in owned_runs)
     assert unrelated.is_dir()
     assert not state_path.exists()
+
+
+def test_schema2_recovery_rollback_deletes_only_marker_owned_runs_and_restores_baseline(tmp_path: Path) -> None:
+    r"""Schema-2 rollback 的删除授权只能来自 marker，并把全部 task state 恢复到 invocation 起点。"""
+
+    template, template_path, lock_path, post_cfg = _build_fake_dataset_fixture(tmp_path)
+    state_path = template_path.parent / ".build_state.yaml"
+    state = yaml.safe_load(state_path.read_text(encoding="utf-8"))
+    lock = yaml.safe_load(lock_path.read_text(encoding="utf-8"))
+    task_id, task_state = next(iter(state["tasks"].items()))
+    task = _locked_tasks_by_id(lock)[task_id]
+    owned_run = Path(task_state["active_run_dir"])
+    unowned_runs = [
+        Path(other_state["active_run_dir"])
+        for other_id, other_state in state["tasks"].items()
+        if other_id != task_id
+    ]
+    _write_schema2_marker_and_exact_summary(
+        owned_run,
+        state=state,
+        task=task,
+        task_state=task_state,
+        post_cfg=post_cfg,
+    )
+
+    dry_run = recover_dataset_build(template, lock_path=lock_path, strategy="rollback")
+
+    assert dry_run["counts"]["run_roots"] == 1
+    assert dry_run["counts"]["complete"] == 1
+    applied = recover_dataset_build(template, lock_path=lock_path, strategy="rollback", apply=True)
+    assert applied["dry_run"] is False
+    assert not owned_run.exists()
+    assert all(run.is_dir() for run in unowned_runs)
+    assert not state_path.exists()
+
+
+def test_schema2_recovery_adopts_complete_run_and_quarantines_partial_run(tmp_path: Path) -> None:
+    r"""Schema-2 adopt 只接管 exact-complete run；partial variant set 必须整套重建。"""
+
+    template, template_path, lock_path, post_cfg = _build_fake_dataset_fixture(tmp_path)
+    state_path = template_path.parent / ".build_state.yaml"
+    state = yaml.safe_load(state_path.read_text(encoding="utf-8"))
+    lock = yaml.safe_load(lock_path.read_text(encoding="utf-8"))
+    selected = list(state["tasks"].items())[:2]
+    complete_id, complete_state = selected[0]
+    partial_id, partial_state = selected[1]
+    complete_task = _locked_tasks_by_id(lock)[complete_id]
+    partial_task = _locked_tasks_by_id(lock)[partial_id]
+    complete_run = Path(complete_state["active_run_dir"])
+    partial_run = Path(partial_state["active_run_dir"])
+    _write_schema2_marker_and_exact_summary(
+        complete_run,
+        state=state,
+        task=complete_task,
+        task_state=complete_state,
+        post_cfg=post_cfg,
+    )
+    _write_schema2_marker_and_exact_summary(
+        partial_run,
+        state=state,
+        task=partial_task,
+        task_state=partial_state,
+        post_cfg=post_cfg,
+        successful_variants=int(partial_task["variant_count"]) - 1,
+    )
+    partial_sample = sorted(partial_run.glob("*/hand.yaml"))[-1].parent
+    shutil.rmtree(partial_sample)
+    for task_state in (complete_state, partial_state):
+        task_state["status"] = "running"
+        task_state["active_run_dir"] = ""
+        task_state["geometry_fingerprints"] = []
+        task_state["attempts"][-1]["status"] = "dispatched"
+    state_path.write_text(yaml.safe_dump(state, sort_keys=False), encoding="utf-8")
+
+    report = recover_dataset_build(template, lock_path=lock_path, strategy="adopt", apply=True)
+    recovered = yaml.safe_load(state_path.read_text(encoding="utf-8"))
+
+    assert report["counts"]["complete"] == 1
+    assert report["counts"]["partial"] == 1
+    assert recovered["tasks"][complete_id]["status"] == "completed"
+    assert recovered["tasks"][complete_id]["active_run_dir"] == str(complete_run)
+    assert recovered["tasks"][partial_id]["status"] == "pending"
+    assert recovered["tasks"][partial_id]["attempts"][-1]["status"] == "quarantined"
+    assert (partial_run / "QUARANTINED.yaml").is_file()
+
+
+def test_schema2_resume_adopts_complete_generated_result_without_rerunning_worker(tmp_path: Path) -> None:
+    r"""Crash 后完整 marker run 应恢复为 generated 并按 lock 接纳，不得重复生成该 mother。"""
+
+    template, template_path, lock_path, post_cfg = _build_fake_dataset_fixture(tmp_path)
+    state_path = template_path.parent / ".build_state.yaml"
+    state = yaml.safe_load(state_path.read_text(encoding="utf-8"))
+    lock = yaml.safe_load(lock_path.read_text(encoding="utf-8"))
+    task_id, task_state = next(iter(state["tasks"].items()))
+    task = _locked_tasks_by_id(lock)[task_id]
+    run_dir = Path(task_state["active_run_dir"])
+    _write_schema2_marker_and_exact_summary(
+        run_dir,
+        state=state,
+        task=task,
+        task_state=task_state,
+        post_cfg=post_cfg,
+    )
+    task_state["status"] = "running"
+    task_state["active_run_dir"] = ""
+    task_state["geometry_fingerprints"] = []
+    task_state["attempts"][-1]["status"] = "dispatched"
+    state_path.write_text(yaml.safe_dump(state, sort_keys=False), encoding="utf-8")
+    rerun_task_ids: list[str] = []
+
+    def resumed_batch(_cfg, tasks, _workers):
+        rerun_task_ids.extend(task.task_id for task in tasks)
+        return tuple(_write_fake_variant_set(task) for task in tasks)
+
+    report = build_dataset_from_lock(
+        template,
+        template_sha256=hashlib.sha256(template_path.read_bytes()).hexdigest(),
+        lock_path=lock_path,
+        post_mutate_cfg=post_cfg,
+        workers=2,
+        run_batch=resumed_batch,
+    )
+
+    assert report["tasks"][task_id]["status"] == "completed"
+    assert report["tasks"][task_id]["active_run_dir"] == str(run_dir)
+    assert task_id not in rerun_task_ids
+
+
+def test_schema2_recovery_rejects_owned_marker_through_symlink_run_root(tmp_path: Path) -> None:
+    r"""即使 marker 身份正确，symlink run root 也不得被忽略、接管或递归删除。"""
+
+    template, template_path, lock_path, post_cfg = _build_fake_dataset_fixture(tmp_path)
+    state_path = template_path.parent / ".build_state.yaml"
+    state = yaml.safe_load(state_path.read_text(encoding="utf-8"))
+    lock = yaml.safe_load(lock_path.read_text(encoding="utf-8"))
+    task_id, task_state = next(iter(state["tasks"].items()))
+    task = _locked_tasks_by_id(lock)[task_id]
+    run_dir = Path(task_state["active_run_dir"])
+    _write_schema2_marker_and_exact_summary(
+        run_dir,
+        state=state,
+        task=task,
+        task_state=task_state,
+        post_cfg=post_cfg,
+    )
+    external_run = tmp_path / "external_owned_run"
+    external_run.mkdir()
+    external_marker = {
+        "schema_version": "1.0.0",
+        "build_id": state["build_id"],
+    }
+    (external_run / "DATASET_BUILD_ATTEMPT.yaml").write_text(
+        yaml.safe_dump(external_marker),
+        encoding="utf-8",
+    )
+    symlink = run_dir.parent / "owned_symlink"
+    symlink.symlink_to(external_run, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink run root"):
+        recover_dataset_build(template, lock_path=lock_path, strategy="rollback")
+
+    assert symlink.is_symlink()
+    assert run_dir.is_dir()
+
+
+def _build_fake_dataset_fixture(tmp_path: Path):
+    r"""完成一轮轻量 schema-2 fake build，供 ownership recovery 测试改造成中断现场。"""
+
+    run_root = _write_inventory(tmp_path / "generated")
+    template_path = _write_template(tmp_path / "dataset" / "template.yaml", run_root=run_root)
+    template, template_sha = load_dataset_build_template(template_path)
+    post_cfg = asset_cfg_module.POST_MUTATE_CFG
+    plan = build_dataset_selection_plan(
+        template,
+        template_sha256=template_sha,
+        generator_config_module="anymani.assets.config.asset_gen_cfg",
+        generator_config_snapshot=RecipeLoader.dump(post_cfg),
+    )
+    lock_path = write_selection_lock(plan, template_path.parent / "selection.lock.yaml")
+
+    def fake_run_batch(_cfg, tasks, _workers):
+        r"""用 bundle fixture 代替昂贵 mutator，但保留 builder state transitions。"""
+
+        return tuple(_write_fake_variant_set(task) for task in tasks)
+
+    build_dataset_from_lock(
+        template,
+        template_sha256=template_sha,
+        lock_path=lock_path,
+        post_mutate_cfg=post_cfg,
+        workers=2,
+        run_batch=fake_run_batch,
+    )
+    return template, template_path, lock_path, post_cfg
+
+
+def _locked_tasks_by_id(lock: dict) -> dict[str, dict]:
+    r"""按 task_id 展开 selection lock lineages，并补回 role。"""
+
+    return {
+        str(task["task_id"]): {**task, "role": role}
+        for role, role_tasks in lock["lineages"].items()
+        for task in role_tasks
+    }
+
+
+def _write_schema2_marker_and_exact_summary(
+    run_dir: Path,
+    *,
+    state: dict,
+    task: dict,
+    task_state: dict,
+    post_cfg,
+    successful_variants: int | None = None,
+) -> None:
+    r"""把 fake run 补成 marker、summary config 与 state attempt 三方一致的 owned run。"""
+
+    attempt = task_state["attempts"][-1]
+    source = Path(attempt["source_topology_dir"])
+    child_cfg = post_cfg.replace(
+        source_topology_dir=source,
+        post_mutate_sources=[],
+        n_samples=int(task["variant_count"]),
+        post_mutate_seed=int(attempt["seed"]),
+        post_mutate_parallel=False,
+        post_mutate_parallel_workers=None,
+    )
+    child_snapshot = RecipeLoader.dump(child_cfg)
+    child_sha256 = hashlib.sha256(
+        yaml.safe_dump(child_snapshot, allow_unicode=True, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    assert child_sha256 == attempt["child_config_sha256"]
+    succeeded = int(task["variant_count"]) if successful_variants is None else successful_variants
+    summary_path = run_dir / "summary.yaml"
+    summary = yaml.safe_load(summary_path.read_text(encoding="utf-8"))
+    summary["config"] = child_snapshot
+    summary["stats"]["succeeded"] = succeeded
+    summary["post_mutate_sampling"] = {
+        "successful_variants": succeeded,
+        "shortfall": int(task["variant_count"]) - succeeded,
+    }
+    summary_path.write_text(yaml.safe_dump(summary, sort_keys=False), encoding="utf-8")
+    marker = {
+        "schema_version": "1.0.0",
+        "build_id": state["build_id"],
+        "selection_lock_sha256": state["selection_lock_sha256"],
+        "task_id": str(task["task_id"]),
+        "attempt_index": int(attempt["attempt_index"]),
+        "source_topology_dir": str(source.resolve()),
+        "seed": int(attempt["seed"]),
+        "generator_config_sha256": state["generator_config_sha256"],
+        "child_config_sha256": child_sha256,
+        "created_at": state["started_at"],
+    }
+    (run_dir / "DATASET_BUILD_ATTEMPT.yaml").write_text(
+        yaml.safe_dump(marker, sort_keys=False),
+        encoding="utf-8",
+    )
 
 def _write_inventory(run_root: Path) -> Path:
     r"""写 24 个 canonical pairs、48 个 mother bundles 的受控 inventory。"""

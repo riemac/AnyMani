@@ -33,7 +33,7 @@ r"""手部资产生成器主入口草案。
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -114,6 +114,20 @@ class PostMutateSourceCfg:
     source_topology_dir: Path | str
     n_samples: int
     seed: int
+    build_id: str = ""
+    """dataset build invocation identity；普通交互式 multi-source 任务保持空字符串。"""
+
+    selection_lock_sha256: str = ""
+    """本任务所属 selection lock 的 byte-level identity。"""
+
+    attempt_index: int = 0
+    """同一 task 的零基 retry 序号，用于 ownership marker 与 state attempt 对齐。"""
+
+    generator_config_sha256: str = ""
+    """selection lock 冻结的 parent ``HandGeneratorCfg`` identity。"""
+
+    child_config_sha256: str = ""
+    """应用 source/count/seed overrides 后实际 worker cfg 的 identity。"""
 
     def __post_init__(self) -> None:
         r"""规范路径并拒绝空任务、负 variant 数和非法 seed。"""
@@ -125,6 +139,8 @@ class PostMutateSourceCfg:
             raise ValueError("post-mutate source n_samples must be non-negative")
         if self.seed < 0:
             raise ValueError("post-mutate source seed must be non-negative")
+        if self.attempt_index < 0:
+            raise ValueError("post-mutate source attempt_index must be non-negative")
 
 
 @dataclass
@@ -249,6 +265,14 @@ class HandGeneratorCfg(AssetCfgBase):
 
     post_mutate_parallel_workers: int | None = None
     """post-mutate worker 数；``None`` 使用不超过 8 的 conservative 自动值。"""
+
+    post_mutate_sdf_execution: Literal["local", "central_gpu_batch"] = "local"
+    r"""post-mutate SDF validator 的资源所有权模型。
+
+    ``local`` 保留单 generator 调试路径；``central_gpu_batch`` 只在
+    :meth:`generate_variant_sets` 中启用一个独立 GPU actor，CPU mother workers 不创建
+    CUDA context。该字段改变执行拓扑而不改变 SDF 数学合同，仍会写入 recipe/lock provenance。
+    """
 
     Made: HandBuilderCfg = field(default_factory=HandBuilderCfg)
     """前序生成配置入口；主要负责关节拓扑维度的变体，把生成空间中的选择落到一个初始 `HandCfg`。"""
@@ -400,6 +424,8 @@ class HandGeneratorCfg(AssetCfgBase):
             raise TypeError("post_mutate_require_unique_geometry must be bool")
         if self.post_mutate_parallel_workers is not None and self.post_mutate_parallel_workers < 1:
             raise ValueError("post_mutate_parallel_workers must be >= 1 when provided")
+        if self.post_mutate_sdf_execution not in {"local", "central_gpu_batch"}:
+            raise ValueError("post_mutate_sdf_execution must be 'local' or 'central_gpu_batch'")
         task_ids = [source.task_id for source in self.post_mutate_sources]
         source_paths = [Path(source.source_topology_dir) for source in self.post_mutate_sources]
         if len(set(task_ids)) != len(task_ids):
@@ -1080,16 +1106,25 @@ class HandGenerator:
             yield result
             success_count += 1
 
-    def generate_variant_sets(self) -> Iterator[PostMutateVariantSetResult]:
+    def generate_variant_sets(
+        self,
+        *,
+        on_report: Callable[[PostMutateVariantSetResult], None] | None = None,
+    ) -> Iterator[PostMutateVariantSetResult]:
         r"""为多个 mother source 生成相互独立的 variant-set runs。
 
         每个 source task 在独立 ``HandGenerator`` 中恢复 mother、设置自己的 seed，
-        顺序完成全部 variants；source tasks 可进程并行，返回顺序仍与 cfg 声明一致。
+        顺序完成全部 variants。``on_report`` 按实际完成顺序交付增量结果，最终 iterator
+        仍按 cfg 声明顺序返回，兼顾 crash recovery 与固定 seed 的可比输出顺序。
         """
 
         if self.cfg.mode != "mutate" or not self.cfg.post_mutate_sources:
             raise ValueError("generate_variant_sets() requires mode='mutate' and non-empty post_mutate_sources")
-        yield from run_post_mutate_source_batch(self, tasks=tuple(self.cfg.post_mutate_sources))
+        yield from run_post_mutate_source_batch(
+            self,
+            tasks=tuple(self.cfg.post_mutate_sources),
+            on_report=on_report,
+        )
 
 __all__ = [
     "HandGenerationResult",

@@ -1,3 +1,10 @@
+0.6.4 - 2026-08-19
+==================
+
+- AnyMani Assets 0.5.0 新增集中式 GPU post-mutate validator：单一 Warp/PyTorch service 执行 ragged micro-batch，CPU mother worker 逐任务回收，并以 scalar GPU 路径锁定数值等价。
+- dataset build state 升级为 schema 2，逐 mother 持久化 ownership、generated report 与 lock-order fingerprint acceptance；recover CLI 支持完整 run adopt、partial quarantine 和精确 rollback。
+- 本版本完成中断 `cross_embodiment_balanced_v1` 失败批次的审计回退；未自动启动新的 512-mother 正式构建。
+
 0.6.3 - 2026-08-19
 ==================
 

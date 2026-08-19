@@ -40,11 +40,12 @@ SDF 的折中近似，不再代表当前 validator 的科研证书。
 
 from __future__ import annotations
 
+import hashlib
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
-import hashlib
 from pathlib import Path
-from typing import Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
@@ -114,26 +115,32 @@ class _WarpMeshHandle:
     `points`、`indices` 与 `mesh`，避免 Python GC 提前释放底层 buffer。
     """
 
-    mesh: object
-    points: object
-    indices: object
+    mesh: Any
+    points: Any
+    indices: Any
 
 
-_WARP_MESH_CACHE: dict[tuple[str, tuple[float, float, float], str], _WarpMeshHandle] = {}
+_WARP_MESH_CACHE_MAXSIZE = 128
+_WARP_MESH_CACHE: OrderedDict[
+    tuple[str, str, tuple[float, float, float], str],
+    _WarpMeshHandle,
+] = OrderedDict()
 """Warp BVH cache。
 
-key = `(resolved_path, scale_xyz, device)`。同一个 custom tip 会在批量 post-mutate
-中反复出现，缓存能避免每次 pairwise clearance 都重建 BVH。
+key = `(resolved_path, content_sha256, scale_xyz, device)`。同一个 custom tip 会在批量
+post-mutate 中反复出现，缓存能避免每次 pairwise clearance 都重建 BVH；content hash
+阻止同路径 mesh 被改写后复用旧 BVH。LRU 上限 128 使单 GPU service 的显存占用不随
+连续 mother 数量无界增长。
 """
 
 
-def is_mesh_body(body: "CollisionBodyRecord") -> bool:
+def is_mesh_body(body: CollisionBodyRecord) -> bool:
     r"""判断 collision body 是否为真实 mesh geometry。"""
 
     return isinstance(body.geometry, MeshGeometryCfg)
 
 
-def sample_mesh_surface(body: "CollisionBodyRecord", *, sample_count: int) -> list[Vector3]:
+def sample_mesh_surface(body: CollisionBodyRecord, *, sample_count: int) -> list[Vector3]:
     r"""在 mesh local surface 上采样，并变换到 world frame。
 
     Args:
@@ -152,13 +159,15 @@ def sample_mesh_surface(body: "CollisionBodyRecord", *, sample_count: int) -> li
         raise TypeError(f"sample_mesh_surface expects MeshGeometryCfg, got {type(body.geometry).__name__}")
 
     # 读取的是已经按 `geometry.scale` 烘焙过的 mesh，因此采样点处在 collision local frame。
-    mesh = _load_checked_trimesh(body.geometry.file_path, _scale_tuple(body.geometry.scale))
+    mesh_path, mesh_sha256 = _mesh_identity(body.geometry.file_path)
+    mesh = _load_checked_trimesh(mesh_path, _scale_tuple(body.geometry.scale), mesh_sha256)
 
     # `trimesh.sample_surface` 支持 seed；这里用 path/body 的稳定 hash，避免测试和批量生成随机漂移。
-    seed = _stable_seed(body.body_path, str(_resolve_mesh_path(body.geometry.file_path)), repr(body.geometry.scale))
+    seed = _stable_seed(body.body_path, mesh_path, mesh_sha256, repr(body.geometry.scale))
     from trimesh.sample import sample_surface
 
-    local_points, _face_indices = sample_surface(mesh, sample_count, seed=seed)  # [N, 3]，mesh local 坐标
+    sampled = sample_surface(mesh, sample_count, seed=seed)
+    local_points = sampled[0]  # [N, 3]，mesh local 坐标；其余返回值是 face/barycentric diagnostics
 
     # 将局部 surface samples 推到 palm/world frame，进入 finger-finger clearance 统一坐标系。
     return [apply_pose(body.world_pose, _to_vector3(point)) for point in local_points]
@@ -166,7 +175,7 @@ def sample_mesh_surface(body: "CollisionBodyRecord", *, sample_count: int) -> li
 
 def signed_distance_to_mesh_body(
     point_world: Vector3,
-    body: "CollisionBodyRecord",
+    body: CollisionBodyRecord,
     *,
     backend: MeshSdfBackend,
     device: str,
@@ -190,7 +199,7 @@ def signed_distance_to_mesh_body(
 
 def signed_distance_to_mesh_body_batch(
     points_world: list[Vector3],
-    body: "CollisionBodyRecord",
+    body: CollisionBodyRecord,
     *,
     backend: MeshSdfBackend,
     device: str,
@@ -243,7 +252,8 @@ def _signed_distance_trimesh(
     因此返回前必须取负，统一成 outside positive / inside negative。
     """
 
-    query = _get_trimesh_proximity_query(geometry.file_path, _scale_tuple(geometry.scale))
+    mesh_path, mesh_sha256 = _mesh_identity(geometry.file_path)
+    query = _get_trimesh_proximity_query(mesh_path, _scale_tuple(geometry.scale), mesh_sha256)
     if stats is not None:
         stats.record_backend("trimesh")
         stats.mesh_query_count += 1
@@ -251,7 +261,11 @@ def _signed_distance_trimesh(
 
 
 @lru_cache(maxsize=128)
-def _get_trimesh_proximity_query(file_path: str, scale: tuple[float, float, float]):
+def _get_trimesh_proximity_query(
+    file_path: str,
+    scale: tuple[float, float, float],
+    content_sha256: str,
+):
     r"""缓存 CPU proximity query。
 
     source union filtering 会对同一个 mesh 进行许多单点查询；若每次都重新构造
@@ -260,7 +274,7 @@ def _get_trimesh_proximity_query(file_path: str, scale: tuple[float, float, floa
 
     from trimesh.proximity import ProximityQuery
 
-    return ProximityQuery(_load_checked_trimesh(file_path, scale))
+    return ProximityQuery(_load_checked_trimesh(file_path, scale, content_sha256))
 
 
 def _signed_distance_warp(
@@ -295,24 +309,41 @@ def _get_warp_mesh_handle(geometry: MeshGeometryCfg, *, device: str) -> _WarpMes
     r"""构造或复用 Warp mesh BVH。"""
 
     wp = _require_warp_cuda()
-    path = str(_resolve_mesh_path(geometry.file_path))
+    path, mesh_sha256 = _mesh_identity(geometry.file_path)
     scale = _scale_tuple(geometry.scale)
-    key = (path, scale, device)
+    key = (path, mesh_sha256, scale, device)
     if key in _WARP_MESH_CACHE:
+        _WARP_MESH_CACHE.move_to_end(key)
         return _WARP_MESH_CACHE[key]
 
-    mesh = _load_checked_trimesh(path, scale)
+    mesh = _load_checked_trimesh(path, scale, mesh_sha256)
     vertices = np.asarray(mesh.vertices, dtype=np.float32)
     faces = np.asarray(mesh.faces, dtype=np.int32).reshape(-1)
     points = wp.array(vertices, dtype=wp.vec3, device=device)
     indices = wp.array(faces, dtype=wp.int32, device=device)
     handle = _WarpMeshHandle(mesh=wp.Mesh(points, indices), points=points, indices=indices)
-    _WARP_MESH_CACHE[key] = handle
+    _remember_warp_mesh_handle(key, handle)
     return handle
 
 
+def _remember_warp_mesh_handle(
+    key: tuple[str, str, tuple[float, float, float], str],
+    handle: _WarpMeshHandle,
+) -> None:
+    r"""按最近使用顺序保存 BVH，并在超过 128 项时释放最旧 Python owner。"""
+
+    _WARP_MESH_CACHE[key] = handle
+    _WARP_MESH_CACHE.move_to_end(key)
+    if len(_WARP_MESH_CACHE) > _WARP_MESH_CACHE_MAXSIZE:
+        _WARP_MESH_CACHE.popitem(last=False)
+
+
 @lru_cache(maxsize=128)
-def _load_checked_trimesh(file_path: str, scale: tuple[float, float, float]):
+def _load_checked_trimesh(
+    file_path: str,
+    scale: tuple[float, float, float],
+    content_sha256: str,
+):
     r"""加载、缩放并验证 mesh。
 
     `process=True` 是刻意选择：STL 常把每个 triangle 的顶点重复写入，若不合并顶点，
@@ -323,6 +354,8 @@ def _load_checked_trimesh(file_path: str, scale: tuple[float, float, float]):
     import trimesh
 
     path = _resolve_mesh_path(file_path)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != content_sha256:
+        raise ValueError(f"mesh bytes changed while constructing SDF cache entry: {path}")
     mesh = trimesh.load(path, force="mesh", process=True)
     if not isinstance(mesh, trimesh.Trimesh):
         raise ValueError(f"mesh SDF expects a triangle mesh, got {type(mesh).__name__}: {path}")
@@ -336,6 +369,17 @@ def _load_checked_trimesh(file_path: str, scale: tuple[float, float, float]):
     if not mesh.is_winding_consistent:
         raise ValueError(f"mesh SDF requires winding-consistent mesh after trimesh processing: {path}")
     return mesh
+
+
+def _mesh_identity(file_path: str) -> tuple[str, str]:
+    r"""返回 cache 使用的规范路径与 byte-level mesh identity。
+
+    路径区分不同资产来源，SHA-256 证明该路径当前承载的三角网格字节。这样同一路径在
+    长时间 dataset build 中被重写时会形成新 cache key，而不会继续使用旧 device BVH。
+    """
+
+    path = _resolve_mesh_path(file_path)
+    return str(path), hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _resolve_mesh_path(file_path: str) -> Path:
@@ -395,28 +439,33 @@ try:
 
     @wp.kernel
     def _warp_mesh_signed_distance_kernel(
-        mesh: wp.uint64,
-        points: wp.array(dtype=wp.vec3),
-        distances: wp.array(dtype=float),
+        mesh: wp.uint64,  # pyright: ignore[reportInvalidTypeForm]
+        points: wp.array(dtype=wp.vec3),  # pyright: ignore[reportInvalidTypeForm]
+        distances: wp.array(dtype=float),  # pyright: ignore[reportInvalidTypeForm]
     ):
         r"""Warp kernel：批量查询点到单个 mesh 的 signed distance。"""
 
         tid = wp.tid()
         point = points[tid]
-        query = wp.mesh_query_point(mesh, point, 1.0e8)
-        if not query.result:
+        query = wp.mesh_query_point(mesh, point, 1.0e8)  # pyright: ignore[reportArgumentType]
+        if not query.result:  # pyright: ignore[reportAttributeAccessIssue]
             distances[tid] = 3.4028234663852886e38
             return
-        closest = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
+        closest = wp.mesh_eval_position(  # pyright: ignore[reportAttributeAccessIssue]
+            mesh,
+            query.face,  # pyright: ignore[reportAttributeAccessIssue]
+            query.u,  # pyright: ignore[reportAttributeAccessIssue]
+            query.v,  # pyright: ignore[reportAttributeAccessIssue]
+        )
         distance = wp.length(closest - point)
-        if query.sign >= 0.0:
+        if query.sign >= 0.0:  # pyright: ignore[reportAttributeAccessIssue]
             distances[tid] = distance
         else:
             distances[tid] = -distance
 
 except Exception:
     # 没装 Warp 时仍允许 import 本模块；真正请求 Warp 后端时 `_require_warp_cuda()` 会报错。
-    _warp_mesh_signed_distance_kernel = None
+    _warp_mesh_signed_distance_kernel = None  # pyright: ignore[reportAssignmentType]
 
 
 __all__ = [

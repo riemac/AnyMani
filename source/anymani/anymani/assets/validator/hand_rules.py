@@ -69,12 +69,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
 
 from ..asset_base import AssetCfgBase, HandCfg
+from ..asset_schema_core import PoseCfg
+from ..asset_schema_embodiment import PalmCfg
 from ._base import ValidationResult, ValidatorBase
 from ._finger_length import FingerLengthConfig, evaluate_finger_axial_length
-from ._sdf_clearance import SdfClearanceConfig, evaluate_finger_sdf_clearance
+from ._sdf_clearance import SdfClearanceConfig
+from ._sdf_service import CentralSdfServiceError, evaluate_finger_sdf_clearance_routed
 from .finger_rules import FingerValidator, FingerValidatorCfg
 
 # ============================================================================
@@ -314,7 +317,8 @@ class HandValidator(ValidatorBase):
                     code="hand.duplicate_joint_names",
                 )
 
-            link_names = [target.palm.name] + [joint.child for joint in target.iter_joints()]
+            palm = cast(PalmCfg, target.palm)
+            link_names = [palm.name] + [joint.child for joint in target.iter_joints()]
             if len(link_names) != len(set(link_names)):
                 result.add_error(
                     f"hand '{target.name}'[{stage}]: duplicate link names",
@@ -373,9 +377,9 @@ class HandValidator(ValidatorBase):
 
         if stage_cfg.check_mount_consistency:
             for finger in target.fingers:
-                if finger.parent_link != target.palm.name:
+                if finger.parent_link != palm.name:
                     result.add_error(
-                        f"finger '{finger.name}'[{stage}] parent_link '{finger.parent_link}' != palm '{target.palm.name}'",
+                        f"finger '{finger.name}'[{stage}] parent_link '{finger.parent_link}' != palm '{palm.name}'",
                         code="hand.finger_mount_parent_mismatch",
                     )
 
@@ -412,7 +416,7 @@ class HandValidator(ValidatorBase):
         因而 post-mutate 默认不再走这条路径。
         """
 
-        mounts = [(finger.name, finger.mount.pos) for finger in target.fingers]
+        mounts = [(finger.name, cast(PoseCfg, finger.mount).pos) for finger in target.fingers]
         for idx in range(len(mounts)):
             for jdx in range(idx + 1, len(mounts)):
                 name_i, pos_i = mounts[idx]
@@ -441,7 +445,7 @@ class HandValidator(ValidatorBase):
         """
 
         try:
-            clearance = evaluate_finger_sdf_clearance(
+            clearance = evaluate_finger_sdf_clearance_routed(
                 target,
                 SdfClearanceConfig(
                     min_clearance=stage_cfg.min_finger_spacing,
@@ -453,6 +457,10 @@ class HandValidator(ValidatorBase):
                     mesh_surface_samples=stage_cfg.sdf_mesh_surface_samples,
                 ),
             )
+        except CentralSdfServiceError:
+            # 中央 GPU actor 已失去数值可信度时，不能把服务故障伪装成 candidate 几何不合法；
+            # 该异常必须穿透 rejection sampling，使 mother worker 和整个 dataset build 立即停止。
+            raise
         except (RuntimeError, ValueError) as exc:
             result.add_error(
                 f"finger spacing sdf[post_mutate]: {exc}",

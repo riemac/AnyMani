@@ -1,3 +1,12 @@
+0.5.0 - 2026-08-19
+==================
+
+- 新增 `post_mutate_sdf_execution="central_gpu_batch"`：一个 spawn GPU service 独占 CUDA context，CPU mother workers 使用 bounded ragged micro-batch validator，逐 mother 进程回收并保留 scalar GPU parity oracle。
+- 正式 dataset recipe 固定 `device="cuda"` 与 `mesh_backend="warp"`；central service 启动失败、超时、服务 fatal error 或 batch/scalar certificate 不一致均 fail-hard，禁止隐式 CPU fallback。
+- Warp mesh BVH cache 加入 path、mesh bytes SHA-256、scale、device identity，并限制为 128 项 LRU；primitive、mesh、mixed geometry、临界阈值和 service IPC 均增加 contract tests。
+- dataset build state 升级为 schema `2.0.0`，逐 task 原子保存 invocation identity、baseline、attempt report 和 geometry acceptance；run root 写入 `DATASET_BUILD_ATTEMPT.yaml` ownership marker。
+- `recover --strategy adopt|rollback` 支持 schema-2 完整 run 接管、partial run quarantine、精确 marker-owned rollback、symlink fail-closed 与 legacy schema-1 严格迁移审计。
+
 0.4.1 - 2026-08-19
 ==================
 

@@ -193,6 +193,10 @@ def test_post_mutate_config_is_direct_hand_generator_cfg():
     assert asset_cfg_module.POST_MUTATE_CFG.mode == "mutate"
     assert isinstance(asset_cfg_module.POST_MUTATE_CFG.Validate, HandValidatorCfg)
     assert asset_cfg_module.POST_MUTATE_CFG.post_mutate_require_unique_geometry is True
+    assert asset_cfg_module.POST_MUTATE_CFG.post_mutate_sdf_execution == "central_gpu_batch"
+    assert asset_cfg_module.POST_MUTATE_CFG.Validate is not None
+    assert asset_cfg_module.POST_MUTATE_CFG.Validate.post_mutate.sdf_device == "cuda"
+    assert asset_cfg_module.POST_MUTATE_CFG.Validate.post_mutate.sdf_mesh_backend == "warp"
     term_names = tuple(name for name, _ in asset_cfg_module.POST_MUTATE_CFG.Mutate.ordered_terms())
     assert "tip_replace" in term_names
     assert "link_proximal_overlap" in term_names

@@ -12,8 +12,10 @@ import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
+from uuid import uuid4
 
 import yaml
 
@@ -33,7 +35,7 @@ from .planner import (
 )
 from .schema import DatasetBuildTemplateCfg
 
-BUILD_STATE_SCHEMA_VERSION = "1.0.0"
+BUILD_STATE_SCHEMA_VERSION = "2.0.0"
 """可恢复 task 状态文件 schema。"""
 
 _STAGES: tuple[tuple[str, ...], ...] = (
@@ -245,12 +247,30 @@ def _execute_stage(
     accepted_fingerprints: dict[str, str],
     run_batch: RunBatch,
 ) -> None:
-    r"""完成一个 outer partition stage；失败 task 以派生 seed 最多补采三轮。"""
+    r"""完成一个 outer partition stage，并在 report 到达时增量持久化。
 
-    for _ in range(retry_rounds):
-        pending = [task for task in tasks if state["tasks"][task["task_id"]]["status"] != "completed"]
+    第一轮把全部 pending mothers 并行送入 CPU workers。异步完成结果先写成
+    ``generated``，但 fingerprint acceptance 只沿 lock 顺序的连续前缀推进；若前序 task
+    shortfall，后序已生成 run 保持 ``generated``，直到前序重试闭合或耗尽预算。这样并发
+    wall-time 不改变跨 mother geometry collision 的 winner。
+    """
+
+    while True:
+        _advance_generated_prefix(
+            tasks,
+            state=state,
+            state_path=state_path,
+            accepted_fingerprints=accepted_fingerprints,
+            retry_rounds=retry_rounds,
+        )
+        pending = [
+            task
+            for task in tasks
+            if state["tasks"][task["task_id"]]["status"] == "pending"
+            and len(state["tasks"][task["task_id"]]["attempts"]) < retry_rounds
+        ]
         if not pending:
-            return
+            break
         source_cfgs: list[PostMutateSourceCfg] = []
         for task in pending:
             task_state = state["tasks"][task["task_id"]]
@@ -261,38 +281,212 @@ def _execute_stage(
                 str(task["mother"]["asset_id"]),
                 retry_index,
             )
-            source_cfgs.append(
-                PostMutateSourceCfg(
-                    task_id=str(task["task_id"]),
-                    source_topology_dir=_source_path(state, task),
-                    n_samples=int(task["variant_count"]),
-                    seed=seed,
-                )
+            source_cfg = _make_owned_source_cfg(
+                task,
+                state=state,
+                post_mutate_cfg=post_mutate_cfg,
+                attempt_index=retry_index,
+                seed=seed,
             )
+            source_cfgs.append(source_cfg)
+            task_state["attempts"].append(_dispatched_attempt(source_cfg))
             task_state["status"] = "running"
         _write_yaml_atomic(state_path, state)
 
-        reports = run_batch(post_mutate_cfg, tuple(source_cfgs), workers)
-        report_by_task = {report.task_id: report for report in reports}
+        def record_generated(report: PostMutateVariantSetResult) -> None:
+            r"""future 完成即把完整 run identity 写入 state，不等待同 stage 其它 mothers。"""
+
+            task_state = state["tasks"].get(report.task_id)
+            if not isinstance(task_state, dict) or not task_state["attempts"]:
+                raise ValueError(f"worker returned report for undispatched task: {report.task_id!r}")
+            attempt = task_state["attempts"][-1]
+            if attempt["status"] == "generated":
+                return
+            if attempt["status"] != "dispatched":
+                raise ValueError(f"worker report conflicts with attempt status {attempt['status']!r}")
+            _record_report_in_attempt(attempt, report)
+            task_state["status"] = "generated"
+            _write_yaml_atomic(state_path, state)
+
+        if run_batch is _run_generator_batch:
+            reports = _run_generator_batch(
+                post_mutate_cfg,
+                tuple(source_cfgs),
+                workers,
+                on_report=record_generated,
+            )
+        else:
+            reports = run_batch(post_mutate_cfg, tuple(source_cfgs), workers)
+        # 测试注入 runner 和旧式 runner 可只在返回时给出 reports；仍逐 report 原子落盘。
+        for report in reports:
+            record_generated(report)
+        reported_ids = {report.task_id for report in reports}
         for task in pending:
             task_id = str(task["task_id"])
-            report = report_by_task.get(task_id)
-            if report is None:
-                state["tasks"][task_id]["status"] = "failed"
+            if task_id in reported_ids:
                 continue
-            _accept_or_quarantine_report(
-                task,
-                report,
-                task_state=state["tasks"][task_id],
-                accepted_fingerprints=accepted_fingerprints,
-            )
-            _write_yaml_atomic(state_path, state)
+            task_state = state["tasks"][task_id]
+            attempt = task_state["attempts"][-1]
+            attempt["status"] = "failed"
+            attempt["reason"] = "worker_report_missing"
+            task_state["status"] = "pending"
+        _write_yaml_atomic(state_path, state)
+
+    _advance_generated_prefix(
+        tasks,
+        state=state,
+        state_path=state_path,
+        accepted_fingerprints=accepted_fingerprints,
+        retry_rounds=retry_rounds,
+    )
+    for task in tasks:
+        task_state = state["tasks"][task["task_id"]]
+        if task_state["status"] not in {"completed", "failed"}:
+            task_state["status"] = "failed"
+    _write_yaml_atomic(state_path, state)
+
+
+def _advance_generated_prefix(
+    tasks: Sequence[dict[str, Any]],
+    *,
+    state: dict[str, Any],
+    state_path: Path,
+    accepted_fingerprints: dict[str, str],
+    retry_rounds: int,
+) -> None:
+    r"""沿 lock 顺序接纳连续 generated 前缀；遇到可重试 task 立即停止。"""
 
     for task in tasks:
         task_state = state["tasks"][task["task_id"]]
-        if task_state["status"] != "completed":
+        status = str(task_state["status"])
+        if status in {"completed", "failed"}:
+            continue
+        if status == "generated":
+            _accept_or_quarantine_report(
+                task,
+                _report_from_attempt(task_state["attempts"][-1]),
+                task_state=task_state,
+                accepted_fingerprints=accepted_fingerprints,
+            )
+            _write_yaml_atomic(state_path, state)
+            status = str(task_state["status"])
+            if status == "completed":
+                continue
+        if status == "pending" and len(task_state["attempts"]) >= retry_rounds:
             task_state["status"] = "failed"
-    _write_yaml_atomic(state_path, state)
+            _write_yaml_atomic(state_path, state)
+            continue
+        # pending/running 是尚未闭合的 lock prefix；后序 generated 不得提前占用 fingerprint。
+        return
+
+
+def _make_owned_source_cfg(
+    task: Mapping[str, Any],
+    *,
+    state: Mapping[str, Any],
+    post_mutate_cfg: HandGeneratorCfg,
+    attempt_index: int,
+    seed: int,
+) -> PostMutateSourceCfg:
+    r"""构造带 invocation ownership 和 exact child-config identity 的 worker task。"""
+
+    source = _source_path(state, task).resolve()
+    provisional = PostMutateSourceCfg(
+        task_id=str(task["task_id"]),
+        source_topology_dir=source,
+        n_samples=int(task["variant_count"]),
+        seed=seed,
+        build_id=str(state["build_id"]),
+        selection_lock_sha256=str(state["selection_lock_sha256"]),
+        attempt_index=attempt_index,
+        generator_config_sha256=str(state["generator_config_sha256"]),
+    )
+    child_cfg = post_mutate_cfg.replace(
+        source_topology_dir=source,
+        post_mutate_sources=[],
+        n_samples=provisional.n_samples,
+        post_mutate_seed=provisional.seed,
+        post_mutate_parallel=False,
+        post_mutate_parallel_workers=None,
+    )
+    from ..runtime.recipe_loader import RecipeLoader
+
+    child_sha256 = hashlib.sha256(
+        yaml.safe_dump(RecipeLoader.dump(child_cfg), allow_unicode=True, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return replace(provisional, child_config_sha256=child_sha256)
+
+
+def _dispatched_attempt(source_cfg: PostMutateSourceCfg) -> dict[str, Any]:
+    r"""建立 report 尚未返回时也足以发现 ownership marker 的 attempt 记录。"""
+
+    return {
+        "attempt_index": source_cfg.attempt_index,
+        "status": "dispatched",
+        "reason": "",
+        "task_id": source_cfg.task_id,
+        "source_topology_dir": str(Path(source_cfg.source_topology_dir).resolve()),
+        "seed": source_cfg.seed,
+        "generator_config_sha256": source_cfg.generator_config_sha256,
+        "child_config_sha256": source_cfg.child_config_sha256,
+        "run_dir": "",
+        "planned_variants": source_cfg.n_samples,
+        "successful_variants": 0,
+        "shortfall": source_cfg.n_samples,
+        "error": "",
+        "sidecar_paths": [],
+        "urdf_paths": [],
+        "worker_pid": 0,
+        "worker_cuda_initialized": False,
+        "sdf_service_pid": 0,
+    }
+
+
+def _record_report_in_attempt(
+    attempt: dict[str, Any],
+    report: PostMutateVariantSetResult,
+) -> None:
+    r"""把一个完成 report 原位写入已经持久化的 dispatched attempt。"""
+
+    if report.mutation_seed != int(attempt["seed"]):
+        raise ValueError(f"worker report seed drifted for task {report.task_id!r}")
+    attempt.update(
+        {
+            "status": "generated",
+            "run_dir": str(report.run_dir),
+            "planned_variants": report.planned_variants,
+            "successful_variants": report.successful_variants,
+            "shortfall": report.shortfall,
+            "error": report.error,
+            "sidecar_paths": [str(path) for path in report.sidecar_paths],
+            "urdf_paths": [str(path) for path in report.urdf_paths],
+            "worker_pid": report.worker_pid,
+            "worker_cuda_initialized": report.worker_cuda_initialized,
+            "sdf_service_pid": report.sdf_service_pid,
+        }
+    )
+
+
+def _report_from_attempt(attempt: Mapping[str, Any]) -> PostMutateVariantSetResult:
+    r"""从 schema-2 generated attempt 恢复标准 report，供 crash resume 后接纳。"""
+
+    if attempt.get("status") != "generated":
+        raise ValueError("only a generated attempt can be reconstructed as a worker report")
+    return PostMutateVariantSetResult(
+        task_id=str(attempt["task_id"]),
+        source_topology_dir=Path(str(attempt["source_topology_dir"])),
+        run_dir=Path(str(attempt["run_dir"])),
+        planned_variants=int(attempt["planned_variants"]),
+        successful_variants=int(attempt["successful_variants"]),
+        shortfall=int(attempt["shortfall"]),
+        mutation_seed=int(attempt["seed"]),
+        sidecar_paths=tuple(Path(str(path)) for path in attempt.get("sidecar_paths", ())),
+        urdf_paths=tuple(Path(str(path)) for path in attempt.get("urdf_paths", ())),
+        worker_pid=int(attempt.get("worker_pid", 0)),
+        worker_cuda_initialized=bool(attempt.get("worker_cuda_initialized", False)),
+        sdf_service_pid=int(attempt.get("sdf_service_pid", 0)),
+        error=str(attempt.get("error", "")),
+    )
 
 
 def _accept_or_quarantine_report(
@@ -304,18 +498,9 @@ def _accept_or_quarantine_report(
 ) -> None:
     r"""按 exact quota 与 geometry fingerprint 决定 variant set 是否可发布。"""
 
-    attempt = {
-        "run_dir": str(report.run_dir),
-        "seed": report.mutation_seed,
-        "planned_variants": report.planned_variants,
-        "successful_variants": report.successful_variants,
-        "shortfall": report.shortfall,
-        "error": report.error,
-        "sidecar_paths": [str(path) for path in report.sidecar_paths],
-        "status": "candidate",
-        "reason": "",
-    }
-    task_state["attempts"].append(attempt)
+    attempt = task_state["attempts"][-1]
+    if attempt.get("status") != "generated":
+        raise ValueError(f"task {task['task_id']!r} has no generated attempt to evaluate")
     if report.error:
         attempt["status"] = "failed"
         attempt["reason"] = f"worker_error:{report.error}"
@@ -359,6 +544,8 @@ def _run_generator_batch(
     cfg: HandGeneratorCfg,
     tasks: tuple[PostMutateSourceCfg, ...],
     workers: int | None,
+    *,
+    on_report: Callable[[PostMutateVariantSetResult], None] | None = None,
 ) -> tuple[PostMutateVariantSetResult, ...]:
     r"""把 locked source tasks lower 到正式多-source HandGenerator façade。"""
 
@@ -370,7 +557,7 @@ def _run_generator_batch(
         post_mutate_parallel=True,
         post_mutate_parallel_workers=workers,
     )
-    return tuple(HandGenerator(run_cfg).generate_variant_sets())
+    return tuple(HandGenerator(run_cfg).generate_variant_sets(on_report=on_report))
 
 
 def _validate_lock(
@@ -402,28 +589,112 @@ def _load_or_create_state(
     state_path: Path,
     resume: bool,
 ) -> dict[str, Any]:
-    r"""读取匹配 lock 的 build state，或为全部 tasks 建立 pending 状态。"""
+    r"""读取匹配 lock 的 schema-2 state，或建立新的 invocation baseline。"""
 
     tasks = [task for role_tasks in _lineages_by_role(lock).values() for task in role_tasks]
     if state_path.exists() and resume:
         state = yaml.safe_load(state_path.read_text(encoding="utf-8")) or {}
         if not isinstance(state, dict) or state.get("selection_lock_sha256") != lock_sha256:
             raise ValueError("build state does not match current selection lock")
+        if state.get("schema_version") != BUILD_STATE_SCHEMA_VERSION:
+            raise ValueError(
+                f"build state schema must be {BUILD_STATE_SCHEMA_VERSION!r}; "
+                "run dataset recover before resuming a legacy invocation"
+            )
+        if not state.get("build_id") or not state.get("started_at") or not isinstance(state.get("baseline"), dict):
+            raise ValueError("build state is missing schema-2 invocation identity or baseline")
+        _reconcile_interrupted_attempts(lock, state=state)
         return state
+    if state_path.exists() and not resume:
+        raise FileExistsError("build state already exists; recover or remove the prior invocation before --no-resume")
+
+    initial_tasks = {
+        str(task["task_id"]): {
+            "status": "pending",
+            "active_run_dir": "",
+            "attempts": [],
+            "geometry_fingerprints": [],
+        }
+        for task in tasks
+    }
+    generator = lock.get("generator", {})
+    if not isinstance(generator, Mapping) or not generator.get("config_sha256"):
+        raise ValueError("selection lock has no generator config identity")
     return {
         "schema_version": BUILD_STATE_SCHEMA_VERSION,
+        "build_id": uuid4().hex,
         "selection_lock_sha256": lock_sha256,
+        "generator_config_sha256": str(generator["config_sha256"]),
+        "started_at": datetime.now(UTC).isoformat(),
         "inventory_run_dir": str(resolve_bank_path(str(lock["inventory"]["run_dir"]))),
-        "tasks": {
-            str(task["task_id"]): {
-                "status": "pending",
-                "active_run_dir": "",
-                "attempts": [],
-                "geometry_fingerprints": [],
-            }
-            for task in tasks
-        },
+        # baseline 是 rollback 的恢复目标；深拷贝保证后续 task mutation 不污染起点证据。
+        "baseline": {"tasks": deepcopy(initial_tasks)},
+        "tasks": initial_tasks,
     }
+
+
+def _reconcile_interrupted_attempts(lock: Mapping[str, Any], *, state: dict[str, Any]) -> None:
+    r"""把 crash 时停在 running/dispatched 的 owned run 对账为 generated 或 pending。
+
+    完整 run 的 summary/config/count 已闭合时，不重复生成，先恢复为 ``generated``，后续仍由
+    lock-order acceptance 决定 fingerprint winner。partial run 写 quarantine 并整套重试；没有
+    marker 表示 worker 尚未获得任何删除/接管授权，该 attempt 只记为 interrupted failure。
+    """
+
+    from .recovery import _discover_owned_candidates
+
+    candidates = _discover_owned_candidates(lock, state=state)
+    candidate_by_attempt = {
+        (str(candidate["task_id"]), int(candidate["attempt_index"])): candidate
+        for candidate in candidates
+    }
+    tasks_by_id = {
+        str(task["task_id"]): task
+        for role_tasks in _lineages_by_role(lock).values()
+        for task in role_tasks
+    }
+    for task_id, task_state in state["tasks"].items():
+        if task_state.get("status") != "running":
+            continue
+        attempts = task_state.get("attempts", [])
+        if not attempts:
+            raise ValueError(f"running schema-2 task has no dispatched attempt: {task_id!r}")
+        attempt = attempts[-1]
+        attempt_index = int(attempt.get("attempt_index", len(attempts) - 1))
+        if attempt.get("status") == "generated":
+            task_state["status"] = "generated"
+            continue
+        if attempt.get("status") != "dispatched":
+            raise ValueError(f"running task {task_id!r} has invalid attempt status {attempt.get('status')!r}")
+        candidate = candidate_by_attempt.get((str(task_id), attempt_index))
+        if candidate is None:
+            attempt["status"] = "failed"
+            attempt["reason"] = "interrupted_before_owned_run"
+            task_state["status"] = "pending"
+            continue
+        run_dir = Path(str(candidate["run_dir"]))
+        if candidate["classification"] != "complete":
+            _quarantine(run_dir, reason="interrupted_partial_run", details=candidate)
+            attempt["status"] = "quarantined"
+            attempt["reason"] = "interrupted_partial_run"
+            attempt["run_dir"] = str(run_dir)
+            task_state["status"] = "pending"
+            continue
+        task = tasks_by_id[str(task_id)]
+        sidecars = tuple(sorted(run_dir.glob("*/hand.yaml")))
+        report = PostMutateVariantSetResult(
+            task_id=str(task_id),
+            source_topology_dir=_source_path(state, task),
+            run_dir=run_dir,
+            planned_variants=int(candidate["planned_variants"]),
+            successful_variants=int(candidate["successful_variants"]),
+            shortfall=int(candidate["shortfall"]),
+            mutation_seed=int(candidate["seed"]),
+            sidecar_paths=sidecars,
+            urdf_paths=tuple(path.parent / "hand.urdf" for path in sidecars),
+        )
+        _record_report_in_attempt(attempt, report)
+        task_state["status"] = "generated"
 
 
 def _completed_task_is_valid(
