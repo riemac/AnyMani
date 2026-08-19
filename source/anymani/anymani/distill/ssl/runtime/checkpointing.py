@@ -11,32 +11,32 @@ from pathlib import Path  # immutable best checkpoint 与 mutable best.pt 发布
 
 import torch  # RNG states 与有限性验证
 
-from anymani.distill.ssl.config import GeometrySSLExperimentCfg, experiment_config_from_dict, resolved_config_dict
+from anymani.distill.ssl.experiment import EmbodimentPretrainCfg, resolved_config_dict
 from anymani.distill.ssl.runtime import ResidentGeometryAssetWindow, WindowedOnlineGeometryBatcher
 
 
-def resume_scientific_config(config: GeometrySSLExperimentCfg) -> dict[str, object]:
+def resume_scientific_config(config: EmbodimentPretrainCfg | dict[str, object]) -> dict[str, object]:
     r"""返回 resume 必须一致的科学配置，只排除 output/resume 定位。"""
 
-    payload = resolved_config_dict(config)
-    run = payload.pop("run", None)  # 整个 run 槽只定位 artifact/resume，不改变科学轨迹
+    payload = resolved_config_dict(config) if isinstance(config, EmbodimentPretrainCfg) else dict(config)
+    run = payload.get("run")
     if not isinstance(run, dict):
         raise ValueError("resolved geometry SSL config lacks run mapping")
+    payload["run"] = {
+        key: value for key, value in run.items() if key not in {"output_dir", "experiment_name", "resume_checkpoint"}
+    }  # seed/deterministic_algorithms 属于科学轨迹，只排除 artifact 定位字段
     return payload
 
 
 def require_resume_scientific_config(
-    current: GeometrySSLExperimentCfg,
+    current: EmbodimentPretrainCfg | dict[str, object],
     checkpoint_resolved: dict[str, object],
 ) -> None:
     r"""拒绝当前 CLI 与 checkpoint 的任一 scientific config 漂移。"""
 
-    checkpoint_protocol = checkpoint_resolved.get("protocol")
-    reproducibility = checkpoint_protocol.get("reproducibility") if isinstance(checkpoint_protocol, dict) else None
-    if not isinstance(reproducibility, dict) or "deterministic_algorithms" not in reproducibility:
-        raise ValueError("resume checkpoint predates the explicit deterministic-algorithm contract")
-    checkpoint_config = experiment_config_from_dict(checkpoint_resolved)
-    expected = resume_scientific_config(checkpoint_config)
+    if checkpoint_resolved.get("schema_version") != "3.0.0":
+        raise ValueError("resume checkpoint must contain schema 3 resolved configuration")
+    expected = resume_scientific_config(checkpoint_resolved)
     actual = resume_scientific_config(current)
     if actual != expected:
         changed_sections = tuple(key for key in expected.keys() | actual.keys() if expected.get(key) != actual.get(key))

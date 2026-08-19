@@ -82,7 +82,7 @@ lower_hand_geometry_semantics
 ```
 
 `lower_hand_geometry_semantics` 只在 asset/cache materialization 时执行一次。结果可通过 ``to()`` 整体
-迁移 GPU，并在同结构 microbatch 的所有训练 step 复用。当前 q 的 FK 才是 batch-dependent；limits、
+迁移 GPU，并在同结构 minibatch 的所有训练 step 复用。当前 q 的 FK 才是 batch-dependent；limits、
 sidecar 字符串和 mesh 几何都不进入每步 POE。
 
 树遍历从 palm link 开始。每个 joint 先复合固定 origin；revolute joint 在 origin frame 中定义局部

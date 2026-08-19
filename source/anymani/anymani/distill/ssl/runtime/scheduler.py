@@ -35,22 +35,25 @@ class GeometrySSLRuntimeCfg:
     r"""resident window 与声明式 online batch 轴。"""
 
     max_resident_assets: int = 20
-    assets_per_microbatch: int = 2
-    q_per_asset_per_microbatch: int = 2
+    assets_per_minibatch: int = 2
+    q_per_asset_per_minibatch: int = 2
     q_per_asset_per_epoch: int = 256
     epochs: int = 20
 
     def __post_init__(self) -> None:
-        if min(
-            self.max_resident_assets,
-            self.assets_per_microbatch,
-            self.q_per_asset_per_microbatch,
-            self.q_per_asset_per_epoch,
-            self.epochs,
-        ) < 1:
+        if (
+            min(
+                self.max_resident_assets,
+                self.assets_per_minibatch,
+                self.q_per_asset_per_minibatch,
+                self.q_per_asset_per_epoch,
+                self.epochs,
+            )
+            < 1
+        ):
             raise ValueError("runtime capacities and epoch counts must be positive")
-        if self.assets_per_microbatch > self.max_resident_assets:
-            raise ValueError("assets_per_microbatch cannot exceed max_resident_assets")
+        if self.assets_per_minibatch > self.max_resident_assets:
+            raise ValueError("assets_per_minibatch cannot exceed max_resident_assets")
 
 
 @dataclass(frozen=True)
@@ -106,14 +109,14 @@ class ResidentGeometryAssetWindow:
 
         requested = tuple(asset_ids)
         if len(set(requested)) != len(requested):
-            raise ValueError("one microbatch cannot request duplicate asset IDs")
+            raise ValueError("one minibatch cannot request duplicate asset IDs")
         if len(requested) > self.max_resident_assets:
             raise ValueError("requested asset group exceeds max_resident_assets")
         for asset_id in requested:
             if asset_id not in self.catalog:
                 raise KeyError(f"unknown geometry asset ID={asset_id!r}")
         if tuple(self._resident) == requested:
-            return tuple(self._resident[asset_id] for asset_id in requested)  # 稳态 microbatch 不同步 CUDA
+            return tuple(self._resident[asset_id] for asset_id in requested)  # 稳态 minibatch 不同步 CUDA
         before_memory = self._memory_snapshot()  # 切窗前设备 free/allocator 状态
         started = perf_counter()  # 同一进程内的 wall-clock 生命周期起点
         released_asset_ids: list[str] = []  # 本次切窗实际释放的资产
@@ -127,9 +130,7 @@ class ResidentGeometryAssetWindow:
         load_started = perf_counter()  # load 子阶段起点
         for asset_id in requested:
             if asset_id not in self._resident:
-                self._resident[asset_id] = self.loader(
-                    self.catalog[asset_id], device=self.device, dtype=self.dtype
-                )
+                self._resident[asset_id] = self.loader(self.catalog[asset_id], device=self.device, dtype=self.dtype)
                 loaded_asset_ids.append(asset_id)
         if len(self._resident) > self.max_resident_assets:
             raise RuntimeError("resident asset window exceeded configured cap")
@@ -325,8 +326,8 @@ class WindowedOnlineGeometryBatcher:
         target_config: GeometryFieldTargetCfg,
         padding: GeometryPaddingCfg,
     ) -> None:
-        if runtime_config.assets_per_microbatch > len(runtimes):
-            raise ValueError("assets_per_microbatch cannot exceed catalog size")
+        if runtime_config.assets_per_minibatch > len(runtimes):
+            raise ValueError("assets_per_minibatch cannot exceed catalog size")
         self.runtime_config = runtime_config
         self.window = window
         self.seed = int(seed)
@@ -338,29 +339,35 @@ class WindowedOnlineGeometryBatcher:
         self.epoch = 0
         self.block_index = 0
         self._catalog_ids = tuple(runtime.asset_id for runtime in runtimes)
-        if runtime_config.q_per_asset_per_epoch % runtime_config.q_per_asset_per_microbatch:
-            raise ValueError("q_per_asset_per_epoch must be divisible by q_per_asset_per_microbatch")
-        self._groups = self._build_groups()
+        self._groups, self._q_counts = self._build_groups()
 
-    def _build_groups(self) -> tuple[tuple[int, ...], ...]:
-        r"""按 resident window 分块，再循环每个资产的 q block，避免跨 window 的 group。"""
+    def _build_groups(self) -> tuple[tuple[tuple[int, ...], ...], tuple[int, ...]]:
+        r"""按 resident window 分块，并记录每组的真实 q block 长度。"""
 
         ordered_groups: list[tuple[int, ...]] = []
+        ordered_q_counts: list[int] = []
         for window_start in range(0, len(self._catalog_ids), self.runtime_config.max_resident_assets):
             window_end = min(window_start + self.runtime_config.max_resident_assets, len(self._catalog_ids))
             window_groups: list[tuple[int, ...]] = []
-            for group_start in range(window_start, window_end, self.runtime_config.assets_per_microbatch):
+            for group_start in range(window_start, window_end, self.runtime_config.assets_per_minibatch):
                 window_groups.append(
-                    tuple(range(group_start, min(group_start + self.runtime_config.assets_per_microbatch, window_end)))
+                    tuple(range(group_start, min(group_start + self.runtime_config.assets_per_minibatch, window_end)))
                 )
-            repeats = self.runtime_config.q_per_asset_per_epoch // self.runtime_config.q_per_asset_per_microbatch
-            ordered_groups.extend(group for _repeat in range(repeats) for group in window_groups)
-        return tuple(ordered_groups)  # 一个 window 完成全部 q coverage 后再触发下一次 lease 切换
+            for q_start in range(
+                0, self.runtime_config.q_per_asset_per_epoch, self.runtime_config.q_per_asset_per_minibatch
+            ):
+                q_count = min(
+                    self.runtime_config.q_per_asset_per_minibatch,
+                    self.runtime_config.q_per_asset_per_epoch - q_start,
+                )
+                ordered_groups.extend(window_groups)
+                ordered_q_counts.extend(q_count for _group in window_groups)
+        # 一个 window 完成全部 q coverage 后再触发下一次 lease 切换。
+        return tuple(ordered_groups), tuple(ordered_q_counts)
 
     def _build_samplers(self, runtimes):
         return tuple(
-            SobolJointSampler(runtime.spec_cpu, seed=self.seed + index)
-            for index, runtime in enumerate(runtimes)
+            SobolJointSampler(runtime.spec_cpu, seed=self.seed + index) for index, runtime in enumerate(runtimes)
         )
 
     @property
@@ -374,8 +381,11 @@ class WindowedOnlineGeometryBatcher:
         if self.epoch >= self.runtime_config.epochs:
             raise StopIteration("all configured geometry SSL epochs are complete")
         asset_indices = self._asset_group()
+        q_count = self._q_counts[self.block_index]
         asset_ids = tuple(self._catalog_ids[index] for index in asset_indices)
-        window_start = (asset_indices[0] // self.runtime_config.max_resident_assets) * self.runtime_config.max_resident_assets
+        window_start = (
+            asset_indices[0] // self.runtime_config.max_resident_assets
+        ) * self.runtime_config.max_resident_assets
         window_end = min(window_start + self.runtime_config.max_resident_assets, len(self._catalog_ids))
         window_ids = self._catalog_ids[window_start:window_end]
         resident_states = self.window.ensure(window_ids)
@@ -384,11 +394,11 @@ class WindowedOnlineGeometryBatcher:
         samples = []
         for asset_index, state in zip(asset_indices, states):
             q_block = self._samplers[asset_index].draw(
-                self.runtime_config.q_per_asset_per_microbatch,
+                q_count,
                 device=state.spec.space_screws.device,
                 dtype=state.spec.space_screws.dtype,
             )
-            q_start = self._samplers[asset_index].cursor - self.runtime_config.q_per_asset_per_microbatch
+            q_start = self._samplers[asset_index].cursor - q_count
             block = sample_online_geometry(
                 state,
                 q_block,
@@ -398,7 +408,7 @@ class WindowedOnlineGeometryBatcher:
                 sampling_seed=self.seed + self.epoch * self.blocks_per_epoch + self.block_index,
                 q_index=torch.arange(
                     q_start,
-                    q_start + self.runtime_config.q_per_asset_per_microbatch,
+                    q_start + q_count,
                     dtype=torch.long,
                 ),
             )
@@ -432,8 +442,10 @@ class WindowedOnlineGeometryBatcher:
         )
 
     def load_state_dict(self, state: GeometrySSLRuntimeState) -> None:
-        if state.epoch < 0 or state.block_index < 0 or (
-            state.epoch < self.runtime_config.epochs and state.block_index >= self.blocks_per_epoch
+        if (
+            state.epoch < 0
+            or state.block_index < 0
+            or (state.epoch < self.runtime_config.epochs and state.block_index >= self.blocks_per_epoch)
         ):
             raise ValueError("invalid geometry SSL runtime epoch/block cursor")
         raw_asset_ids = state.batcher_state.get("asset_ids", ())

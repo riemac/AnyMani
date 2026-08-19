@@ -7,13 +7,12 @@ import statistics
 
 import pytest
 import torch
-from anymani.distill.models.geometry_ssl import GeometrySSLModel
+from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelCfg
 from anymani.distill.models.input_adapters.geometry import (
     GeometryLatents,
     ImplicitGeometryEncoder,
     StaticGeometryEvidence,
 )
-from anymani.distill.ssl.experiments import CanonicalResidualFamilyCfg
 
 pytestmark = pytest.mark.performance
 
@@ -104,7 +103,7 @@ def test_canonical_retained_encoder_p95_is_at_most_40_ms() -> None:
 
     torch.manual_seed(20260813)
     torch.cuda.manual_seed_all(20260813)
-    model = ImplicitGeometryEncoder(CanonicalResidualFamilyCfg().model.encoder).to(device).eval()
+    model = ImplicitGeometryEncoder(GeometrySSLModelCfg().encoder).to(device).eval()
     evidence = _canonical_single_structure_evidence(device)
     q = torch.empty(4096, 16, device=device, dtype=torch.float32).uniform_(-0.7, 0.7)
 
@@ -169,7 +168,7 @@ def test_ssl_only_decoder_cost_is_reported_outside_retained_budget() -> None:
     if "RTX 5070 Ti" not in device_name:
         pytest.skip(f"performance contract is bound to RTX 5070 Ti, found {device_name}")
 
-    model = GeometrySSLModel(CanonicalResidualFamilyCfg().model).to(device).eval()
+    model = GeometrySSLModel(GeometrySSLModelCfg()).to(device).eval()
     latents = GeometryLatents(
         zero_order=torch.randn(4, 21, 128, device=device),
         first_order=torch.randn(4, 16, 64, device=device),

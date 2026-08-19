@@ -1,4 +1,4 @@
-r"""不等大小 microbatch 的 Geometry SSL denominator-aware accumulation 合同。"""
+r"""不等大小 minibatch 的 Geometry SSL denominator-aware accumulation 合同。"""
 
 from __future__ import annotations
 

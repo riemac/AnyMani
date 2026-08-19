@@ -1,11 +1,18 @@
-r"""Geometry SSL runtime 的稳定公开接口。
+r"""Schema 3 embodiment pretraining runtime 的稳定公开接口。
 
-实现按职责分散在 ``assets``、``scheduler``、``objective``、``validation``、``checkpointing`` 与
-``trainer``；包入口只 re-export window/q scheduler 的公共类型，避免 import ``runtime`` 时加载
-HandBank、模型、TensorBoard 或训练器生命周期。
+resident window 与旧 geometry utilities 继续提供底层 tensor/lease 能力；最高训练入口由
+``ssl.experiment.EmbodimentPretrain`` 组合，不在 runtime 包中恢复集中式 experiment config。
 """
 
-from .experiment import GeometrySSLExperiment
+from .evaluation import MultiAnchorEvaluation, MultiAnchorEvaluationCfg
+from .pretrainer import EmbodimentPretrainTrainer, EmbodimentPretrainTrainerCfg
+from .run import PretrainRun, PretrainRunCfg
+from .sampling import (
+    OnlineMinibatchSchedule,
+    OnlineSamplingCfg,
+    OnlineSamplingState,
+    ScheduledMinibatch,
+)
 from .scheduler import (
     GeometrySSLRuntimeCfg,
     GeometrySSLRuntimeState,
@@ -15,10 +22,19 @@ from .scheduler import (
 )
 
 __all__ = [
-    "GeometrySSLExperiment",
+    "EmbodimentPretrainTrainer",
+    "EmbodimentPretrainTrainerCfg",
     "GeometrySSLRuntimeCfg",
     "GeometrySSLRuntimeState",
     "ResidentGeometryAssetWindow",
     "WindowedOnlineGeometryBatcher",
     "runtime_state_from_dict",
+    "MultiAnchorEvaluation",
+    "MultiAnchorEvaluationCfg",
+    "OnlineMinibatchSchedule",
+    "OnlineSamplingCfg",
+    "OnlineSamplingState",
+    "PretrainRun",
+    "PretrainRunCfg",
+    "ScheduledMinibatch",
 ]

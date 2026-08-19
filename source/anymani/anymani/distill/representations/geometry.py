@@ -567,7 +567,7 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
         r"""按 round-robin 资产平衡生成一个 batch；不同 family 共享模型参数。
 
         Args:
-            batch_size (int): 当前 microbatch 样本数 $B$。
+            batch_size (int): 当前 minibatch 样本数 $B$。
             step (int): 唯一在线采样步，用于资产路由与 query/edge seed。
 
         Returns:
@@ -602,7 +602,7 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
     def sample_asset_blocks(
         self,
         *,
-        assets_per_microbatch: int,
+        assets_per_minibatch: int,
         q_per_asset: int,
         step: int,
     ) -> PaddedOnlineGeometryBatch:
@@ -613,11 +613,11 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
         `Q=1` 兼容路径供历史 tiny-overfit 使用。
         """
 
-        if assets_per_microbatch < 1 or q_per_asset < 1 or step < 0:
-            raise ValueError("assets_per_microbatch, q_per_asset and step must be positive/non-negative")
+        if assets_per_minibatch < 1 or q_per_asset < 1 or step < 0:
+            raise ValueError("assets_per_minibatch, q_per_asset and step must be positive/non-negative")
         samples: list[OnlineGeometrySample] = []
-        for asset_offset in range(assets_per_microbatch):
-            asset_index = (step * assets_per_microbatch + asset_offset) % len(self.states)
+        for asset_offset in range(assets_per_minibatch):
+            asset_index = (step * assets_per_minibatch + asset_offset) % len(self.states)
             state = self.states[asset_index]
             q_block = self.samplers[asset_index].draw(
                 q_per_asset,
@@ -631,7 +631,7 @@ class OnlineGeometryBatcher:  # deterministic multi-asset online sampler
                 field_config=self.field_config,
                 query_config=self.query_config,
                 target_config=self.target_config,
-                sampling_seed=self.seed + step * assets_per_microbatch + asset_offset,
+                sampling_seed=self.seed + step * assets_per_minibatch + asset_offset,
                 q_index=torch.arange(q_start, q_start + q_per_asset),  # Q block asset-local provenance
             )
             samples.extend(split_online_geometry_sample(block))

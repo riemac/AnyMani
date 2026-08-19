@@ -23,9 +23,11 @@ from anymani.distill.ssl.checkpoint import (
     GeometrySSLCheckpointMetadata,
     load_geometry_ssl_checkpoint,
     load_geometry_ssl_runtime_state,
-    load_retained_geometry_encoder,
+    load_retained_geometry_artifact,
     save_geometry_ssl_checkpoint,
+    save_retained_geometry_artifact,
 )
+from anymani.distill.ssl.contracts import FeatureSpec
 
 
 def _config() -> GeometrySSLModelCfg:
@@ -51,7 +53,7 @@ def _config() -> GeometrySSLModelCfg:
 
 
 def test_checkpoint_resumes_full_state_and_transfers_only_encoder(tmp_path: Path) -> None:
-    """SSL resume 包含 decoder/optimizer，PPO 初始化只读取 encoder namespace。"""
+    """full checkpoint 恢复 decoder/optimizer；PPO 只读取独立 encoder artifact。"""
 
     torch.manual_seed(47)
     config = _config()
@@ -91,20 +93,35 @@ def test_checkpoint_resumes_full_state_and_transfers_only_encoder(tmp_path: Path
     assert loaded_metadata["code_revision"] == "test-revision"
     assert resumed_optimizer.state_dict()["state"]
     assert load_geometry_ssl_runtime_state(path)["epoch"] == 2
+    with pytest.raises(ValueError, match="artifact type"):
+        load_retained_geometry_artifact(path, encoder=ImplicitGeometryEncoder(config.encoder))
 
-    transferred = ImplicitGeometryEncoder(config.encoder)
-    report = load_retained_geometry_encoder(path, encoder=transferred)
-    for key, value in model.encoder.state_dict().items():
-        torch.testing.assert_close(transferred.state_dict()[key], value)
-    assert report.missing_keys == ()
-    assert report.unexpected_keys == ()
+    artifact = tmp_path / "retained_artifact.pt"
+    save_retained_geometry_artifact(
+        artifact,
+        model=model,
+        feature_spec=FeatureSpec(zero_order_width=12, first_order_width=8),
+        metadata=metadata,
+        source_checkpoint=path,
+    )
+    retained_encoder = ImplicitGeometryEncoder(config.encoder)
+    artifact_report = load_retained_geometry_artifact(artifact, encoder=retained_encoder)
+    assert artifact_report.missing_keys == ()
+    assert artifact_report.unexpected_keys == ()
+    artifact_payload = torch.load(artifact, map_location="cpu", weights_only=True)
+    assert "optimizer_state" not in artifact_payload
+    assert "runtime_state" not in artifact_payload
+    assert "model_state" not in artifact_payload
+    assert "decoder" not in str(artifact_payload)
+    assert "objective" not in str(artifact_payload)
 
 
-def test_checkpoint_schema_1_x_is_rejected_without_compatibility_guessing(tmp_path: Path) -> None:
-    """schema 2.0.0 不得把旧 experiment/objective payload 猜测迁移为当前语义。"""
+@pytest.mark.parametrize("schema_version", ["1.0.0", "2.0.0"])
+def test_legacy_checkpoint_is_rejected_without_compatibility_guessing(tmp_path: Path, schema_version: str) -> None:
+    """schema 1/2 不得把旧 experiment/objective payload 猜测迁移为当前 schema 3 语义。"""
 
     path = tmp_path / "legacy.pt"
-    torch.save({"schema_version": "1.0.0"}, path)
+    torch.save({"schema_version": schema_version}, path)
 
-    with pytest.raises(ValueError, match="unsupported geometry SSL checkpoint schema='1.0.0'"):
+    with pytest.raises(ValueError, match=f"unsupported geometry SSL checkpoint schema='{schema_version}'"):
         load_geometry_ssl_checkpoint(path, model=GeometrySSLModel(_config()))

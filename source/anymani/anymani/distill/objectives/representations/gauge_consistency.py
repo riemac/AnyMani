@@ -149,7 +149,7 @@ def joint_sign_paired_loss_additive_components(
     \mathcal L_{pair}=N_0/D_0+N_1/D_1.
     $$
 
-    分开返回四个标量，使 gradient accumulation 能先跨不等大小 microbatches 累加
+    分开返回四个标量，使 gradient accumulation 能先跨不等大小 minibatches 累加
     $(N_0,D_0)$ 与 $(N_1,D_1)$，再保持原公式归一化；尾资产组不会因合并分母
     $D_0D_1$ 而获得与 $B^2$ 成正比的错误权重。
     """

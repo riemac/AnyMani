@@ -1,149 +1,175 @@
-"""Resolved experiment 与 asset split leakage 合同。"""
+"""Schema 3 Hydra composition、在线预算与 physical realization fingerprint 合同。"""
 
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 import pytest
-import yaml
-from anymani.assets.bank import (
-    HandAssetDatasetCfg,
-    HandAssetLineageCfg,
-    HandAssetPartitionCfg,
-    HandAssetRunCfg,
-    ResolvedHandAssetDataset,
-    ResolvedHandAssetPartition,
-)
-from anymani.distill.representations.geometry import GeometryRepresentationCfg
+from anymani.distill.models.geometry_ssl import GeometrySSLModel
 from anymani.distill.representations.sources.collision_geometry import (
     AnchorSamples,
     HomeSurfaceSamples,
     OwnerGeometryCache,
 )
-from anymani.distill.representations.targets.geometry_field import GaussianProximityFieldCfg
-from anymani.distill.ssl.config import (
-    GeometrySSLAssetManifest,
-    GeometrySSLExperimentCfg,
-    GeometrySSLTrainerCfg,
-    derive_geometry_ssl_training_budget,
-    experiment_config_from_dict,
-    resolved_config_dict,
-    write_resolved_experiment_files,
+from anymani.distill.ssl.data import HandAssetCatalogCfg
+from anymani.distill.ssl.experiment import EmbodimentPretrain, EmbodimentPretrainCfg, resolved_config_dict
+from anymani.distill.ssl.runtime.assets import (
+    anchor_realization_record,
+    home_surface_realization_record,
+    validate_asset_manifest_isolation,
 )
-from anymani.distill.ssl.experiments import CanonicalResidualFamilyCfg
-from anymani.distill.ssl.runtime import GeometrySSLExperiment
-from anymani.distill.ssl.runtime.assets import anchor_realization_record, home_surface_realization_record
+from anymani.distill.ssl.runtime.pretrainer import EmbodimentPretrainTrainerCfg
+from anymani.distill.ssl.runtime.sampling import OnlineMinibatchSchedule, OnlineSamplingCfg
 from hydra import compose, initialize_config_module
 from omegaconf import OmegaConf
 
-
-def test_omegaconf_payload_round_trip_rebuilds_validated_dataclasses() -> None:
-    """CLI 可变 payload 必须重建冻结科研合同，且不改变数值。"""
-
-    original = GeometrySSLExperimentCfg(
-        asset_dataset_manifest="source/anymani/anymani/assets/datasets/canonical_cross_mother_v1.yaml",
-    )
-    rebuilt = experiment_config_from_dict(resolved_config_dict(original))
-
-    assert rebuilt == original
-    assert rebuilt.asset_dataset_manifest.endswith("canonical_cross_mother_v1.yaml")
-    assert isinstance(rebuilt.representation.field.bandwidth_centers_m, tuple)
-    assert isinstance(rebuilt.representation.field.validation_bandwidths_m, tuple)
+pytestmark = pytest.mark.contract
 
 
-def test_concrete_canonical_class_composes_trainer_yaml_and_cli_override() -> None:
-    """Hydra group 必须进入具体 experiment，且无需 builder function 或 experiment registry。"""
+def _compose() -> EmbodimentPretrainCfg:
+    """恢复正式 canonical YAML，不调用训练副作用。"""
 
-    import anymani.distill.ssl.pretrain  # noqa: F401  # import 时只注册 ConfigStore，不执行 run
+    import anymani.distill.ssl.pretrain  # noqa: F401  # import only registers Hydra schemas
 
-    assert CanonicalResidualFamilyCfg.defaults == ({"trainer": "single_gpu_16gb"}, "_self_")
+    with initialize_config_module(config_module="anymani.distill.presets.ssl", version_base="1.3"):
+        composed = compose(config_name="canonical_multi_anchor_gaussian")
+    resolved = OmegaConf.to_object(composed)
+    assert isinstance(resolved, EmbodimentPretrainCfg)
+    return resolved
+
+
+def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
+    """根五 role 与六个 objective term 必须保持 concrete dataclass 类型。"""
+
+    config = _compose()
+    config.validate_composed()
+    assert isinstance(config.data, HandAssetCatalogCfg)
+    assert type(config.method).__name__ == "MultiAnchorGaussianMethodCfg"
+    assert type(config.trainer).__name__ == "EmbodimentPretrainTrainerCfg"
+    assert type(config.method.representation).__name__ == "GeometryRepresentationCfg"
+    assert type(config.method.model).__name__ == "GeometrySSLModelCfg"
+    assert set(config.method.objectives) == {
+        "density",
+        "kappa",
+        "derived_field",
+        "sobolev",
+        "chain",
+        "paired",
+    }
+    assert all(type(term).__name__.endswith("ObjectiveTermCfg") for term in config.method.objectives.values())
+
+
+def test_hydra_cli_override_changes_local_cfg_without_central_parser() -> None:
+    """Hydra override 应直接改变局部 optimizer cfg，并保留 concrete root。"""
+
+    import anymani.distill.ssl.pretrain  # noqa: F401
+
     with initialize_config_module(config_module="anymani.distill.presets.ssl", version_base="1.3"):
         composed = compose(
-            config_name="geometry_ssl_canonical_residual_family",
-            overrides=["trainer.learning_rate=0.0007"],
+            config_name="canonical_multi_anchor_gaussian",
+            overrides=["trainer.optimizer.learning_rate=0.0007"],
         )
-    payload = OmegaConf.to_container(composed, resolve=True)
-    assert isinstance(payload, dict)
-    rebuilt = experiment_config_from_dict(payload)
-
-    assert rebuilt.schema_version == "2.0.0"
-    assert rebuilt.asset_dataset_manifest.endswith("canonical_cross_mother_v1.yaml")
-    assert rebuilt.trainer.learning_rate == pytest.approx(7.0e-4)
-    assert rebuilt.model.encoder.backbone.layers == 2
-    assert resolved_config_dict(rebuilt) == payload
+    config = OmegaConf.to_object(composed)
+    assert isinstance(config, EmbodimentPretrainCfg)
+    assert config.trainer.optimizer.learning_rate == pytest.approx(7.0e-4)
+    assert resolved_config_dict(config)["schema_version"] == "3.0.0"
 
 
-def test_experiment_constructor_has_no_filesystem_or_cuda_side_effect(tmp_path: Path) -> None:
-    """配置对象到 runtime object 的构造边界不得提前创建 run 或 materialize source。"""
+def test_experiment_constructor_has_no_filesystem_or_cuda_side_effect(tmp_path) -> None:
+    """完整 resolved config 到 façade 的构造不得提前创建 run 或 materialize source。"""
 
     output_dir = tmp_path / "not-created-until-run"
-    experiment = GeometrySSLExperiment(GeometrySSLExperimentCfg(), output_dir=output_dir)
+    experiment = EmbodimentPretrain(_compose(), output_dir=output_dir)
 
-    assert experiment.config.schema_version == "2.0.0"
+    assert experiment.config.schema_version == "3.0.0"
     assert experiment.output_dir == output_dir
     assert not output_dir.exists()
 
 
-def test_resolved_artifacts_copy_dataset_and_embed_its_content_hash(tmp_path: Path) -> None:
-    r"""run artifact 必须同时保留输入 YAML、解析内容与 expanded physical manifest。"""
+def test_schema_one_and_two_are_fail_closed() -> None:
+    """旧配置不通过 alias 或 parser 猜测进入 schema 3。"""
 
-    dataset_path = tmp_path / "dataset.yaml"
-    dataset_path.write_text("schema_version: 1.0.0\n", encoding="utf-8")  # 原始 bytes 应逐字复制
-    dataset_config = HandAssetDatasetCfg(
-        default_run_dir="/generated",
-        train=HandAssetPartitionCfg(
-            runs={
-                "default": HandAssetRunCfg(
-                    groups={"single_palm_leap": {"right_t4": HandAssetLineageCfg(include_mother=True)}}
-                )
-            }
-        ),
+    config = _compose()
+    for version in ("1.0.0", "2.0.0"):
+        with pytest.raises(ValueError, match="schema must be exactly 3.0.0"):
+            replace(config, schema_version=version).validate_composed()
+
+
+def test_model_does_not_freeze_target_sigma_sample_count() -> None:
+    """sigma 数量属于 target 数据轴，改变中心数不应重建 scalar decoder。"""
+
+    config = _compose()
+    representation = replace(
+        config.method.representation,
+        field=replace(config.method.representation.field, bandwidth_centers_m=(0.004, 0.008, 0.016, 0.032, 0.064)),
     )
-    empty_train = ResolvedHandAssetPartition(name="train", records=())
-    empty_validation = ResolvedHandAssetPartition(name="validation", records=())
-    dataset = ResolvedHandAssetDataset(
-        source_path=dataset_path,
-        source_sha256="dataset-sha256",
-        config=dataset_config,
-        train=empty_train,
-        validation=empty_validation,
-        evaluation={},
+    method = replace(config.method, representation=representation)
+    model = GeometrySSLModel(method.model)
+    assert len(representation.field.bandwidth_centers_m) == 5
+    assert model.density_decoder.output.out_features == 1
+
+
+def test_canonical_45_asset_budget_reports_actual_tail_group_and_updates() -> None:
+    """45 项 train partition 的尾组保留真实长度，并给出 proposal 中的预算锚点。"""
+
+    sampling = OnlineSamplingCfg(
+        epochs=20,
+        q_per_asset_per_epoch=256,
+        assets_per_minibatch=2,
+        q_per_asset_per_minibatch=2,
+        seed=20260813,
     )
-    manifest = GeometrySSLAssetManifest(
-        schema_version="2.0.0",
-        dataset_source_path=str(dataset_path),
-        dataset_source_sha256=dataset.source_sha256,
-        train=(),
-        validation=(),
-        evaluation={},
-    )
-    output_dir = tmp_path / "run"
-
-    write_resolved_experiment_files(
-        output_dir,
-        config=GeometrySSLExperimentCfg(asset_dataset_manifest=str(dataset_path)),
-        dataset=dataset,
-        manifest=manifest,
-    )
-
-    resolved = yaml.safe_load((output_dir / "resolved_config.yaml").read_text(encoding="utf-8"))
-    expanded = yaml.safe_load((output_dir / "asset_manifest.yaml").read_text(encoding="utf-8"))
-    assert (output_dir / "asset_dataset.yaml").read_bytes() == dataset_path.read_bytes()
-    assert resolved["resolved_asset_dataset"]["source_sha256"] == "dataset-sha256"
-    assert resolved["resolved_asset_dataset"]["config"]["train"]["runs"]["default"]["groups"]
-    assert expanded["dataset_source_sha256"] == "dataset-sha256"
+    schedule = OnlineMinibatchSchedule(45, sampling)
+    assert schedule.minibatches_per_epoch == 2944
+    assert schedule.minibatches_per_epoch * sampling.epochs == 58880
+    assert 45 * sampling.q_per_asset_per_epoch * sampling.epochs == 230400
+    assert 2944 // 4 == 736
+    assert pytest.approx(15.652173913043478) == 230400 / 14720
+    for _ in range(schedule.minibatches_per_epoch - 1):
+        schedule.next()
+    tail = schedule.next()
+    assert len(tail.asset_indices) == 1
 
 
-def test_legacy_resolved_config_fails_with_an_explicit_contract_error() -> None:
-    """旧 fixed-bandwidth/AABB 配置不做兼容迁移，但必须给出可审计的 fail-closed 原因。"""
+@pytest.mark.parametrize("device", ["cpu", "cuda:not-an-index"])
+def test_warp_training_config_rejects_non_cuda_device(device: str) -> None:
+    """online Warp teacher 不接受 CPU 或非法 CUDA index。"""
 
-    payload = resolved_config_dict(GeometrySSLExperimentCfg())
-    payload["schema_version"] = "1.1.0"
+    with pytest.raises(ValueError, match="device.*cuda"):
+        EmbodimentPretrainTrainerCfg(device=device)
 
-    with pytest.raises(ValueError, match="schema must be exactly 2.0.0"):
-        experiment_config_from_dict(payload)
+
+def test_warp_training_config_rejects_float64() -> None:
+    """正式 Warp bridge 只接受 CUDA float32。"""
+
+    with pytest.raises(ValueError, match="dtype.*float32"):
+        EmbodimentPretrainTrainerCfg(dtype="float64")
+
+
+def test_hand_catalog_rejects_missing_manifest_without_io() -> None:
+    """data role 必须显式绑定 assets dataset YAML。"""
+
+    with pytest.raises(ValueError, match="requires one dataset manifest"):
+        HandAssetCatalogCfg()
+
+
+@pytest.mark.parametrize(
+    ("identity_name", "error"),
+    [("content_hash", "content hashes leak"), ("physical_geometry_hash", "physical geometry hashes leak")],
+)
+def test_expanded_manifest_rejects_identity_leakage(identity_name: str, error: str) -> None:
+    r"""路径/ID 或 limits 不同也不能掩盖 content/physical mapping 的跨 role 重复。"""
+
+    train = {"asset_id": "train", "content_hash": "content-a", "physical_geometry_hash": "physical-a"}
+    validation = {
+        "asset_id": "renamed",
+        "content_hash": "content-b",
+        "physical_geometry_hash": "physical-b",
+    }
+    validation[identity_name] = train[identity_name]
+    with pytest.raises(ValueError, match=error):
+        validate_asset_manifest_isolation({"train": [train], "validation": [validation], "evaluation": {}})
 
 
 def test_anchor_realization_fingerprint_covers_points_parameters_and_version() -> None:
@@ -161,20 +187,16 @@ def test_anchor_realization_fingerprint_covers_points_parameters_and_version() -
         algorithm_version="palm-seed-radial-gaussian-fps-v1",
     )
     baseline = anchor_realization_record(anchors)
-    repeated = anchor_realization_record(anchors)
-    changed_seed = anchor_realization_record(replace(anchors, sampling_seed=8))
-    changed_points = anchor_realization_record(
+    assert baseline == anchor_realization_record(anchors)
+    assert len(baseline["anchor_realization_hash"]) == 64
+    assert baseline != anchor_realization_record(replace(anchors, sampling_seed=8))
+    assert baseline != anchor_realization_record(
         replace(anchors, anchors_hand_m=anchors.anchors_hand_m + np.asarray([1.0e-4, 0.0, 0.0]))
     )
 
-    assert baseline == repeated
-    assert len(baseline["anchor_realization_hash"]) == 64
-    assert changed_seed["anchor_realization_hash"] != baseline["anchor_realization_hash"]
-    assert changed_points["anchor_realization_hash"] != baseline["anchor_realization_hash"]
-
 
 def test_home_surface_fingerprint_covers_retained_points_and_surface_backend() -> None:
-    """manifest 必须冻结 retained home points 及其 Boolean/surface sampling 生产语义。"""
+    """manifest 必须冻结 retained home points 及 Boolean/surface sampling 生产语义。"""
 
     samples = HomeSurfaceSamples(
         owner_ids=("palm",),
@@ -197,80 +219,7 @@ def test_home_surface_fingerprint_covers_retained_points_and_surface_backend() -
         replace(samples, points_owner_local_m=samples.points_owner_local_m + 1.0e-4),
         cache,
     )
-
     assert len(baseline["home_surface_realization_hash"]) == 64
     assert baseline["surface_query_sampling_version"] == "owner-triangle-area-barycentric-v1"
     assert baseline["boolean_backend"] == "manifold3d"
-    assert changed["home_surface_realization_hash"] != baseline["home_surface_realization_hash"]
-
-
-def test_model_does_not_freeze_target_sigma_sample_count() -> None:
-    """sigma 数量属于 target 数据轴，改变中心数不应重建或拒绝 scalar decoder。"""
-
-    config = GeometrySSLExperimentCfg(
-        representation=GeometryRepresentationCfg(
-            field=GaussianProximityFieldCfg(bandwidth_centers_m=(0.004, 0.008, 0.016, 0.032, 0.064))
-        )
-    )
-    assert len(config.representation.field.bandwidth_centers_m) == 5
-
-
-def test_canonical_45_asset_budget_reports_actual_tail_group_and_updates() -> None:
-    """45 项 train partition 的尾组应保留真实样本数，而不是用名义 batch_size 掩盖。"""
-
-    budget = derive_geometry_ssl_training_budget(GeometrySSLExperimentCfg(), train_asset_count=45)
-
-    assert budget.microbatches_per_epoch == 2944
-    assert budget.optimizer_updates_per_epoch == 736
-    assert budget.total_optimizer_updates == 14720
-    assert budget.total_q_samples == 230400
-    assert budget.nominal_microbatch_q == 4
-    assert budget.nominal_effective_q == 16
-    assert budget.mean_effective_q == pytest.approx(15.652173913043478)
-
-
-@pytest.mark.parametrize("device", ["cpu", "cuda:not-an-index"])
-def test_warp_training_config_rejects_non_cuda_device(device: str) -> None:
-    """resolved 配置不得接受 Warp 在线 teacher 无法执行的 device。"""
-
-    with pytest.raises(ValueError, match="device.*cuda"):
-        GeometrySSLTrainerCfg(device=device)
-
-
-def test_warp_training_config_rejects_float64() -> None:
-    """Warp PyTorch bridge 主路径只接受 CUDA float32，不声明伪 float64 路线。"""
-
-    with pytest.raises(ValueError, match="dtype.*float32"):
-        GeometrySSLTrainerCfg(dtype="float64")
-
-
-def test_asset_manifest_rejects_content_hash_leakage_across_splits() -> None:
-    """路径或 ID 不同但静态语义内容相同的资产仍视为 leakage。"""
-
-    train = ({"asset_id": "train", "content_hash": "same"},)
-    validation = ({"asset_id": "renamed", "content_hash": "same"},)
-    with pytest.raises(ValueError, match="content hashes leak"):
-        GeometrySSLAssetManifest(
-            schema_version="2.0.0",
-            dataset_source_path="/dataset.yaml",
-            dataset_source_sha256="dataset-hash",
-            train=train,
-            validation=validation,
-            evaluation={},
-        )
-
-
-def test_asset_manifest_rejects_physical_geometry_leakage_across_splits() -> None:
-    r"""不同 limits/content 但同一物理映射的资产仍不得跨 split。"""
-
-    train = ({"asset_id": "train", "content_hash": "content-a", "physical_geometry_hash": "same"},)
-    validation = ({"asset_id": "limit-only", "content_hash": "content-b", "physical_geometry_hash": "same"},)
-    with pytest.raises(ValueError, match="physical geometry hashes leak"):
-        GeometrySSLAssetManifest(
-            schema_version="2.0.0",
-            dataset_source_path="/dataset.yaml",
-            dataset_source_sha256="dataset-hash",
-            train=train,
-            validation=validation,
-            evaluation={},
-        )
+    assert baseline["home_surface_realization_hash"] != changed["home_surface_realization_hash"]

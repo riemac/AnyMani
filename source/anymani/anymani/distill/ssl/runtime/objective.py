@@ -1,4 +1,4 @@
-r"""Geometry SSL 单 microbatch 前向与 optimizer-step 全局归一化。
+r"""Geometry SSL 单 minibatch 前向与 optimizer-step 全局归一化。
 
 物理 loss 公式由 ``objectives.representations`` 定义；本模块只把 runtime batch 与模型装配起来，
 执行真实 joint-sign coordinate rewrite，并在 gradient accumulation 时按整个 optimizer step 的有效
@@ -70,7 +70,7 @@ def forward_objective(
         joint_sign=joint_sign,
         entity_valid_mask=batch.evidence.entity_valid_mask,
         joint_valid_mask=joint_valid,
-    )  # `(N_0,D_0,N_1,D_1)`，服务不等大小 microbatch accumulation
+    )  # `(N_0,D_0,N_1,D_1)`，服务不等大小 minibatch accumulation
     pair_loss, pair_numerator, pair_denominator = joint_sign_paired_loss_components(
         prediction.latents,
         paired_latents,
@@ -97,10 +97,10 @@ def accumulated_objective(
     paired_denominator_totals: tuple[torch.Tensor, torch.Tensor],
     weights: GeometryFieldObjectiveCfg,
 ) -> torch.Tensor:
-    r"""把一个 microbatch 的 numerators 按整个 optimizer step 的 denominator 缩放。
+    r"""把一个 minibatch 的 numerators 按整个 optimizer step 的 denominator 缩放。
 
     六项 field/objective 使用 $\sum_bN_{t,b}/\sum_bD_{t,b}$；paired 项保持
-    $\sum_bN_{0,b}/\sum_bD_{0,b}+\sum_bN_{1,b}/\sum_bD_{1,b}$。调用方逐 microbatch
+    $\sum_bN_{0,b}/\sum_bD_{0,b}+\sum_bN_{1,b}/\sum_bD_{1,b}$。调用方逐 minibatch
     backward，显存仍只持有一份 Sobolev 图。
     """
 

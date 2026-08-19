@@ -1,8 +1,8 @@
-r"""几何 SSL checkpoint 的完整 resume 与 retained-only transfer 合同。
+r"""Schema 3 full checkpoint 与 standalone retained artifact 合同。
 
-完整 checkpoint 保存 encoder、两个 SSL-only decoders、optimizer、step 与可审计 metadata；迁入 IL/PPO 时
-只允许读取 ``encoder.`` namespace。加载函数严格报告 missing/unexpected keys，不以兼容包装静默吞掉
-结构变化。
+完整 checkpoint 只服务预训练 resume，保存 encoder、两个 SSL-only readers、optimizer、采样状态与审计
+metadata。IL/PPO 只能读取独立 retained artifact；其 loader 严格报告 missing/unexpected keys，且 artifact
+不携带 optimizer、teacher、reader 或 objective 配置。
 """
 
 from __future__ import annotations
@@ -16,8 +16,10 @@ import torch  # tensor/optimizer state 使用官方 state_dict 序列化
 
 from anymani.distill.models.geometry_ssl import GeometrySSLModel  # 完整 retained+disposable 组装
 from anymani.distill.models.input_adapters.geometry import ImplicitGeometryEncoder  # PPO/IL transfer 目标
+from anymani.distill.ssl.contracts import FeatureSpec
 
-CHECKPOINT_SCHEMA_VERSION = "2.0.0"  # schema 1.x 不兼容声明式 experiment/calibration evidence
+CHECKPOINT_SCHEMA_VERSION = "3.0.0"  # schema 1/2 明确拒绝；role config 与 sampling state 已重构
+RETAINED_ARTIFACT_SCHEMA_VERSION = "3.0.0"  # standalone transfer artifact 与 full checkpoint 同代但不同类型
 
 
 @dataclass(frozen=True)
@@ -66,11 +68,10 @@ def save_geometry_ssl_checkpoint(
     metadata: GeometrySSLCheckpointMetadata,  # 科研复现实验合同
     runtime_state: Mapping[str, Any] | None = None,  # epoch/window/Sobol cursor resume state
 ) -> None:
-    r"""保存可 resume 的完整 state 和无需 decoder 装配即可读取的 retained state。
+    r"""保存只服务预训练 resume/审计的完整 state。
 
-    完整 ``model_state`` 服务 SSL resume；冗余的 ``retained_state`` 以 ``encoder.`` 前缀冻结 transfer
-    边界，使 PPO 代码无需实例化任何 decoder。先写同目录临时文件再 rename，避免异常终止后正式路径
-    指向半写 payload。
+    ``model_state`` 包含 retained encoder 与 disposable readers；PPO/IL 不读取该 payload，只消费独立
+    retained artifact。先写同目录临时文件再 rename，避免异常终止后正式路径指向半写 payload。
 
     Raises:
         ValueError: step 为负时抛出。
@@ -85,7 +86,6 @@ def save_geometry_ssl_checkpoint(
             "schema_version": CHECKPOINT_SCHEMA_VERSION,  # payload reader 路由键
             "step": int(step),  # Python int，resume 从下一 step 继续
             "model_state": model.state_dict(),  # encoder + 两个 disposable decoders
-            "retained_state": model.retained_state_dict(),  # 仅 `encoder.*`
             "optimizer_state": optimizer.state_dict(),  # AdamW moments/param groups
             "metadata": asdict(metadata),  # 只含 weights-only loader 支持的基础类型
             "runtime_state": dict(runtime_state or {}),  # 资产窗口与每资产 q 游标
@@ -125,45 +125,91 @@ def load_geometry_ssl_runtime_state(path: Path, *, map_location: str | torch.dev
     return dict(runtime_state)
 
 
-def load_retained_geometry_encoder(
-    path: Path,  # 几何 SSL 完整 checkpoint
+def save_retained_geometry_artifact(
+    path: Path,
     *,
-    encoder: ImplicitGeometryEncoder,  # PPO/IL 已装配的 retained encoder
-    strict: bool = True,  # 正式 transfer 必须 True
-    map_location: str | torch.device = "cpu",  # 默认 CPU 预检 key
-) -> RetainedLoadReport:
-    r"""只加载 ``encoder.`` state，明确拒绝把 SSL decoder 带进 PPO/IL。
+    model: GeometrySSLModel,
+    feature_spec: FeatureSpec,
+    metadata: GeometrySSLCheckpointMetadata,
+    source_checkpoint: Path,
+) -> None:
+    r"""原子写出只含 retained encoder 的 schema 3 standalone artifact。
 
-    ``retained_state`` 中每个 key 必须以 ``encoder.`` 开头；去掉前缀后用 ``strict=False`` 获取完整
-    incompatibility report，再由本函数的 ``strict`` 语义决定是否抛错。该两阶段流程既提供可审计信息，
-    又避免 PyTorch strict 异常只展示截断上下文。
-
-    Returns:
-        RetainedLoadReport: missing/unexpected key 元组。
+    该 payload 不保存 optimizer、training q sampler、query/target backend、decoder 或 objective；下游
+    只能从 ``retained_state`` 和输入/特征合同构造部署期消费路径。
     """
 
-    payload = _load_payload(path, map_location=map_location)  # weights-only 安全加载 + schema 验证
-    retained = payload.get("retained_state")  # 读取冗余、明确的 transfer state
-    if not isinstance(retained, Mapping) or not retained:  # 空/错误类型均不可 transfer
-        raise ValueError("checkpoint does not contain a non-empty retained_state")  # 不退回 model_state 猜 namespace
-    prefix = "encoder."  # 完整与 retained checkpoint 共享的稳定前缀
-    unexpected_namespace = tuple(  # 审计任何 decoder/未知状态泄漏
-        str(key) for key in retained if not str(key).startswith(prefix)
+    if not source_checkpoint.is_file():
+        raise FileNotFoundError(f"retained artifact source checkpoint does not exist: {source_checkpoint}")
+    retained = model.retained_state_dict()
+    if not retained or any(not key.startswith("encoder.") for key in retained):
+        raise ValueError("retained artifact requires a non-empty encoder-only state")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(
+        {
+            "schema_version": RETAINED_ARTIFACT_SCHEMA_VERSION,
+            "artifact_type": "retained_geometry_encoder",
+            "retained_state": retained,
+            "retained_model_config": {"encoder": asdict(model.config.encoder)},
+            "feature_spec": asdict(feature_spec),
+            "input_contract": {
+                "frame": metadata.frame_contract,
+                "units": metadata.unit_contract,
+                "retained_inputs": "physical q + static geometry evidence",
+            },
+            "lineage": {
+                "source_checkpoint": str(source_checkpoint),
+                "code_revision": metadata.code_revision,
+                "package_version": metadata.package_version,
+                "geometry_semantics_schema": metadata.geometry_semantics_schema,
+                "asset_manifest": dict(metadata.asset_manifest),
+            },
+        },
+        temporary,
     )
-    if unexpected_namespace:  # 生命周期边界错误优先于普通 key mismatch
-        raise ValueError(f"retained_state contains non-encoder namespaces: {unexpected_namespace}")
-    encoder_state = {  # 目标对象本身已是 encoder，故只在此边界去前缀
-        str(key)[len(prefix) :]: value for key, value in retained.items()
-    }
-    incompatible = encoder.load_state_dict(encoder_state, strict=False)  # 收集而非吞掉 mismatch
-    report = RetainedLoadReport(  # 转成不可变、可序列化报告
-        tuple(incompatible.missing_keys), tuple(incompatible.unexpected_keys)
-    )
-    if strict and (report.missing_keys or report.unexpected_keys):  # 正式 transfer 的硬闸门
-        raise RuntimeError(  # 同时展示两类 key，便于定位模型配置漂移
+    temporary.replace(path)
+
+
+def load_retained_geometry_artifact(
+    path: Path,
+    *,
+    encoder: ImplicitGeometryEncoder,
+    strict: bool = True,
+    map_location: str | torch.device = "cpu",
+) -> RetainedLoadReport:
+    r"""严格加载 standalone retained artifact，拒绝把 full checkpoint 当作 transfer artifact。"""
+
+    payload = torch.load(path, map_location=map_location, weights_only=True)
+    if not isinstance(payload, dict) or payload.get("schema_version") != RETAINED_ARTIFACT_SCHEMA_VERSION:
+        actual = payload.get("schema_version") if isinstance(payload, dict) else None
+        raise ValueError(
+            f"unsupported retained artifact schema={actual!r}; expected {RETAINED_ARTIFACT_SCHEMA_VERSION!r}"
+        )
+    if payload.get("artifact_type") != "retained_geometry_encoder":
+        raise ValueError("retained artifact type is not retained_geometry_encoder")
+    required = {"retained_state", "retained_model_config", "feature_spec", "input_contract", "lineage"}
+    missing = required - payload.keys()
+    if missing:
+        raise ValueError(f"retained artifact is missing fields: {sorted(missing)}")
+    forbidden = ("optimizer_state", "runtime_state", "model_state", "query_backend", "target_backend", "objective")
+    leaked = tuple(name for name in forbidden if name in payload)
+    if leaked:
+        raise ValueError(f"retained artifact contains disposable namespaces: {leaked}")
+    retained = payload.get("retained_state")
+    if not isinstance(retained, Mapping):
+        raise ValueError("retained artifact retained_state must be a mapping")
+    unexpected_namespace = tuple(str(key) for key in retained if not str(key).startswith("encoder."))
+    if unexpected_namespace:
+        raise ValueError(f"retained artifact contains non-encoder namespaces: {unexpected_namespace}")
+    encoder_state = {str(key)[len("encoder.") :]: value for key, value in retained.items()}
+    incompatible = encoder.load_state_dict(encoder_state, strict=False)
+    report = RetainedLoadReport(tuple(incompatible.missing_keys), tuple(incompatible.unexpected_keys))
+    if strict and (report.missing_keys or report.unexpected_keys):
+        raise RuntimeError(
             f"retained encoder key mismatch: missing={report.missing_keys}, unexpected={report.unexpected_keys}"
         )
-    return report  # strict=False 诊断仍必须由调用者记录该报告
+    return report
 
 
 def _load_payload(path: Path, *, map_location: str | torch.device) -> dict[str, Any]:
@@ -180,10 +226,9 @@ def _load_payload(path: Path, *, map_location: str | torch.device) -> dict[str, 
             f"unsupported geometry SSL checkpoint schema={payload.get('schema_version')!r}; "
             f"expected {CHECKPOINT_SCHEMA_VERSION!r}"
         )
-    required = {  # 完整 resume 与 retained transfer 共同所需字段
+    required = {  # 完整 resume 所需字段；transfer 使用独立 retained artifact reader
         "step",
         "model_state",
-        "retained_state",
         "optimizer_state",
         "metadata",
     }
@@ -195,10 +240,12 @@ def _load_payload(path: Path, *, map_location: str | torch.device) -> dict[str, 
 
 __all__ = [  # checkpoint 模块稳定公开面
     "CHECKPOINT_SCHEMA_VERSION",  # payload schema 常量
+    "RETAINED_ARTIFACT_SCHEMA_VERSION",
     "GeometrySSLCheckpointMetadata",  # metadata schema
     "RetainedLoadReport",  # transfer 审计报告
     "load_geometry_ssl_checkpoint",  # SSL resume
     "load_geometry_ssl_runtime_state",  # window/Sobol cursor resume
-    "load_retained_geometry_encoder",  # PPO/IL transfer
+    "load_retained_geometry_artifact",
+    "save_retained_geometry_artifact",
     "save_geometry_ssl_checkpoint",  # 原子完整保存
 ]

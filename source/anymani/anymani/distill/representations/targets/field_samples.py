@@ -138,7 +138,7 @@ class SensitivityTargetBatch:
                 raise ValueError(f"{name} must share selector shape {selector_shape}, got {tuple(selector.shape)}")
         if self.closest_point.ndim != 3 or self.closest_point.shape[1:] != (edge_count, 3):
             raise ValueError("closest_point must have shape [B,E,3]")
-        batch_size = self.closest_point.shape[0]  # microbatch 大小 $B$
+        batch_size = self.closest_point.shape[0]  # minibatch 大小 $B$
         if self.owner_index.ndim == 2 and self.owner_index.shape[0] != batch_size:
             raise ValueError("batched edge selectors must share B with closest_point")
         edge_shape = (batch_size, edge_count)  # 所有抽样边标量的共同轴

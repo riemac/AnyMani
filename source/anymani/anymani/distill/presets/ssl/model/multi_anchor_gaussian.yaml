@@ -1,0 +1,34 @@
+# Retained encoder：共享多锚点前端、graph-biased Transformer 与类型化零/一阶 heads。
+defaults:
+  - schema_multi_anchor_gaussian
+  - _self_
+
+encoder:
+  frontend:
+    relation_width: 64
+    home_width: 64
+    screw_width: 64
+    role_width: 8
+    length_scale_m: 0.1
+  backbone:
+    hidden_width: 128
+    layers: 2
+    attention_heads: 4
+    feedforward_width: 256
+    dropout: 0.0
+    max_graph_distance: 8
+  heads:
+    zero_order_width: 128
+    first_order_width: 64
+    first_order_source: residual_screw
+
+# 仅训练期 readers；standalone retained artifact 不包含这些参数。
+ssl_decoders:
+  density:
+    hidden_width: 128
+    residual_blocks: 3
+    sigma_reference_m: 0.016
+  sensitivity:
+    coefficient_hidden_width: 128
+    readout_bias: false
+    carrier_scale: inverse_sqrt

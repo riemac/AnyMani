@@ -840,14 +840,14 @@ def stack_static_geometry_evidence(
         for field_name in shared_fields:
             if not torch.equal(getattr(reference, field_name), getattr(evidence, field_name)):
                 raise ValueError(
-                    f"evidence[{evidence_index}] field '{field_name}' differs; split into another structure microbatch"
+                    f"evidence[{evidence_index}] field '{field_name}' differs; split into another structure minibatch"
                 )
         if evidence.anchors.shape != reference.anchors.shape:
-            raise ValueError("same microbatch requires one configured anchor count K")
+            raise ValueError("same minibatch requires one configured anchor count K")
         if evidence.home_surface_points.shape != reference.home_surface_points.shape:
-            raise ValueError("same microbatch requires one configured home point budget M")
+            raise ValueError("same minibatch requires one configured home point budget M")
         if evidence.space_screws.shape != reference.space_screws.shape:
-            raise ValueError("same microbatch requires one active JOINT axis length")
+            raise ValueError("same minibatch requires one active JOINT axis length")
 
     return StaticGeometryEvidence(
         anchors=torch.stack([evidence.anchors for evidence in evidences], dim=0),

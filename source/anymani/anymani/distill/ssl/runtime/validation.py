@@ -20,7 +20,6 @@ from anymani.distill.diagnostics.evaluation.geometry_ssl import (
     geometry_ssl_stratified_components_per_sample,
     same_asset_q_permutation,
 )
-from anymani.distill.diagnostics.recording.geometry_ssl import GeometrySSLRunLogger
 from anymani.distill.models.geometry_ssl import GeometrySSLForward, GeometrySSLModel
 from anymani.distill.representations.geometry import (
     GeometryRepresentation,
@@ -29,7 +28,6 @@ from anymani.distill.representations.geometry import (
 )
 from anymani.distill.representations.sources.geometry_source import GeometrySource
 from anymani.distill.representations.targets.geometry_field import fixed_validation_gaussian_field_config
-from anymani.distill.ssl.config import GeometrySSLExperimentCfg
 from anymani.distill.ssl.runtime import (
     GeometrySSLRuntimeCfg,
     ResidentGeometryAssetWindow,
@@ -114,16 +112,21 @@ def fixed_validation_ablation_evidence(
             ablation="query_only",
             **common,
         )
-        predictions["same_asset_q_shuffle"] = geometry_ssl_ablation_forward(
-            model,
-            q,
-            batch.evidence,
-            batch.queries.query_points_h,
-            batch.field_targets.bandwidths,
-            ablation="latent_shuffle",
-            batch_permutation=same_asset_q_permutation(batch.asset_ids, device=q.device),
-            **common,
-        )
+        try:
+            same_asset_permutation = same_asset_q_permutation(batch.asset_ids, device=q.device)
+        except ValueError:
+            predictions["same_asset_q_shuffle"] = None  # 单 q 尾 block 不补造同资产样本
+        else:
+            predictions["same_asset_q_shuffle"] = geometry_ssl_ablation_forward(
+                model,
+                q,
+                batch.evidence,
+                batch.queries.query_points_h,
+                batch.field_targets.bandwidths,
+                ablation="latent_shuffle",
+                batch_permutation=same_asset_permutation,
+                **common,
+            )
         try:
             cross_permutation = cross_asset_permutation(batch.asset_ids, device=q.device)
         except ValueError:
@@ -182,10 +185,14 @@ def stream_training_morphology_q_bank(
     model: GeometrySSLModel,
     runtimes: tuple[GeometrySource, ...],
     *,
-    config: GeometrySSLExperimentCfg,
+    representation_config: GeometryRepresentationCfg,
+    seed: int,
+    q_per_asset: int,
+    assets_per_minibatch: int,
+    q_per_asset_per_minibatch: int,
+    max_resident_assets: int,
     device: torch.device,
     dtype: torch.dtype,
-    logger: GeometrySSLRunLogger,
     phase: str,
 ) -> dict[str, object]:
     r"""流式评估训练形态上的独立 q bank，并保存可确定性重放的逐样本 evidence。
@@ -194,23 +201,15 @@ def stream_training_morphology_q_bank(
     共同进入 SHA-256。bank 不常驻训练期 GPU，只在 initial/final 各流式执行一次。
     """
 
-    bank_seed = config.protocol.reproducibility.seed + 3_000_003  # 与 train/held-out/bootstrap seed 空间分离
+    bank_seed = int(seed)  # 与 train/held-out/bootstrap seed 空间分离
     runtime_config = GeometrySSLRuntimeCfg(
-        max_resident_assets=config.trainer.max_resident_assets,
-        assets_per_microbatch=min(config.trainer.assets_per_microbatch, len(runtimes)),
-        q_per_asset_per_microbatch=config.protocol.coverage.q_per_asset_per_realization,
-        q_per_asset_per_epoch=config.protocol.validation.q_per_asset,
+        max_resident_assets=max_resident_assets,
+        assets_per_minibatch=min(assets_per_minibatch, len(runtimes)),
+        q_per_asset_per_minibatch=q_per_asset_per_minibatch,
+        q_per_asset_per_epoch=q_per_asset,
         epochs=1,
     )
-    representation = GeometryRepresentation(
-        GeometryRepresentationCfg(
-            source=config.representation.source,
-            field=config.representation.field,
-            query=config.representation.query,
-            target=config.representation.target,
-            layout=config.representation.layout,
-        )
-    )  # independent q bank 与训练使用同一 representation contract
+    representation = GeometryRepresentation(representation_config)
     window = ResidentGeometryAssetWindow(
         runtimes,
         device=str(device),
@@ -223,10 +222,10 @@ def stream_training_morphology_q_bank(
         window,
         seed=bank_seed,
         runtime_config=runtime_config,
-        field_config=fixed_validation_gaussian_field_config(config.representation.field),
-        query_config=config.representation.query,
-        target_config=config.representation.target,
-        padding=config.representation.layout,
+        field_config=fixed_validation_gaussian_field_config(representation_config.field),
+        query_config=representation_config.query,
+        target_config=representation_config.target,
+        padding=representation_config.layout,
     )
     digest = hashlib.sha256()  # q/query/teacher byte-level identity
     digest.update(b"geometry-ssl-train-morphology-q-bank-v2\0")
@@ -255,24 +254,21 @@ def stream_training_morphology_q_bank(
                         {
                             "asset_id": asset_id,
                             "q_index": int(q_index),
-                            "metrics": {
-                                metric: per_sample[sample_index] for metric, per_sample in metrics.items()
-                            },
+                            "metrics": {metric: per_sample[sample_index] for metric, per_sample in metrics.items()},
                         }
                     )
-                for event in window.drain_telemetry_events():
-                    logger.log_runtime_event({**event, "phase": f"training_morphology_q_bank_{phase}"})
+                window.drain_telemetry_events()  # q-bank evidence 不混入 optimizer runtime 日志
     finally:
         window.release_all()
-        for event in window.drain_telemetry_events():
-            logger.log_runtime_event({**event, "phase": f"training_morphology_q_bank_{phase}"})
+        window.drain_telemetry_events()
         torch.set_rng_state(cpu_rng_state)
         if torch.cuda.is_available():
             torch.cuda.set_rng_state_all(cuda_rng_state)
     return {
         "split": "training_morphology_independent_q",
+        "phase": phase,
         "seed": bank_seed,
-        "q_per_asset": config.protocol.validation.q_per_asset,
+        "q_per_asset": q_per_asset,
         "asset_count": len(runtimes),
         "record_count": len(records),
         "bank_digest_sha256": digest.hexdigest(),

@@ -1,0 +1,9 @@
+defaults:
+  - schema_canonical_multi_anchor_gaussian
+  - _self_
+
+output_dir: logs/ssl
+experiment_name: canonical_multi_anchor_gaussian
+resume_checkpoint: ""
+seed: 20260813
+deterministic_algorithms: true

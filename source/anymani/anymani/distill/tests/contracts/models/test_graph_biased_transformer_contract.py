@@ -10,8 +10,7 @@ from anymani.distill.models.backbones.geometry_transformer import (
     GraphBiasedTransformer,
     GraphBiasedTransformerCfg,
 )
-from anymani.distill.models.geometry_ssl import GeometrySSLModel
-from anymani.distill.ssl.experiments import CanonicalResidualFamilyCfg
+from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelCfg
 
 pytestmark = pytest.mark.contract
 
@@ -19,7 +18,7 @@ pytestmark = pytest.mark.contract
 def test_canonical_model_parameter_and_state_key_identity_is_frozen() -> None:
     """配置重排不得静默改变 canonical 参数量、模块 namespace 或 retained 边界。"""
 
-    model = GeometrySSLModel(CanonicalResidualFamilyCfg().model)
+    model = GeometrySSLModel(GeometrySSLModelCfg())
     state_key_digest = hashlib.sha256("\n".join(model.state_dict()).encode()).hexdigest()
 
     assert sum(parameter.numel() for parameter in model.parameters()) == 590856

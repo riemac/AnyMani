@@ -1,3 +1,11 @@
+0.6.0 - 2026-08-18
+==================
+
+- 将 Geometry SSL 重构为 schema 3 的 `EmbodimentPretrainCfg`：最高层只组合 concrete `data / method / trainer / evaluation / run` roles，canonical 数值迁入 packaged Hydra YAML，并删除集中式字段 parser、旧 Python canonical facade 与 schema 1/2 兼容路径。
+- 新增 trainer-owned 全资产 q-round permutation、每资产连续 Sobol coverage、真实尾 asset/q/accumulation groups 和 optimizer-boundary resume；full checkpoint 保存 sampling/optimizer/selection/RNG，validation-best 另行导出不含 reader、teacher、objective 或 optimizer 的 standalone retained artifact。
+- 将多锚点 Gaussian 的 density、κ、derived field、Sobolev/JVP、chain 与 paired parity 拆成独立 objective runtimes，由 method-local lazy context 共享 forward/JVP/paired graph；固定张量合同验证拆分前后 loss 与 q/κ 梯度逐元素等价。
+- 保留 `python -m anymani.distill.ssl.pretrain` 与 `logs/ssl`，同步 expanded physical manifest、fixed validation、training-morphology q-bank replay、ablation 和 schema 3 文档；资产 dataset schema 与 assets 子项目版本不变。
+
 0.5.8 - 2026-08-18
 ==================
 

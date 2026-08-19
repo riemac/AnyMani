@@ -1,4 +1,4 @@
-r"""训练资产固定 calibration microbatches 的一次性梯度量级校准。"""
+r"""训练资产固定 calibration minibatches 的一次性梯度量级校准。"""
 
 from __future__ import annotations
 

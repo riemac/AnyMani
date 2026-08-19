@@ -85,6 +85,17 @@ python -m anymani.distill.play \
 Use `scripts/random_agent.py` or `scripts/zero_agent.py` for lightweight task startup checks. These do not replace
 task-specific contract tests or Isaac Sim runtime smoke tests.
 
+### Geometry SSL
+
+Geometry SSL is a task-free PyTorch/Warp process and does not launch Isaac Sim. Asset selection is provided by one reusable dataset manifest:
+
+```bash
+python -m anymani.distill.ssl.pretrain \
+  data.manifest=source/anymani/anymani/assets/datasets/canonical_cross_mother_v1.yaml
+```
+
+Schema 3 composes concrete `data / method / trainer / evaluation / run` roles from packaged Hydra YAML. Resolved configuration, dataset and expanded physical manifests, JSONL metrics, validation evidence, full resume checkpoints, and the standalone retained artifact are written under `logs/ssl/<experiment>/<UTC timestamp>/`. See `source/anymani/anymani/distill/ssl/README.md` for the physical target and lifecycle contract.
+
 ## Tests
 
 Default pytest paths are contract-only and must not launch Isaac Sim:

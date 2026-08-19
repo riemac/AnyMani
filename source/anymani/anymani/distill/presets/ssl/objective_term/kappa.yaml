@@ -1,0 +1,4 @@
+defaults: [schema_kappa, _self_]
+
+weight: 1.0
+calibrate: true

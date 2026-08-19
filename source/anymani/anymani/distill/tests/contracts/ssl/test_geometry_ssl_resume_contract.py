@@ -5,11 +5,13 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from anymani.distill.ssl.config import GeometrySSLExperimentCfg, resolved_config_dict
+from anymani.distill.ssl.experiment import EmbodimentPretrainCfg, resolved_config_dict
 from anymani.distill.ssl.runtime.checkpointing import (
     require_resume_scientific_config,
     restore_validation_selection_state,
 )
+from hydra import compose, initialize_config_module
+from omegaconf import OmegaConf
 
 pytestmark = pytest.mark.contract
 
@@ -17,7 +19,7 @@ pytestmark = pytest.mark.contract
 def test_resume_allows_only_run_location_fields_to_change() -> None:
     r"""新 output/run/checkpoint 路径不改变科学过程，应允许 resume。"""
 
-    checkpoint_config = GeometrySSLExperimentCfg()
+    checkpoint_config = _config()
     current = replace(
         checkpoint_config,
         run=replace(
@@ -31,27 +33,32 @@ def test_resume_allows_only_run_location_fields_to_change() -> None:
     require_resume_scientific_config(current, resolved_config_dict(checkpoint_config))
 
 
-@pytest.mark.parametrize("section", ["query", "coverage"])
+@pytest.mark.parametrize("section", ["query", "coverage", "seed"])
 def test_resume_rejects_query_or_q_budget_drift(section: str) -> None:
     r"""query 测度或每资产 q coverage 改变都不是同一训练轨迹。"""
 
-    checkpoint_config = GeometrySSLExperimentCfg()
+    checkpoint_config = _config()
     if section == "query":
         current = replace(
             checkpoint_config,
-            representation=replace(
-                checkpoint_config.representation,
-                query=replace(checkpoint_config.representation.query, shell_offset_max_m=0.003),
+            method=replace(
+                checkpoint_config.method,
+                representation=replace(
+                    checkpoint_config.method.representation,
+                    query=replace(checkpoint_config.method.representation.query, shell_offset_max_m=0.003),
+                ),
+            ),
+        )
+    elif section == "coverage":
+        current = replace(
+            checkpoint_config,
+            trainer=replace(
+                checkpoint_config.trainer,
+                sampling=replace(checkpoint_config.trainer.sampling, q_per_asset_per_epoch=128),
             ),
         )
     else:
-        current = replace(
-            checkpoint_config,
-            protocol=replace(
-                checkpoint_config.protocol,
-                coverage=replace(checkpoint_config.protocol.coverage, q_per_asset_per_epoch=128),
-            ),
-        )
+        current = replace(checkpoint_config, run=replace(checkpoint_config.run, seed=19))
 
     with pytest.raises(ValueError, match="resume scientific config mismatch"):
         require_resume_scientific_config(current, resolved_config_dict(checkpoint_config))
@@ -85,3 +92,15 @@ def test_resume_rejects_best_score_without_selection_history() -> None:
                 "selection_history": [],
             }
         )
+
+
+def _config() -> EmbodimentPretrainCfg:
+    """恢复 schema 3 canonical config，避免测试自己复制 concrete defaults。"""
+
+    import anymani.distill.ssl.pretrain  # noqa: F401
+
+    with initialize_config_module(config_module="anymani.distill.presets.ssl", version_base="1.3"):
+        composed = compose(config_name="canonical_multi_anchor_gaussian")
+    config = OmegaConf.to_object(composed)
+    assert isinstance(config, EmbodimentPretrainCfg)
+    return config

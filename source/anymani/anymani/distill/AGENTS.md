@@ -34,6 +34,8 @@ PALM/JOINT/TIP entity、owner 与 decoder 轴同索引。physical anchors 在网
 
 input adapter、backbone 与零/一阶 heads 构成 retained geometry encoder。representation decoder、最近点教师和 target backend 只在 SSL 存在，导出到 PPO 时必须删除。RL、IL 与 SSL 不复制科研语义相同的 trunk。
 
+Geometry SSL 使用 schema 3 的 `data / method / trainer / evaluation / run` Hydra composition；局部 concrete cfg 绑定本地 runtime，禁止恢复集中式配置 parser 或 Python canonical 子类。full checkpoint 只服务预训练 resume，RL/IL 只能消费 standalone retained artifact。
+
 official LEAP/Allegro 不参与 generated 训练、辅助权重校准或 checkpoint 选择；冻结后的 zero-shot 与独立 geometry-only adaptation 必须使用分离配置和证据。
 
 generated train/validation 必须按 `physical_geometry_hash` 整组划分；路径、asset ID 或完整 sidecar `content_hash` 不足以识别 limit-only 物理重复。`configuration_domain_hash` 只记录 joint names/limits 采样域，不得把同一物理映射拆到两个 split。

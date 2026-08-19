@@ -4,7 +4,7 @@
 
 ## 一次观测应保留什么
 
-最小分析单位不是“某个 step 的 total loss”，而是带有 asset、q、owner、query stratum、sigma、distance shell、ancestor relation 与 validity mask 的预测—真值配对。`GeometrySSLRunLogger` 同时保存六项 loss 的 numerator 与 denominator，使 tail asset group、跨结构 padding 和非光滑 mask 不会因先做 microbatch mean 而静默改变统计权重。
+最小分析单位不是“某个 step 的 total loss”，而是带有 asset、q、owner、query stratum、sigma、distance shell、ancestor relation 与 validity mask 的预测—真值配对。训练记录同时保存六项 loss 的 numerator 与 denominator，使 tail asset group、跨结构 padding 和非光滑 mask 不会因先做 minibatch mean 而静默改变统计权重。
 
 dense evidence 保留 $Z^{(0)}$、$Z^{(1)}$、density/κ errors、closest-source 与采样 provenance。被 mask 排除的一阶样本仍携带原始数值和排除原因；否则低误差可能只是有效区域不断缩小。runtime evidence 另外记录 resident assets、BVH/triangle 数、load/release 时间、显存变化与吞吐，从而把表示误差与资源退化分开。
 

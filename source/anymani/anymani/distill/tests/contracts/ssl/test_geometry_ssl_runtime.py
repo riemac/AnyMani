@@ -25,6 +25,7 @@ from anymani.distill.ssl.runtime import (
     ResidentGeometryAssetWindow,
     WindowedOnlineGeometryBatcher,
 )
+from anymani.distill.ssl.runtime import validation as validation_runtime
 from anymani.distill.ssl.runtime.validation import _update_training_q_bank_digest
 
 pytestmark = pytest.mark.contract
@@ -122,7 +123,9 @@ def test_q_block_split_matches_padding_of_individual_q_samples() -> None:
 
     block = _sample(torch.tensor([[0.1, -0.2], [0.3, 0.4]], dtype=torch.float64))
     split = split_online_geometry_sample(block)
-    block_batch = pad_online_geometry_samples(list(split), padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1))
+    block_batch = pad_online_geometry_samples(
+        list(split), padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1)
+    )
     individual_batch = pad_online_geometry_samples(
         [_sample(block.q[index : index + 1]) for index in range(2)],
         padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
@@ -202,29 +205,27 @@ def test_resident_window_evicts_old_asset_and_enforces_cap() -> None:
     assert [event["event"] for event in final_events] == ["resident_window", "resident_window_release_all"]
 
 
-def test_runtime_config_freezes_declared_microbatch_axes() -> None:
+def test_runtime_config_freezes_declared_minibatch_axes() -> None:
     """配置中的逻辑 batch 必须与 A_mb*Q_mb 一致，避免 silent reshape。"""
 
-    config = GeometrySSLRuntimeCfg(assets_per_microbatch=2, q_per_asset_per_microbatch=2)
+    config = GeometrySSLRuntimeCfg(assets_per_minibatch=2, q_per_asset_per_minibatch=2)
     assert config.max_resident_assets == 20
     with pytest.raises(ValueError, match="resident"):
-        GeometrySSLRuntimeCfg(max_resident_assets=1, assets_per_microbatch=2)
+        GeometrySSLRuntimeCfg(max_resident_assets=1, assets_per_minibatch=2)
 
 
 def test_epoch_scheduler_finishes_each_resident_window_before_switching() -> None:
     """资产数超过 cap 时，同一 window 的全部 q coverage 应连续完成，避免反复重建 BVH。"""
 
-    runtimes = tuple(
-        SimpleNamespace(asset_id=f"asset-{index}", spec_cpu=_spec()) for index in range(5)
-    )
+    runtimes = tuple(SimpleNamespace(asset_id=f"asset-{index}", spec_cpu=_spec()) for index in range(5))
     runtime = WindowedOnlineGeometryBatcher(
         runtimes,
         SimpleNamespace(),
         seed=7,
         runtime_config=GeometrySSLRuntimeCfg(
             max_resident_assets=4,
-            assets_per_microbatch=2,
-            q_per_asset_per_microbatch=1,
+            assets_per_minibatch=2,
+            q_per_asset_per_minibatch=1,
             q_per_asset_per_epoch=2,
             epochs=1,
         ),
@@ -236,3 +237,61 @@ def test_epoch_scheduler_finishes_each_resident_window_before_switching() -> Non
 
     assert runtime._groups == ((0, 1), (2, 3), (0, 1), (2, 3), (4,), (4,))
     assert runtime.blocks_per_epoch == 6
+
+
+def test_epoch_scheduler_preserves_a_smaller_tail_q_block() -> None:
+    """不可整除的 q coverage 必须保留真实尾块，不能拒绝配置或重复补齐样本。"""
+
+    runtimes = tuple(SimpleNamespace(asset_id=f"asset-{index}", spec_cpu=_spec()) for index in range(2))
+    runtime = WindowedOnlineGeometryBatcher(
+        runtimes,
+        SimpleNamespace(),
+        seed=11,
+        runtime_config=GeometrySSLRuntimeCfg(
+            max_resident_assets=2,
+            assets_per_minibatch=2,
+            q_per_asset_per_minibatch=2,
+            q_per_asset_per_epoch=5,
+            epochs=1,
+        ),
+        field_config=SimpleNamespace(),
+        query_config=SimpleNamespace(),
+        target_config=SimpleNamespace(),
+        padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
+    )
+
+    assert runtime._groups == ((0, 1), (0, 1), (0, 1))
+    assert runtime._q_counts == (2, 2, 1)
+
+
+def test_validation_ablation_marks_single_q_same_asset_shuffle_as_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """单 q 尾块没有合法同资产置换，应记录缺测而不是补样本或终止生命周期。"""
+
+    monkeypatch.setattr(validation_runtime, "geometry_ssl_ablation_forward", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        validation_runtime,
+        "geometry_ssl_reconstruction_metrics_per_sample",
+        lambda _prediction, _batch: {"density": [1.0], "kappa": [2.0], "derived_field": [3.0]},
+    )
+    batch = SimpleNamespace(
+        q=torch.zeros(1, 2),
+        q_index=torch.tensor([7]),
+        asset_ids=("asset-a",),
+        evidence=object(),
+        queries=SimpleNamespace(query_points_h=torch.zeros(1, 1, 1, 3)),
+        field_targets=SimpleNamespace(bandwidths=torch.ones(1)),
+        sensitivity_targets=SimpleNamespace(
+            owner_index=torch.tensor([0]),
+            query_index=torch.tensor([0]),
+            joint_index=torch.tensor([0]),
+        ),
+    )
+
+    def model(*_args: object, **_kwargs: object) -> object:
+        return object()
+
+    evidence = validation_runtime.fixed_validation_ablation_evidence(model, (batch,))
+
+    assert evidence["records"][0]["metrics"]["same_asset_q_shuffle"] is None

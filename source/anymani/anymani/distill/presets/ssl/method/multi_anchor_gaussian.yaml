@@ -1,0 +1,10 @@
+# Method 只组合 representation、model 与 objectives；具体 concrete cfg 由根 defaults 注入。
+defaults:
+  - schema_multi_anchor_gaussian
+  - _self_
+
+calibration:
+  minibatches: 8
+  min_weight: 1.0e-2
+  max_weight: 1.0e3
+  reference_term: density
