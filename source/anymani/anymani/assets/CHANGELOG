@@ -1,3 +1,11 @@
+0.4.1 - 2026-08-19
+==================
+
+- `HandGeneratorCfg.post_mutate_require_unique_geometry` 默认关闭以保留 identity 加权采样实验；正式 `POST_MUTATE_CFG` 开启后，每个 worker 以 mother 与本 variant set 已接受样本建立局部静态几何禁集。
+- 重复候选在 sample ID/bundle 创建前以 `post_mutate.duplicate_mother_geometry` 或 `post_mutate.duplicate_variant_geometry` 拒绝，只重抽当前槽位；joint limits、mass/inertia、ID 与 metadata 单独变化不构成新几何。
+- geometry fingerprint 提升为 Assets 共享工具，内存 `HandCfg` 和 sidecar 使用相同运动链、home pose、collision primitive/mesh bytes 规约；dataset builder 的跨角色闸门保留，并在 resume 时重新读取 sidecar 验证 fingerprint。
+- typed dataset template、planner、build/resume 与 manifest 编译由 `assets/dataset_build/` 迁入 `assets/generator/dataset_build/`，与最高 `HandGenerator` façade 保持同一生产子树。
+
 0.4.0 - 2026-08-19
 ==================
 

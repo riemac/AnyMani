@@ -9,7 +9,7 @@ seeds:
   mutation: 20260820
 generator:
   config_module: anymani.assets.config.asset_gen_cfg
-  config_sha256: adaf4f34a1f14a63f1cd4b4d9f06d293428eda27f3ed945b0838ce479b5edec8
+  config_sha256: 75e6a79821d57583cc7b241d8c00d7b4da3e5cfdbecac4bc56dcbb47aeda272c
   config_snapshot:
     mode: mutate
     artifact_level: bundle
@@ -20,6 +20,7 @@ generator:
     premade_parallel_fallback: serial
     post_mutate_seed: 20260813
     post_mutate_attempts_per_variant: 10
+    post_mutate_require_unique_geometry: true
     post_mutate_sources: []
     post_mutate_parallel: true
     post_mutate_parallel_workers: null
@@ -209,7 +210,7 @@ generator:
     missing: true
     recolored: anatomy_soft_v1
 code:
-  git_commit: fa2b887163f1274a7aaa063245f20279394410cf
+  git_commit: 5abc8fa40ce735b79f7924174cca560c39ad9005
   git_dirty: true
 quota_report:
   inventory:

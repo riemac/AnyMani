@@ -1,3 +1,10 @@
+0.6.3 - 2026-08-19
+==================
+
+- `HandGeneratorCfg` 新增可选的 post-mutate variant-set 静态几何唯一性闸门；正式资产 recipe 开启后，mother no-op、limit-only 变化和同 set 重复不再计为成功，而是在当前槽位预算内重新联合采样。
+- 唯一性检查在 bundle 导出前执行且不改变 mother-level 进程并行；dataset builder 继续以同一 fingerprint 拒绝跨 mother/partition 重复，并在 resume 时从实际 sidecar 重算身份。
+- 分层 dataset template/planner/build 编排迁入 `assets/generator/dataset_build/` 子包，明确其作为 `HandGenerator` 上层批量生产流程的职责。
+
 0.6.2 - 2026-08-19
 ==================
 
