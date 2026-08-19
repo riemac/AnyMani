@@ -1,4 +1,4 @@
-schema_version: 1.0.0
+schema_version: 2.0.0
 default_run_dir: source/anymani/anymani/assets/generated/2026-08-16_14-55-19
 
 train:
@@ -20,16 +20,6 @@ train:
               - 2026-08-18_16-01-25
 
 validation:
-  runs:
-    default:
-      groups:
-        single_palm_leap:
-          right_t4_i4_m4_r4:
-            include_mother: false
-            variant_sets:
-              - 2026-08-18_16-32-34
-
-evaluation:
   unseen_variant_set:
     runs:
       default:
@@ -38,7 +28,13 @@ evaluation:
             right_t4_i4_m4_r4:
               include_mother: false
               variant_sets:
-                - 2026-08-18_16-33-08
+                - 2026-08-18_16-32-34
+  unseen_mother:
+    runs: {}
+
+evaluation:
+  unseen_variant_set:
+    runs: {}
   unseen_mother:
     runs:
       default:

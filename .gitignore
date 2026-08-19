@@ -71,6 +71,7 @@ logs/rl_games/*
 datasets
 !source/anymani/anymani/assets/datasets/
 !source/anymani/anymani/assets/datasets/**
+**/assets/datasets/**/.build_state.yaml
 
 # Docker history
 .isaac-lab-docker-history

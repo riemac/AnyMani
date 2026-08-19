@@ -67,8 +67,11 @@ def test_resume_rejects_query_or_q_budget_drift(section: str) -> None:
 def test_resume_restores_initial_baseline_best_score_and_history() -> None:
     r"""中断后 checkpoint selection 必须沿用初始化分母与 historical best。"""
 
-    initial = {"density": 0.2, "kappa": 0.01, "derived_field": 2.0}
-    history = [{"step": 4, "score": 0.8, "metrics": {"density": 0.1}}]
+    initial = {
+        "unseen_variant_set": {"density": 0.2, "kappa": 0.01, "derived_field": 2.0},
+        "unseen_mother": {"density": 0.3, "kappa": 0.02, "derived_field": 2.5},
+    }
+    history = [{"step": 4, "score": 0.8, "metrics": {"unseen_variant_set": {"density": 0.1}}}]
 
     restored = restore_validation_selection_state(
         {
@@ -87,7 +90,10 @@ def test_resume_rejects_best_score_without_selection_history() -> None:
     with pytest.raises(ValueError, match="inconsistent"):
         restore_validation_selection_state(
             {
-                "initial_validation_metrics": {"density": 0.2, "kappa": 0.01, "derived_field": 2.0},
+                "initial_validation_metrics": {
+                    "unseen_variant_set": {"density": 0.2, "kappa": 0.01, "derived_field": 2.0},
+                    "unseen_mother": {"density": 0.3, "kappa": 0.02, "derived_field": 2.5},
+                },
                 "best_validation_score": 0.8,
                 "selection_history": [],
             }

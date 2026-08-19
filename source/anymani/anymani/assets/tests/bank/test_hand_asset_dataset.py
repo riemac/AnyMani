@@ -81,8 +81,13 @@ def _write_dataset(path: Path, payload: dict) -> Path:
     return path
 
 
-def test_dataset_resolves_default_and_overridden_runs_with_named_evaluation_suites(tmp_path: Path) -> None:
-    r"""同一 manifest 应稳定展开 groups、多 run 与两种 generated evaluation 关系。"""
+def test_dataset_resolves_named_validation_and_evaluation_suites(tmp_path: Path) -> None:
+    r"""Schema 2.0 应分别交付两类 validation/evaluation 泛化轴。
+
+    ``unseen_variant_set`` 固定 mother topology，只替换 post-mutate 随机实现；
+    ``unseen_mother`` 同时留出 mother 及其 variants。二者不能在 resolver 内扁平化，
+    否则 checkpoint selection 无法区分“未见扰动”与“未见形态”误差。
+    """
 
     default_run = _write_generation_run(tmp_path / "generated_default")
     secondary_run = _write_generation_run(tmp_path / "generated_secondary")
@@ -91,20 +96,28 @@ def test_dataset_resolves_default_and_overridden_runs_with_named_evaluation_suit
     mother_a = _write_bundle(default_run / "single_palm_leap" / "right_t4_i4_m4_r4", "mother_a")
     _write_variant_set(mother_a, "train_set", ("train_b", "train_a"))
     _write_variant_set(mother_a, "validation_set", ("validation_a",))
-    _write_variant_set(mother_a, "evaluation_set", ("evaluation_a",))
+
+    # mother E 也属于 train，但只承担 evaluation unseen-variant，避免 checkpoint selection mother 泄漏。
+    mother_e = _write_bundle(default_run / "single_palm_leap" / "right_t3_i4_m4_r4", "mother_e")
+    _write_variant_set(mother_e, "train_set", ("train_e",))
+    _write_variant_set(mother_e, "evaluation_set", ("evaluation_a",))
 
     # mother B 位于第二个 generation run，证明 run_dir 只在 run block 边界覆盖。
     mother_b = _write_bundle(secondary_run / "single_palm_allegro" / "right_t3_i3_m3_r3", "mother_b")
     _write_variant_set(mother_b, "train_set", ("train_secondary",))
 
-    # mother C 从未进入 train，因而可作为 unseen_mother suite；mixed 多一层 composition group。
+    # mother C 从未进入 train/validation，因而可作为 evaluation unseen_mother。
     mother_c = _write_bundle(default_run / "mixed" / "leap_thumb_allegro_ring" / "left_t3_i2_m4_r4", "mother_c")
     _write_variant_set(mother_c, "evaluation_set", ("evaluation_mother",))
+
+    # mother D 只属于 validation unseen_mother；evaluation 不得再次复用其 lineage。
+    mother_d = _write_bundle(default_run / "single_palm_leap" / "left_t3_i3_m3_r3", "mother_d")
+    _write_variant_set(mother_d, "validation_set", ("validation_mother",))
 
     manifest = _write_dataset(
         tmp_path / "dataset.yaml",
         {
-            "schema_version": "1.0.0",
+            "schema_version": "2.0.0",
             "default_run_dir": str(default_run),
             "train": {
                 "runs": {
@@ -114,7 +127,11 @@ def test_dataset_resolves_default_and_overridden_runs_with_named_evaluation_suit
                                 "right_t4_i4_m4_r4": {
                                     "include_mother": True,
                                     "variant_sets": ["train_set"],
-                                }
+                                },
+                                "right_t3_i4_m4_r4": {
+                                    "include_mother": True,
+                                    "variant_sets": ["train_set"],
+                                },
                             }
                         }
                     },
@@ -132,13 +149,29 @@ def test_dataset_resolves_default_and_overridden_runs_with_named_evaluation_suit
                 }
             },
             "validation": {
-                "runs": {
-                    "default": {
-                        "groups": {
-                            "single_palm_leap": {
-                                "right_t4_i4_m4_r4": {
-                                    "include_mother": False,
-                                    "variant_sets": ["validation_set"],
+                "unseen_variant_set": {
+                    "runs": {
+                        "default": {
+                            "groups": {
+                                "single_palm_leap": {
+                                    "right_t4_i4_m4_r4": {
+                                        "include_mother": False,
+                                        "variant_sets": ["validation_set"],
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "unseen_mother": {
+                    "runs": {
+                        "default": {
+                            "groups": {
+                                "single_palm_leap": {
+                                    "left_t3_i3_m3_r3": {
+                                        "include_mother": True,
+                                        "variant_sets": ["validation_set"],
+                                    }
                                 }
                             }
                         }
@@ -151,7 +184,7 @@ def test_dataset_resolves_default_and_overridden_runs_with_named_evaluation_suit
                         "default": {
                             "groups": {
                                 "single_palm_leap": {
-                                    "right_t4_i4_m4_r4": {
+                                    "right_t3_i4_m4_r4": {
                                         "include_mother": False,
                                         "variant_sets": ["evaluation_set"],
                                     }
@@ -185,10 +218,18 @@ def test_dataset_resolves_default_and_overridden_runs_with_named_evaluation_suit
         "mother_a",
         "train_a",
         "train_b",
+        "mother_e",
+        "train_e",
         "mother_b",
         "train_secondary",
     )
-    assert tuple(record.container.asset_id for record in resolved.validation.records) == ("validation_a",)
+    assert tuple(record.container.asset_id for record in resolved.validation["unseen_variant_set"].records) == (
+        "validation_a",
+    )
+    assert tuple(record.container.asset_id for record in resolved.validation["unseen_mother"].records) == (
+        "mother_d",
+        "validation_mother",
+    )
     assert tuple(record.container.asset_id for record in resolved.evaluation["unseen_variant_set"].records) == (
         "evaluation_a",
     )
@@ -210,7 +251,7 @@ def test_dataset_rejects_evaluation_suite_with_wrong_relation_to_train(tmp_path:
     manifest = _write_dataset(
         tmp_path / "wrong_relation.yaml",
         {
-            "schema_version": "1.0.0",
+            "schema_version": "2.0.0",
             "default_run_dir": str(run),
             "train": {
                 "runs": {
@@ -226,7 +267,10 @@ def test_dataset_rejects_evaluation_suite_with_wrong_relation_to_train(tmp_path:
                     }
                 }
             },
-            "validation": {"runs": {}},
+            "validation": {
+                "unseen_variant_set": {"runs": {}},
+                "unseen_mother": {"runs": {}},
+            },
             "evaluation": {
                 "unseen_variant_set": {"runs": {}},
                 "unseen_mother": {
@@ -265,7 +309,7 @@ def test_dataset_rejects_variant_set_whose_summary_points_to_another_mother(tmp_
     manifest = _write_dataset(
         tmp_path / "wrong_source.yaml",
         {
-            "schema_version": "1.0.0",
+            "schema_version": "2.0.0",
             "default_run_dir": str(run),
             "train": {
                 "runs": {
@@ -281,7 +325,10 @@ def test_dataset_rejects_variant_set_whose_summary_points_to_another_mother(tmp_
                     }
                 }
             },
-            "validation": {"runs": {}},
+            "validation": {
+                "unseen_variant_set": {"runs": {}},
+                "unseen_mother": {"runs": {}},
+            },
             "evaluation": {
                 "unseen_variant_set": {"runs": {}},
                 "unseen_mother": {"runs": {}},
@@ -292,3 +339,41 @@ def test_dataset_rejects_variant_set_whose_summary_points_to_another_mother(tmp_
 
     with pytest.raises(ValueError, match="source_topology_dir.*mother"):
         HandAssetDataset.from_yaml(manifest).resolve()
+
+
+def test_dataset_schema_two_rejects_legacy_flat_validation(tmp_path: Path) -> None:
+    r"""Schema 2.0 不保留扁平 validation 或 1.0 compatibility parser。
+
+    项目尚未开始正式训练，因此这里选择及时出清 persisted schema：旧 manifest
+    必须显式迁移成两条 suite，不能由 loader 猜测原 validation 属于哪种泛化轴。
+    """
+
+    run = _write_generation_run(tmp_path / "generated")
+    mother = _write_bundle(run / "single_palm_leap" / "right_t4_i4_m4_r4", "mother")
+    _write_variant_set(mother, "train_set", ("train",))
+    manifest = _write_dataset(
+        tmp_path / "legacy.yaml",
+        {
+            "schema_version": "1.0.0",
+            "default_run_dir": str(run),
+            "train": {
+                "runs": {
+                    "default": {
+                        "groups": {
+                            "single_palm_leap": {
+                                "right_t4_i4_m4_r4": {
+                                    "include_mother": True,
+                                    "variant_sets": ["train_set"],
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "validation": {"runs": {}},
+            "evaluation": {},
+        },
+    )
+
+    with pytest.raises(ValueError, match="schema must be exactly '2.0.0'"):
+        HandAssetDataset.from_yaml(manifest)

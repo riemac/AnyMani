@@ -1,0 +1,58 @@
+# 本文件只描述“从哪些 mother 采样、每条 lineage 生成多少资产、如何划分实验角色”。
+# post-mutate 算子、validator 和 physics closure 的数值配置仍以 asset_gen_cfg.py::POST_MUTATE_CFG 为真源。
+schema_version: 1.0.0  # 构建模板合同版本；最终 ssl.yaml/ppo.yaml 使用 HandAssetDataset schema 2.0.0。
+template_id: cross_embodiment_balanced_v1  # 稳定数据集身份，同时用作 lock、state、report 与 manifest 的一致性锚点。
+
+inventory:  # 只读 pre-made 库存；plan/build 不改写该 run 中现有 mother bundle。
+  run_dir: source/anymani/anymani/assets/generated/2026-08-19_15-10-48  # 2920 mothers，即 1460 个 canonical 左右镜像 pair。
+
+seeds:  # 两个随机域相互独立，改变生成随机性不会改变已冻结的 cohort 身份。
+  selection: 20260819  # 对分层桶内 mirror pairs 做稳定 SHA-256 排序；同一库存与模板可精确重放。
+  mutation: 20260820  # 每个 partition/suite/mother/retry 的 post-mutate seed 由此根种子确定性派生。
+
+balance:  # 所有权重先在容量约束下分配；不可实现的整数余数与容量偏差显式写入 selection lock。
+  selection_unit: canonical_mirror_pair  # left/right 是不可拆分形态单位；任何 partition 都不能只取得一侧。
+  macro_family:  # 四类权重均为 1，目标是在每个 cohort 中分配相同数量的 mirror pairs。
+    single_allegro: 1  # Allegro palm 且全部存活 non-thumb 均为 Allegro mechanism。
+    single_leap: 1  # LEAP palm 且全部存活 non-thumb 均为 LEAP mechanism。
+    mixed_allegro_base: 1  # Allegro palm，存活 non-thumb 同时包含 Allegro 与 LEAP。
+    mixed_leap_base: 1  # LEAP palm，存活 non-thumb 同时包含 LEAP 与 Allegro。
+  topology_shape:  # full:missing 的目标 pair 比例为 2:1；奇数余数由最大余数法确定，不改变 cohort 总量。
+    full: 2  # 四个 non-thumb slots 均存活的 topology 权重。
+    missing: 1  # 至少缺少一个 non-thumb slot 的 topology 权重。
+  missing_slot: uniform  # 在 missing 子空间内尽量均匀覆盖被移除的语义 finger slot。
+  mixed_composition_group: uniform  # 在 mixed 子空间内尽量均匀覆盖不同 LEAP/Allegro slot composition。
+  dof: uniform_available  # 在上述细分桶内对库存实际存在的整数 active-DOF 水平尽量等额取样。
+
+partitions:  # mother_count 统计单只手而非 pair，因此必须为偶数；assets_per_lineage 统计最终消费资产。
+  train:  # SSL 训练形态池；所有 unseen-variant mother 均从该池复用，但使用新的 variant set。
+    mother_count: 512  # 256 个 mirror pairs；与 validation/evaluation 的 unseen-mother cohorts 严格互斥。
+    assets_per_lineage: 16  # 包含 pre-made mother 本体，因此每只 mother 实际生成 15 个 post-mutate variants。
+  validation:  # 两条 suite 分别测“同形态新几何”和“全新形态”，checkpoint 聚合在 Distill 端等权完成。
+    unseen_variant_set:  # 复用 train mothers，但禁止复用 train variant assets；也不包含 mother 本体。
+      mother_count: 64  # 从 train 取得 32 个 mirror pairs，且与 evaluation.unseen_variant_set 的 mother cohort 互斥。
+      assets_per_lineage: 8  # 全部为新 post-mutate variants，因此每只 mother 实际生成 8 个 variants。
+    unseen_mother:  # mother 形态不允许出现在 train 或任何更早的 unseen-mother suite。
+      mother_count: 64  # 32 个完整 holdout mirror pairs，与 train 和 evaluation.unseen_mother 严格互斥。
+      assets_per_lineage: 8  # 包含 holdout mother 本体，因此每只 mother 实际生成 7 个 variants。
+  evaluation:  # 只用于最终评估；suite 关系与 validation 相同，但每条 lineage 使用更密的几何采样。
+    unseen_variant_set:  # 复用另一组 train mothers，不与 validation seen-mother cohort 重叠。
+      mother_count: 64  # 从 train 取得 32 个 mirror pairs；该 cohort 与 validation 的 64 mothers 共同定义 PPO 训练子集。
+      assets_per_lineage: 16  # 不包含 mother 本体，因此每只 mother 实际生成 16 个新 variants。
+    unseen_mother:  # 对训练和 validation 均不可见的独立形态 holdout。
+      mother_count: 64  # 32 个完整 holdout mirror pairs，与所有更早 mother-disjoint cohorts 互斥。
+      assets_per_lineage: 16  # 包含 holdout mother 本体，因此每只 mother 实际生成 15 个 variants。
+    official_zero_shot: []  # 首版不推断 official 手的 geometry semantics；待人工核验后再显式加入。
+
+generation_policy:  # 该层只处理 dataset 完整性；worker 内 candidate rejection 仍由 HandGenerator 配置控制。
+  dataset_retry_rounds: 3  # 每只 mother 最多执行 3 个确定性 seed rounds，避免无界补采改变目标分布。
+  uniqueness: resample  # variant shortfall、no-op 或跨角色 geometry fingerprint 重复时，整套 variant set 换 seed 重建。
+  failed_run_policy: quarantine  # 失败 run 保留诊断证据并写 QUARANTINED.yaml，但不进入最终 manifest。
+
+manifests:  # 只有全部必需 lineage 闭合后才原子发布；未完成 build 不产生可误消费的正式 manifest。
+  ssl:
+    enabled: true  # 发布包含 train、两条 validation 与两条 evaluation suites 的 ssl.yaml。
+  ppo:
+    enabled: true  # 只派生 lineage/variant 引用，不复制资产，也不再次运行 post-mutate。
+    train_mother_count: 128  # 固定为 64 validation seen mothers 与 64 evaluation seen mothers 的并集。
+    reuse_ssl_holdouts: true  # PPO 复用 SSL 的 validation/evaluation suites，保证两阶段评估形态完全一致。

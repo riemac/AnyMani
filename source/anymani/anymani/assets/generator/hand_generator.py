@@ -45,6 +45,7 @@ from ..asset_physics import AssetPhysicsCfg, close_hand_physics
 from ..exporter import HandExporter, HandExporterCfg
 from ..procedural_meshes import materialize_hand_procedural_meshes
 from ..validator import HandValidator, HandValidatorCfg
+from .mutate import HandMutator, HandMutatorCfg
 from .premade.batch import (
     build_premade_tasks,
     run_premade_parallel,
@@ -76,35 +77,10 @@ from .presentation.recolor import (
 )
 from .result import HandGenerationResult
 from .runtime.artifact_lifecycle import rollback_created_directory, rollback_written_artifacts
+from .runtime.mutate_batch import PostMutateVariantSetResult, run_post_mutate_source_batch
 from .runtime.mutate_sampling import run_mutate_batch_with_independent_proposals
 from .runtime.restore import PostMutateSource, load_post_mutate_source
 from .runtime.run_context import GenerationRunContext
-
-try:
-    from .mutate import HandMutator, HandMutatorCfg
-except Exception:
-    @dataclass
-    class HandMutatorCfg(AssetCfgBase):
-        r"""Fallback mutate cfg used when the mutate package is unavailable.
-
-        The first implementation slice does not execute post-mutate logic, but the
-        generator cfg still keeps the field so the public interface remains stable.
-        """
-
-        def has_terms(self) -> bool:
-            return False
-
-    class HandMutator:
-        r"""Fallback mutator used when the mutate package is unavailable."""
-
-        def __init__(self, cfg: HandMutatorCfg):
-            self.cfg = cfg
-
-        def describe_sampling(self, target: HandCfg) -> dict[str, dict[str, Any]]:
-            return {}
-
-        def mutate(self, target: HandCfg, *, sampled_params: dict[str, dict[str, Any]] | None = None) -> HandCfg | None:
-            raise NotImplementedError("mutate runtime is unavailable in the current environment")
 
 
 def _has_enabled_mutation(cfg: HandMutatorCfg) -> bool:
@@ -123,6 +99,31 @@ def _sample_mutation_terms(mutator: HandMutator, target: HandCfg) -> dict[str, d
 # ============================================================================
 #  生成器配置
 # ============================================================================
+
+
+@dataclass(frozen=True)
+class PostMutateSourceCfg:
+    r"""一个可独立并行调度的 mother variant-set 生成任务。
+
+    ``n_samples`` 只统计 post-mutate variants，不包含 mother 本体；dataset planner
+    负责由 ``assets_per_lineage`` 扣除 ``include_mother`` 后给出该值。
+    """
+
+    task_id: str
+    source_topology_dir: Path | str
+    n_samples: int
+    seed: int
+
+    def __post_init__(self) -> None:
+        r"""规范路径并拒绝空任务、负 variant 数和非法 seed。"""
+
+        object.__setattr__(self, "source_topology_dir", Path(self.source_topology_dir))
+        if not self.task_id.strip():
+            raise ValueError("post-mutate source task_id cannot be empty")
+        if self.n_samples < 0:
+            raise ValueError("post-mutate source n_samples must be non-negative")
+        if self.seed < 0:
+            raise ValueError("post-mutate source seed must be non-negative")
 
 
 @dataclass
@@ -221,6 +222,19 @@ class HandGeneratorCfg(AssetCfgBase):
     四个 mutator 的原始 proposal 分布重新独立抽样。预算耗尽只造成当前槽位
     shortfall，不在其他 mode 内补采，也不占用后续槽位的预算。
     """
+
+    post_mutate_sources: list[PostMutateSourceCfg] = field(default_factory=list)
+    r"""多个 mother 的 source-level variant-set tasks。
+
+    该字段只供 :meth:`HandGenerator.generate_variant_sets` 使用，并与单源
+    ``source_topology_dir`` 互斥。每项 task 可独立覆盖 variant 数与 seed。
+    """
+
+    post_mutate_parallel: bool = True
+    """是否在 mother variant-set 粒度启用进程并行。"""
+
+    post_mutate_parallel_workers: int | None = None
+    """post-mutate worker 数；``None`` 使用不超过 8 的 conservative 自动值。"""
 
     Made: HandBuilderCfg = field(default_factory=HandBuilderCfg)
     """前序生成配置入口；主要负责关节拓扑维度的变体，把生成空间中的选择落到一个初始 `HandCfg`。"""
@@ -355,6 +369,10 @@ class HandGeneratorCfg(AssetCfgBase):
         self.output_dir = Path(self.output_dir)  # 统一在 cfg 边界内把路径收口为 `Path`
         if self.source_topology_dir is not None:
             self.source_topology_dir = Path(self.source_topology_dir)
+        self.post_mutate_sources = [
+            source if isinstance(source, PostMutateSourceCfg) else PostMutateSourceCfg(**source)
+            for source in self.post_mutate_sources
+        ]
         self.hand_presets = normalize_name_list(self.hand_presets, field_name="hand_presets")
         self.connectivity_presets = normalize_connectivity_mapping(self.connectivity_presets)
         self.recolored = normalize_recolor_spec(self.recolored)
@@ -364,6 +382,14 @@ class HandGeneratorCfg(AssetCfgBase):
             raise ValueError("premade_parallel_fallback must be either 'serial' or 'raise'")
         if int(self.post_mutate_attempts_per_variant) < 1:
             raise ValueError("post_mutate_attempts_per_variant must be >= 1")
+        if self.post_mutate_parallel_workers is not None and self.post_mutate_parallel_workers < 1:
+            raise ValueError("post_mutate_parallel_workers must be >= 1 when provided")
+        task_ids = [source.task_id for source in self.post_mutate_sources]
+        source_paths = [Path(source.source_topology_dir) for source in self.post_mutate_sources]
+        if len(set(task_ids)) != len(task_ids):
+            raise ValueError("post_mutate_sources task_id values must be unique")
+        if len(set(source_paths)) != len(source_paths):
+            raise ValueError("post_mutate_sources source topology paths must be unique within one batch")
 
         # pre-made façade 一旦显式给出 `connectivity_presets`，就必须同时给出 hand preset 列表；
         # 否则运行时连“这张映射是给谁的”都无法确定。
@@ -378,10 +404,12 @@ class HandGeneratorCfg(AssetCfgBase):
                 "When hand_presets contains multiple base hand presets, Made must stay abstract; "
                 "otherwise one concrete builder cfg would be incorrectly reused for all preset anchors."
             )
-        if self.mode == "mutate" and self.source_topology_dir is None:
-            raise ValueError("mode='mutate' requires 'source_topology_dir' to point at one topology directory")
-        if self.mode != "mutate" and self.source_topology_dir is not None:
-            raise ValueError("'source_topology_dir' is only valid when mode='mutate'")
+        if self.source_topology_dir is not None and self.post_mutate_sources:
+            raise ValueError("source_topology_dir and post_mutate_sources are mutually exclusive")
+        if self.mode == "mutate" and self.source_topology_dir is None and not self.post_mutate_sources:
+            raise ValueError("mode='mutate' requires one source_topology_dir or non-empty post_mutate_sources")
+        if self.mode != "mutate" and (self.source_topology_dir is not None or self.post_mutate_sources):
+            raise ValueError("post-mutate source fields are only valid when mode='mutate'")
         if self.mode == "mutate" and not _has_enabled_mutation(self.Mutate):
             raise ValueError("mode='mutate' requires at least one enabled mutator term")
 
@@ -900,6 +928,8 @@ class HandGenerator:
                 "the full pipeline has not been adapted to topology-root export semantics yet."
             )
         if self.cfg.mode == "mutate":
+            if self.cfg.post_mutate_sources:
+                raise ValueError("multi-source mutate cfg must use generate_variant_sets(), not generate()")
             return self._generate_once(hand_preset_name=None, connectivity_preset_name=None)
         selection = self._resolve_single_premade_selection()
         if selection is None:
@@ -933,6 +963,8 @@ class HandGenerator:
             )
 
         if self.cfg.mode == "mutate":
+            if self.cfg.post_mutate_sources:
+                raise ValueError("multi-source mutate cfg must use generate_variant_sets(), not generate_batch()")
             target_count = max(int(self.cfg.n_samples), 0)
             mutator = HandMutator(self.cfg.Mutate)
             source_hand = self._load_mutate_source().hand_cfg
@@ -980,8 +1012,21 @@ class HandGenerator:
             yield result
             success_count += 1
 
+    def generate_variant_sets(self) -> Iterator[PostMutateVariantSetResult]:
+        r"""为多个 mother source 生成相互独立的 variant-set runs。
+
+        每个 source task 在独立 ``HandGenerator`` 中恢复 mother、设置自己的 seed，
+        顺序完成全部 variants；source tasks 可进程并行，返回顺序仍与 cfg 声明一致。
+        """
+
+        if self.cfg.mode != "mutate" or not self.cfg.post_mutate_sources:
+            raise ValueError("generate_variant_sets() requires mode='mutate' and non-empty post_mutate_sources")
+        yield from run_post_mutate_source_batch(self, tasks=tuple(self.cfg.post_mutate_sources))
+
 __all__ = [
     "HandGenerationResult",
     "HandGeneratorCfg",
     "HandGenerator",
+    "PostMutateSourceCfg",
+    "PostMutateVariantSetResult",
 ]

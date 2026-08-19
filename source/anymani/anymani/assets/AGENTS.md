@@ -36,7 +36,7 @@
 - **Validator**：显式拒绝不合法资产；
 - **Exporter**：URDF / sidecar / tree / mesh materialization；
 - **Physics Closure**：`asset_physics.py`，只负责由最终 collision 几何重建 `mass / inertial`；
-- **Asset Bank / Dataset**：bank 负责低层路径解析、bundle 校验与虚拟视图；dataset 负责跨 run 的 lineage 选择、partition 展开与 provenance；
+- **Asset Bank / Dataset**：bank 负责低层路径解析、bundle 校验与虚拟视图；dataset manifest 负责 partition 展开，`dataset_build` 负责从 inventory 分层选择 lineages、并行 post-mutate 与发布 provenance；
 - **Generator**：最高 façade，只编排阶段，不吞并各阶段职责。
 
 尤其注意：**动力学闭包不要再塞回 builder、mutator 或 exporter**。  
@@ -48,7 +48,7 @@ pre-made topology 把 family composition 与 missing slots 视为正交轴。thu
 
 `asset_schema_geometry.py` 定义版本化 `{a}->{h}`、完整 fixed/revolute 链、显式 $q_{home}$、limits、PALM/JOINT/TIP owner、collision component 与 anchor seed。exporter 在 `HandCfg` 真源仍在内存时写入 `hand.yaml.geometry_semantics`；bank 只在 `require_geometry_semantics=True` 时解析，新 generated sidecar 直接读取，旧 generated sidecar 确定性迁移，official 缺人工核验字段时严格拒绝。
 
-`HandBank` 是单 bundle、单 source root 与显式 container 选择的低层交付入口；`HandAssetDataset` 读取 `assets/datasets/*.yaml`，在其上组合多个 generation runs、mother lineages 与 train/validation/evaluation partitions。两者均保持下游中立；不要让 tasks/distill 重做目录展开，也不要把动态 FK/Jacobian、field/query、spawn 或 optimizer 逻辑放进 bank。
+`HandBank` 是单 bundle、单 source root 与显式 container 选择的低层交付入口；`HandAssetDataset` 读取 schema 2.0 最终 manifest，`dataset_build` 读取 typed template 并冻结 selection lock。模板控制 cohort 分布和 post-mutate 数量，但具体 mutator/validator/physics 仍由 `HandGeneratorCfg` 定义。三者均保持下游中立；不要让 tasks/distill 重做目录展开，也不要把动态 FK/Jacobian、field/query、spawn 或 optimizer 逻辑放进 bank。
 
 ### 4. 自包含性
 
@@ -77,6 +77,8 @@ pre-made topology 把 family composition 与 missing slots 视为正交轴。thu
 | **Dataset partition（数据划分）** | cohort 的 `train` / `validation` / `evaluation` 子集 | 训练角色，不改变资产自身的生成身份与 family 身份。 |
 
 `family` 表示 base palm 的来源/机制族；完整 topology 必须结合 `family_composition`、`missing_slots`、`surviving_slots` 与 `slot_family_map` 判断，不能只读顶层 `family`。`topology_kind` 只保留为历史 sidecar/summary 的派生兼容标签。dataset YAML 以完整 variant set 为配置原子，并对每条 lineage 显式声明 `include_mother`；跨 partition 先按路径、asset ID 与 `content_hash` 拒绝重复，geometry consumer 再按 `physical_geometry_hash` 拒绝相同物理映射。
+
+Dataset partition 以 canonical left/right mirror pair 为最小 morphology 分配单位；同一 pair 不得拆到 train 与 unseen-mother holdout。selection lock、generator config hash 与 build report 是正式 manifest 的 provenance，`.build_state.yaml` 仅用于本地中断恢复，不进入版本库。
 
 ### 文档与版本
 

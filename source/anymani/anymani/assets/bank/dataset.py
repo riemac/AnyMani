@@ -30,8 +30,8 @@ from .hand_bank import HandBank, HandBankCfg
 from .hand_container import HandContainer, HandContainerCfg
 from .path_utils import resolve_bank_path
 
-HAND_ASSET_DATASET_SCHEMA_VERSION = "1.0.0"
-"""第一版 run-map dataset YAML schema；不兼容旧 leaf-ID family split。"""
+HAND_ASSET_DATASET_SCHEMA_VERSION = "2.0.0"
+"""具名 validation/evaluation suites 的严格 run-map dataset YAML schema。"""
 
 HandAssetCollectionKind: TypeAlias = Literal["groups", "mixed", "official"]
 """资产目录分支；``mixed`` 比普通 production group 多一层 composition group。"""
@@ -120,6 +120,19 @@ class HandAssetOfficialPartitionCfg:
 
 
 @dataclass(frozen=True)
+class HandAssetValidationCfg:
+    r"""checkpoint selection 使用的两条 generated validation 泛化轴。
+
+    ``unseen_variant_set`` 的 mother 必须已属于 train，因而只测同一 morphology
+    下未见 post-mutate realization；``unseen_mother`` 的完整 lineage 必须与 train
+    隔离。两者保持具名结构，训练侧才能分别聚合后再决定 checkpoint score。
+    """
+
+    unseen_variant_set: HandAssetPartitionCfg = field(default_factory=HandAssetPartitionCfg)
+    unseen_mother: HandAssetPartitionCfg = field(default_factory=HandAssetPartitionCfg)
+
+
+@dataclass(frozen=True)
 class HandAssetEvaluationCfg:
     r"""训练冻结后可独立执行的三类 zero-shot 资产选择。"""
 
@@ -135,7 +148,7 @@ class HandAssetDatasetCfg:
     schema_version: str = HAND_ASSET_DATASET_SCHEMA_VERSION  # persisted YAML contract
     default_run_dir: str = ""  # 大多数 run block 共用的 generation root
     train: HandAssetPartitionCfg = field(default_factory=HandAssetPartitionCfg)
-    validation: HandAssetPartitionCfg = field(default_factory=HandAssetPartitionCfg)
+    validation: HandAssetValidationCfg = field(default_factory=HandAssetValidationCfg)
     evaluation: HandAssetEvaluationCfg = field(default_factory=HandAssetEvaluationCfg)
 
     def __post_init__(self) -> None:
@@ -193,7 +206,7 @@ class ResolvedHandAssetDataset:
     source_sha256: str  # 原始 YAML bytes，供 resume/实验产物比对
     config: HandAssetDatasetCfg  # 已类型化且验证的选择声明
     train: ResolvedHandAssetPartition
-    validation: ResolvedHandAssetPartition
+    validation: Mapping[str, ResolvedHandAssetPartition]
     evaluation: Mapping[str, ResolvedHandAssetPartition]
 
     def config_dict(self) -> dict[str, Any]:
@@ -259,21 +272,31 @@ class HandAssetDataset:
             require_geometry_semantics=require_geometry_semantics,
             allow_legacy_left_handedness=allow_legacy_left_handedness,
         )
-        validation = self._resolve_generated_partition(
-            self.config.validation,
-            partition_name="validation",
+        validation_unseen_variant_set = self._resolve_generated_partition(
+            self.config.validation.unseen_variant_set,
+            partition_name="validation.unseen_variant_set",
             require_geometry_semantics=require_geometry_semantics,
             allow_legacy_left_handedness=allow_legacy_left_handedness,
         )
+        validation_unseen_mother = self._resolve_generated_partition(
+            self.config.validation.unseen_mother,
+            partition_name="validation.unseen_mother",
+            require_geometry_semantics=require_geometry_semantics,
+            allow_legacy_left_handedness=allow_legacy_left_handedness,
+        )
+        validation = {
+            "unseen_variant_set": validation_unseen_variant_set,
+            "unseen_mother": validation_unseen_mother,
+        }
         unseen_variant_set = self._resolve_generated_partition(
             self.config.evaluation.unseen_variant_set,
-            partition_name="unseen_variant_set",
+            partition_name="evaluation.unseen_variant_set",
             require_geometry_semantics=require_geometry_semantics,
             allow_legacy_left_handedness=allow_legacy_left_handedness,
         )
         unseen_mother = self._resolve_generated_partition(
             self.config.evaluation.unseen_mother,
-            partition_name="unseen_mother",
+            partition_name="evaluation.unseen_mother",
             require_geometry_semantics=require_geometry_semantics,
             allow_legacy_left_handedness=allow_legacy_left_handedness,
         )
@@ -289,9 +312,15 @@ class HandAssetDataset:
 
         # Dataset identity 要求每项物理 bundle 只承担一个 partition/suite 角色；更深的
         # physical-mapping equality 由 SSL geometry materialization 后的 hash gate 负责。
-        all_partitions = (train, validation, *evaluation.values())
+        all_partitions = (train, *validation.values(), *evaluation.values())
         _validate_unique_asset_records(all_partitions)
-        _validate_evaluation_relations(train, unseen_variant_set, unseen_mother)
+        _validate_named_suite_relations(
+            train,
+            validation_unseen_variant_set=validation_unseen_variant_set,
+            validation_unseen_mother=validation_unseen_mother,
+            evaluation_unseen_variant_set=unseen_variant_set,
+            evaluation_unseen_mother=unseen_mother,
+        )
         return ResolvedHandAssetDataset(
             source_path=self.source_path,
             source_sha256=self.source_sha256,
@@ -361,7 +390,7 @@ class HandAssetDataset:
                 ResolvedHandAssetRecord(
                     container=container,
                     provenance=HandAssetProvenance(
-                        partition="official_zero_shot",
+                        partition="evaluation.official_zero_shot",
                         run_alias="official",
                         run_dir="",
                         collection_kind="official",
@@ -374,7 +403,7 @@ class HandAssetDataset:
                     content_hash=_container_content_hash(container),
                 )
             )
-        return ResolvedHandAssetPartition(name="official_zero_shot", records=tuple(records))
+        return ResolvedHandAssetPartition(name="evaluation.official_zero_shot", records=tuple(records))
 
 
 def _resolve_generated_lineage(
@@ -588,24 +617,74 @@ def _record_unique_identity(
     string_seen[identity] = partition
 
 
-def _validate_evaluation_relations(
+def _validate_named_suite_relations(
     train: ResolvedHandAssetPartition,
-    unseen_variant_set: ResolvedHandAssetPartition,
-    unseen_mother: ResolvedHandAssetPartition,
+    *,
+    validation_unseen_variant_set: ResolvedHandAssetPartition,
+    validation_unseen_mother: ResolvedHandAssetPartition,
+    evaluation_unseen_variant_set: ResolvedHandAssetPartition,
+    evaluation_unseen_mother: ResolvedHandAssetPartition,
 ) -> None:
-    r"""验证 suite 名称与 mother lineage 相对 train 的真实关系一致。"""
+    r"""验证具名 validation/evaluation suites 的 lineage 隔离关系。
+
+    validation 与 evaluation 都包含“同 mother 新 variants”和“全新 mother”两条轴。
+    evaluation 发生在 checkpoint selection 之后，因此其 seen-mother cohort 不能与
+    validation seen-mother cohort 重合，unseen mother 也不能在任何更早角色出现。
+    """
 
     train_mothers = {record.provenance.mother_path for record in train.records if record.provenance.mother_path}
-    for record in unseen_variant_set.records:
+    validation_seen_mothers = _validate_unseen_variant_set(
+        validation_unseen_variant_set,
+        train_mothers=train_mothers,
+    )
+    evaluation_seen_mothers = _validate_unseen_variant_set(
+        evaluation_unseen_variant_set,
+        train_mothers=train_mothers,
+    )
+    overlap = validation_seen_mothers & evaluation_seen_mothers
+    if overlap:
+        raise ValueError(f"validation/evaluation unseen_variant_set mothers overlap: {tuple(sorted(overlap))}")
+
+    validation_unseen_mothers = _validate_unseen_mother(
+        validation_unseen_mother,
+        forbidden_mothers=train_mothers,
+    )
+    _validate_unseen_mother(
+        evaluation_unseen_mother,
+        forbidden_mothers=train_mothers | validation_unseen_mothers,
+    )
+
+
+def _validate_unseen_variant_set(
+    partition: ResolvedHandAssetPartition,
+    *,
+    train_mothers: set[str],
+) -> set[str]:
+    r"""验证一条 unseen-variant suite，并返回其 mother lineage 集。"""
+
+    mothers: set[str] = set()
+    for record in partition.records:
         provenance = record.provenance
         if provenance.asset_role != "variant":
             raise ValueError("unseen_variant_set may contain variants only; mother inclusion must be false")
         if provenance.mother_path not in train_mothers:
             raise ValueError(f"unseen_variant_set mother is absent from train: {provenance.mother_path}")
-    for record in unseen_mother.records:
-        provenance = record.provenance
-        if provenance.mother_path in train_mothers:
-            raise ValueError(f"unseen_mother already appears in train: {provenance.mother_path}")
+        mothers.add(provenance.mother_path)
+    return mothers
+
+
+def _validate_unseen_mother(
+    partition: ResolvedHandAssetPartition,
+    *,
+    forbidden_mothers: set[str],
+) -> set[str]:
+    r"""验证一条 unseen-mother suite，并返回其完整 lineage 集。"""
+
+    mothers = {record.provenance.mother_path for record in partition.records if record.provenance.mother_path}
+    overlap = mothers & forbidden_mothers
+    if overlap:
+        raise ValueError(f"unseen_mother already appears in train or validation: {tuple(sorted(overlap))}")
+    return mothers
 
 
 def _container_content_hash(container: HandContainer) -> str:
@@ -625,8 +704,19 @@ def _dataset_cfg_from_mapping(document: Mapping[str, Any]) -> HandAssetDatasetCf
     _require_keys(
         document,
         allowed={"schema_version", "default_run_dir", "train", "validation", "evaluation"},
-        required={"schema_version", "default_run_dir", "train"},
+        required={"schema_version", "default_run_dir", "train", "validation", "evaluation"},
         context="dataset",
+    )
+    schema_version = str(document["schema_version"])
+    if schema_version != HAND_ASSET_DATASET_SCHEMA_VERSION:
+        raise ValueError(f"hand asset dataset schema must be exactly {HAND_ASSET_DATASET_SCHEMA_VERSION!r}")
+
+    validation_raw = _as_mapping(document["validation"], context="validation")
+    _require_keys(
+        validation_raw,
+        allowed={"unseen_variant_set", "unseen_mother"},
+        required={"unseen_variant_set", "unseen_mother"},
+        context="validation",
     )
     evaluation_raw = _as_mapping(document.get("evaluation", {}), context="evaluation")
     _require_keys(
@@ -639,10 +729,17 @@ def _dataset_cfg_from_mapping(document: Mapping[str, Any]) -> HandAssetDatasetCf
     _require_keys(official_raw, allowed={"assets"}, required=set(), context="official_zero_shot")
     official_assets = _string_tuple(official_raw.get("assets", ()), context="official_zero_shot.assets")
     return HandAssetDatasetCfg(
-        schema_version=str(document["schema_version"]),
+        schema_version=schema_version,
         default_run_dir=str(document["default_run_dir"]),
         train=_partition_cfg_from_mapping(document["train"], context="train"),
-        validation=_partition_cfg_from_mapping(document.get("validation", {}), context="validation"),
+        validation=HandAssetValidationCfg(
+            unseen_variant_set=_partition_cfg_from_mapping(
+                validation_raw["unseen_variant_set"], context="validation.unseen_variant_set"
+            ),
+            unseen_mother=_partition_cfg_from_mapping(
+                validation_raw["unseen_mother"], context="validation.unseen_mother"
+            ),
+        ),
         evaluation=HandAssetEvaluationCfg(
             unseen_variant_set=_partition_cfg_from_mapping(
                 evaluation_raw.get("unseen_variant_set", {}), context="evaluation.unseen_variant_set"
@@ -779,6 +876,7 @@ __all__ = [
     "HandAssetPartitionCfg",
     "HandAssetProvenance",
     "HandAssetRunCfg",
+    "HandAssetValidationCfg",
     "ResolvedHandAssetDataset",
     "ResolvedHandAssetPartition",
     "ResolvedHandAssetRecord",

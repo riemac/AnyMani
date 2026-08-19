@@ -30,23 +30,52 @@ class MultiAnchorEvaluation:
             seed=run_seed + self.config.validation_seed_offset,
         )
 
-    def selection_baseline(self, metrics: dict[str, float]) -> dict[str, float]:
-        r"""只保留 checkpoint selection 声明的初始化归一化分母。"""
+    def selection_baseline(
+        self,
+        metrics: dict[str, dict[str, float]],
+    ) -> dict[str, dict[str, float]]:
+        r"""保存每条 validation suite 的初始化归一化分母。
 
-        missing = set(self.config.selection_metrics) - metrics.keys()
-        if missing:
-            raise ValueError(f"validation metrics lack selection terms: {sorted(missing)}")
-        baseline = {name: float(metrics[name]) for name in self.config.selection_metrics}
-        if any(value <= 0.0 for value in baseline.values()):
+        suite 轴不能在 baseline 前合并。若先按资产数扁平平均，扩大某条 suite 会
+        同时改变统计精度和 checkpoint objective；这里对每条 suite 独立冻结三项指标。
+        """
+
+        if not metrics:
+            raise ValueError("validation selection requires at least one named suite")
+        baseline: dict[str, dict[str, float]] = {}
+        for suite_name, suite_metrics in metrics.items():
+            missing = set(self.config.selection_metrics) - suite_metrics.keys()
+            if missing:
+                raise ValueError(f"validation suite {suite_name!r} lacks selection terms: {sorted(missing)}")
+            baseline[suite_name] = {
+                name: float(suite_metrics[name]) for name in self.config.selection_metrics
+            }  # 每个 suite 固定同一组 metric 分母，suite 间不共享尺度
+        if any(value <= 0.0 for suite in baseline.values() for value in suite.values()):
             raise FloatingPointError("initial validation selection metrics must be positive")
         return baseline
 
-    def normalized_score(self, metrics: dict[str, float], baseline: dict[str, float]) -> float:
-        r"""按 initialization-normalized metrics 等权计算 promotion score。"""
+    def normalized_score(
+        self,
+        metrics: dict[str, dict[str, float]],
+        baseline: dict[str, dict[str, float]],
+    ) -> float:
+        r"""先对 metric 等权，再对 validation suite 等权计算 promotion score。
 
-        return sum(metrics[name] / baseline[name] for name in self.config.selection_metrics) / len(
-            self.config.selection_metrics
-        )
+        对 suite $s$ 的归一化分数为
+        $S_s=|M|^{-1}\sum_{m\in M}L_{s,m}/L^{(0)}_{s,m}$；最终
+        $S=|S|^{-1}\sum_s S_s$。因此 suite 资产数不进入 checkpoint 权重。
+        """
+
+        if set(metrics) != set(baseline):
+            raise ValueError("validation metrics and initialization baseline suites do not match")
+        suite_scores = []
+        for suite_name, suite_baseline in baseline.items():
+            suite_metrics = metrics[suite_name]
+            suite_scores.append(
+                sum(suite_metrics[name] / suite_baseline[name] for name in self.config.selection_metrics)
+                / len(self.config.selection_metrics)
+            )
+        return sum(suite_scores) / len(suite_scores)
 
     def require_ablation_contract(self, reported: tuple[str, ...]) -> None:
         r"""拒绝 YAML 声明与 concrete evaluator 实际执行的 ablation 集漂移。"""

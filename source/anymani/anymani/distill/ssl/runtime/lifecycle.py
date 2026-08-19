@@ -105,12 +105,13 @@ def _manifest_record(asset: Any, source: Any, *, partition: str, provenance: Any
 
 
 def _build_manifest(
-    catalog: Any, train_sources: tuple[Any, ...], validation_sources: tuple[Any, ...]
+    catalog: Any,
+    train_sources: tuple[Any, ...],
+    validation_sources: dict[str, tuple[Any, ...]],
 ) -> dict[str, Any]:
-    r"""构造 schema 3 expanded physical manifest，evaluation 只做 identity lowering。"""
+    r"""构造 schema 4 expanded physical manifest，保留具名 validation suites。"""
 
     train_by_id = {source.asset_id: source for source in train_sources}
-    validation_by_id = {source.asset_id: source for source in validation_sources}
     train = tuple(
         _manifest_record(
             record.container,
@@ -120,15 +121,18 @@ def _build_manifest(
         )
         for record in catalog.dataset.train.records
     )
-    validation = tuple(
-        _manifest_record(
-            record.container,
-            validation_by_id[record.container.asset_id],
-            partition="validation",
-            provenance=record.provenance,
-        )
-        for record in catalog.dataset.validation.records
-    )
+    validation: dict[str, list[dict[str, Any]]] = {}
+    for suite_name, suite_sources in validation_sources.items():
+        source_by_id = {source.asset_id: source for source in suite_sources}
+        validation[suite_name] = [
+            _manifest_record(
+                record.container,
+                source_by_id[record.container.asset_id],
+                partition=f"validation.{suite_name}",
+                provenance=record.provenance,
+            )
+            for record in catalog.dataset.validation[suite_name].records
+        ]
     evaluation: dict[str, list[dict[str, Any]]] = {}
     for name, partition in catalog.dataset.evaluation.items():
         records: list[dict[str, Any]] = []
@@ -152,11 +156,11 @@ def _build_manifest(
             )
         evaluation[name] = records
     manifest = {
-        "schema_version": "3.0.0",
+        "schema_version": "4.0.0",
         "dataset_source_path": str(catalog.dataset.source_path),
         "dataset_source_sha256": catalog.dataset.source_sha256,
         "train": list(train),
-        "validation": list(validation),
+        "validation": validation,
         "evaluation": evaluation,
     }
     validate_asset_manifest_isolation(manifest)
@@ -395,7 +399,10 @@ def fit_embodiment_pretrain(
     output_dir = run.prepare_output_dir(output_dir_override)
     catalog = data.resolve()
     train_sources = method.materialize_sources(catalog.train)
-    validation_sources = method.materialize_sources(catalog.validation)
+    validation_sources = {
+        suite_name: method.materialize_sources(suite_assets)
+        for suite_name, suite_assets in catalog.validation.items()
+    }  # 每条泛化轴独立 materialize，后续指标先 suite 内聚合
     manifest = _build_manifest(catalog, train_sources, validation_sources)
     _write_yaml(output_dir / "resolved_config.yaml", resolved_config)
     _write_yaml(output_dir / "asset_dataset.yaml", catalog.dataset.config_dict())
@@ -409,7 +416,7 @@ def fit_embodiment_pretrain(
         )
     )
     train_window = None
-    validation_window = None
+    validation_windows: dict[str, Any] = {}
     model = method.initialize_model(device=device, dtype=dtype)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -421,22 +428,28 @@ def fit_embodiment_pretrain(
         SobolJointSampler(source.spec_cpu, seed=trainer.config.sampling.seed + index)
         for index, source in enumerate(train_sources)
     )
-    validation_schedule = (
-        OnlineMinibatchSchedule(
-            len(validation_sources),
+    validation_schedules = {
+        suite_name: OnlineMinibatchSchedule(
+            len(suite_sources),
             evaluation.validation_sampling(
                 trainer_sampling=trainer.config.sampling,
                 run_seed=run.config.seed,
-                asset_count=len(validation_sources),
+                asset_count=len(suite_sources),
             ),
         )
-        if validation_sources
-        else None
-    )
-    validation_samplers = tuple(
-        SobolJointSampler(source.spec_cpu, seed=run.config.seed + evaluation.validation_seed + index)
-        for index, source in enumerate(validation_sources)
-    )
+        for suite_name, suite_sources in validation_sources.items()
+        if suite_sources
+    }
+    validation_samplers = {
+        suite_name: tuple(
+            SobolJointSampler(
+                source.spec_cpu,
+                seed=run.config.seed + evaluation.validation_seed + suite_index * 1_000_003 + source_index,
+            )
+            for source_index, source in enumerate(suite_sources)
+        )
+        for suite_index, (suite_name, suite_sources) in enumerate(validation_sources.items())
+    }  # suite seed 域显式错开，且不依赖进程/字典遍历之外的运行时状态
     updates_per_epoch = math.ceil(train_schedule.minibatches_per_epoch / trainer.config.gradient_accumulation_steps)
     required_updates = updates_per_epoch * trainer.config.sampling.epochs
     if trainer.config.run_safety_step_limit < required_updates:
@@ -444,7 +457,7 @@ def fit_embodiment_pretrain(
             f"run_safety_step_limit={trainer.config.run_safety_step_limit} cannot cover "
             f"required optimizer updates={required_updates}"
         )
-    initial_validation: dict[str, float] | None = None
+    initial_validation: dict[str, dict[str, float]] | None = None
     best_score = float("inf")
     selection_history: list[dict[str, Any]] = []
     step = 0
@@ -525,36 +538,45 @@ def fit_embodiment_pretrain(
             inherited_best.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_best, inherited_best)
             publish_best_checkpoint(output_dir / "checkpoints" / "best.pt", inherited_best)
-        if validation_sources:
-            validation_window = ResidentGeometryAssetWindow(
-                validation_sources,
+        validation_batches: dict[str, tuple[PaddedOnlineGeometryBatch, ...]] = {}
+        for suite_index, (suite_name, suite_sources) in enumerate(validation_sources.items()):
+            if not suite_sources:
+                continue
+            suite_schedule = validation_schedules[suite_name]
+            suite_samplers = validation_samplers[suite_name]
+            suite_window = ResidentGeometryAssetWindow(
+                suite_sources,
                 device=str(device),
                 dtype=dtype,
                 max_resident_assets=trainer.config.max_resident_assets,
                 loader=validation_representation.to_device,
             )
-        validation_batches: list[PaddedOnlineGeometryBatch] = []
-        if validation_schedule is not None and validation_window is not None:
-            validation_state_cache: dict[str, Any] = {}
-            while not validation_schedule.complete:
-                item = validation_schedule.next()
-                validation_batches.append(
+            validation_windows[suite_name] = suite_window
+            suite_batches: list[PaddedOnlineGeometryBatch] = []
+            suite_state_cache: dict[str, Any] = {}
+            while not suite_schedule.complete:
+                item = suite_schedule.next()
+                suite_batches.append(
                     _build_batch(
                         item,
-                        sources=validation_sources,
-                        states_by_id=validation_state_cache,
-                        samplers=validation_samplers,
+                        sources=suite_sources,
+                        states_by_id=suite_state_cache,
+                        samplers=suite_samplers,
                         representation=validation_representation,
-                        window=validation_window,
+                        window=suite_window,
                         padding=representation.config.layout,
-                        seed=run.config.seed + evaluation.validation_seed,
-                        schedule=validation_schedule,
+                        seed=run.config.seed + evaluation.validation_seed + suite_index * 1_000_003,
+                        schedule=suite_schedule,
                     )
                 )
-            validation_window.release_all()
-            if initial_validation is None:
-                initial_metrics = _evaluate_validation(method, tuple(validation_batches))
-                initial_validation = evaluation.selection_baseline(initial_metrics)
+            suite_window.release_all()
+            validation_batches[suite_name] = tuple(suite_batches)
+        if validation_batches and initial_validation is None:
+            initial_metrics = {
+                suite_name: _evaluate_validation(method, suite_batches)
+                for suite_name, suite_batches in validation_batches.items()
+            }
+            initial_validation = evaluation.selection_baseline(initial_metrics)
 
         from anymani.distill.ssl.runtime.validation import (
             compare_training_q_banks,
@@ -638,7 +660,10 @@ def fit_embodiment_pretrain(
             if validation_batches and (
                 step % evaluation.config.every_optimizer_updates == 0 or train_schedule.complete
             ):
-                metrics = _evaluate_validation(method, tuple(validation_batches))
+                metrics = {
+                    suite_name: _evaluate_validation(method, suite_batches)
+                    for suite_name, suite_batches in validation_batches.items()
+                }
                 if initial_validation is None:
                     raise RuntimeError("validation baseline was not initialized")
                 score = evaluation.normalized_score(metrics, initial_validation)
@@ -756,21 +781,22 @@ def fit_embodiment_pretrain(
             from anymani.distill.ssl.runtime.validation import fixed_validation_ablation_evidence
 
             model.eval()
-            with torch.no_grad():
-                ablation_evidence = fixed_validation_ablation_evidence(model, tuple(validation_batches))
-            raw_ablations = ablation_evidence.get("ablations")
-            if not isinstance(raw_ablations, (tuple, list)):
-                raise ValueError("multi-anchor evaluator did not report its ablation names")
-            supported_ablations = tuple(str(name) for name in raw_ablations)[1:]
-            evaluation.require_ablation_contract(supported_ablations)
-            ablation_path = output_dir / "validation_ablations.yaml"
-            _write_yaml(ablation_path, ablation_evidence)
-            write_geometry_ssl_ablation_analysis(
-                ablation_path,
-                output_dir / "validation_ablation_analysis.yaml",
-                bootstrap_samples=evaluation.config.bootstrap_replicates,
-                seed=run.config.seed + evaluation.bootstrap_seed,
-            )
+            for suite_index, (suite_name, frozen_batches) in enumerate(validation_batches.items()):
+                with torch.no_grad():
+                    ablation_evidence = fixed_validation_ablation_evidence(model, frozen_batches)
+                raw_ablations = ablation_evidence.get("ablations")
+                if not isinstance(raw_ablations, (tuple, list)):
+                    raise ValueError("multi-anchor evaluator did not report its ablation names")
+                supported_ablations = tuple(str(name) for name in raw_ablations)[1:]
+                evaluation.require_ablation_contract(supported_ablations)
+                ablation_path = output_dir / f"validation_{suite_name}_ablations.yaml"
+                _write_yaml(ablation_path, ablation_evidence)
+                write_geometry_ssl_ablation_analysis(
+                    ablation_path,
+                    output_dir / f"validation_{suite_name}_ablation_analysis.yaml",
+                    bootstrap_samples=evaluation.config.bootstrap_replicates,
+                    seed=run.config.seed + evaluation.bootstrap_seed + suite_index * 1_000_003,
+                )
         run.save_retained_artifact(
             output_dir / "retained_artifact.pt",
             model=model,
@@ -792,7 +818,7 @@ def fit_embodiment_pretrain(
     finally:
         if train_window is not None:
             train_window.release_all()
-        if validation_window is not None:
+        for validation_window in validation_windows.values():
             validation_window.release_all()
 
 

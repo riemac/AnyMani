@@ -154,6 +154,32 @@ def test_hand_catalog_rejects_missing_manifest_without_io() -> None:
         HandAssetCatalogCfg()
 
 
+def test_validation_selection_weights_named_suites_equally() -> None:
+    r"""checkpoint score 应先在 suite 内归一化，再对两条泛化轴等权平均。
+
+    该合同与每条 suite 的资产数量无关；否则把 validation-unseen-mother 扩容会
+    隐式改变 checkpoint objective，而不是只提高同一指标的统计精度。
+    """
+
+    config = _compose()
+    evaluation = config.evaluation.runtime_type(config.evaluation)
+    baseline = evaluation.selection_baseline(
+        {
+            "unseen_variant_set": {"density": 1.0, "kappa": 1.0, "derived_field": 1.0},
+            "unseen_mother": {"density": 2.0, "kappa": 2.0, "derived_field": 2.0},
+        }
+    )
+    score = evaluation.normalized_score(
+        {
+            "unseen_variant_set": {"density": 0.5, "kappa": 0.5, "derived_field": 0.5},
+            "unseen_mother": {"density": 2.0, "kappa": 2.0, "derived_field": 2.0},
+        },
+        baseline,
+    )
+
+    assert score == pytest.approx(0.75)
+
+
 @pytest.mark.parametrize(
     ("identity_name", "error"),
     [("content_hash", "content hashes leak"), ("physical_geometry_hash", "physical geometry hashes leak")],
@@ -169,7 +195,13 @@ def test_expanded_manifest_rejects_identity_leakage(identity_name: str, error: s
     }
     validation[identity_name] = train[identity_name]
     with pytest.raises(ValueError, match=error):
-        validate_asset_manifest_isolation({"train": [train], "validation": [validation], "evaluation": {}})
+        validate_asset_manifest_isolation(
+            {
+                "train": [train],
+                "validation": {"unseen_variant_set": [validation], "unseen_mother": []},
+                "evaluation": {},
+            }
+        )
 
 
 def test_anchor_realization_fingerprint_covers_points_parameters_and_version() -> None:

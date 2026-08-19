@@ -45,7 +45,7 @@ def require_resume_scientific_config(
 
 def restore_validation_selection_state(
     runtime_payload: dict[str, object],
-) -> tuple[dict[str, float] | None, dict[str, object] | None, float, list[dict[str, object]]]:
+) -> tuple[dict[str, dict[str, float]] | None, dict[str, object] | None, float, list[dict[str, object]]]:
     r"""恢复 initialization strata、normalization baseline 与 historical best score/history。"""
 
     raw_initial = runtime_payload.get("initial_validation_metrics")
@@ -55,10 +55,17 @@ def restore_validation_selection_state(
     if raw_initial is None:
         initial = None
     elif isinstance(raw_initial, dict):
-        if set(raw_initial) != {"density", "kappa", "derived_field"}:
-            raise ValueError("resume checkpoint validation baseline has invalid metric keys")
-        initial = {str(name): float(value) for name, value in raw_initial.items()}
-        if any(not torch.isfinite(torch.tensor(value)) or value <= 0.0 for value in initial.values()):
+        expected_metrics = {"density", "kappa", "derived_field"}
+        initial = {}
+        for suite_name, raw_metrics in raw_initial.items():
+            if not isinstance(raw_metrics, dict) or set(raw_metrics) != expected_metrics:
+                raise ValueError("resume checkpoint validation baseline has invalid suite metric keys")
+            initial[str(suite_name)] = {str(name): float(value) for name, value in raw_metrics.items()}
+        if not initial or any(
+            not torch.isfinite(torch.tensor(value)) or value <= 0.0
+            for suite_metrics in initial.values()
+            for value in suite_metrics.values()
+        ):
             raise ValueError("resume checkpoint validation baseline must be finite and positive")
     else:
         raise ValueError("resume checkpoint validation baseline must be a mapping or null")
@@ -88,7 +95,7 @@ def checkpoint_runtime_payload(
     batcher: WindowedOnlineGeometryBatcher,
     window: ResidentGeometryAssetWindow,
     *,
-    initial_validation_metrics: dict[str, float] | None,
+    initial_validation_metrics: dict[str, dict[str, float]] | None,
     initial_validation_strata: dict[str, object] | None,
     best_validation_score: float,
     selection_history: list[dict[str, object]],

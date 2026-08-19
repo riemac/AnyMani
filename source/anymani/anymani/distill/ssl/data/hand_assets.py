@@ -26,10 +26,14 @@ class EmbodimentCatalog:
         return self.dataset.train.assets
 
     @property
-    def validation(self) -> tuple[HandContainer, ...]:
-        r"""返回 checkpoint selection 使用的固定 held-out 资产轴。"""
+    def validation(self) -> dict[str, tuple[HandContainer, ...]]:
+        r"""返回 checkpoint selection 使用的两条具名 held-out 资产轴。
 
-        return self.dataset.validation.assets
+        Assets schema 2.0 保留 ``unseen_variant_set`` 与 ``unseen_mother``，训练侧
+        必须先在各 suite 内聚合，再等权形成 checkpoint score，不能按资产数量扁平加权。
+        """
+
+        return {name: partition.assets for name, partition in self.dataset.validation.items()}
 
     @property
     def evaluation(self) -> dict[str, tuple[HandContainer, ...]]:
