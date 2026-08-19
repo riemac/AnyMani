@@ -9,7 +9,7 @@ seeds:
   mutation: 20260820
 generator:
   config_module: anymani.assets.config.asset_gen_cfg
-  config_sha256: 75e6a79821d57583cc7b241d8c00d7b4da3e5cfdbecac4bc56dcbb47aeda272c
+  config_sha256: 7de2a9b79d76055e9b4d52406beb93d5a1a637386b580900e17cf516458cd7d8
   config_snapshot:
     mode: mutate
     artifact_level: bundle
@@ -24,6 +24,7 @@ generator:
     post_mutate_sources: []
     post_mutate_parallel: true
     post_mutate_parallel_workers: null
+    post_mutate_sdf_execution: central_gpu_batch
     Made:
       name: hand
       family: generic
@@ -167,8 +168,8 @@ generator:
         sdf_surface_samples_per_axis: 5
         sdf_unsupported_geometry_policy: fail
         sdf_threshold_tolerance: 1.0e-09
-        sdf_device: auto
-        sdf_mesh_backend: auto
+        sdf_device: cuda
+        sdf_mesh_backend: warp
         sdf_mesh_surface_samples: 4096
     Export:
       artifact_level: bundle
@@ -210,7 +211,7 @@ generator:
     missing: true
     recolored: anatomy_soft_v1
 code:
-  git_commit: 5abc8fa40ce735b79f7924174cca560c39ad9005
+  git_commit: 87fdeba647ef4ae9e6a3926dfffa9a3edc48b65b
   git_dirty: true
 quota_report:
   inventory:
