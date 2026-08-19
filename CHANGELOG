@@ -1,3 +1,11 @@
+0.6.2 - 2026-08-19
+==================
+
+- Assets 新增 typed YAML 驱动的分层数据集构建流程：将 pre-made inventory 规约成不可拆左右镜像 pair，按 family composition、full/missing、mixed composition、missing slot 与 DOF 确定性选择 train/validation/evaluation cohorts。
+- `HandGenerator` 新增多 mother post-mutate façade，在 mother variant-set 粒度进程并行，并支持每 source 独立 variant 数、seed、summary 与 lightweight result；单 mother 调试入口保持不变。
+- hand asset dataset 升级为 schema 2.0，validation 与 evaluation 均显式区分 unseen-variant-set 和 unseen-mother；SSL 按 suite 分别聚合后等权选择 checkpoint，expanded physical manifest 升级为 schema 4.0。
+- 新增可恢复 `plan -> build`、geometry fingerprint 补采、quarantine、SSL/PPO manifest 发布及纯 manifest `derive-ppo`；首份 `cross_embodiment_balanced_v1` plan 冻结 512 train mothers 和 10624 个待生成 variants，本版本不执行正式 post-mutate build。
+
 0.6.1 - 2026-08-19
 ==================
 

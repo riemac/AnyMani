@@ -1,3 +1,12 @@
+0.4.0 - 2026-08-19
+==================
+
+- 新增 `dataset_build` typed template/planner：从 generation summary 与 mother sidecar 构建 canonical mirror pairs，采用容量约束最大余数法和固定 seed 不放回排序，联合规划 train、两类 validation、两类 evaluation 与 PPO lineage 子集。
+- `HandGeneratorCfg.post_mutate_sources` 与 `generate_variant_sets()` 支持多个 mother variant sets 串行或进程并行；每 task 独立声明 source、variant 数和 seed，worker 继续写单 source mutate summary。
+- 新增 selection lock、原子 build state、resume、三轮 dataset-level retry 和 quarantined run 证据；静态 geometry fingerprint 覆盖运动链、home pose、collision 参数与 mesh bytes，用于生成期 no-op/重复补采。
+- hand asset dataset schema 由 1.0 升级到 2.0：validation 改为具名 `unseen_variant_set` / `unseen_mother`，旧扁平 schema 不再接受；现有 canonical pilot manifest 已迁移。
+- 首份 `datasets/cross_embodiment_balanced_v1/template.yaml` 与 selection lock 固定 1460 个可用 mirror pairs 中的 512 train、64+64 validation、64+64 evaluation mothers；最终目标为 10624 variants / 11264 SSL assets，并派生 128-mother PPO manifest。
+
 0.3.7 - 2026-08-19
 ==================
 
