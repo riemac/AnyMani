@@ -23,23 +23,66 @@ _PREMADE_FINGER_PRESET_BY_FAMILY_AND_KIND: dict[tuple[str, Literal["thumb", "non
 
 @dataclass(frozen=True)
 class PremadeTopologySpec:
-    r"""pre-made 阶段的一份显式 topology 规格。"""
+    r"""pre-made 阶段的一份显式 topology 规格。
+
+    family composition 与 slot survival 是两个独立物理轴：前者回答存活的
+    non-thumb 来自一个还是多个运动学 family，后者回答 canonical palm 上哪些
+    finger slot 实际存在。将二者分开后，三指 mixed hand 不再需要新增一个揉合
+    两种语义的枚举标签。
+
+    ``topology_kind`` 仅作为历史 sidecar/summary 的派生兼容标签：mixed composition
+    始终导出为 ``mixed``，single-family 再按 ``missing_slots`` 区分 ``missing`` 与
+    ``single_family``。新代码不得根据该标签反推完整 topology。
+    """
 
     name: str
     anchor_root: str
-    topology_kind: Literal["single_family", "missing", "mixed"]
+    family_composition: Literal["single_family", "mixed"]
+    missing_slots: tuple[str, ...]
     base_hand_preset: str
     handedness: Literal["left", "right"]
     family: str
     finger_preset_names: dict[str, str]
     surviving_slots: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        r"""验证 composition 与 slot survival 没有产生退化或互相矛盾的 topology。"""
+
+        if len(set(self.missing_slots)) != len(self.missing_slots):
+            raise ValueError("premade topology missing_slots must be unique")
+        if any(slot not in _PREMADE_NON_THUMB_SLOT_ORDER for slot in self.missing_slots):
+            raise ValueError("premade topology may only mark non-thumb slots as missing")
+        if set(self.missing_slots) & set(self.surviving_slots):
+            raise ValueError("premade topology missing_slots and surviving_slots must be disjoint")
+        if tuple(slot for slot in _PREMADE_SLOT_ORDER if slot in self.surviving_slots) != self.surviving_slots:
+            raise ValueError("premade topology surviving_slots must follow canonical slot order")
+
+        # Thumb 的 mount 属于 palm canonical 装配；它不参与 mixed 判定，但必须与 palm family 一致。
+        slot_family_map = self.slot_family_map()
+        if slot_family_map.get("thumb") != self.family:
+            raise ValueError("premade topology thumb family must match the base palm family")
+        non_thumb_families = {
+            slot_family_map[slot] for slot in self.surviving_slots if slot != "thumb"
+        }  # 存活 non-thumb 的运动学机制集合，不把同型 thumb 当作 family 证据
+        if self.family_composition == "mixed":
+            if non_thumb_families != {"allegro", "leap"}:
+                raise ValueError("mixed topology requires both Allegro and LEAP surviving non-thumb fingers")
+        elif non_thumb_families != {self.family}:
+            raise ValueError("single-family topology requires every surviving non-thumb to match the palm family")
+
+    @property
+    def topology_kind(self) -> Literal["single_family", "missing", "mixed"]:
+        r"""返回旧 sidecar/summary 使用的粗粒度派生标签。"""
+
+        if self.family_composition == "mixed":
+            return "mixed"
+        return "missing" if self.missing_slots else "single_family"
+
     def slot_family_map(self) -> dict[str, str]:
         r"""返回每个 surviving slot 当前来自哪个 finger family。"""
 
         return {
-            slot: _finger_family_from_preset_name(preset_name)
-            for slot, preset_name in self.finger_preset_names.items()
+            slot: _finger_family_from_preset_name(preset_name) for slot, preset_name in self.finger_preset_names.items()
         }
 
     def to_metadata(self) -> dict[str, Any]:
@@ -50,6 +93,8 @@ class PremadeTopologySpec:
             "base_hand_preset": self.base_hand_preset,
             "handedness": self.handedness,
             "topology_kind": self.topology_kind,
+            "family_composition": self.family_composition,
+            "missing_slots": list(self.missing_slots),
             "topology_anchor": self.anchor_root,
             "topology_name": self.name,
             "surviving_slots": list(self.surviving_slots),
@@ -160,7 +205,8 @@ def _extract_base_topology_spec(
     return PremadeTopologySpec(
         name=build_topology_registry_key(base_hand_preset=hand_preset_name, handedness=handedness),
         anchor_root=hand_preset_name,
-        topology_kind="single_family",
+        family_composition="single_family",
+        missing_slots=(),
         base_hand_preset=hand_preset_name,
         handedness=handedness,
         family=str(hand_preset_data["family"]),
@@ -195,7 +241,8 @@ def _build_missing_topology_specs(base_topology: PremadeTopologySpec) -> tuple[P
                     suffix_tokens=(f"missing_{missing_slot}",),
                 ),
                 anchor_root=base_topology.base_hand_preset,
-                topology_kind="missing",
+                family_composition="single_family",
+                missing_slots=(missing_slot,),
                 base_hand_preset=base_topology.base_hand_preset,
                 handedness=base_topology.handedness,
                 family=base_topology.family,
@@ -222,13 +269,13 @@ def _format_mixed_topology_name(
 
 
 def _build_mixed_topology_specs(base_topology: PremadeTopologySpec) -> tuple[PremadeTopologySpec, ...]:
-    r"""从 canonical topology 派生仅混合 non-thumb family 的组合。
+    r"""从 full 或 missing single-family topology 派生 true mixed 组合。
 
     `mixed` 的机械语义不是把所有 finger slot 任意换族。thumb mount 由 palm
     family 的 canonical preset 定义，因此 thumb 与 palm 必须共享 family；只有
     index / middle / ring / little 这类 non-thumb slot 参与 LEAP / Allegro
-    笛卡尔展开。这样 topology registry 本身只表达可装配结构，而不是先生成一个
-    已知错误的 palm-thumb 组合，再依赖 validator 事后拒绝。
+    笛卡尔展开。存活 non-thumb 必须同时含有两个 family；全为 base family 会退化
+    为普通 single-family，全为 opposite family 也不因 palm/thumb 标签而冒充 mixed。
     """
 
     slot_order = base_topology.surviving_slots
@@ -243,14 +290,16 @@ def _build_mixed_topology_specs(base_topology: PremadeTopologySpec) -> tuple[Pre
         if "thumb" in slot_order:
             slot_family_map["thumb"] = base_topology.family
 
-        # 全部 non-thumb 都仍属于 base family 时就是 canonical single-family topology，不能重复注册。
-        if all(current_family == base_topology.family for current_family in family_assignment):
+        # True mixed 必须由存活 non-thumb 本身提供两种运动学 family，thumb 不计入判据。
+        if set(family_assignment) != {"allegro", "leap"}:
             continue
 
         # 恢复 canonical slot 顺序，使 registry key、metadata 与导出目录保持确定性。
         slot_family_map = {slot_name: slot_family_map[slot_name] for slot_name in slot_order}
         finger_preset_names = {
-            slot_name: _PREMADE_FINGER_PRESET_BY_FAMILY_AND_KIND[(slot_family_map[slot_name], slot_finger_kind(slot_name))]
+            slot_name: _PREMADE_FINGER_PRESET_BY_FAMILY_AND_KIND[
+                (slot_family_map[slot_name], slot_finger_kind(slot_name))
+            ]
             for slot_name in slot_order
         }
         specs.append(
@@ -261,7 +310,8 @@ def _build_mixed_topology_specs(base_topology: PremadeTopologySpec) -> tuple[Pre
                     slot_family_map=slot_family_map,
                 ),
                 anchor_root="mixed",
-                topology_kind="mixed",
+                family_composition="mixed",
+                missing_slots=base_topology.missing_slots,
                 base_hand_preset=base_topology.base_hand_preset,
                 handedness=base_topology.handedness,
                 family=base_topology.family,
@@ -273,22 +323,27 @@ def _build_mixed_topology_specs(base_topology: PremadeTopologySpec) -> tuple[Pre
 
 
 def build_premade_topology_registry(cfg: Any) -> dict[str, PremadeTopologySpec]:
-    r"""构建当前 generator cfg 可见的所有 pre-made topology 规格。"""
+    r"""构建 full/missing 与 single/mixed 正交组合后的 pre-made topology 规格。"""
 
     registry: dict[str, PremadeTopologySpec] = {}
     for hand_preset_name in cfg.hand_presets:
         for handedness in requested_handednesses(cfg):
             base_topology = _extract_base_topology_spec(hand_preset_name, handedness=handedness)
-            registry[base_topology.name] = base_topology
-
             if not _supports_topology_expansion(cfg, base_hand_preset_name=hand_preset_name):
+                registry[base_topology.name] = base_topology
                 continue
+
+            # Slot survival 先形成 single-family physical templates；mixed family assignment
+            # 随后作用于每个 full/missing template，避免两个独立分支漏掉组合空间。
+            single_family_specs = [base_topology]
             if getattr(cfg, "missing", True):
-                for spec in _build_missing_topology_specs(base_topology):
-                    registry[spec.name] = spec
+                single_family_specs.extend(_build_missing_topology_specs(base_topology))
+            for spec in single_family_specs:
+                registry[spec.name] = spec
             if getattr(cfg, "mixed", False):
-                for spec in _build_mixed_topology_specs(base_topology):
-                    registry[spec.name] = spec
+                for single_family_spec in single_family_specs:
+                    for mixed_spec in _build_mixed_topology_specs(single_family_spec):
+                        registry[mixed_spec.name] = mixed_spec
     return registry
 
 
@@ -303,12 +358,31 @@ def resolve_premade_topology_spec(cfg: Any, topology_name: str) -> PremadeTopolo
 
 
 def extract_premade_topology_metadata(hand_cfg: HandCfg, *, hand_preset_name: str | None) -> dict[str, Any]:
-    r"""从 HandCfg metadata 中读取 premade topology provenance。"""
+    r"""从 HandCfg metadata 中读取并补齐正交 premade topology provenance。
+
+    2026-08-19 之前的持久化 sidecar 只有粗粒度 ``topology_kind``。这里保留真实
+    兼容需要：mixed 直接恢复 family composition；single-family missing 则用 base
+    preset 的 canonical slots 与已保存 surviving slots 求集合差。该迁移只补 metadata，
+    不修改历史资产文件或改变其 physical identity。
+    """
 
     metadata = dict(hand_cfg.metadata or {})
     topology_metadata = metadata.get("premade_topology")
     if isinstance(topology_metadata, dict):
-        return topology_metadata
+        normalized = dict(topology_metadata)
+        topology_kind = str(normalized.get("topology_kind") or "single_family")
+        normalized.setdefault("family_composition", "mixed" if topology_kind == "mixed" else "single_family")
+        if "missing_slots" not in normalized:
+            missing_slots: tuple[str, ...] = ()
+            base_hand_preset = normalized.get("base_hand_preset")
+            handedness = normalized.get("handedness")
+            surviving_slots = normalized.get("surviving_slots")
+            if topology_kind == "missing" and isinstance(base_hand_preset, str) and handedness in {"left", "right"}:
+                base_topology = _extract_base_topology_spec(base_hand_preset, handedness=handedness)
+                surviving_set = set(surviving_slots) if isinstance(surviving_slots, (tuple, list)) else set()
+                missing_slots = tuple(slot for slot in base_topology.surviving_slots if slot not in surviving_set)
+            normalized["missing_slots"] = list(missing_slots)
+        return normalized
     if hand_preset_name is None:
         raise ValueError("HandCfg is missing premade_topology metadata")
     return {
@@ -316,9 +390,13 @@ def extract_premade_topology_metadata(hand_cfg: HandCfg, *, hand_preset_name: st
         "base_hand_preset": hand_preset_name,
         "handedness": hand_cfg.handedness,
         "topology_kind": "single_family",
+        "family_composition": "single_family",
+        "missing_slots": [],
         "topology_anchor": hand_preset_name,
         "topology_name": hand_preset_name,
-        "surviving_slots": [slot_name for slot_name in _PREMADE_SLOT_ORDER if slot_name in {"thumb", "index", "middle", "ring"}],
+        "surviving_slots": [
+            slot_name for slot_name in _PREMADE_SLOT_ORDER if slot_name in {"thumb", "index", "middle", "ring"}
+        ],
         "slot_finger_presets": {},
         "slot_family_map": {slot_name: hand_cfg.family for slot_name in ("thumb", "index", "middle", "ring")},
     }
@@ -364,7 +442,9 @@ def build_base_hand(cfg: Any, *, hand_preset_name: str | None) -> tuple[HandCfg,
         topology = resolve_premade_topology_spec(cfg, hand_preset_name)
         builder_cfg = make_builder_cfg_from_topology(topology)
     else:
-        raise ValueError("HandGenerator requires a concrete Made cfg or at least one hand preset when using the pre-made facade")
+        raise ValueError(
+            "HandGenerator requires a concrete Made cfg or at least one hand preset when using the pre-made facade"
+        )
 
     builder = builder_cfg.class_type(builder_cfg)
     hand_cfg = builder.build()

@@ -21,7 +21,6 @@ from .topology import (
     slot_finger_kind,
 )
 
-
 _PREMADE_SLOT_ORDER: tuple[str, ...] = ("thumb", "index", "middle", "ring", "little")
 
 
@@ -128,9 +127,7 @@ def _build_slot_level_connectivity_selection_registry(
     registry: dict[str, dict[str, str]] = {}
     ordered_slots = tuple(slot_name for slot_name in _PREMADE_SLOT_ORDER if slot_name in slot_pools)
     for combination in product(*(slot_pools[slot_name] for slot_name in ordered_slots)):
-        slot_recipe_names = {
-            slot_name: recipe_name for slot_name, recipe_name in zip(ordered_slots, combination)
-        }
+        slot_recipe_names = {slot_name: recipe_name for slot_name, recipe_name in zip(ordered_slots, combination)}
         registry[_format_slot_level_connectivity_name(slot_recipe_names)] = slot_recipe_names
     return registry
 
@@ -247,11 +244,7 @@ def apply_connectivity_preset(
             deleted_joint_suffixes=finger_recipe.deleted_joint_suffixes,
         )
         deleted_joint_set = set(deleted_joint_names)
-        deleted_child_links = [
-            str(joint.child)
-            for joint in current_finger.joints
-            if joint.name in deleted_joint_set
-        ]
+        deleted_child_links = [str(joint.child) for joint in current_finger.joints if joint.name in deleted_joint_set]
         remaining_revolute = sum(
             1
             for joint in current_finger.joints
@@ -300,6 +293,8 @@ def apply_connectivity_preset(
         "base_hand_preset": topology_metadata["base_hand_preset"],
         "handedness": topology_metadata["handedness"],
         "topology_kind": topology_metadata["topology_kind"],
+        "family_composition": topology_metadata["family_composition"],
+        "missing_slots": topology_metadata["missing_slots"],
         "topology_anchor": topology_metadata["topology_anchor"],
         "topology_group_name": output_identity["topology_group_name"],
         "topology_name": output_identity["topology_name"],
@@ -318,6 +313,8 @@ def apply_connectivity_preset(
         "base_hand_preset": topology_metadata["base_hand_preset"],
         "handedness": topology_metadata["handedness"],
         "topology_kind": topology_metadata["topology_kind"],
+        "family_composition": topology_metadata["family_composition"],
+        "missing_slots": topology_metadata["missing_slots"],
         "topology_anchor": topology_metadata["topology_anchor"],
         "topology_group_name": output_identity["topology_group_name"],
         "topology_name": output_identity["topology_name"],

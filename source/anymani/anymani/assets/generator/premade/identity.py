@@ -6,12 +6,10 @@ import hashlib
 from pathlib import Path
 from typing import Any, Literal
 
-from ...asset_base import HandCfg
 from ...presets.connectivity_presets import _remaining_revolute_count as _connectivity_remaining_revolute_count
 from ...presets.connectivity_presets import get_finger_connectivity_preset_data
 from ..result import HandGenerationResult
 from .topology import PremadeTopologySpec
-
 
 _PREMADE_SLOT_ORDER: tuple[str, ...] = ("thumb", "index", "middle", "ring", "little")
 _PREMADE_SLOT_VARIANT_TOKEN: dict[str, str] = {
@@ -142,7 +140,7 @@ def resolve_topology_output_identity(
 ) -> dict[str, Any]:
     r"""把内部 topology registry key lower 成最终导出目录身份。"""
 
-    if topology.topology_kind == "mixed":
+    if topology.family_composition == "mixed":
         topology_group_name = _format_mixed_group_name(topology)
         base_variant_name = _format_mixed_variant_name(
             handedness=topology.handedness,
@@ -158,7 +156,7 @@ def resolve_topology_output_identity(
 
     duplicate_selection_names: list[str] = []
     for selection_name, candidate_slot_recipes in selection_registry.items():
-        if topology.topology_kind == "mixed":
+        if topology.family_composition == "mixed":
             candidate_base_name = _format_mixed_variant_name(
                 handedness=topology.handedness,
                 slot_family_map=topology.slot_family_map(),
@@ -199,14 +197,19 @@ def resolve_export_root(
     if result.hand_cfg is None or "connectivity_preset" not in result.metadata:
         return effective_root
 
-    topology_kind = str(result.metadata.get("topology_kind") or "single_family")
-    topology_name = str(result.metadata.get("topology_name") or result.metadata.get("connectivity_preset") or result.hand_cfg.family)
-    topology_group_name = str(
-        result.metadata.get("topology_group_name")
-        or result.metadata.get("base_hand_preset")
-        or result.hand_cfg.family
+    family_composition = result.metadata.get("family_composition")
+    is_mixed = (
+        str(family_composition) == "mixed"
+        if family_composition is not None
+        else str(result.metadata.get("topology_kind") or "single_family") == "mixed"
+    )  # 新产物读取正交轴；历史产物仅有 topology_kind 时保持原目录合同
+    topology_name = str(
+        result.metadata.get("topology_name") or result.metadata.get("connectivity_preset") or result.hand_cfg.family
     )
-    if topology_kind == "mixed":
+    topology_group_name = str(
+        result.metadata.get("topology_group_name") or result.metadata.get("base_hand_preset") or result.hand_cfg.family
+    )
+    if is_mixed:
         return effective_root / "mixed" / topology_group_name / topology_name
     return effective_root / topology_group_name / topology_name
 

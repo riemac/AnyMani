@@ -1,3 +1,11 @@
+0.3.7 - 2026-08-19
+==================
+
+- 修复 pre-made registry 将 `missing` 与 `mixed` 从 canonical base 独立派生、导致 mixed hand 永远保持四指的问题；family composition 与 missing slots 现在作为正交轴组合。
+- true mixed 只由存活 non-thumb 判定并要求同时包含 LEAP 与 Allegro；thumb 继续绑定 base palm family但不参与判定，全 base-family 与全 opposite-family 两类退化 assignment 均不再注册。
+- 当前正式 preset 的 topology 空间由 44 个 specs / 3044 个 connectivity candidates 更新为 64 个 specs / 3256 个 candidates，其中新增 24 个 mixed-missing specs，并移除 4 个退化 full-mixed specs。
+- sidecar provenance 新增 `family_composition` 与 `missing_slots`；历史 `topology_kind` 继续作为派生兼容标签，旧 missing metadata 可在内存中确定性恢复正交字段而不改写资产。
+
 0.3.6 - 2026-08-18
 ==================
 

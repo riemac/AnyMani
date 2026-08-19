@@ -42,7 +42,7 @@
 尤其注意：**动力学闭包不要再塞回 builder、mutator 或 exporter**。  
 它现在有专门的落点：`assets/asset_physics.py`。
 
-pre-made `mixed` topology 的装配边界固定为：thumb 与 base palm 共享 family，只有 non-thumb slot 可以跨 LEAP / Allegro family。程序化 mesh 虽然必须在 physics closure 与 validator 前物化，但此时仍属于候选期文件；拒绝或异常候选只能回滚本次新写文件，不能在 generated 资产树中留下 OBJ-only 半成品。
+pre-made topology 把 family composition 与 missing slots 视为正交轴。thumb 与 base palm 共享 family，但不参与 mixed 判定；只有存活 non-thumb 同时包含 LEAP 与 Allegro 才是真正 mixed，全为 base family 或全为 opposite family 都必须退出 mixed 空间。程序化 mesh 虽然必须在 physics closure 与 validator 前物化，但此时仍属于候选期文件；拒绝或异常候选只能回滚本次新写文件，不能在 generated 资产树中留下 OBJ-only 半成品。
 
 ### 3. 几何语义交付
 
@@ -76,7 +76,7 @@ pre-made `mixed` topology 的装配边界固定为：thumb 与 base palm 共享 
 | **Asset cohort（实验资产集合）** | 从多个 mother lineages 中显式选取的 mothers / variant sets | 一次训练或评估主动选择的数据集合；不用 `group` 或 `cluster` 指代。 |
 | **Dataset partition（数据划分）** | cohort 的 `train` / `validation` / `evaluation` 子集 | 训练角色，不改变资产自身的生成身份与 family 身份。 |
 
-`family` 表示来源/机制族；mixed 手的完整构成必须结合 `topology_kind` 与 `slot_family_map` 判断，不能只读顶层 `family`。dataset YAML 以完整 variant set 为配置原子，并对每条 lineage 显式声明 `include_mother`；跨 partition 先按路径、asset ID 与 `content_hash` 拒绝重复，geometry consumer 再按 `physical_geometry_hash` 拒绝相同物理映射。
+`family` 表示 base palm 的来源/机制族；完整 topology 必须结合 `family_composition`、`missing_slots`、`surviving_slots` 与 `slot_family_map` 判断，不能只读顶层 `family`。`topology_kind` 只保留为历史 sidecar/summary 的派生兼容标签。dataset YAML 以完整 variant set 为配置原子，并对每条 lineage 显式声明 `include_mother`；跨 partition 先按路径、asset ID 与 `content_hash` 拒绝重复，geometry consumer 再按 `physical_geometry_hash` 拒绝相同物理映射。
 
 ### 文档与版本
 

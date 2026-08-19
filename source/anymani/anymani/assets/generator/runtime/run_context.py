@@ -158,8 +158,13 @@ def result_topology_key(result: HandGenerationResult) -> str:
         or result.metadata.get("family")
         or "ungrouped"
     )
-    topology_kind = str(result.metadata.get("topology_kind") or "single_family")
-    if topology_kind == "mixed":
+    family_composition = result.metadata.get("family_composition")
+    is_mixed = (
+        str(family_composition) == "mixed"
+        if family_composition is not None
+        else str(result.metadata.get("topology_kind") or "single_family") == "mixed"
+    )  # summary 优先消费正交 composition；旧 sidecar/result 继续回退历史标签
+    if is_mixed:
         return f"mixed/{topology_group_name}/{topology_name}"
     return f"{topology_group_name}/{topology_name}"
 

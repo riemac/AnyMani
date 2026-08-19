@@ -1,3 +1,10 @@
+0.6.1 - 2026-08-19
+==================
+
+- 修复 generated pre-made topology 空间遗漏 mixed+missing 组合的问题，将 family composition 与 missing slots 改为正交语义，并在新 sidecar provenance 中显式记录两个轴。
+- 收紧 true-mixed 定义：存活 non-thumb 必须同时包含 LEAP 与 Allegro，thumb 只服从 base palm 装配且不参与 family 判定；退化为单一 non-thumb family 的组合不再进入 mixed production group。
+- 新增 registry 计数、退化反例、左右/掌基对称、临时 bundle 目录和历史 metadata 恢复合同；本版本不生成或改写正式 generated run。
+
 0.6.0 - 2026-08-18
 ==================
 
