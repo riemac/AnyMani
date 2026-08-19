@@ -283,6 +283,8 @@ POST_MUTATE_VALIDATOR_CFG: HandValidatorCfg | None = HandValidatorCfg(
         check_finger_spacing=True,  # 显式检查挂载扰动后是否出现过近手指间距
         min_finger_spacing=0.01,  # 最小合法间距约 $1\text{cm}$
         check_mount_consistency=True,  # mount perturb 后仍需保持 mount 语义一致性
+        sdf_device="cuda",  # 正式 dataset validator 固定使用 GPU，CUDA 不可用时 fail-hard
+        sdf_mesh_backend="warp",  # mesh SDF 固定 Warp；禁止同一 dataset 内隐式混入 CPU fallback
     )
 )
 """post-mutate validator 默认锚点。
@@ -299,6 +301,7 @@ POST_MUTATE_CFG = HandGeneratorCfg(
     output_dir=Path("__post_mutate_output_dir__"),  # 兼容占位；新目录 contract 实际由 source_topology_dir 驱动
     n_samples=POST_MUTATE_N_SAMPLES,  # 目标联合 Monte Carlo 样本数
     post_mutate_require_unique_geometry=True,  # 数据集 variant set 拒绝 mother no-op 与 set 内静态几何重复，并在当前槽位补抽
+    post_mutate_sdf_execution="central_gpu_batch",  # 单 GPU actor 批量验证；mother workers 不持有 CUDA context
     Mutate=POST_MUTATE_MUTATOR_CFG,  # 当前默认 mutator term container
     Validate=POST_MUTATE_VALIDATOR_CFG,  # 后变异 hand-level validator
     recolored=POST_MUTATE_RECOLORED,  # 后变异样本的可视 recolor 方案
