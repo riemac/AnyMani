@@ -72,6 +72,7 @@ datasets
 !source/anymani/anymani/assets/datasets/
 !source/anymani/anymani/assets/datasets/**
 **/assets/datasets/**/.build_state.yaml
+**/assets/datasets/**/recovery_report.yaml
 
 # Docker history
 .isaac-lab-docker-history

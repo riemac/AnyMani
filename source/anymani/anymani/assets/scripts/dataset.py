@@ -19,6 +19,7 @@ from ..generator.dataset_build import (
     build_dataset_selection_plan,
     derive_ppo_manifest_from_lock,
     load_dataset_build_template,
+    recover_dataset_build,
     write_selection_lock,
 )
 from ..generator.hand_generator import HandGeneratorCfg
@@ -73,6 +74,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Require both SSL seen-mother suites to remain in PPO train.",
+    )
+    recover = subcommands.add_parser("recover", help="Audit, adopt, or roll back an interrupted dataset build.")
+    recover.add_argument("--template", required=True, help="Dataset build template YAML path.")
+    recover.add_argument("--lock-path", default=None, help="Selection lock path.")
+    recover.add_argument("--state-path", default=None, help="Interrupted build state path.")
+    recover.add_argument("--strategy", choices=("adopt", "rollback"), required=True)
+    recover.add_argument(
+        "--apply",
+        action="store_true",
+        help="Execute the audited recovery action; without this flag only a dry-run report is written.",
     )
     return parser
 
@@ -215,6 +226,37 @@ def _run_derive_ppo(
     return 0
 
 
+def _run_recover(
+    *,
+    template_path: str,
+    lock_path: str | None,
+    state_path: str | None,
+    strategy: str,
+    apply: bool,
+) -> int:
+    r"""审计并可选执行中断 build 的 adopt/rollback；该命令不重新加载 generator cfg。"""
+
+    template_file = Path(template_path).expanduser().resolve()
+    template, _template_sha = load_dataset_build_template(template_file)
+    resolved_lock = Path(lock_path).expanduser().resolve() if lock_path else template_file.parent / "selection.lock.yaml"
+    report = recover_dataset_build(
+        template,
+        lock_path=resolved_lock,
+        state_path=state_path,
+        strategy=strategy,  # type: ignore[arg-type]
+        apply=apply,
+    )
+    counts = report["counts"]
+    print(f"strategy          = {strategy}")
+    print(f"dry_run           = {report['dry_run']}")
+    print(f"run_roots         = {counts['run_roots']}")
+    print(f"complete          = {counts['complete']}")
+    print(f"partial           = {counts['partial']}")
+    print(f"variant_sidecars  = {counts['variant_sidecars']}")
+    print(f"recovery_report   = {resolved_lock.parent / 'recovery_report.yaml'}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     r"""解析命令并执行无生成副作用的 plan 阶段。"""
 
@@ -242,6 +284,14 @@ def main(argv: list[str] | None = None) -> int:
             mother_count=args.mother_count,
             selection_seed=args.selection_seed,
             reuse_ssl_holdouts=args.reuse_ssl_holdouts,
+        )
+    if args.command == "recover":
+        return _run_recover(
+            template_path=args.template,
+            lock_path=args.lock_path,
+            state_path=args.state_path,
+            strategy=args.strategy,
+            apply=args.apply,
         )
     raise AssertionError(f"unhandled dataset command: {args.command}")
 

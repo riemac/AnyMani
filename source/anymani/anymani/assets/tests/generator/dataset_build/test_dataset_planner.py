@@ -12,8 +12,9 @@ from anymani.assets.bank.dataset import HandAssetDataset
 from anymani.assets.config import asset_gen_cfg as asset_cfg_module
 from anymani.assets.generator.dataset_build.builder import build_dataset_from_lock, derive_ppo_manifest_from_lock
 from anymani.assets.generator.dataset_build.planner import build_dataset_selection_plan, write_selection_lock
+from anymani.assets.generator.dataset_build.recovery import recover_dataset_build
 from anymani.assets.generator.dataset_build.schema import load_dataset_build_template
-from anymani.assets.generator.hand_generator import PostMutateVariantSetResult
+from anymani.assets.generator.hand_generator import PostMutateSourceCfg, PostMutateVariantSetResult
 from anymani.assets.generator.runtime.recipe_loader import RecipeLoader
 from anymani.assets.scripts import dataset as dataset_cli
 
@@ -349,6 +350,83 @@ def test_builder_resume_recomputes_fingerprints_before_skipping_completed_task(t
     assert report["tasks"][task_id]["status"] == "completed"
     assert len(report["tasks"][task_id]["attempts"]) == 2
 
+
+def test_recovery_rollback_deletes_only_exact_legacy_invocation_runs(tmp_path: Path) -> None:
+    r"""Legacy rollback 必须依赖完整 child cfg/seed/source，并恢复到 build 前无 state 状态。"""
+
+    run_root = _write_inventory(tmp_path / "generated")
+    template_path = _write_template(tmp_path / "dataset" / "template.yaml", run_root=run_root)
+    template, template_sha = load_dataset_build_template(template_path)
+    post_cfg = asset_cfg_module.POST_MUTATE_CFG
+    plan = build_dataset_selection_plan(
+        template,
+        template_sha256=template_sha,
+        generator_config_module="anymani.assets.config.asset_gen_cfg",
+        generator_config_snapshot=RecipeLoader.dump(post_cfg),
+    )
+    lock_path = write_selection_lock(plan, template_path.parent / "selection.lock.yaml")
+    lock_bytes = lock_path.read_bytes()
+    lock = yaml.safe_load(lock_bytes)
+    tasks = [
+        {**task, "role": role}
+        for role, role_tasks in lock["lineages"].items()
+        for task in role_tasks
+    ]
+    selected = tasks[:2]
+    state_path = template_path.parent / ".build_state.yaml"
+    state = {
+        "schema_version": "1.0.0",
+        "selection_lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
+        "inventory_run_dir": str(run_root.resolve()),
+        "tasks": {
+            task["task_id"]: {
+                "status": "running" if task in selected else "pending",
+                "active_run_dir": "",
+                "attempts": [],
+                "geometry_fingerprints": [],
+            }
+            for task in tasks
+        },
+    }
+    state_path.write_text(yaml.safe_dump(state, sort_keys=False), encoding="utf-8")
+    owned_runs: list[Path] = []
+    for task in selected:
+        source = run_root / task["mother"]["relative_dir"]
+        source_cfg = PostMutateSourceCfg(
+            task_id=task["task_id"],
+            source_topology_dir=source,
+            n_samples=task["variant_count"],
+            seed=task["mutation_seed"],
+        )
+        child_cfg = post_cfg.replace(
+            source_topology_dir=source.resolve(),
+            post_mutate_sources=[],
+            n_samples=source_cfg.n_samples,
+            post_mutate_seed=source_cfg.seed,
+            post_mutate_parallel=False,
+            post_mutate_parallel_workers=None,
+        )
+        report = _write_fake_variant_set(source_cfg, config_snapshot=RecipeLoader.dump(child_cfg))
+        owned_runs.append(report.run_dir)
+
+    unrelated = run_root / selected[0]["mother"]["relative_dir"] / "unrelated_run"
+    unrelated.mkdir()
+    (unrelated / "summary.yaml").write_text("run: {mode: mutate}\nconfig: {}\n", encoding="utf-8")
+
+    dry_run = recover_dataset_build(template, lock_path=lock_path, strategy="rollback")
+
+    assert dry_run["dry_run"] is True
+    assert dry_run["counts"] == {"run_roots": 2, "complete": 2, "partial": 0, "variant_sidecars": 6}
+    assert all(path.is_dir() for path in owned_runs)
+    assert unrelated.is_dir()
+
+    applied = recover_dataset_build(template, lock_path=lock_path, strategy="rollback", apply=True)
+
+    assert applied["dry_run"] is False
+    assert all(not path.exists() for path in owned_runs)
+    assert unrelated.is_dir()
+    assert not state_path.exists()
+
 def _write_inventory(run_root: Path) -> Path:
     r"""写 24 个 canonical pairs、48 个 mother bundles 的受控 inventory。"""
 
@@ -475,6 +553,7 @@ def _write_fake_variant_set(
     *,
     successful_variants: int | None = None,
     forced_size: float | None = None,
+    config_snapshot: dict | None = None,
 ) -> PostMutateVariantSetResult:
     r"""按 source task 写 exact-count fake run，隔离 builder 与真实 mutator 数值。"""
 
@@ -514,7 +593,8 @@ def _write_fake_variant_set(
         yaml.safe_dump(
             {
                 "run": {"mode": "mutate", "root_dir": str(run_dir)},
-                "config": {
+                "config": config_snapshot
+                or {
                     "source_topology_dir": str(source),
                     "post_mutate_seed": task.seed,
                     "post_mutate_sources": [],
