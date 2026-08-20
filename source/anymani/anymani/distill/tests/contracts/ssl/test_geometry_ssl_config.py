@@ -45,6 +45,10 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
     config = _compose()
     config.validate_composed()
     assert isinstance(config.data, HandAssetCatalogCfg)
+    assert config.data.manifest == (
+        "source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ssl.yaml"
+    )
+    assert config.data.expected_sha256 == "f1398417888e7c237cbb2583dcf8e9cd10bef7fee792b307c67dfa74fb6e0698"
     assert type(config.method).__name__ == "MultiAnchorGaussianMethodCfg"
     assert type(config.trainer).__name__ == "EmbodimentPretrainTrainerCfg"
     assert type(config.method.representation).__name__ == "GeometryRepresentationCfg"

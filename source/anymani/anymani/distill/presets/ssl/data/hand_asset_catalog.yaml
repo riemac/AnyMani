@@ -1,8 +1,0 @@
-# Asset dataset 固定 train/validation/evaluation roles；Trainer 不按 family 或 mother 隐式重加权。
-defaults:
-  - schema_hand_asset_catalog
-  - _self_
-
-manifest: source/anymani/anymani/assets/datasets/canonical_cross_mother_v1.yaml
-expected_sha256: a30e846924fe3545fdae29db15c796e0e0f2553e057046c18e6b67e91d5e930f
-allow_legacy_left_handedness: false

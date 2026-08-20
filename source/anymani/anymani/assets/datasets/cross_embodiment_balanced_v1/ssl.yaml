@@ -1,0 +1,3201 @@
+schema_version: 2.0.0
+default_run_dir: source/anymani/anymani/assets/generated/2026-08-19_15-10-48
+train:
+  runs:
+    default:
+      groups:
+        single_palm_allegro:
+          left_t3_i2_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-53-01
+          right_t3_i2_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-53-01
+          left_t3_i2_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-53-01
+          right_t3_i2_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-53-01
+          left_t3_i3_m2_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-53-01
+          right_t3_i3_m2_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-53-01
+          left_t3_i2_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-53-01
+          right_t3_i2_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-53-01
+          left_t3_i3_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-54-08
+          right_t3_i3_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-54-13
+          left_t3_i3_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-54-13
+          right_t3_i3_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-54-13
+          left_t3_i2_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-54-13
+          right_t3_i2_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-54-13
+          left_t4_i2_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-54-13
+          right_t4_i2_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-54-19
+          left_t3_i2_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-55-23
+          right_t3_i2_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-55-28
+          left_t4_i3_m2_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-55-31
+          right_t4_i3_m2_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-55-32
+          left_t4_i2_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-55-32
+          right_t4_i2_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-55-34
+          left_t3_i3_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-55-37
+          right_t3_i3_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-55-47
+          left_t4_i2_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-56-41
+          right_t4_i2_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-56-47
+          left_t3_i3_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-56-51
+          right_t3_i3_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-56-56
+          left_t4_i3_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-56-56
+          right_t4_i3_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-56-58
+          left_t4_i4_m2_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-57-02
+          right_t4_i4_m2_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-57-07
+          left_t3_i3_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-58-04
+          right_t3_i3_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-58-12
+          left_t3_i2_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-58-15
+          right_t3_i2_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-58-18
+          left_t4_i2_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-58-24
+          right_t4_i2_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-58-26
+          left_t4_i2_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-58-41
+          right_t4_i2_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-58-46
+          left_t3_i4_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-59-26
+          right_t3_i4_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-59-37
+          left_t4_i3_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-59-40
+          right_t4_i3_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-59-46
+          left_t3_i4_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-59-52
+          right_t3_i4_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_02-59-54
+          left_t4_i3_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-00-03
+          right_t4_i3_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-00-09
+          left_t3_i3_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-00-57
+          right_t3_i3_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-01-09
+          left_t4_i4_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-01-18
+          right_t4_i4_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-01-18
+          left_t4_i2_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-01-21
+          right_t4_i2_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-01-24
+          left_t4_i3_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-01-42
+          right_t4_i3_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-01-42
+          left_t3_i4_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-02-25
+          right_t3_i4_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-02-37
+          left_t3_i3_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-02-49
+          right_t3_i3_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-02-59
+          left_t3_i4_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-02-59
+          right_t3_i4_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-03-05
+          left_t4_i3_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-03-17
+          right_t4_i3_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-03-23
+          left_t4_i2_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-03-56
+          right_t4_i2_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-04-26
+          left_t4_i4_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-04-26
+          right_t4_i4_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-04-30
+          left_t4_i3_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-04-36
+          right_t4_i3_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-04-42
+          left_t4_i4_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-04-55
+          right_t4_i4_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-05-07
+          left_t4_i4_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-05-27
+          right_t4_i4_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-05-58
+          left_t4_i3_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-06-08
+          right_t4_i3_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-06-08
+          left_t4_i4_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-06-10
+          right_t4_i4_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-06-33
+          left_t4_i4_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-06-40
+          right_t4_i4_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-06-52
+          left_t3_i4_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-07-07
+          right_t3_i4_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-07-33
+          left_t4_i4_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-07-50
+          right_t4_i4_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-07-51
+          left_t3_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-07-53
+          right_t3_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-08-18
+          left_t3_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-08-21
+          right_t3_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-08-42
+          left_t4_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-08-45
+          right_t4_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-09-07
+          left_t4_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-09-10
+          right_t4_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-09-17
+          left_t3_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-09-25
+          right_t3_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-09-30
+          left_t3_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-09-34
+          right_t3_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-09-41
+          left_t4_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-09-43
+          right_t4_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-09-59
+          left_t4_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-10-09
+          right_t4_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-10-09
+          left_t3_i2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-10-19
+          right_t3_i2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-10-21
+          left_t3_i3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-10-25
+          right_t3_i3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-10-35
+          left_t3_i3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-10-38
+          right_t3_i3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-10-53
+          left_t4_i3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-11-03
+          right_t4_i3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-11-03
+          left_t4_i4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-11-09
+          right_t4_i4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-11-11
+          left_t4_i3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-11-14
+          right_t4_i3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-11-24
+          left_t4_i4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-11-31
+          right_t4_i4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-11-43
+          left_t3_i3_m2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-11-57
+          right_t3_i3_m2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-12-01
+          left_t3_i2_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-12-03
+          right_t3_i2_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-12-08
+          left_t3_i4_m2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-12-13
+          right_t3_i4_m2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-12-22
+          left_t3_i3_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-12-25
+          right_t3_i3_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-12-42
+          left_t4_i3_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-12-44
+          right_t4_i3_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-12-48
+          left_t4_i4_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-12-49
+          right_t4_i4_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-12-54
+          left_t4_i4_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-13-00
+          right_t4_i4_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-13-09
+        single_palm_leap:
+          left_t3_i1_m3_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-13-12
+          right_t3_i1_m3_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-13-35
+          left_t3_i1_m1_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-13-36
+          right_t3_i1_m1_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-13-57
+          left_t3_i3_m1_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-13-58
+          right_t3_i3_m1_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-14-00
+          left_t3_i1_m4_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-14-07
+          right_t3_i1_m4_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-14-19
+          left_t3_i4_m1_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-14-40
+          right_t3_i4_m1_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-14-52
+          left_t3_i3_m2_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-15-11
+          right_t3_i3_m2_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-15-24
+          left_t3_i1_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-15-27
+          right_t3_i1_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-15-35
+          left_t4_i1_m3_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-15-35
+          right_t4_i1_m3_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-15-38
+          left_t3_i1_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-16-23
+          right_t3_i1_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-16-26
+          left_t3_i1_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-16-50
+          right_t3_i1_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-17-02
+          left_t3_i3_m1_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-17-10
+          right_t3_i3_m1_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-17-10
+          left_t4_i2_m3_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-17-15
+          right_t4_i2_m3_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-17-24
+          left_t3_i2_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-18-05
+          right_t3_i2_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-18-20
+          left_t4_i2_m1_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-18-23
+          right_t4_i2_m1_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-18-37
+          left_t3_i2_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-18-52
+          right_t3_i2_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-18-55
+          left_t3_i2_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-18-55
+          right_t3_i2_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-19-16
+          left_t3_i4_m1_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-19-46
+          right_t3_i4_m1_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-19-49
+          left_t4_i2_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-20-04
+          right_t4_i2_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-20-26
+          left_t3_i3_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-20-32
+          right_t3_i3_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-20-38
+          left_t3_i3_m4_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-21-18
+          right_t3_i3_m4_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-21-25
+          left_t4_i1_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-21-31
+          right_t4_i1_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-21-34
+          left_t4_i2_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-22-02
+          right_t4_i2_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-22-12
+          left_t3_i3_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-22-24
+          right_t3_i3_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-22-37
+          left_t4_i1_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-23-13
+          right_t4_i1_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-23-23
+          left_t4_i4_m3_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-23-33
+          right_t4_i4_m3_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-23-39
+          left_t4_i3_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-23-55
+          right_t4_i3_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-24-05
+          left_t4_i3_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-24-15
+          right_t4_i3_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-24-28
+          left_t4_i2_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-25-05
+          right_t4_i2_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-25-11
+          left_t4_i4_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-25-15
+          right_t4_i4_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-25-42
+          left_t4_i4_m1_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-26-01
+          right_t4_i4_m1_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-26-05
+          left_t3_i4_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-26-12
+          right_t3_i4_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-27-04
+          left_t3_i4_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-27-11
+          right_t3_i4_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-27-14
+          left_t4_i3_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-27-42
+          right_t4_i3_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-27-53
+          left_t4_i3_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-28-13
+          right_t4_i3_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-28-17
+          left_t3_i4_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-28-17
+          right_t3_i4_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-29-06
+          left_t4_i4_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-29-17
+          right_t4_i4_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-29-32
+          left_t4_i4_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-29-43
+          right_t4_i4_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-30-23
+          left_t4_i4_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-30-42
+          right_t4_i4_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-30-46
+          left_t4_i3_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-30-57
+          right_t4_i3_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-31-11
+          left_t4_i4_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-31-28
+          right_t4_i4_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-31-36
+          left_t3_i4_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-32-10
+          right_t3_i4_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-32-36
+          left_t4_i4_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-32-54
+          right_t4_i4_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-33-02
+          left_t4_i4_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-33-33
+          right_t4_i4_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-33-41
+          left_t3_m1_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-33-51
+          right_t3_m1_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-33-51
+          left_t3_m3_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-34-23
+          right_t3_m3_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-34-25
+          left_t3_m4_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-34-51
+          right_t3_m4_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-35-16
+          left_t3_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-35-21
+          right_t3_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-35-25
+          left_t4_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-35-29
+          right_t4_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-35-33
+          left_t4_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-35-37
+          right_t4_m3_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-35-42
+          left_t4_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-36-04
+          right_t4_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-36-21
+          left_t3_i3_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-36-23
+          right_t3_i3_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-36-23
+          left_t3_i4_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-36-25
+          right_t3_i4_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-36-30
+          left_t3_i2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-36-37
+          right_t3_i2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-36-46
+          left_t3_i4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-37-04
+          right_t3_i4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-37-17
+          left_t4_i2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-37-17
+          right_t4_i2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-37-19
+          left_t3_i4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-37-23
+          right_t3_i4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-37-26
+          left_t4_i4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-37-30
+          right_t4_i4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-37-39
+          left_t3_i1_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-38-07
+          right_t3_i1_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-38-14
+          left_t4_i3_m1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-38-14
+          right_t4_i3_m1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-38-17
+          left_t4_i2_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-38-20
+          right_t4_i2_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-38-28
+          left_t3_i3_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-38-28
+          right_t3_i3_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-38-37
+          left_t4_i3_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-39-04
+          right_t4_i3_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-39-10
+          left_t3_i4_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-39-12
+          right_t3_i4_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-39-14
+          left_t4_i4_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-39-16
+          right_t4_i4_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-39-26
+      mixed:
+        allegro_single_palm_allegro_thumb_index_leap_middle_allegro_ring:
+          left_allegro_t3_i2_leap_m2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-39-30
+          right_allegro_t3_i2_leap_m2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-39-36
+          left_allegro_t3_i2_leap_m4_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-40-11
+          right_allegro_t3_i2_leap_m4_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-40-13
+          left_allegro_t4_i3_leap_m2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-40-16
+          right_allegro_t4_i3_leap_m2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-40-21
+          left_allegro_t4_i3_leap_m4_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-40-33
+          right_allegro_t4_i3_leap_m4_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-40-44
+          left_allegro_t4_i4_leap_m4_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-40-47
+          right_allegro_t4_i4_leap_m4_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-40-50
+          left_allegro_t4_i4_leap_m4_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-41-35
+          right_allegro_t4_i4_leap_m4_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-41-47
+          left_allegro_t4_i4_leap_m4_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-41-50
+          right_allegro_t4_i4_leap_m4_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-41-53
+        allegro_single_palm_allegro_thumb_index_leap_middle_ring:
+          left_allegro_t3_i3_leap_m1_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-42-03
+          right_allegro_t3_i3_leap_m1_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-42-23
+          left_allegro_t3_i2_leap_m1_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-42-33
+          right_allegro_t3_i2_leap_m1_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-42-42
+          left_allegro_t3_i2_leap_m4_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-43-22
+          right_allegro_t3_i2_leap_m4_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-43-27
+          left_allegro_t3_i3_leap_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-43-39
+          right_allegro_t3_i3_leap_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-43-42
+          left_allegro_t4_i3_leap_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-43-53
+          right_allegro_t4_i3_leap_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-44-04
+          left_allegro_t4_i2_leap_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-44-18
+          right_allegro_t4_i2_leap_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-44-32
+          left_allegro_t4_i4_leap_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-45-00
+          right_allegro_t4_i4_leap_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-45-16
+        allegro_single_palm_allegro_thumb_index_middle_leap_ring:
+          left_allegro_t3_i2_m3_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-45-32
+          right_allegro_t3_i2_m3_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-45-32
+          left_allegro_t3_i3_m3_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-45-35
+          right_allegro_t3_i3_m3_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-45-56
+          left_allegro_t4_i3_m3_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-46-06
+          right_allegro_t4_i3_m3_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-46-24
+          left_allegro_t4_i2_m2_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-46-55
+          right_allegro_t4_i2_m2_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-47-00
+          left_allegro_t3_i2_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-47-06
+          right_allegro_t3_i2_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-47-09
+          left_allegro_t4_i4_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-47-21
+          right_allegro_t4_i4_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-47-25
+          left_allegro_t4_i3_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-47-45
+          right_allegro_t4_i3_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-48-04
+          left_allegro_t4_i4_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-48-38
+          right_allegro_t4_i4_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-48-48
+        allegro_single_palm_allegro_thumb_leap_index_allegro_middle_leap_ring:
+          left_allegro_t3_leap_i2_allegro_m2_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-48-51
+          right_allegro_t3_leap_i2_allegro_m2_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-48-51
+          left_allegro_t4_leap_i2_allegro_m3_leap_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-48-58
+          right_allegro_t4_leap_i2_allegro_m3_leap_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-49-20
+          left_allegro_t4_leap_i1_allegro_m4_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-49-33
+          right_allegro_t4_leap_i1_allegro_m4_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-49-45
+          left_allegro_t4_leap_i3_allegro_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-50-26
+          right_allegro_t4_leap_i3_allegro_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-50-26
+          left_allegro_t4_leap_i2_allegro_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-50-26
+          right_allegro_t4_leap_i2_allegro_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-50-29
+          left_allegro_t3_leap_i4_allegro_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-50-45
+          right_allegro_t3_leap_i4_allegro_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-51-14
+          left_allegro_t4_leap_i4_allegro_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-51-27
+          right_allegro_t4_leap_i4_allegro_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-51-34
+        allegro_single_palm_allegro_thumb_leap_index_allegro_middle_ring:
+          left_allegro_t3_leap_i1_allegro_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-52-09
+          right_allegro_t3_leap_i1_allegro_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-52-13
+          left_allegro_t4_leap_i1_allegro_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-52-20
+          right_allegro_t4_leap_i1_allegro_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-52-26
+          left_allegro_t4_leap_i2_allegro_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-52-32
+          right_allegro_t4_leap_i2_allegro_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-52-53
+          left_allegro_t4_leap_i4_allegro_m2_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-53-28
+          right_allegro_t4_leap_i4_allegro_m2_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-53-33
+          left_allegro_t4_leap_i4_allegro_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-53-39
+          right_allegro_t4_leap_i4_allegro_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-53-47
+          left_allegro_t4_leap_i3_allegro_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-53-58
+          right_allegro_t4_leap_i3_allegro_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-53-58
+          left_allegro_t4_leap_i4_allegro_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-54-04
+          right_allegro_t4_leap_i4_allegro_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-54-20
+        allegro_single_palm_allegro_thumb_leap_index_middle_allegro_ring:
+          left_allegro_t3_leap_i1_m1_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-55-06
+          right_allegro_t3_leap_i1_m1_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-55-12
+          left_allegro_t3_leap_i1_m2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-55-22
+          right_allegro_t3_leap_i1_m2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-55-38
+          left_allegro_t3_leap_i2_m3_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-55-47
+          right_allegro_t3_leap_i2_m3_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-55-47
+          left_allegro_t3_leap_i4_m2_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-56-10
+          right_allegro_t3_leap_i4_m2_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-56-13
+          left_allegro_t4_leap_i4_m3_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-56-45
+          right_allegro_t4_leap_i4_m3_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-56-51
+          left_allegro_t4_leap_i4_m3_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-57-03
+          right_allegro_t4_leap_i4_m3_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-57-18
+          left_allegro_t4_leap_i4_m4_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-57-37
+          right_allegro_t4_leap_i4_m4_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-57-51
+        allegro_single_palm_allegro_thumb_index_leap_middle:
+          left_allegro_t3_i3_leap_m1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-58-08
+          right_allegro_t3_i3_leap_m1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-58-35
+          left_allegro_t3_i4_leap_m1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-58-51
+          right_allegro_t3_i4_leap_m1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-58-53
+          left_allegro_t4_i3_leap_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-59-07
+          right_allegro_t4_i3_leap_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-59-12
+          left_allegro_t4_i4_leap_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-59-14
+          right_allegro_t4_i4_leap_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-59-29
+        allegro_single_palm_allegro_thumb_index_leap_ring:
+          left_allegro_t3_i3_leap_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-59-35
+          right_allegro_t3_i3_leap_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-59-45
+          left_allegro_t3_i3_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_03-59-53
+          right_allegro_t3_i3_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-00-02
+          left_allegro_t4_i3_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-00-04
+          right_allegro_t4_i3_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-00-16
+          left_allegro_t4_i4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-00-22
+          right_allegro_t4_i4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-00-31
+        allegro_single_palm_allegro_thumb_leap_index_allegro_middle:
+          left_allegro_t4_leap_i1_allegro_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-00-37
+          right_allegro_t4_leap_i1_allegro_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-00-40
+          left_allegro_t3_leap_i4_allegro_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-00-50
+          right_allegro_t3_leap_i4_allegro_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-00-59
+          left_allegro_t4_leap_i4_allegro_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-01-09
+          right_allegro_t4_leap_i4_allegro_m3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-01-12
+          left_allegro_t4_leap_i4_allegro_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-01-21
+          right_allegro_t4_leap_i4_allegro_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-01-32
+        allegro_single_palm_allegro_thumb_leap_index_allegro_ring:
+          left_allegro_t3_leap_i1_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-01-36
+          right_allegro_t3_leap_i1_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-01-38
+          left_allegro_t4_leap_i3_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-01-45
+          right_allegro_t4_leap_i3_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-01-58
+          left_allegro_t4_leap_i3_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-02-10
+          right_allegro_t4_leap_i3_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-02-17
+        allegro_single_palm_allegro_thumb_leap_middle_allegro_ring:
+          left_allegro_t3_leap_m2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-02-19
+          right_allegro_t3_leap_m2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-02-26
+          left_allegro_t4_leap_m4_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-02-29
+          right_allegro_t4_leap_m4_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-02-31
+          left_allegro_t4_leap_m4_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-02-39
+          right_allegro_t4_leap_m4_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-02-51
+        allegro_single_palm_allegro_thumb_middle_leap_ring:
+          left_allegro_t3_m3_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-03-08
+          right_allegro_t3_m3_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-03-13
+          left_allegro_t4_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-03-15
+          right_allegro_t4_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-03-23
+          left_allegro_t4_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-03-27
+          right_allegro_t4_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-03-29
+        leap_single_palm_leap_thumb_allegro_index_leap_middle_allegro_ring:
+          left_leap_t3_allegro_i3_leap_m1_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-03-40
+          right_leap_t3_allegro_i3_leap_m1_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-03-53
+          left_leap_t3_allegro_i2_leap_m2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-04-02
+          right_leap_t3_allegro_i2_leap_m2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-04-08
+          left_leap_t4_allegro_i3_leap_m2_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-04-11
+          right_leap_t4_allegro_i3_leap_m2_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-04-22
+          left_leap_t4_allegro_i3_leap_m3_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-04-30
+          right_leap_t4_allegro_i3_leap_m3_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-04-32
+          left_leap_t3_allegro_i3_leap_m4_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-04-56
+          right_leap_t3_allegro_i3_leap_m4_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-05-09
+          left_leap_t4_allegro_i4_leap_m3_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-05-24
+          right_leap_t4_allegro_i4_leap_m3_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-05-35
+          left_leap_t4_allegro_i4_leap_m4_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-05-38
+          right_leap_t4_allegro_i4_leap_m4_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-05-54
+        leap_single_palm_leap_thumb_allegro_index_leap_middle_ring:
+          left_leap_t3_allegro_i4_leap_m1_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-05-57
+          right_leap_t3_allegro_i4_leap_m1_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-06-04
+          left_leap_t3_allegro_i4_leap_m1_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-06-32
+          right_leap_t3_allegro_i4_leap_m1_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-07-02
+          left_leap_t4_allegro_i2_leap_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-07-14
+          right_leap_t4_allegro_i2_leap_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-07-23
+          left_leap_t4_allegro_i2_leap_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-07-35
+          right_leap_t4_allegro_i2_leap_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-07-35
+          left_leap_t3_allegro_i4_leap_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-07-56
+          right_leap_t3_allegro_i4_leap_m4_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-07-59
+          left_leap_t3_allegro_i3_leap_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-08-33
+          right_leap_t3_allegro_i3_leap_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-08-39
+          left_leap_t4_allegro_i3_leap_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-09-05
+          right_leap_t4_allegro_i3_leap_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-09-21
+        leap_single_palm_leap_thumb_allegro_index_middle_leap_ring:
+          left_leap_t3_allegro_i3_m2_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-09-21
+          right_leap_t3_allegro_i3_m2_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-09-28
+          left_leap_t3_allegro_i4_m2_leap_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-09-47
+          right_leap_t3_allegro_i4_m2_leap_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-10-09
+          left_leap_t4_allegro_i2_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-10-41
+          right_leap_t4_allegro_i2_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-10-47
+          left_leap_t4_allegro_i3_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-10-55
+          right_leap_t4_allegro_i3_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-11-08
+          left_leap_t4_allegro_i2_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-11-11
+          right_leap_t4_allegro_i2_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-11-14
+          left_leap_t4_allegro_i4_m4_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-11-20
+          right_leap_t4_allegro_i4_m4_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-11-49
+          left_leap_t4_allegro_i4_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-12-15
+          right_leap_t4_allegro_i4_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-12-28
+        leap_single_palm_leap_thumb_index_allegro_middle_leap_ring:
+          left_leap_t3_i1_allegro_m3_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-12-31
+          right_leap_t3_i1_allegro_m3_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-12-44
+          left_leap_t3_i1_allegro_m4_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-12-57
+          right_leap_t3_i1_allegro_m4_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-13-04
+          left_leap_t3_i1_allegro_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-13-13
+          right_leap_t3_i1_allegro_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-13-31
+          left_leap_t3_i3_allegro_m2_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-14-01
+          right_leap_t3_i3_allegro_m2_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-14-17
+          left_leap_t3_i4_allegro_m2_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-14-19
+          right_leap_t3_i4_allegro_m2_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-14-23
+          left_leap_t3_i4_allegro_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-14-31
+          right_leap_t3_i4_allegro_m3_leap_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-14-37
+          left_leap_t4_i4_allegro_m4_leap_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-14-46
+          right_leap_t4_i4_allegro_m4_leap_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-15-05
+          left_leap_t4_i4_allegro_m3_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-16-00
+          right_leap_t4_i4_allegro_m3_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-16-00
+        leap_single_palm_leap_thumb_index_allegro_middle_ring:
+          left_leap_t3_i1_allegro_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-16-03
+          right_leap_t3_i1_allegro_m3_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-16-06
+          left_leap_t3_i2_allegro_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-16-09
+          right_leap_t3_i2_allegro_m2_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-16-25
+          left_leap_t4_i2_allegro_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-16-39
+          right_leap_t4_i2_allegro_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-16-51
+          left_leap_t4_i3_allegro_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-17-32
+          right_leap_t4_i3_allegro_m3_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-17-41
+          left_leap_t4_i4_allegro_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-17-42
+          right_leap_t4_i4_allegro_m2_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-17-44
+          left_leap_t4_i4_allegro_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-18-00
+          right_leap_t4_i4_allegro_m4_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-18-00
+          left_leap_t4_i4_allegro_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-18-16
+          right_leap_t4_i4_allegro_m4_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-18-23
+        leap_single_palm_leap_thumb_index_middle_allegro_ring:
+          left_leap_t3_i1_m1_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-19-10
+          right_leap_t3_i1_m1_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-19-20
+          left_leap_t3_i1_m2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-19-32
+          right_leap_t3_i1_m2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-19-39
+          left_leap_t3_i2_m1_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-19-42
+          right_leap_t3_i2_m1_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-19-45
+          left_leap_t4_i4_m1_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-20-05
+          right_leap_t4_i4_m1_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-20-11
+          left_leap_t3_i3_m4_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-20-46
+          right_leap_t3_i3_m4_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-20-49
+          left_leap_t4_i1_m4_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-21-08
+          right_leap_t4_i1_m4_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-21-11
+          left_leap_t4_i4_m4_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-21-15
+          right_leap_t4_i4_m4_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-21-21
+        leap_single_palm_leap_thumb_allegro_index_leap_middle:
+          left_leap_t3_allegro_i3_leap_m1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-21-37
+          right_leap_t3_allegro_i3_leap_m1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-22-02
+          left_leap_t3_allegro_i2_leap_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-22-31
+          right_leap_t3_allegro_i2_leap_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-22-35
+          left_leap_t4_allegro_i4_leap_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-23-02
+          right_leap_t4_allegro_i4_leap_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-23-07
+        leap_single_palm_leap_thumb_allegro_index_leap_ring:
+          left_leap_t3_allegro_i4_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-23-10
+          right_leap_t3_allegro_i4_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-23-15
+          left_leap_t3_allegro_i3_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-23-19
+          right_leap_t3_allegro_i3_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-23-21
+          left_leap_t4_allegro_i4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-23-38
+          right_leap_t4_allegro_i4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-23-40
+        leap_single_palm_leap_thumb_allegro_middle_leap_ring:
+          left_leap_t3_allegro_m3_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-24-03
+          right_leap_t3_allegro_m3_leap_r1:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-24-05
+          left_leap_t3_allegro_m2_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-24-08
+          right_leap_t3_allegro_m2_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-24-10
+          left_leap_t4_allegro_m2_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-24-14
+          right_leap_t4_allegro_m2_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-24-16
+          left_leap_t4_allegro_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-24-31
+          right_leap_t4_allegro_m4_leap_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-24-33
+        leap_single_palm_leap_thumb_index_allegro_middle:
+          left_leap_t3_i1_allegro_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-24-55
+          right_leap_t3_i1_allegro_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-24-57
+          left_leap_t4_i3_allegro_m2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-25-00
+          right_leap_t4_i3_allegro_m2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-25-08
+          left_leap_t3_i3_allegro_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-25-10
+          right_leap_t3_i3_allegro_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-25-10
+          left_leap_t3_i4_allegro_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-25-24
+          right_leap_t3_i4_allegro_m4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-25-26
+        leap_single_palm_leap_thumb_index_allegro_ring:
+          left_leap_t3_i1_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-25-49
+          right_leap_t3_i1_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-25-51
+          left_leap_t3_i2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-25-53
+          right_leap_t3_i2_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-26-00
+          left_leap_t4_i4_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-26-01
+          right_leap_t4_i4_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-26-05
+          left_leap_t4_i3_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-26-21
+          right_leap_t4_i3_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-26-23
+        leap_single_palm_leap_thumb_middle_allegro_ring:
+          left_leap_t4_m3_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-26-39
+          right_leap_t4_m3_allegro_r2:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-26-41
+          left_leap_t4_m3_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-26-43
+          right_leap_t4_m3_allegro_r3:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-26-50
+          left_leap_t4_m4_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-26-52
+          right_leap_t4_m4_allegro_r4:
+            include_mother: true
+            variant_sets:
+            - 2026-08-20_04-26-56
+validation:
+  unseen_variant_set:
+    runs:
+      default:
+        groups:
+          single_palm_allegro:
+            left_t3_i3_m3_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-46-25
+            right_t3_i3_m3_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-46-25
+            left_t4_i2_m2_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-46-25
+            right_t4_i2_m2_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-46-25
+            left_t3_i4_m3_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-46-25
+            right_t3_i4_m3_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-46-25
+            left_t4_i4_m3_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-46-25
+            right_t4_i4_m3_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-46-25
+            left_t4_i4_m4_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-05
+            right_t4_i4_m4_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-10
+            left_t4_m4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-10
+            right_t4_m4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-10
+            left_t3_i3_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-10
+            right_t3_i3_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-10
+            left_t4_i4_m4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-10
+            right_t4_i4_m4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-10
+          single_palm_leap:
+            left_t3_i1_m3_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-36
+            right_t3_i1_m3_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-44
+            left_t3_i3_m2_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-44
+            right_t3_i3_m2_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-44
+            left_t4_i2_m4_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-44
+            right_t4_i2_m4_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-44
+            left_t3_i4_m3_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-46
+            right_t3_i4_m3_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-47-51
+            left_t3_i4_m4_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-48-32
+            right_t3_i4_m4_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-48-32
+            left_t4_m3_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-48-33
+            right_t4_m3_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-48-37
+            left_t4_i4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-48-37
+            right_t4_i4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-48-43
+            left_t4_i3_m1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-48-46
+            right_t4_i3_m1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-48-49
+        mixed:
+          allegro_single_palm_allegro_thumb_index_leap_middle_allegro_ring:
+            left_allegro_t4_i3_leap_m4_allegro_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-49-18
+            right_allegro_t4_i3_leap_m4_allegro_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-49-18
+          allegro_single_palm_allegro_thumb_index_leap_middle_ring:
+            left_allegro_t4_i3_leap_m3_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-49-18
+            right_allegro_t4_i3_leap_m3_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-49-20
+          allegro_single_palm_allegro_thumb_index_middle_leap_ring:
+            left_allegro_t4_i3_m4_leap_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-49-20
+            right_allegro_t4_i3_m4_leap_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-49-23
+          allegro_single_palm_allegro_thumb_leap_index_allegro_middle_leap_ring:
+            left_allegro_t4_leap_i4_allegro_m4_leap_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-49-25
+            right_allegro_t4_leap_i4_allegro_m4_leap_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-49-29
+          allegro_single_palm_allegro_thumb_leap_index_allegro_middle_ring:
+            left_allegro_t4_leap_i4_allegro_m2_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-50-08
+            right_allegro_t4_leap_i4_allegro_m2_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-50-15
+          allegro_single_palm_allegro_thumb_leap_index_middle_allegro_ring:
+            left_allegro_t3_leap_i4_m2_allegro_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-50-18
+            right_allegro_t3_leap_i4_m2_allegro_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-50-22
+          allegro_single_palm_allegro_thumb_index_leap_middle:
+            left_allegro_t3_i3_leap_m1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-50-22
+            right_allegro_t3_i3_leap_m1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-50-28
+          allegro_single_palm_allegro_thumb_leap_middle_allegro_ring:
+            left_allegro_t4_leap_m4_allegro_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-50-31
+            right_allegro_t4_leap_m4_allegro_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-50-57
+          leap_single_palm_leap_thumb_allegro_index_leap_middle_allegro_ring:
+            left_leap_t4_allegro_i3_leap_m3_allegro_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-51-00
+            right_leap_t4_allegro_i3_leap_m3_allegro_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-51-05
+          leap_single_palm_leap_thumb_allegro_index_leap_middle_ring:
+            left_leap_t3_allegro_i4_leap_m1_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-51-06
+            right_leap_t3_allegro_i4_leap_m1_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-51-11
+          leap_single_palm_leap_thumb_allegro_index_middle_leap_ring:
+            left_leap_t4_allegro_i4_m4_leap_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-51-11
+            right_leap_t4_allegro_i4_m4_leap_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-51-19
+          leap_single_palm_leap_thumb_index_allegro_middle_leap_ring:
+            left_leap_t3_i1_allegro_m3_leap_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-51-19
+            right_leap_t3_i1_allegro_m3_leap_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-51-40
+          leap_single_palm_leap_thumb_index_allegro_middle_ring:
+            left_leap_t4_i4_allegro_m4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-51-44
+            right_leap_t4_i4_allegro_m4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-51-56
+          leap_single_palm_leap_thumb_index_middle_allegro_ring:
+            left_leap_t3_i3_m4_allegro_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-52-02
+            right_leap_t3_i3_m4_allegro_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-52-09
+          leap_single_palm_leap_thumb_index_allegro_ring:
+            left_leap_t4_i3_allegro_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-52-11
+            right_leap_t4_i3_allegro_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-52-15
+          leap_single_palm_leap_thumb_middle_allegro_ring:
+            left_leap_t4_m3_allegro_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-52-18
+            right_leap_t4_m3_allegro_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_04-52-34
+  unseen_mother:
+    runs:
+      default:
+        groups:
+          single_palm_allegro:
+            left_t3_i4_m2_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-52-38
+            right_t3_i4_m2_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-52-42
+            left_t3_i2_m3_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-52-54
+            right_t3_i2_m3_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-01
+            left_t4_i3_m3_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-01
+            right_t4_i3_m3_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-02
+            left_t3_i4_m4_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-09
+            right_t3_i4_m4_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-16
+            left_t3_i2_m4_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-19
+            right_t3_i2_m4_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-19
+            left_t4_m3_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-30
+            right_t4_m3_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-39
+            left_t4_i2_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-39
+            right_t4_i2_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-44
+            left_t3_i4_m3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-51
+            right_t3_i4_m3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-53
+          single_palm_leap:
+            left_t4_i3_m1_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-53-56
+            right_t4_i3_m1_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-54-04
+            left_t4_i4_m2_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-54-04
+            right_t4_i4_m2_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-54-15
+            left_t3_i2_m4_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-54-15
+            right_t3_i2_m4_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-54-15
+            left_t4_i4_m4_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-54-22
+            right_t4_i4_m4_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-54-25
+            left_t3_i3_m4_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-54-28
+            right_t3_i3_m4_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-54-54
+            left_t4_m4_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-54-58
+            right_t4_m4_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-54-58
+            left_t4_i3_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-55-01
+            right_t4_i3_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-55-04
+            left_t3_i3_m1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-55-09
+            right_t3_i3_m1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-55-12
+        mixed:
+          allegro_single_palm_allegro_thumb_index_leap_middle_allegro_ring:
+            left_allegro_t3_i2_leap_m3_allegro_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-55-25
+            right_allegro_t3_i2_leap_m3_allegro_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-55-30
+          allegro_single_palm_allegro_thumb_index_leap_middle_ring:
+            left_allegro_t3_i3_leap_m4_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-55-31
+            right_allegro_t3_i3_leap_m4_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-55-34
+          allegro_single_palm_allegro_thumb_index_middle_leap_ring:
+            left_allegro_t3_i4_m4_leap_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-55-36
+            right_allegro_t3_i4_m4_leap_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-55-40
+          allegro_single_palm_allegro_thumb_leap_index_allegro_middle_leap_ring:
+            left_allegro_t3_leap_i4_allegro_m3_leap_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-55-41
+            right_allegro_t3_leap_i4_allegro_m3_leap_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-55-43
+          allegro_single_palm_allegro_thumb_leap_index_allegro_middle_ring:
+            left_allegro_t3_leap_i1_allegro_m4_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-07
+            right_allegro_t3_leap_i1_allegro_m4_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-07
+          allegro_single_palm_allegro_thumb_index_leap_middle:
+            left_allegro_t4_i3_leap_m2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-10
+            right_allegro_t4_i3_leap_m2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-22
+          allegro_single_palm_allegro_thumb_leap_index_allegro_ring:
+            left_allegro_t4_leap_i4_allegro_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-22
+            right_allegro_t4_leap_i4_allegro_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-25
+          allegro_single_palm_allegro_thumb_leap_middle_allegro_ring:
+            left_allegro_t3_leap_m1_allegro_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-26
+            right_allegro_t3_leap_m1_allegro_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-27
+          leap_single_palm_leap_thumb_allegro_index_leap_middle_allegro_ring:
+            left_leap_t4_allegro_i4_leap_m2_allegro_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-43
+            right_leap_t4_allegro_i4_leap_m2_allegro_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-45
+          leap_single_palm_leap_thumb_allegro_index_middle_leap_ring:
+            left_leap_t4_allegro_i2_m3_leap_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-52
+            right_leap_t4_allegro_i2_m3_leap_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-52
+          leap_single_palm_leap_thumb_index_allegro_middle_leap_ring:
+            left_leap_t3_i2_allegro_m3_leap_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-55
+            right_leap_t3_i2_allegro_m3_leap_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-55
+          leap_single_palm_leap_thumb_index_allegro_middle_ring:
+            left_leap_t4_i4_allegro_m3_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-56-57
+            right_leap_t4_i4_allegro_m3_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-57-06
+          leap_single_palm_leap_thumb_index_middle_allegro_ring:
+            left_leap_t4_i4_m3_allegro_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-57-24
+            right_leap_t4_i4_m3_allegro_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-57-27
+          leap_single_palm_leap_thumb_allegro_index_leap_middle:
+            left_leap_t3_allegro_i4_leap_m1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-57-33
+            right_leap_t3_allegro_i4_leap_m1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-57-33
+          leap_single_palm_leap_thumb_allegro_index_leap_ring:
+            left_leap_t3_allegro_i3_leap_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-57-36
+            right_leap_t3_allegro_i3_leap_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-57-42
+          leap_single_palm_leap_thumb_index_allegro_ring:
+            left_leap_t3_i1_allegro_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-57-44
+            right_leap_t3_i1_allegro_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_04-57-51
+evaluation:
+  unseen_variant_set:
+    runs:
+      default:
+        groups:
+          single_palm_allegro:
+            left_t3_i3_m2_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-01-58
+            right_t3_i3_m2_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-01-58
+            left_t4_i2_m3_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-01-58
+            right_t4_i2_m3_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-01-58
+            left_t4_i2_m4_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-01-58
+            right_t4_i2_m4_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-01-58
+            left_t3_i4_m3_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-01-58
+            right_t3_i4_m3_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-01-58
+            left_t4_i3_m4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-03-18
+            right_t4_i3_m4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-03-19
+            left_t4_i4_m4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-03-23
+            right_t4_i4_m4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-03-23
+            left_t4_m4_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-03-23
+            right_t4_m4_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-03-23
+            left_t4_i4_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-03-28
+            right_t4_i4_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-03-33
+          single_palm_leap:
+            left_t4_i2_m3_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-04-45
+            right_t4_i2_m3_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-04-45
+            left_t3_i2_m3_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-04-48
+            right_t3_i2_m3_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-04-48
+            left_t3_i3_m4_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-04-52
+            right_t3_i3_m4_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-04-58
+            left_t4_i4_m4_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-04-58
+            right_t4_i4_m4_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-04-58
+            left_t3_i4_m4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-06-30
+            right_t3_i4_m4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-06-37
+            left_t4_i4_m4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-06-50
+            right_t4_i4_m4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-06-54
+            left_t3_m1_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-07-01
+            right_t3_m1_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-07-02
+            left_t3_i4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-07-08
+            right_t3_i4_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-07-17
+        mixed:
+          allegro_single_palm_allegro_thumb_index_leap_middle_allegro_ring:
+            left_allegro_t4_i4_leap_m4_allegro_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-08-19
+            right_allegro_t4_i4_leap_m4_allegro_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-08-24
+          allegro_single_palm_allegro_thumb_index_leap_middle_ring:
+            left_allegro_t3_i3_leap_m2_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-08-32
+            right_allegro_t3_i3_leap_m2_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-08-38
+          allegro_single_palm_allegro_thumb_index_middle_leap_ring:
+            left_allegro_t3_i3_m3_leap_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-08-44
+            right_allegro_t3_i3_m3_leap_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-08-47
+          allegro_single_palm_allegro_thumb_leap_index_allegro_middle_leap_ring:
+            left_allegro_t4_leap_i2_allegro_m4_leap_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-09-07
+            right_allegro_t4_leap_i2_allegro_m4_leap_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-09-10
+          allegro_single_palm_allegro_thumb_leap_index_allegro_middle_ring:
+            left_allegro_t4_leap_i1_allegro_m2_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-10-17
+            right_allegro_t4_leap_i1_allegro_m2_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-10-17
+          allegro_single_palm_allegro_thumb_leap_index_allegro_middle:
+            left_allegro_t4_leap_i4_allegro_m4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-10-25
+            right_allegro_t4_leap_i4_allegro_m4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-10-31
+          allegro_single_palm_allegro_thumb_leap_index_allegro_ring:
+            left_allegro_t4_leap_i3_allegro_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-10-34
+            right_allegro_t4_leap_i3_allegro_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-10-52
+          allegro_single_palm_allegro_thumb_middle_leap_ring:
+            left_allegro_t4_m4_leap_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-11-00
+            right_allegro_t4_m4_leap_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-11-02
+          leap_single_palm_leap_thumb_allegro_index_leap_middle_allegro_ring:
+            left_leap_t3_allegro_i3_leap_m4_allegro_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-11-34
+            right_leap_t3_allegro_i3_leap_m4_allegro_r3:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-11-43
+          leap_single_palm_leap_thumb_allegro_index_middle_leap_ring:
+            left_leap_t4_allegro_i4_m4_leap_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-11-45
+            right_leap_t4_allegro_i4_m4_leap_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-11-53
+          leap_single_palm_leap_thumb_index_allegro_middle_leap_ring:
+            left_leap_t3_i1_allegro_m4_leap_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-11-56
+            right_leap_t3_i1_allegro_m4_leap_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-12-12
+          leap_single_palm_leap_thumb_index_allegro_middle_ring:
+            left_leap_t3_i1_allegro_m3_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-12-30
+            right_leap_t3_i1_allegro_m3_r2:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-12-33
+          leap_single_palm_leap_thumb_index_middle_allegro_ring:
+            left_leap_t3_i2_m1_allegro_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-13-09
+            right_leap_t3_i2_m1_allegro_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-13-38
+          leap_single_palm_leap_thumb_allegro_index_leap_middle:
+            left_leap_t4_allegro_i4_leap_m4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-13-41
+            right_leap_t4_allegro_i4_leap_m4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-13-41
+          leap_single_palm_leap_thumb_allegro_index_leap_ring:
+            left_leap_t3_allegro_i3_leap_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-13-50
+            right_leap_t3_allegro_i3_leap_r4:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-13-57
+          leap_single_palm_leap_thumb_allegro_middle_leap_ring:
+            left_leap_t3_allegro_m3_leap_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-14-01
+            right_leap_t3_allegro_m3_leap_r1:
+              include_mother: false
+              variant_sets:
+              - 2026-08-20_05-14-04
+  unseen_mother:
+    runs:
+      default:
+        groups:
+          single_palm_allegro:
+            left_t3_i4_m2_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-14-35
+            right_t3_i4_m2_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-14-50
+            left_t3_i4_m3_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-14-56
+            right_t3_i4_m3_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-14-58
+            left_t3_i3_m4_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-15-03
+            right_t3_i3_m4_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-15-10
+            left_t4_i4_m3_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-15-13
+            right_t4_i4_m3_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-15-16
+            left_t4_i2_m3_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-15-50
+            right_t4_i2_m3_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-16-11
+            left_t3_m2_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-16-20
+            right_t3_m2_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-16-22
+            left_t3_i4_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-16-28
+            right_t3_i4_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-16-40
+            left_t4_i3_m4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-16-44
+            right_t4_i3_m4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-16-47
+          single_palm_leap:
+            left_t3_i2_m3_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-17-09
+            right_t3_i2_m3_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-17-24
+            left_t4_i1_m1_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-17-26
+            right_t4_i1_m1_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-17-26
+            left_t3_i3_m2_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-17-40
+            right_t3_i3_m2_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-17-48
+            left_t3_i2_m4_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-17-51
+            right_t3_i2_m4_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-17-54
+            left_t4_i2_m4_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-18-25
+            right_t4_i2_m4_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-19-00
+            left_t4_m3_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-19-13
+            right_t4_m3_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-19-29
+            left_t3_i1_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-19-29
+            right_t3_i1_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-19-32
+            left_t4_i4_m3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-19-37
+            right_t4_i4_m3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-19-45
+        mixed:
+          allegro_single_palm_allegro_thumb_index_leap_middle_allegro_ring:
+            left_allegro_t4_i4_leap_m3_allegro_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-20-07
+            right_allegro_t4_i4_leap_m3_allegro_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-20-31
+          allegro_single_palm_allegro_thumb_index_leap_middle_ring:
+            left_allegro_t4_i3_leap_m2_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-20-36
+            right_allegro_t4_i3_leap_m2_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-20-38
+          allegro_single_palm_allegro_thumb_index_middle_leap_ring:
+            left_allegro_t3_i4_m3_leap_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-20-38
+            right_allegro_t3_i4_m3_leap_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-20-40
+          allegro_single_palm_allegro_thumb_leap_index_allegro_middle_leap_ring:
+            left_allegro_t3_leap_i1_allegro_m4_leap_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-20-46
+            right_allegro_t3_leap_i1_allegro_m4_leap_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-20-55
+          allegro_single_palm_allegro_thumb_leap_index_middle_allegro_ring:
+            left_allegro_t3_leap_i2_m1_allegro_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-21-45
+            right_allegro_t3_leap_i2_m1_allegro_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-22-12
+          allegro_single_palm_allegro_thumb_index_leap_ring:
+            left_allegro_t3_i2_leap_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-22-12
+            right_allegro_t3_i2_leap_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-22-15
+          allegro_single_palm_allegro_thumb_leap_index_allegro_ring:
+            left_allegro_t3_leap_i4_allegro_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-22-15
+            right_allegro_t3_leap_i4_allegro_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-22-32
+          allegro_single_palm_allegro_thumb_middle_leap_ring:
+            left_allegro_t4_m3_leap_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-22-32
+            right_allegro_t4_m3_leap_r1:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-22-34
+          leap_single_palm_leap_thumb_allegro_index_leap_middle_allegro_ring:
+            left_leap_t3_allegro_i3_leap_m1_allegro_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-22-59
+            right_leap_t3_allegro_i3_leap_m1_allegro_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-23-13
+          leap_single_palm_leap_thumb_allegro_index_leap_middle_ring:
+            left_leap_t4_allegro_i4_leap_m4_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-23-13
+            right_leap_t4_allegro_i4_leap_m4_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-23-15
+          leap_single_palm_leap_thumb_allegro_index_middle_leap_ring:
+            left_leap_t4_allegro_i4_m3_leap_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-23-15
+            right_leap_t4_allegro_i4_m3_leap_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-23-33
+          leap_single_palm_leap_thumb_index_allegro_middle_ring:
+            left_leap_t3_i4_allegro_m3_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-23-36
+            right_leap_t3_i4_allegro_m3_r4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-23-44
+          leap_single_palm_leap_thumb_index_middle_allegro_ring:
+            left_leap_t4_i3_m2_allegro_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-24-27
+            right_leap_t4_i3_m2_allegro_r2:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-24-43
+          leap_single_palm_leap_thumb_allegro_middle_leap_ring:
+            left_leap_t4_allegro_m4_leap_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-25-00
+            right_leap_t4_allegro_m4_leap_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-25-03
+          leap_single_palm_leap_thumb_index_allegro_middle:
+            left_leap_t4_i1_allegro_m4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-25-15
+            right_leap_t4_i1_allegro_m4:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-25-23
+          leap_single_palm_leap_thumb_middle_allegro_ring:
+            left_leap_t3_m3_allegro_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-25-23
+            right_leap_t3_m3_allegro_r3:
+              include_mother: true
+              variant_sets:
+              - 2026-08-20_05-25-26
+  official_zero_shot:
+    assets: []

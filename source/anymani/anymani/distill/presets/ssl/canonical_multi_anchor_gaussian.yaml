@@ -1,7 +1,6 @@
 # 完整实验 façade：每一行 defaults 都选择一个可独立维护的 concrete component。
 defaults:
-  - embodiment_pretrain_schema
-  - data: hand_asset_catalog
+  - multi_anchor_gaussian_implicit_field
   - method: multi_anchor_gaussian
   - representation@method.representation: multi_anchor_gaussian
   - model@method.model: multi_anchor_gaussian

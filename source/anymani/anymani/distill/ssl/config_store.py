@@ -22,22 +22,22 @@ from anymani.distill.objectives.representations.geometry_terms import (
 )
 from anymani.distill.representations.geometry import GeometryRepresentationCfg
 
-from .data import HandAssetCatalogCfg
 from .experiment import EmbodimentPretrainCfg
+from .experiments.multi_anchor_gaussion_implicit_field import EXPERIMENT
 from .methods import MultiAnchorGaussianMethodCfg
 from .runtime.evaluation import MultiAnchorEvaluationCfg
 from .runtime.pretrainer import EmbodimentPretrainTrainerCfg
 from .runtime.run import PretrainRunCfg
 
 
-def _mutable_schema(config_type: type[Any]) -> DictConfig:
+def _mutable_schema(config: Any) -> DictConfig:
     r"""保留 dataclass object type，但允许 Hydra defaults 在 compose 期间写入字段。
 
     ``frozen=True`` 是 runtime 科研合同；Hydra compose 则需要一个短暂可合并的 DictConfig view。
     最终 ``OmegaConf.to_object`` 仍按原 dataclass 类型构造冻结对象。
     """
 
-    node = OmegaConf.structured(config_type)
+    node = OmegaConf.structured(config)
 
     def thaw(value: Any) -> None:
         r"""递归解除 nested frozen dataclass nodes 的 compose-time readonly 标志。"""
@@ -60,7 +60,7 @@ def register_pretraining_configs() -> None:
 
     store = ConfigStore.instance()
     store.store(name="embodiment_pretrain_schema", node=_mutable_schema(EmbodimentPretrainCfg))
-    store.store(group="data", name="schema_hand_asset_catalog", node=_mutable_schema(HandAssetCatalogCfg))
+    store.store(name="multi_anchor_gaussian_implicit_field", node=_mutable_schema(EXPERIMENT))
     store.store(group="method", name="schema_multi_anchor_gaussian", node=_mutable_schema(MultiAnchorGaussianMethodCfg))
     store.store(
         group="representation",
