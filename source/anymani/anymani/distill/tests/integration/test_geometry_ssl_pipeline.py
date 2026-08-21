@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
+from anymani.distill.methods.contracts import MethodStep
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import MultiAnchorGaussianObjectivesCfg
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.context import MultiAnchorObjectiveContext
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives import (
+    evaluate_objectives,
+    reduce_method_steps,
+)
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.decoders.representations.implicit_field import (
     ConditionalDensityDecoder,
@@ -15,10 +24,6 @@ from anymani.distill.models.input_adapters.geometry import (
     ImplicitGeometryEncoder,
     SO2AnchorFrontendCfg,
     StaticGeometryEvidence,
-)
-from anymani.distill.objectives.representations.field_reconstruction import (
-    GeometryFieldObjective,
-    GeometryFieldObjectiveCfg,
 )
 from anymani.distill.representations.fields.density import gaussian_density_from_distance
 from anymani.distill.representations.targets.field_samples import FieldTargetBatch, QueryStratum, SensitivityTargetBatch
@@ -137,6 +142,7 @@ def test_synthetic_geometry_ssl_forward_joint_jvp_and_backward() -> None:
         query_index=query_index,
         joint_index=joint_index,
         ancestor_mask=torch.ones(2, dtype=torch.bool),
+        active_mask=torch.ones(2, dtype=torch.bool),
         closest_point=torch.zeros(batch_size, 2, 3, dtype=dtype),
         closest_source=torch.zeros(batch_size, 2, dtype=torch.long),
         uniqueness_margin=torch.full((batch_size, 2), 0.004, dtype=dtype),
@@ -147,22 +153,23 @@ def test_synthetic_geometry_ssl_forward_joint_jvp_and_backward() -> None:
         valid_mask=torch.ones(batch_size, 2, dtype=torch.bool),
     )
 
-    objective = GeometryFieldObjective(
-        GeometryFieldObjectiveCfg(density=1.0, kappa=1.0, derived_field=1.0, sobolev=1.0, chain=1.0)
-    )
-    terms = objective(
+    context = MultiAnchorObjectiveContext(
+        model=encoder,
         q=q,
-        density_prediction=density_prediction,
-        kappa_prediction=kappa_prediction,
-        field_targets=field_targets,
-        sensitivity_targets=sensitivity_targets,
+        prediction=SimpleNamespace(density=density_prediction, kappa=kappa_prediction),
+        batch=SimpleNamespace(field_targets=field_targets, sensitivity_targets=sensitivity_targets),
     )
-    terms.total.backward()
+    objectives_cfg = MultiAnchorGaussianObjectivesCfg()
+    update = reduce_method_steps(
+        (MethodStep(objectives=evaluate_objectives(context, objectives_cfg), sample_count=batch_size),),
+        objectives_cfg,
+    )
+    update.loss.backward()
 
     assert density_prediction.shape == (batch_size, owner_count, query_count, 2)
     assert kappa_prediction.shape == (batch_size, 2)
-    assert terms.auto_field_sensitivity.shape == (batch_size, 2, 2)
-    assert torch.isfinite(terms.total)
+    assert context.auto_field_sensitivity.shape == (batch_size, 2, 2)
+    assert torch.isfinite(update.loss)
     assert q.grad is not None and torch.isfinite(q.grad).all()
     trainable_gradients = [parameter.grad for parameter in encoder.parameters() if parameter.requires_grad]
     assert any(gradient is not None and torch.isfinite(gradient).all() for gradient in trainable_gradients)

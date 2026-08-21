@@ -9,7 +9,7 @@ from anymani.distill.ssl.runtime.sampling import OnlineMinibatchSchedule, Online
 
 
 def test_each_q_round_is_one_deterministic_permutation_of_all_assets() -> None:
-    r"""每个 q round 每项资产恰出现一次，顺序由 seed/epoch/round 唯一决定。"""
+    r"""每个 epoch 的第一窗覆盖全部资产一次；顺序由 seed/epoch 唯一决定。"""
 
     config = OnlineSamplingCfg(
         epochs=1,
@@ -75,6 +75,43 @@ def test_schedule_checkpoint_restores_the_exact_next_minibatch() -> None:
     resumed = OnlineMinibatchSchedule(6, config)
     resumed.load_state_dict(state)
     assert resumed.next() == expected
+
+
+def test_window_major_schedule_finishes_each_resident_window_before_switching() -> None:
+    r"""超过 resident cap 时，同一窗内资产先完成全部 q coverage，再切到下一窗。"""
+
+    schedule = OnlineMinibatchSchedule(
+        5,
+        OnlineSamplingCfg(
+            epochs=1,
+            q_per_asset_per_epoch=2,
+            assets_per_minibatch=2,
+            q_per_asset_per_minibatch=1,
+            shuffle_assets=False,
+            seed=7,
+        ),
+        max_resident_assets=4,
+    )
+    items = tuple(schedule.next() for _ in range(schedule.minibatches_per_epoch))
+    windows = tuple(item.resident_asset_indices for item in items)
+    assert windows == (
+        (0, 1, 2, 3),
+        (0, 1, 2, 3),
+        (0, 1, 2, 3),
+        (0, 1, 2, 3),
+        (4,),
+        (4,),
+    )
+    assert tuple(item.asset_indices for item in items) == (
+        (0, 1),
+        (2, 3),
+        (0, 1),
+        (2, 3),
+        (4,),
+        (4,),
+    )
+    assert tuple(item.q_per_asset for item in items) == (1, 1, 1, 1, 1, 1)
+    assert schedule.minibatches_per_epoch == 6
 
 
 def test_completed_schedule_checkpoint_restores_as_complete() -> None:

@@ -13,21 +13,8 @@ from time import perf_counter
 
 import torch
 
-from anymani.distill.models.input_adapters.geometry import GeometryPaddingCfg
-from anymani.distill.representations.geometry import (
-    GeometryRepresentationState,
-    PaddedOnlineGeometryBatch,
-    SobolJointSampler,
-    pad_online_geometry_samples,
-    sample_online_geometry,
-    split_online_geometry_sample,
-)
-from anymani.distill.representations.queries.spatial_sampling import SpatialQuerySamplerCfg
+from anymani.distill.representations.geometry import GeometryRepresentationState
 from anymani.distill.representations.sources.geometry_source import GeometrySource
-from anymani.distill.representations.targets.geometry_field import (
-    GaussianProximityFieldCfg,
-    GeometryFieldTargetCfg,
-)
 
 
 @dataclass(frozen=True)
@@ -69,7 +56,7 @@ class GeometrySSLRuntimeState:
 class ResidentGeometryAssetWindow:
     r"""把 CPU catalog 映射为有界 GPU asset window。
 
-    ``loader`` 在正式运行中是 ``GeometryRepresentation.to_device``；参数注入使纯 contract 可以用
+    ``loader`` 在正式运行中是 method 的 ``load_device_state``；参数注入使纯 contract 可以用
     synthetic loader 验证 resident cap 与 eviction，而不启动 Warp/Isaac Sim。
     """
 
@@ -311,178 +298,8 @@ def _memory_allocator_delta(
     return after_value - before_value  # 正值表示 PyTorch allocator 占用增加
 
 
-class WindowedOnlineGeometryBatcher:
-    r"""按 epoch coverage 取资产组，并在每组内一次生成 ``A_mb*Q_mb`` 样本。"""
-
-    def __init__(
-        self,
-        runtimes: tuple[GeometrySource, ...] | list[GeometrySource],
-        window: ResidentGeometryAssetWindow,
-        *,
-        seed: int,
-        runtime_config: GeometrySSLRuntimeCfg,
-        field_config: GaussianProximityFieldCfg,
-        query_config: SpatialQuerySamplerCfg,
-        target_config: GeometryFieldTargetCfg,
-        padding: GeometryPaddingCfg,
-    ) -> None:
-        if runtime_config.assets_per_minibatch > len(runtimes):
-            raise ValueError("assets_per_minibatch cannot exceed catalog size")
-        self.runtime_config = runtime_config
-        self.window = window
-        self.seed = int(seed)
-        self.field_config = field_config
-        self.query_config = query_config
-        self.target_config = target_config
-        self.padding = padding
-        self._samplers = self._build_samplers(runtimes)
-        self.epoch = 0
-        self.block_index = 0
-        self._catalog_ids = tuple(runtime.asset_id for runtime in runtimes)
-        self._groups, self._q_counts = self._build_groups()
-
-    def _build_groups(self) -> tuple[tuple[tuple[int, ...], ...], tuple[int, ...]]:
-        r"""按 resident window 分块，并记录每组的真实 q block 长度。"""
-
-        ordered_groups: list[tuple[int, ...]] = []
-        ordered_q_counts: list[int] = []
-        for window_start in range(0, len(self._catalog_ids), self.runtime_config.max_resident_assets):
-            window_end = min(window_start + self.runtime_config.max_resident_assets, len(self._catalog_ids))
-            window_groups: list[tuple[int, ...]] = []
-            for group_start in range(window_start, window_end, self.runtime_config.assets_per_minibatch):
-                window_groups.append(
-                    tuple(range(group_start, min(group_start + self.runtime_config.assets_per_minibatch, window_end)))
-                )
-            for q_start in range(
-                0, self.runtime_config.q_per_asset_per_epoch, self.runtime_config.q_per_asset_per_minibatch
-            ):
-                q_count = min(
-                    self.runtime_config.q_per_asset_per_minibatch,
-                    self.runtime_config.q_per_asset_per_epoch - q_start,
-                )
-                ordered_groups.extend(window_groups)
-                ordered_q_counts.extend(q_count for _group in window_groups)
-        # 一个 window 完成全部 q coverage 后再触发下一次 lease 切换。
-        return tuple(ordered_groups), tuple(ordered_q_counts)
-
-    def _build_samplers(self, runtimes):
-        return tuple(
-            SobolJointSampler(runtime.spec_cpu, seed=self.seed + index) for index, runtime in enumerate(runtimes)
-        )
-
-    @property
-    def blocks_per_epoch(self) -> int:
-        return len(self._groups)
-
-    def _asset_group(self) -> tuple[int, ...]:
-        return self._groups[self.block_index]
-
-    def sample(self) -> PaddedOnlineGeometryBatch:
-        if self.epoch >= self.runtime_config.epochs:
-            raise StopIteration("all configured geometry SSL epochs are complete")
-        asset_indices = self._asset_group()
-        q_count = self._q_counts[self.block_index]
-        asset_ids = tuple(self._catalog_ids[index] for index in asset_indices)
-        window_start = (
-            asset_indices[0] // self.runtime_config.max_resident_assets
-        ) * self.runtime_config.max_resident_assets
-        window_end = min(window_start + self.runtime_config.max_resident_assets, len(self._catalog_ids))
-        window_ids = self._catalog_ids[window_start:window_end]
-        resident_states = self.window.ensure(window_ids)
-        resident_by_id = {state.source.asset_id: state for state in resident_states}
-        states = tuple(resident_by_id[asset_id] for asset_id in asset_ids)
-        samples = []
-        for asset_index, state in zip(asset_indices, states):
-            q_block = self._samplers[asset_index].draw(
-                q_count,
-                device=state.spec.space_screws.device,
-                dtype=state.spec.space_screws.dtype,
-            )
-            q_start = self._samplers[asset_index].cursor - q_count
-            block = sample_online_geometry(
-                state,
-                q_block,
-                field_config=self.field_config,
-                query_config=self.query_config,
-                target_config=self.target_config,
-                sampling_seed=self.seed + self.epoch * self.blocks_per_epoch + self.block_index,
-                q_index=torch.arange(
-                    q_start,
-                    q_start + q_count,
-                    dtype=torch.long,
-                ),
-            )
-            samples.extend(split_online_geometry_sample(block))
-        batch = pad_online_geometry_samples(samples, padding=self.padding)
-        self.block_index += 1
-        if self.block_index >= self.blocks_per_epoch:
-            self.epoch += 1
-            self.block_index = 0
-        return batch
-
-    def sample_epoch(self) -> tuple[PaddedOnlineGeometryBatch, ...]:
-        r"""消费当前 epoch 的全部 q blocks，返回固定 validation bank 的稠密切片。"""
-
-        start_epoch = self.epoch
-        batches: list[PaddedOnlineGeometryBatch] = []
-        while self.epoch == start_epoch:
-            batches.append(self.sample())
-        return tuple(batches)
-
-    def state_dict(self) -> GeometrySSLRuntimeState:
-        return GeometrySSLRuntimeState(
-            epoch=self.epoch,
-            block_index=self.block_index,
-            resident_asset_ids=self.window.resident_asset_ids,
-            batcher_state={
-                "seed": self.seed,
-                "asset_ids": self._catalog_ids,
-                "samplers": tuple(sampler.state_dict() for sampler in self._samplers),
-            },
-        )
-
-    def load_state_dict(self, state: GeometrySSLRuntimeState) -> None:
-        if (
-            state.epoch < 0
-            or state.block_index < 0
-            or (state.epoch < self.runtime_config.epochs and state.block_index >= self.blocks_per_epoch)
-        ):
-            raise ValueError("invalid geometry SSL runtime epoch/block cursor")
-        raw_asset_ids = state.batcher_state.get("asset_ids", ())
-        if not isinstance(raw_asset_ids, (tuple, list)) or tuple(raw_asset_ids) != self._catalog_ids:
-            raise ValueError("runtime checkpoint asset order does not match catalog")
-        sampler_states = state.batcher_state.get("samplers", ())
-        if not isinstance(sampler_states, (tuple, list)) or len(sampler_states) != len(self._samplers):
-            raise ValueError("runtime checkpoint sampler count does not match catalog")
-        for sampler, sampler_state in zip(self._samplers, sampler_states):
-            sampler.load_state_dict(sampler_state)
-        self.epoch = state.epoch
-        self.block_index = state.block_index
-
-
-def runtime_state_from_dict(payload: dict[str, object]) -> GeometrySSLRuntimeState:
-    r"""把 checkpoint 基础 mapping 重建为严格 runtime state。"""
-
-    batcher_state = payload.get("batcher_state")
-    resident_asset_ids = payload.get("resident_asset_ids", ())
-    if not isinstance(batcher_state, dict) or not isinstance(resident_asset_ids, (tuple, list)):
-        raise ValueError("invalid geometry SSL runtime checkpoint payload")
-    epoch = payload.get("epoch")
-    block_index = payload.get("block_index")
-    if not isinstance(epoch, int) or not isinstance(block_index, int):
-        raise ValueError("runtime checkpoint epoch/block_index must be integers")
-    return GeometrySSLRuntimeState(
-        epoch=epoch,
-        block_index=block_index,
-        resident_asset_ids=tuple(str(asset_id) for asset_id in resident_asset_ids),
-        batcher_state=batcher_state,
-    )
-
-
 __all__ = [
     "GeometrySSLRuntimeCfg",
     "GeometrySSLRuntimeState",
     "ResidentGeometryAssetWindow",
-    "WindowedOnlineGeometryBatcher",
-    "runtime_state_from_dict",
 ]

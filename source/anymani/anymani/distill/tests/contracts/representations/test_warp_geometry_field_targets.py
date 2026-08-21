@@ -85,8 +85,8 @@ def test_warp_geometry_targets_close_density_chain_and_kappa_finite_difference()
 
     assert field.distance.shape == (1, 21, 64)
     assert field.density.shape == (1, 21, 64, 3)
-    assert sensitivity.kappa.shape == (1, 42)
-    assert sensitivity.field_sensitivity.shape == (1, 42, 3)
+    assert sensitivity.kappa.shape == (1, 32)
+    assert sensitivity.field_sensitivity.shape == (1, 32, 3)
     assert torch.count_nonzero(sensitivity.kappa[:, ~sensitivity.ancestor_mask]) == 0
     assert torch.count_nonzero(sensitivity.field_sensitivity[:, ~sensitivity.ancestor_mask]) == 0
     assert sensitivity.provenance["global_second_nearest_margin"] == "not_materialized"

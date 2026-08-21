@@ -14,9 +14,10 @@ from typing import Any  # 标量记录包含字符串、列表与 float
 import numpy as np  # dense latent/mask/error 使用压缩 NPZ
 from torch.utils.tensorboard import SummaryWriter  # 在线曲线不替代 JSONL 事实源
 
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import (
+    PaddedOnlineGeometryBatch,  # target、mask 与资产身份
+)
 from anymani.distill.models.geometry_ssl import GeometrySSLForward  # latent/density/κ 预测包
-from anymani.distill.objectives.representations.field_reconstruction import GeometryFieldObjectiveTerms  # 六项损失包
-from anymani.distill.representations.geometry import PaddedOnlineGeometryBatch  # target、mask 与资产身份
 
 
 class GeometrySSLRunLogger:
@@ -70,33 +71,21 @@ class GeometrySSLRunLogger:
         *,
         step: int,  # optimizer step，从 1 开始
         split: str,  # `train` 或 `validation`
-        terms: GeometryFieldObjectiveTerms,  # 当前 batch 的六项标量损失
+        terms: dict[str, float],  # 当前 update 的五项 $(asset,q)$ 等权均值
         asset_ids: tuple[str, ...],  # `[B]` 路由身份
         gradient_norm: float | None = None,  # train-only clip 前总范数
         batch: PaddedOnlineGeometryBatch | None = None,  # q cursor provenance
+        total: float | None = None,  # 加权五项总损失；缺省时按声明权重无法重建
     ) -> None:
-        r"""记录六项损失、总损失、资产路由和可选共享参数梯度范数。
+        r"""记录五项损失、可选总损失、资产路由和可选共享参数梯度范数。
 
         ``density`` 无量纲；``kappa`` 的误差来自 m/rad；``derived_field``、``sobolev`` 与 ``chain``
-        来自 1/rad 场灵敏度。loss 已在 objective 中平方并对有效标量归一化，因此这里统一记录标量，
-        但不宣称不同物理项可直接比较绝对大小。
+        来自 1/rad 场灵敏度。不记录 paired latent MSE。
         """
 
-        scalars = {  # 六个量保持独立键，禁止只存 total 隐藏失效分支
-            "total": float(terms.total.detach()),  # 加权联合标量
-            "density": float(terms.density.detach()),  # 多带宽零阶 MSE
-            "kappa": float(terms.kappa.detach()),  # sampled distance sensitivity MSE
-            "derived_field": float(terms.derived_field.detach()),  # chain-rule 显式路径 MSE
-            "sobolev": float(terms.sobolev.detach()),  # density 对物理 q 自导数 MSE
-            "chain": float(terms.chain.detach()),  # 两条预测灵敏度路径一致性 MSE
-            "paired": float(terms.paired.detach()),  # joint-sign latent 偶/奇成对 MSE
-        }
-        term_names = ("density", "kappa", "derived_field", "sobolev", "chain", "paired")
-        components = {
-            f"{name}_{suffix}": float(value.detach())
-            for suffix, values in (("numerator", terms.numerators), ("denominator", terms.denominators))
-            for name, value in zip(term_names, values)
-        }  # 原始平方误差和与有效标量数，允许按完整 mask 重新聚合
+        scalars = dict(terms)
+        if total is not None:
+            scalars = {"total": float(total), **scalars}
         for name, value in scalars.items():  # TensorBoard 命名与 JSONL 字段保持同构
             self.writer.add_scalar(f"{split}/{name}", value, step)  # 横轴固定 optimizer step
         if gradient_norm is not None:  # validation 不反向，因此该字段为空
@@ -109,7 +98,6 @@ class GeometrySSLRunLogger:
                 batch.q_index.detach().cpu().tolist() if batch is not None and batch.q_index is not None else None
             ),
             **scalars,
-            **components,
         }
         if gradient_norm is not None:  # train record 才写入梯度证据
             record["gradient_norm"] = gradient_norm  # 与 TensorBoard 数值相同

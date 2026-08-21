@@ -1,12 +1,20 @@
-"""真实 mother cache -> Warp teacher -> SSL model -> 六项目标 -> backward 集成合同。"""
+"""真实 mother cache -> Warp teacher -> SSL model -> 五项目标 -> backward 集成合同。"""
 
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
 from anymani.assets.bank import HandContainer, HandContainerCfg
+from anymani.distill.methods.contracts import MethodStep
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import MultiAnchorGaussianObjectivesCfg
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.context import MultiAnchorObjectiveContext
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives import (
+    evaluate_objectives,
+    reduce_method_steps,
+)
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.decoders.representations.implicit_field import (
     DistanceSensitivityDecoderCfg,
@@ -19,10 +27,6 @@ from anymani.distill.models.input_adapters.geometry import (
     GeometryLatentHeadsCfg,
     SO2AnchorFrontendCfg,
     build_static_geometry_evidence,
-)
-from anymani.distill.objectives.representations.field_reconstruction import (
-    GeometryFieldObjective,
-    GeometryFieldObjectiveCfg,
 )
 from anymani.distill.representations.queries.spatial_sampling import (
     SpatialQuerySamplerCfg,
@@ -138,21 +142,21 @@ def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
         sensitivity_targets.query_index,
         sensitivity_targets.joint_index,
     )
-    terms = GeometryFieldObjective(GeometryFieldObjectiveCfg())(
-        q=q,
-        density_prediction=prediction.density,
-        kappa_prediction=prediction.kappa,
-        field_targets=field_targets,
-        sensitivity_targets=sensitivity_targets,
+    batch = SimpleNamespace(field_targets=field_targets, sensitivity_targets=sensitivity_targets)
+    context = MultiAnchorObjectiveContext(model=model, q=q, prediction=prediction, batch=batch)
+    objectives_cfg = MultiAnchorGaussianObjectivesCfg()
+    update = reduce_method_steps(
+        (MethodStep(objectives=evaluate_objectives(context, objectives_cfg), sample_count=1),),
+        objectives_cfg,
     )
-    terms.total.backward()
+    update.loss.backward()
     torch.cuda.synchronize()
 
     assert prediction.latents.zero_order.shape == (1, 21, 24)
     assert prediction.latents.first_order.shape == (1, 16, 12)
     assert prediction.density.shape == (1, 21, 64, 3)
-    assert prediction.kappa.shape == (1, 42)
-    assert torch.isfinite(terms.total)
+    assert prediction.kappa.shape == (1, 32)
+    assert torch.isfinite(update.loss)
     assert q.grad is not None and torch.isfinite(q.grad).all()
     assert any(parameter.grad is not None for parameter in model.encoder.parameters())
     retained_keys = model.retained_state_dict()

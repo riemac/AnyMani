@@ -1,29 +1,29 @@
-r"""六项独立 objective 与旧联合数值公式的等价合同。"""
+r"""五项独立 objective 的 $(asset,q)$ 等权与 active/zero 1:1 合同。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import torch
-from anymani.distill.objectives.representations.field_reconstruction import (
-    GeometryFieldObjective,
-    GeometryFieldObjectiveCfg,
+from anymani.distill.methods.contracts import MethodStep
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import (
+    DensityObjectiveCfg,
+    KappaObjectiveCfg,
+    MultiAnchorGaussianObjectivesCfg,
 )
-from anymani.distill.objectives.representations.geometry_terms import (
-    ChainObjectiveTermCfg,
-    DensityObjectiveTermCfg,
-    DerivedFieldObjectiveTermCfg,
-    KappaObjectiveTermCfg,
-    PairedParityObjectiveTermCfg,
-    SobolevObjectiveTermCfg,
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives import (
+    chain_objective,
+    density_objective,
+    derived_field_objective,
+    kappa_objective,
+    reduce_method_steps,
+    sobolev_objective,
 )
-from anymani.distill.representations.targets.field_samples import FieldTargetBatch, SensitivityTargetBatch
-from anymani.distill.ssl.contracts import build_runtime
 
 
 @dataclass
 class _Context:
-    """把同一联合 objective 的共享节点暴露给六个独立 term。"""
+    """把五项 objective 需要的预测与真值暴露给无状态 callable。"""
 
     density_prediction: torch.Tensor
     density_target: torch.Tensor
@@ -34,93 +34,61 @@ class _Context:
     field_sensitivity_target: torch.Tensor
     derived_field_sensitivity: torch.Tensor
     auto_field_sensitivity: torch.Tensor
-    paired_additive_components: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    active_mask: torch.Tensor
 
 
-def test_split_terms_match_joint_values_and_gradients() -> None:
-    r"""固定 batch 上六项值、总和和 q/kappa 梯度必须逐元素等于联合实现。"""
+def test_five_terms_reduce_by_asset_q_and_split_active_zero() -> None:
+    r"""两个异构样本等权；active 全被 mask 时 kappa 退化为 zero 均值。"""
 
     dtype = torch.float64
-    q = torch.tensor([[0.2, -0.1], [0.4, 0.3]], dtype=dtype, requires_grad=True)
-    coefficients = torch.tensor(
-        [
-            [[[0.2, -0.1], [0.3, 0.4]], [[-0.2, 0.5], [0.1, 0.2]]],
-            [[[0.4, 0.1], [-0.3, 0.2]], [[0.5, -0.2], [0.2, 0.3]]],
-        ],
-        dtype=dtype,
-    )  # `[G,N_Q,L,N_J]`
-    density_prediction = 0.5 + torch.einsum("bj,grlj->bgrl", q, coefficients)
-    kappa_prediction = torch.tensor([[0.1, -0.2], [0.3, 0.4]], dtype=dtype, requires_grad=True)
-    density_target = torch.full_like(density_prediction, 0.45)
-    field_targets = FieldTargetBatch(
-        query_points=torch.zeros(2, 2, 2, 3, dtype=dtype),
-        query_stratum=torch.zeros(2, 2, 2, dtype=torch.long),
-        distance=torch.tensor([[[0.1, 0.2], [0.3, 0.4]], [[0.2, 0.1], [0.5, 0.3]]], dtype=dtype),
-        density=density_target,
-        valid_mask=torch.tensor([[[True, True], [True, False]], [[True, True], [False, True]]]),
-        owner_role=torch.tensor([0, 1]),
-        bandwidths=torch.tensor([0.5, 1.0], dtype=dtype),
-        provenance={"frame": "h", "length_unit": "m"},
-    )
-    owner_index = torch.tensor([0, 1])
-    query_index = torch.tensor([1, 0])
-    joint_index = torch.tensor([0, 1])
-    sensitivity_targets = SensitivityTargetBatch(
-        owner_index=owner_index,
-        query_index=query_index,
-        joint_index=joint_index,
-        ancestor_mask=torch.tensor([True, True]),
-        closest_point=torch.zeros(2, 2, 3, dtype=dtype),
-        closest_source=torch.zeros(2, 2, dtype=torch.long),
-        uniqueness_margin=torch.ones(2, 2, dtype=dtype),
-        kappa=torch.tensor([[0.05, -0.1], [0.2, 0.25]], dtype=dtype),
-        field_sensitivity=torch.tensor([[[0.02, -0.03], [0.01, 0.04]], [[-0.02, 0.05], [0.03, -0.01]]], dtype=dtype),
-        valid_mask=torch.tensor([[True, True], [True, False]]),
-        provenance={"frame": "h", "distance_unit": "m", "joint_unit": "rad"},
-    )
-    paired = (
-        torch.tensor(2.0, dtype=dtype),
-        torch.tensor(4.0, dtype=dtype),
-        torch.tensor(3.0, dtype=dtype),
-        torch.tensor(2.0, dtype=dtype),
-    )
-    paired_loss = paired[0] / paired[1] + paired[2] / paired[3]
-    joint = GeometryFieldObjective(GeometryFieldObjectiveCfg())(
-        q=q,
-        density_prediction=density_prediction,
-        kappa_prediction=kappa_prediction,
-        field_targets=field_targets,
-        sensitivity_targets=sensitivity_targets,
-        paired_loss=paired_loss,
-        paired_components=(torch.tensor(5.0, dtype=dtype), torch.tensor(6.0, dtype=dtype)),
-        paired_additive_components=paired,
-    )
+    density_prediction = torch.tensor([[[[0.2], [0.4]], [[0.6], [0.8]]]], dtype=dtype)
+    density_target = torch.zeros_like(density_prediction)
+    density_valid = torch.tensor([[[True, True], [True, False]]])
+    # 样本 0：1 active 有效 + 1 zero 有效；样本 1：active 全无效，zero 有效。
+    kappa_prediction = torch.tensor([[0.4, 0.0], [9.0, 0.2]], dtype=dtype)
+    kappa_target = torch.zeros_like(kappa_prediction)
+    edge_valid = torch.tensor([[True, True], [False, True]])
+    active_mask = torch.tensor([[True, False], [True, False]])
+    field_sensitivity = torch.zeros(2, 2, 1, dtype=dtype)
     context = _Context(
-        density_prediction=density_prediction,
-        density_target=density_target,
-        density_valid_mask=field_targets.valid_mask,
+        density_prediction=density_prediction.expand(2, -1, -1, -1).clone(),
+        density_target=density_target.expand(2, -1, -1, -1).clone(),
+        density_valid_mask=density_valid.expand(2, -1, -1).clone(),
         kappa_prediction=kappa_prediction,
-        kappa_target=sensitivity_targets.kappa,
-        edge_valid_mask=sensitivity_targets.valid_mask,
-        field_sensitivity_target=sensitivity_targets.field_sensitivity,
-        derived_field_sensitivity=joint.derived_field_sensitivity,
-        auto_field_sensitivity=joint.auto_field_sensitivity,
-        paired_additive_components=paired,
+        kappa_target=kappa_target,
+        edge_valid_mask=edge_valid,
+        field_sensitivity_target=field_sensitivity,
+        derived_field_sensitivity=field_sensitivity.clone(),
+        auto_field_sensitivity=field_sensitivity.clone(),
+        active_mask=active_mask,
     )
-    configs = {
-        "density": DensityObjectiveTermCfg(),
-        "kappa": KappaObjectiveTermCfg(),
-        "derived_field": DerivedFieldObjectiveTermCfg(),
-        "sobolev": SobolevObjectiveTermCfg(),
-        "chain": ChainObjectiveTermCfg(),
-        "paired": PairedParityObjectiveTermCfg(),
-    }
-    results = {name: build_runtime(config).evaluate(context) for name, config in configs.items()}
-    for name, result in results.items():
-        torch.testing.assert_close(result.metrics["loss"], getattr(joint, name), atol=0.0, rtol=0.0)
-    split_total = sum((result.metrics["loss"] for result in results.values()), torch.zeros((), dtype=dtype))
-    torch.testing.assert_close(split_total, joint.total, atol=0.0, rtol=0.0)
-    joint_gradients = torch.autograd.grad(joint.total, (q, kappa_prediction), retain_graph=True)
-    split_gradients = torch.autograd.grad(split_total, (q, kappa_prediction))
-    for actual, expected in zip(split_gradients, joint_gradients):
-        torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
+    density = density_objective(context)
+    kappa = kappa_objective(context)
+    derived = derived_field_objective(context)
+    sobolev = sobolev_objective(context)
+    chain = chain_objective(context)
+    assert density.name == "density"
+    # density: 每样本 3 个有效标量，MSE 对两样本等权。
+    assert float(density.components[0].denominator.detach()) == 2.0
+    # kappa 样本 0：0.5*(0.16+0)=0.08；样本 1：只有 zero=0.04；等权 0.06。
+    torch.testing.assert_close(kappa.metrics["loss"], torch.tensor(0.06, dtype=dtype), atol=1.0e-12, rtol=0.0)
+    update = reduce_method_steps(
+        (
+            MethodStep(
+                objectives={
+                    "density": density,
+                    "kappa": kappa,
+                    "derived_field": derived,
+                    "sobolev": sobolev,
+                    "chain": chain,
+                },
+                sample_count=2,
+            ),
+        ),
+        MultiAnchorGaussianObjectivesCfg(
+            density=DensityObjectiveCfg(weight=1.0),
+            kappa=KappaObjectiveCfg(weight=1.0),
+        ),
+    )
+    assert update.sample_count == 2
+    assert "density" in update.terms and "kappa" in update.terms

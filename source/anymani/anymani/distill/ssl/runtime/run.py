@@ -60,9 +60,12 @@ class PretrainRun:
         geometry_semantics_schema: str,
         asset_manifest: Mapping[str, Any],
         resolved_config: Mapping[str, Any],
-        calibrated_objective: Mapping[str, float],
+        declared_objective: Mapping[str, float],
+        calibration_artifact_hash: str = "",
+        worktree_dirty: bool = False,
+        worktree_fingerprint: str = "",
     ) -> Any:
-        r"""构造一次 run 共用的 schema 3 checkpoint lineage。"""
+        r"""构造一次 run 共用的 schema 4 checkpoint lineage。"""
 
         from anymani.distill.ssl.checkpoint import GeometrySSLCheckpointMetadata
 
@@ -72,7 +75,10 @@ class PretrainRun:
             geometry_semantics_schema=geometry_semantics_schema,
             asset_manifest=asset_manifest,
             resolved_config=resolved_config,
-            calibrated_objective=calibrated_objective,
+            declared_objective=declared_objective,
+            calibration_artifact_hash=calibration_artifact_hash,
+            worktree_dirty=worktree_dirty,
+            worktree_fingerprint=worktree_fingerprint,
         )
 
     @staticmethod
@@ -102,14 +108,18 @@ class PretrainRunCfg:
     resume_checkpoint: str = ""
     seed: int = 0  # model 初始化及各 role 派生 seed 的唯一根
     deterministic_algorithms: bool = True
+    phase: str = "pretrain"  # `calibrate_objectives` 或 `pretrain`
+    calibration_artifact: str = ""  # pretrain 可显式加载的 calibration YAML
 
     def __post_init__(self) -> None:
-        r"""拒绝空 experiment identity 与负随机种子。"""
+        r"""拒绝空 experiment identity、负随机种子和未知 phase。"""
 
         if not self.output_dir or not self.experiment_name:
             raise ValueError("pretraining run requires output_dir and experiment_name")
         if self.seed < 0:
             raise ValueError("pretraining run seed must be non-negative")
+        if self.phase not in {"calibrate_objectives", "pretrain"}:
+            raise ValueError("run.phase must be 'calibrate_objectives' or 'pretrain'")
 
 
 __all__ = ["PretrainRun", "PretrainRunCfg"]

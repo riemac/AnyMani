@@ -89,6 +89,7 @@ class OwnerSurfaceRecord:
     owner_id: str  # 与语义实体轴一致的稳定 ID
     owner_index: int  # 规范实体轴索引
     role: str  # palm/joint/tip
+    finger_name: str | None  # PALM 为 None；JOINT/TIP 记录所属手指，供一阶 edge 分层
     component_ids: tuple[str, ...]  # 参与并集的碰撞片
     surface_mesh: trimesh.Trimesh  # owner reference link 中的 UDF 表面 $S_g$，单位 m
     solid_mesh: trimesh.Trimesh | None  # 合法闭合体；开放 surface owner 为 None
@@ -263,6 +264,7 @@ def materialize_owner_geometry_cache(
                 owner_id=owner.owner_id,
                 owner_index=owner.owner_index,
                 role=owner.role,
+                finger_name=getattr(owner, "finger_name", None),
                 component_ids=tuple(owner.component_ids),
                 surface_mesh=surface_mesh,
                 solid_mesh=solid_mesh,

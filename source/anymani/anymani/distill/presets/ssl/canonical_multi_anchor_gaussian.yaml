@@ -1,18 +1,4 @@
-# 完整实验 façade：每一行 defaults 都选择一个可独立维护的 concrete component。
+# 兼容旧 CLI 名称；实际实验由 Python façade 装配。
 defaults:
   - multi_anchor_gaussian_implicit_field
-  - method: multi_anchor_gaussian
-  - representation@method.representation: multi_anchor_gaussian
-  - model@method.model: multi_anchor_gaussian
-  - objective_term@method.objectives.density: density
-  - objective_term@method.objectives.kappa: kappa
-  - objective_term@method.objectives.derived_field: derived_field
-  - objective_term@method.objectives.sobolev: sobolev
-  - objective_term@method.objectives.chain: chain
-  - objective_term@method.objectives.paired: paired
-  - trainer: single_gpu_16gb
-  - evaluation: multi_anchor_gaussian
-  - run: canonical_multi_anchor_gaussian
   - _self_
-
-schema_version: "3.0.0"

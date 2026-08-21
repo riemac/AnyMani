@@ -71,8 +71,7 @@ margin 大于阈值。provenance 明确写 ``global_second_nearest_margin=not_ma
 分别报告 mask 覆盖率、按 owner/距离壳层的有效比例，以及 CPU/Kaolin reference 上的最近源切换；
 不能只报告被 mask 后的低误差。
 
-sigma 使用统一 SI 米制。训练中心为 4/16/64 mm 并施加 log-space 有界 jitter；validation 固定使用
-4/8/16/32/64 mm。stratum 不决定 sigma，owner 大小也不做独立归一化。共同尺度实验必须同时缩放 geometry、query、anchor 与
+sigma 使用统一 SI 米制。训练中心为 4/16/64 mm 并施加 log-space 有界 jitter；validation 关闭 jitter，固定使用同一组 4/16/64 mm 中心。stratum 不决定 sigma，owner 大小也不做独立归一化。共同尺度实验必须同时缩放 geometry、query、anchor 与
 bandwidth；只缩放 geometry 而保持米制 bandwidth 是有意改变物理尺度，不是 invariance test。
 
 生成的 ``FieldTargetBatch`` 与 ``SensitivityTargetBatch`` 是 privileged data package。模型 decoder
@@ -111,7 +110,7 @@ class GaussianProximityFieldCfg:
 
     bandwidth_centers_m: tuple[float, ...] = (0.004, 0.016, 0.064)  # 4/16/64 mm 训练中心
     bandwidth_jitter_relative: float = 0.10  # log-space 有界采样的相对半宽，默认 ±10%
-    validation_bandwidths_m: tuple[float, ...] = (0.004, 0.008, 0.016, 0.032, 0.064)  # 固定 4--64 mm 网格
+    validation_bandwidths_m: tuple[float, ...] = (0.004, 0.016, 0.064)  # 固定 4/16/64 mm，与训练中心一致
     def __post_init__(self) -> None:
         """拒绝无带宽、非递增带宽与越界的 log-space jitter。"""
 
@@ -133,15 +132,24 @@ class GaussianProximityFieldCfg:
 class GeometryFieldTargetCfg:
     r"""sampled $\kappa$ edge 数与 UDF 非光滑区域有效性阈值。"""
 
-    edges_per_owner: int = 2  # 每个 owner 至少覆盖祖先/非祖先候选
+    train_active_per_joint: int = 1  # 每个有效 JOINT、每个 q 的 descendant/active shell 边数
+    train_zero_per_joint: int = 1  # 每个有效 JOINT、每个 q 的 structure-zero shell 边数
+    validation_active_per_joint: int = 4  # 固定 validation bank 的 descendant 边数
+    validation_zero_per_joint: int = 4  # 固定 validation bank 的 structure-zero 边数
     distance_epsilon_m: float = 1.0e-6  # $d\approx0$ 时 UDF 方向未定义
     feature_margin_min_m: float = 1.0e-5  # 最近投影点远离当前三角面边界的阈值
 
     def __post_init__(self) -> None:
         r"""拒绝失去 sampled-edge 监督或不合法的米制 mask 阈值。"""
 
-        if self.edges_per_owner < 1:
-            raise ValueError("edges_per_owner must be positive")
+        counts = (
+            self.train_active_per_joint,
+            self.train_zero_per_joint,
+            self.validation_active_per_joint,
+            self.validation_zero_per_joint,
+        )
+        if min(counts) < 1:
+            raise ValueError("joint-first active/zero edge budgets must be positive")
         if self.distance_epsilon_m <= 0.0 or self.feature_margin_min_m < 0.0:
             raise ValueError("distance epsilon must be positive and feature margin non-negative")
 
@@ -199,6 +207,7 @@ def generate_geometry_field_targets(
     field_config: GaussianProximityFieldCfg = GaussianProximityFieldCfg(),
     target_config: GeometryFieldTargetCfg = GeometryFieldTargetCfg(),
     edge_sampling_seed: int = 0,
+    supervision_split: str = "train",
 ) -> tuple[FieldTargetBatch, SensitivityTargetBatch]:
     r"""生成多带宽零阶目标与 sampled-edge 一阶目标。
 
@@ -211,6 +220,7 @@ def generate_geometry_field_targets(
         field_config (GaussianProximityFieldCfg): train sigma realization 的测量尺度。
         target_config (GeometryFieldTargetCfg): edge 数与局部光滑 mask 阈值。
         edge_sampling_seed (int): 可复现 edge/query/JOINT 选择种子。
+        supervision_split (str): ``train`` 使用每 JOINT 1+1 边；``eval`` 使用 4+4。
 
     Returns:
         tuple[FieldTargetBatch, SensitivityTargetBatch]: 零阶完整 query 轴与一阶抽样边轴。
@@ -252,10 +262,19 @@ def generate_geometry_field_targets(
         },
     )
 
-    owner_index, query_index, joint_index = _sample_sensitivity_edges(
+    if supervision_split == "eval":
+        active_per_joint = target_config.validation_active_per_joint
+        zero_per_joint = target_config.validation_zero_per_joint
+    elif supervision_split == "train":
+        active_per_joint = target_config.train_active_per_joint
+        zero_per_joint = target_config.train_zero_per_joint
+    else:
+        raise ValueError(f"unknown supervision_split={supervision_split!r}")
+    owner_index, query_index, joint_index, active_mask = _sample_sensitivity_edges(
         spec,
         queries,
-        edges_per_owner=target_config.edges_per_owner,
+        active_per_joint=active_per_joint,
+        zero_per_joint=zero_per_joint,
         sampling_seed=edge_sampling_seed,
     )
     closest_h = surface.closest_point_h_m[:, owner_index, query_index]
@@ -288,10 +307,14 @@ def generate_geometry_field_targets(
         bandwidths,
         kappa.unsqueeze(-1),
     ).squeeze(-1)  # `[B,E,L]`，1/rad
-    selected_valid = field_valid[:, owner_index, query_index]
-    selected_valid &= selected_distance > target_config.distance_epsilon_m
-    selected_valid &= selected_feature_margin >= target_config.feature_margin_min_m
-    selected_valid &= queries.query_stratum[:, owner_index, query_index] == int(QueryStratum.OWNER_SHELL)
+    selected_shell = queries.query_stratum[:, owner_index, query_index] == int(QueryStratum.OWNER_SHELL)
+    selected_face_valid = field_valid[:, owner_index, query_index] & selected_shell
+    active_smooth = (
+        selected_face_valid
+        & (selected_distance > target_config.distance_epsilon_m)
+        & (selected_feature_margin >= target_config.feature_margin_min_m)
+    )
+    selected_valid = torch.where(active_mask.unsqueeze(0), active_smooth, selected_face_valid)
     closest_source = (
         owner_index.to(torch.int64).view(1, -1).bitwise_left_shift(32)
         | selected_face.to(torch.int64)
@@ -301,6 +324,7 @@ def generate_geometry_field_targets(
         query_index=query_index,
         joint_index=joint_index,
         ancestor_mask=ancestor_mask,
+        active_mask=active_mask,
         closest_point=closest_h.detach(),
         closest_source=closest_source.detach(),
         uniqueness_margin=selected_feature_margin.detach(),
@@ -323,40 +347,122 @@ def _sample_sensitivity_edges(
     spec: EmbodimentGeometrySpec,
     queries: SpatialQueryBatch,
     *,
-    edges_per_owner: int,
+    active_per_joint: int,
+    zero_per_joint: int,
     sampling_seed: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    r"""为每个 owner 从 shell query 中交替选择祖先与非祖先 JOINT。"""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    r"""按 JOINT 列覆盖从 owner-shell query 抽取 active descendant 与 structure-zero 边。"""
 
-    device = queries.query_points_h.device
+    device = queries.query_stratum.device
     generator = torch.Generator(device=device)
     generator.manual_seed(int(sampling_seed))
     owner_axis: list[int] = []
     query_axis: list[int] = []
     joint_axis: list[int] = []
-    for owner_index in range(spec.owner_ancestor_mask.shape[0]):
-        shell_queries = torch.where(queries.query_stratum[0, owner_index] == int(QueryStratum.OWNER_SHELL))[0]
-        ancestor_joints = torch.where(spec.owner_ancestor_mask[owner_index])[0]
-        nonancestor_joints = torch.where(~spec.owner_ancestor_mask[owner_index])[0]
-        for edge_offset in range(edges_per_owner):
-            prefer_ancestor = edge_offset % 2 == 0 and len(ancestor_joints) > 0
-            joint_candidates = ancestor_joints if prefer_ancestor else nonancestor_joints
-            if len(joint_candidates) == 0:
-                joint_candidates = ancestor_joints
-            query_choice = shell_queries[
-                torch.randint(len(shell_queries), (), generator=generator, device=device)
-            ]
-            joint_choice = joint_candidates[
-                torch.randint(len(joint_candidates), (), generator=generator, device=device)
-            ]
-            owner_axis.append(owner_index)
-            query_axis.append(int(query_choice))
-            joint_axis.append(int(joint_choice))
+    active_axis: list[bool] = []
+    owner_count = spec.owner_ancestor_mask.shape[0]
+    joint_count = spec.owner_ancestor_mask.shape[1]
+    roles = spec.owner_roles or tuple("joint" for _ in range(owner_count))
+    fingers = spec.owner_finger_names or tuple(None for _ in range(owner_count))
+    owner_joint_indices = spec.owner_joint_indices or tuple(-1 for _ in range(owner_count))
+    for joint_index in range(joint_count):
+        descendant_owners = torch.where(spec.owner_ancestor_mask[:, joint_index])[0]
+        zero_owners = torch.where(~spec.owner_ancestor_mask[:, joint_index])[0]
+        self_owners = [
+            owner_index
+            for owner_index, mapped_joint in enumerate(owner_joint_indices)
+            if mapped_joint == joint_index
+        ]
+        self_finger = fingers[self_owners[0]] if self_owners else None
+        tip_owners = [
+            int(owner_index)
+            for owner_index in descendant_owners.tolist()
+            if roles[int(owner_index)] == "tip" and fingers[int(owner_index)] == self_finger
+        ]
+        other_descendants = [
+            int(owner_index)
+            for owner_index in descendant_owners.tolist()
+            if int(owner_index) not in self_owners and int(owner_index) not in tip_owners
+        ]
+        active_pool = _cycle_owner_pool(self_owners, tip_owners, other_descendants, descendant_owners.tolist())
+        zero_pool = _cycle_zero_owner_pool(zero_owners.tolist(), roles, fingers, self_finger)
+        for edge_offset in range(active_per_joint):
+            owner_choice = active_pool[edge_offset % len(active_pool)]
+            query_choice = _choose_shell_query(queries, owner_choice, generator=generator)
+            owner_axis.append(owner_choice)
+            query_axis.append(query_choice)
+            joint_axis.append(joint_index)
+            active_axis.append(True)
+        for edge_offset in range(zero_per_joint):
+            owner_choice = zero_pool[edge_offset % len(zero_pool)]
+            query_choice = _choose_shell_query(queries, owner_choice, generator=generator)
+            owner_axis.append(owner_choice)
+            query_axis.append(query_choice)
+            joint_axis.append(joint_index)
+            active_axis.append(False)
     return (
         torch.tensor(owner_axis, device=device, dtype=torch.long),
         torch.tensor(query_axis, device=device, dtype=torch.long),
         torch.tensor(joint_axis, device=device, dtype=torch.long),
+        torch.tensor(active_axis, device=device, dtype=torch.bool),
     )
+
+
+def _cycle_owner_pool(
+    self_owners: list[int],
+    tip_owners: list[int],
+    other_descendants: list[int],
+    all_descendants: list[int],
+) -> list[int]:
+    r"""按 self / tip / other-descendant / other-descendant 的长期 25/25/50 轮换构造 active owner 池。"""
+
+    ordered: list[int] = []
+    for pool in (self_owners, tip_owners, other_descendants, other_descendants):
+        ordered.extend(pool if pool else all_descendants)
+    if not ordered:
+        raise ValueError("joint-first active sampling requires at least one descendant owner")
+    return ordered
+
+
+def _cycle_zero_owner_pool(
+    zero_owners: list[int],
+    roles: tuple[str, ...],
+    fingers: tuple[str | None, ...],
+    self_finger: str | None,
+) -> list[int]:
+    r"""按 PALM / same-finger upstream / other-finger JOINT / other-finger TIP 轮换构造 structure-zero owner 池。"""
+
+    if not zero_owners:
+        raise ValueError("joint-first zero sampling requires at least one non-descendant owner")
+    palm = [owner for owner in zero_owners if roles[owner] == "palm"]
+    same_finger_upstream = [
+        owner for owner in zero_owners if fingers[owner] == self_finger and roles[owner] != "palm"
+    ]
+    other_joint = [
+        owner for owner in zero_owners if roles[owner] == "joint" and fingers[owner] != self_finger
+    ]
+    other_tip = [
+        owner for owner in zero_owners if roles[owner] == "tip" and fingers[owner] != self_finger
+    ]
+    ordered: list[int] = []
+    for pool in (palm, same_finger_upstream, other_joint, other_tip):
+        ordered.extend(pool if pool else zero_owners)
+    return ordered
+
+
+def _choose_shell_query(
+    queries: SpatialQueryBatch,
+    owner_index: int,
+    *,
+    generator: torch.Generator,
+) -> int:
+    r"""从指定 owner 的 owner-shell query 中确定性抽取一个槽。"""
+
+    shell_queries = torch.where(queries.query_stratum[0, owner_index] == int(QueryStratum.OWNER_SHELL))[0]
+    if len(shell_queries) == 0:
+        raise ValueError(f"owner {owner_index} has no owner-shell queries for first-order edges")
+    choice = shell_queries[torch.randint(len(shell_queries), (), generator=generator, device=shell_queries.device)]
+    return int(choice)
 
 
 __all__ = [

@@ -3,29 +3,30 @@ r"""Geometry SSL runtime 的 q cursor、Q block 与 resident window 合同。"""
 from __future__ import annotations
 
 import hashlib
+import inspect
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
-from anymani.distill.models.input_adapters.geometry import GeometryPaddingCfg, StaticGeometryEvidence
-from anymani.distill.representations.geometry import (
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.augmentation import maybe_rewrite_batch
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import (
     OnlineGeometrySample,
-    SobolJointSampler,
     pad_online_geometry_samples,
     split_online_geometry_sample,
 )
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import JointSignRewriteCfg
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.state_measure import SobolJointSampler
+from anymani.distill.models.input_adapters.geometry import GeometryPaddingCfg, StaticGeometryEvidence
 from anymani.distill.representations.queries.spatial_sampling import SpatialQueryBatch
 from anymani.distill.representations.targets.field_samples import (
     FieldTargetBatch,
     QueryStratum,
     SensitivityTargetBatch,
 )
-from anymani.distill.ssl.runtime import (
-    GeometrySSLRuntimeCfg,
-    ResidentGeometryAssetWindow,
-    WindowedOnlineGeometryBatcher,
-)
+from anymani.distill.ssl.runtime import GeometrySSLRuntimeCfg, ResidentGeometryAssetWindow
 from anymani.distill.ssl.runtime import validation as validation_runtime
+from anymani.distill.ssl.runtime.sampling import OnlineMinibatchSchedule, OnlineSamplingCfg
 from anymani.distill.ssl.runtime.validation import _update_training_q_bank_digest
 
 pytestmark = pytest.mark.contract
@@ -59,11 +60,12 @@ def _sample(q: torch.Tensor) -> OnlineGeometrySample:
         query_index=torch.tensor([1, 2]),
         joint_index=torch.tensor([0, 1]),
         ancestor_mask=torch.tensor([True, False]),
+        active_mask=torch.tensor([True, False]),
         closest_point=torch.zeros(batch_size, edge_count, 3, dtype=torch.float64),
         closest_source=torch.zeros(batch_size, edge_count, dtype=torch.long),
         uniqueness_margin=torch.ones(batch_size, edge_count, dtype=torch.float64),
-        kappa=torch.zeros(batch_size, edge_count, dtype=torch.float64),
-        field_sensitivity=torch.zeros(batch_size, edge_count, bandwidth_count, dtype=torch.float64),
+        kappa=torch.tensor([[0.3, 0.0]] * batch_size, dtype=torch.float64),
+        field_sensitivity=torch.tensor([[[0.12, -0.04], [0.0, 0.0]]] * batch_size, dtype=torch.float64),
         valid_mask=torch.ones(batch_size, edge_count, dtype=torch.bool),
         provenance={"frame": "h", "distance_unit": "m", "joint_unit": "rad"},
     )
@@ -116,6 +118,48 @@ def test_sobol_cursor_resume_reproduces_the_next_q_block() -> None:
 
     torch.testing.assert_close(actual_next, expected_next, atol=0.0, rtol=0.0)
     assert resumed.cursor == 8
+
+
+def test_joint_sign_rewrite_keeps_density_and_flips_matching_kappa(monkeypatch: pytest.MonkeyPatch) -> None:
+    """选中改写后 density/distance 不变，对应 JOINT 的 κ/g 翻号。"""
+
+    sample = _sample(torch.tensor([[0.25, -0.4]], dtype=torch.float64))
+    batch = pad_online_geometry_samples(
+        list(split_online_geometry_sample(sample)),
+        padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
+    )
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.zeros(*args))
+    rewritten = maybe_rewrite_batch(
+        batch,
+        config=JointSignRewriteCfg(probability=0.20, seed_offset=0),
+        step=0,
+        seed=0,
+    )
+
+    torch.testing.assert_close(rewritten.field_targets.density, batch.field_targets.density)
+    torch.testing.assert_close(rewritten.field_targets.distance, batch.field_targets.distance)
+    assert int((rewritten.q[0] / batch.q[0]).tolist().count(-1.0)) == 1
+    flipped = (rewritten.q[0] / batch.q[0]) < 0
+    joint_index = int(torch.where(flipped)[0][0])
+    edge_sign = torch.where(batch.sensitivity_targets.joint_index[0] == joint_index, -1.0, 1.0)
+    torch.testing.assert_close(rewritten.sensitivity_targets.kappa, batch.sensitivity_targets.kappa * edge_sign)
+    torch.testing.assert_close(
+        rewritten.sensitivity_targets.field_sensitivity,
+        batch.sensitivity_targets.field_sensitivity * edge_sign.unsqueeze(-1),
+    )
+
+
+def test_trainer_modules_do_not_construct_sobol_or_read_method_representation() -> None:
+    """lifecycle 与 independent q-bank 必须走 method 封闭 sampler，不得直接读 representation。"""
+
+    from anymani.distill.ssl.runtime import lifecycle, validation
+
+    forbidden = ("SobolJointSampler(", "method.representation.")
+    for module in (lifecycle, validation):
+        source = Path(inspect.getsourcefile(module) or "").read_text(encoding="utf-8")
+        for token in forbidden:
+            assert token not in source, f"{module.__name__} still contains {token}"
+    assert "make_independent_samplers" in Path(inspect.getsourcefile(validation) or "").read_text(encoding="utf-8")
 
 
 def test_q_block_split_matches_padding_of_individual_q_samples() -> None:
@@ -217,51 +261,46 @@ def test_runtime_config_freezes_declared_minibatch_axes() -> None:
 def test_epoch_scheduler_finishes_each_resident_window_before_switching() -> None:
     """资产数超过 cap 时，同一 window 的全部 q coverage 应连续完成，避免反复重建 BVH。"""
 
-    runtimes = tuple(SimpleNamespace(asset_id=f"asset-{index}", spec_cpu=_spec()) for index in range(5))
-    runtime = WindowedOnlineGeometryBatcher(
-        runtimes,
-        SimpleNamespace(),
-        seed=7,
-        runtime_config=GeometrySSLRuntimeCfg(
-            max_resident_assets=4,
+    schedule = OnlineMinibatchSchedule(
+        5,
+        OnlineSamplingCfg(
+            epochs=1,
+            q_per_asset_per_epoch=2,
             assets_per_minibatch=2,
             q_per_asset_per_minibatch=1,
-            q_per_asset_per_epoch=2,
-            epochs=1,
+            shuffle_assets=False,
+            seed=7,
         ),
-        field_config=SimpleNamespace(),
-        query_config=SimpleNamespace(),
-        target_config=SimpleNamespace(),
-        padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
+        max_resident_assets=4,
     )
-
-    assert runtime._groups == ((0, 1), (2, 3), (0, 1), (2, 3), (4,), (4,))
-    assert runtime.blocks_per_epoch == 6
+    items = tuple(schedule.next() for _ in range(schedule.minibatches_per_epoch))
+    assert tuple(item.resident_asset_indices for item in items) == (
+        (0, 1, 2, 3),
+        (0, 1, 2, 3),
+        (0, 1, 2, 3),
+        (0, 1, 2, 3),
+        (4,),
+        (4,),
+    )
 
 
 def test_epoch_scheduler_preserves_a_smaller_tail_q_block() -> None:
     """不可整除的 q coverage 必须保留真实尾块，不能拒绝配置或重复补齐样本。"""
 
-    runtimes = tuple(SimpleNamespace(asset_id=f"asset-{index}", spec_cpu=_spec()) for index in range(2))
-    runtime = WindowedOnlineGeometryBatcher(
-        runtimes,
-        SimpleNamespace(),
-        seed=11,
-        runtime_config=GeometrySSLRuntimeCfg(
-            max_resident_assets=2,
+    schedule = OnlineMinibatchSchedule(
+        2,
+        OnlineSamplingCfg(
+            epochs=1,
+            q_per_asset_per_epoch=5,
             assets_per_minibatch=2,
             q_per_asset_per_minibatch=2,
-            q_per_asset_per_epoch=5,
-            epochs=1,
+            shuffle_assets=False,
+            seed=11,
         ),
-        field_config=SimpleNamespace(),
-        query_config=SimpleNamespace(),
-        target_config=SimpleNamespace(),
-        padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
+        max_resident_assets=2,
     )
-
-    assert runtime._groups == ((0, 1), (0, 1), (0, 1))
-    assert runtime._q_counts == (2, 2, 1)
+    items = tuple(schedule.next() for _ in range(schedule.minibatches_per_epoch))
+    assert tuple(item.q_per_asset for item in items) == (2, 2, 1)
 
 
 def test_validation_ablation_marks_single_q_same_asset_shuffle_as_missing(

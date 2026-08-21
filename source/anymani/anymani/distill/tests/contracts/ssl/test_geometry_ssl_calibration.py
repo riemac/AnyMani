@@ -1,78 +1,122 @@
-r"""训练资产固定 calibration 的数值与 artifact 合同。"""
+r"""前向预实验 artifact 合同：不更新参数、不改权重。"""
 
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
-from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
-from anymani.distill.models.decoders.representations.implicit_field import (
-    DistanceSensitivityDecoderCfg,
-    GeometrySSLDecoderCfg,
-    ScalarSigmaFiLMDensityDecoderCfg,
-)
-from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelCfg
-from anymani.distill.models.input_adapters.geometry import (
-    GeometryEncoderCfg,
-    GeometryLatentHeadsCfg,
-    SO2AnchorFrontendCfg,
-)
-from anymani.distill.objectives.representations.field_reconstruction import GeometryFieldObjective
-from anymani.distill.ssl.calibration import calibrate_geometry_ssl_weights
+import yaml
+from anymani.distill.ssl.runtime.lifecycle import _require_calibration_identity, _write_calibration_artifact
 
 
-def test_calibration_uses_density_as_reference_and_writes_frozen_clipped_weights(tmp_path: Path) -> None:
-    """固定 synthetic terms 的梯度量级应产生可审计 median、reference 与裁剪权重。"""
+class _Term:
+    def __init__(self, value: float) -> None:
+        self.metrics = {"loss": __import__("torch").tensor(value)}
 
-    model = GeometrySSLModel(
-        GeometrySSLModelCfg(
-            encoder=GeometryEncoderCfg(
-                frontend=SO2AnchorFrontendCfg(relation_width=8, home_width=8, screw_width=8),
-                backbone=GraphBiasedTransformerCfg(
-                    hidden_width=16,
-                    layers=1,
-                    attention_heads=4,
-                    feedforward_width=24,
-                    dropout=0.0,
-                ),
-                heads=GeometryLatentHeadsCfg(zero_order_width=8, first_order_width=4),
-            ),
-            ssl_decoders=GeometrySSLDecoderCfg(
-                density=ScalarSigmaFiLMDensityDecoderCfg(hidden_width=8, residual_blocks=1),
-                sensitivity=DistanceSensitivityDecoderCfg(coefficient_hidden_width=8),
-            ),
-        )
+
+class _Step:
+    def __init__(self, terms: dict[str, float]) -> None:
+        self.objectives = {name: _Term(value) for name, value in terms.items()}
+
+
+class _Method:
+    def declared_objective_weights(self) -> dict[str, float]:
+        return {"density": 1.0, "kappa": 1.0, "derived_field": 1.0, "sobolev": 1.0, "chain": 1.0}
+
+    def formula_identity(self) -> dict[str, str]:
+        return {
+            "density": "anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives.density_objective",
+            "kappa": "anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives.kappa_objective",
+            "derived_field": "anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives.derived_field_objective",
+            "sobolev": "anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives.sobolev_objective",
+            "chain": "anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives.chain_objective",
+        }
+
+    def require_model(self):
+        class _Model:
+            def eval(self) -> None:
+                return None
+
+        return _Model()
+
+    def forward_objectives(self, batch, *, step: int, mode: str = "eval"):
+        del step, mode
+        return _Step(batch)
+
+
+def test_calibration_artifact_records_five_terms_without_weight_rewrite(tmp_path: Path) -> None:
+    """前向预实验写出五项均值，并保持声明权重不变。"""
+
+    method = _Method()
+    batches = (
+        {"density": 0.4, "kappa": 0.2, "derived_field": 0.1, "sobolev": 0.3, "chain": 0.5},
+        {"density": 0.6, "kappa": 0.4, "derived_field": 0.3, "sobolev": 0.1, "chain": 0.1},
     )
-    parameter = model.encoder.screw_projection.weight
-    batches = tuple(SimpleNamespace(scale=float(index + 1)) for index in range(8))
-
-    def forward_terms(current_model, _objective, batch):
-        base = current_model.encoder.screw_projection.weight.square().mean()
-        return SimpleNamespace(
-            density=base,
-            kappa=base * 0.1 * batch.scale,
-            derived_field=base * 10.0,
-            sobolev=base * 0.01,
-            chain=base * 100.0,
-            paired=base * 0.001,
-        )
-
     path = tmp_path / "loss_calibration.yaml"
-    weights = calibrate_geometry_ssl_weights(
-        model,
-        GeometryFieldObjective,
-        batches,
-        forward_terms,
-        output_path=path,
-        min_weight=0.01,
-        max_weight=10.0,
+    resolved = {
+        "method": {
+            "state_measure": {"kind": "scrambled_sobol_joint_limits"},
+            "representation": {"field": {"bandwidth_centers_m": [0.004, 0.016, 0.064]}},
+            "model": {"encoder": {"heads": {"zero_order_width": 128}}},
+            "objectives": {"density": {"weight": 1.0}},
+        },
+        "trainer": {"sampling": {"epochs": 20, "q_per_asset_per_epoch": 256}},
+    }
+    digest = _write_calibration_artifact(
+        method, batches, path, manifest_hash="abc", resolved_config=resolved
     )
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "4.0.0"
+    assert payload["declared_objective"]["density"] == 1.0
+    assert payload["formula_identity"]["density"].endswith("density_objective")
+    assert payload["scientific_identity"]["sampling"]["q_per_asset_per_epoch"] == 256
+    assert payload["term_means"]["density"] == pytest.approx(0.5)
+    assert payload["term_means"]["kappa"] == pytest.approx(0.3)
+    assert len(digest) == 64
+    assert _require_calibration_identity(
+        path, method=method, manifest_hash="abc", resolved_config=resolved
+    ) == digest
 
-    assert path.is_file()
-    assert weights.density == pytest.approx(1.0)
-    assert weights.derived_field == pytest.approx(0.1, rel=1.0e-5)
-    assert weights.sobolev == pytest.approx(10.0, rel=1.0e-5)
-    assert weights.chain == pytest.approx(0.01, rel=1.0e-5)
-    assert weights.paired == pytest.approx(10.0)
-    assert parameter.grad is not None
+    payload.pop("scientific_identity")
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="scientific identity"):
+        _require_calibration_identity(path, method=method, manifest_hash="abc", resolved_config=resolved)
+
+
+def test_calibration_accepts_changed_weights_but_rejects_formula_drift(tmp_path: Path) -> None:
+    """pretrain 允许事后改 OBJECTIVES_CFG 权重，但公式身份必须 fail-closed。"""
+
+    method = _Method()
+    path = tmp_path / "loss_calibration.yaml"
+    resolved = {
+        "method": {
+            "state_measure": {"kind": "scrambled_sobol_joint_limits"},
+            "representation": {"field": {"bandwidth_centers_m": [0.004, 0.016, 0.064]}},
+            "model": {"encoder": {"heads": {"zero_order_width": 128}}},
+            "objectives": {"density": {"weight": 1.0}},
+        },
+        "trainer": {"sampling": {"epochs": 20, "q_per_asset_per_epoch": 256}},
+    }
+    _write_calibration_artifact(
+        method,
+        ({"density": 0.4, "kappa": 0.2, "derived_field": 0.1, "sobolev": 0.3, "chain": 0.5},),
+        path,
+        manifest_hash="abc",
+        resolved_config=resolved,
+    )
+    method.declared_objective_weights = lambda: {  # type: ignore[method-assign]
+        "density": 0.2,
+        "kappa": 1.0,
+        "derived_field": 1.0,
+        "sobolev": 1.0,
+        "chain": 1.0,
+    }
+    assert _require_calibration_identity(path, method=method, manifest_hash="abc", resolved_config=resolved)
+
+    drifted = _Method()
+    drifted.formula_identity = lambda: {  # type: ignore[method-assign]
+        **method.formula_identity(),
+        "density": "somewhere.else.density_objective",
+    }
+    with pytest.raises(ValueError, match="formula identity"):
+        _require_calibration_identity(path, method=drifted, manifest_hash="abc", resolved_config=resolved)

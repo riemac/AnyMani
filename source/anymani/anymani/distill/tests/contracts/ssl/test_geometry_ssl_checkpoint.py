@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from anymani.distill.methods.contracts import FeatureSpec
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.decoders.representations.implicit_field import (
     DistanceSensitivityDecoderCfg,
@@ -27,7 +28,6 @@ from anymani.distill.ssl.checkpoint import (
     save_geometry_ssl_checkpoint,
     save_retained_geometry_artifact,
 )
-from anymani.distill.ssl.contracts import FeatureSpec
 
 
 def _config() -> GeometrySSLModelCfg:
@@ -69,7 +69,7 @@ def test_checkpoint_resumes_full_state_and_transfers_only_encoder(tmp_path: Path
         geometry_semantics_schema="1.0.0",
         asset_manifest={"train": [{"asset_id": "synthetic", "content_hash": "abc"}]},
         resolved_config={"model": {"sigma_reference_m": 0.016}},
-        calibrated_objective={"density": 1.0},
+        declared_objective={"density": 1.0, "kappa": 1.0, "derived_field": 1.0, "sobolev": 1.0, "chain": 1.0},
     )
     save_geometry_ssl_checkpoint(
         path,
@@ -118,7 +118,7 @@ def test_checkpoint_resumes_full_state_and_transfers_only_encoder(tmp_path: Path
 
 @pytest.mark.parametrize("schema_version", ["1.0.0", "2.0.0"])
 def test_legacy_checkpoint_is_rejected_without_compatibility_guessing(tmp_path: Path, schema_version: str) -> None:
-    """schema 1/2 不得把旧 experiment/objective payload 猜测迁移为当前 schema 3 语义。"""
+    """schema 1/2 不得把旧 experiment/objective payload 猜测迁移为当前 schema 4 语义。"""
 
     path = tmp_path / "legacy.pt"
     torch.save({"schema_version": schema_version}, path)

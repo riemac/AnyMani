@@ -1,116 +1,80 @@
 # AnyMani Distill
 
-`distill` 是 AnyMani 面向跨手型策略学习的训练与模型层。它消费 `tasks` 已经定义好的环境接口，组织
-RL、可运行的几何自监督预训练与未来模仿学习，同时让物理表征、可学习模型和数学目标保持可独立替换。
+不同灵巧手即使执行同一个任务，也不会共享相同的关节数、运动链、碰撞表面或动作坐标。直接把这些差异压成固定长度 observation，容易让策略记住某一只手的索引布局，而不是学习“这只手在当前构型下能够如何接触和运动”。`distill` 研究的正是这一中间层：如何从手型与当前构型提取跨 embodiment 可比较、又保留绝对几何尺度和局部运动方向的表示，并把它迁移到后续策略学习。
 
-这里的 `distill` 不只表示 teacher-student 蒸馏，也包括共享表示学习和 policy training。资产生成、robot
-spawn、reward、reset 与 PhysX 生命周期仍分别属于 `assets`、`robots` 和 `tasks`。
+## 从手型到可迁移状态
 
-## 当前状态
+记手型的静态物理定义为 $\mathfrak m$，当前活动关节角为 $q\in\mathbb R^{N_J}$。AnyMani 不把原始 URDF link 当作学习实体，而是依据资产 sidecar 中经过审核的语义，把碰撞几何组织成 PALM、JOINT 与 TIP owners。第 $g$ 个 owner 的当前表面记为 $\mathcal S_{\mathfrak m,g}^{h}(q)$；它同时对应模型中的第 $g$ 个 entity 与场解码轴。由此，手指数、链长与自由度可以变化，而物理角色和张量语义保持一致。
 
-| 部分 | 状态 | 当前含义 |
-| --- | --- | --- |
-| RL | **可运行** | 现有 `distill.train/play` 与 `scripts/rl_games/` 入口；本次 geometry SSL 不迁移其生命周期 |
-| [`models/`](models/README.md) | 可运行主线 + 候选 scaffold | geometry encoder、SSL-only decoder、tactile temporal baseline，以及 SSL/RL/IL 共用边界 |
-| [`representations/`](representations/README.md) | 可运行主线 + 候选 scaffold | Warp geometry field、50/25/25 query、$d/\rho/\kappa/g$ target 与候选物理表征 |
-| [`ssl/`](ssl/README.md) | **可运行** | 在线 Sobol q/target、跨结构 padding、Hydra 入口、fixed validation、日志与 checkpoint |
-| `il/` | 不可运行 scaffold | 未来 BC、DAgger 与 teacher-student distillation 生命周期 |
-| `objectives/` | 可运行主线 + scaffold | geometry SSL 五项联合目标与未来 RL objective |
-| [`diagnostics/`](diagnostics/README.md) | 部分可运行 | geometry SSL recording、query-only/latent-shuffle 与可选 Warp/Kaolin 对照；通用 analysis 仍待实现 |
-| [`doc/spec/`](doc/spec/README.md) | 工程规范 | 当前隐式场工程规范与阅读入口；`doc/` 其他图像不是 executable contract |
+当前主线以逐 owner unsigned distance 为基础：
 
-目录或模块名存在不代表对应实现已经完成。首版预训练协同使用逐归属体多带宽 $\rho$、距离灵敏度
-$\kappa=\nabla_qd$、由 $\kappa$ 派生的 $g=\nabla_q\rho$、同一密度预测器的 Sobolev/JVP 自导数与链式一致性；
-独立 $D_g$ 是正式候选但默认关闭。当前实现主线是多锚点 Gaussian 条件隐式场；解析直接压缩只保留为
-后续公平对照候选，本轮不为它伪造同等成熟的 pipeline。
+$$
+d_g(x;q)=\inf_{y\in\mathcal S_{\mathfrak m,g}^{h}(q)}\|x-y\|_2,
+$$
 
-## 科学数据流
+其中 query $x$ 固定在手部语义坐标系 `{h}`，长度单位为 m。训练并不要求部署模型直接输出距离，而是用多尺度 Gaussian 邻近场
+
+$$
+\rho_{\sigma,g}(x;q)=\exp\!\left(-\frac{d_g(x;q)^2}{2\sigma^2}\right)
+$$
+
+监督 configuration-level latent，并用距离灵敏度
+
+$$
+\kappa_{g,i}(x;q)=\frac{\partial d_g(x;q)}{\partial q_i}
+\quad [\mathrm{m/rad}]
+$$
+
+监督 joint-sensitive latent。ρ 描述“当前表面在哪里”，κ 描述“沿某个关节坐标运动时，表面距离如何变化”；二者共同约束表示，而不是把一个无类型 latent 任意切成两半。
+
+## 方法分解
+
+这一研究命题被拆成四个相互独立、可分别证伪的层次。
+
+`representations` 定义物理对象。它从资产提供的 typed geometry semantics lower 出 simulator-independent POE/FK/Jacobian 与 owner collision union，再组合 field、query measure 与 privileged target。稠密 padding 上限由 method 从 resolved 资产推导。这里没有神经网络，也不读取 optimizer、epoch 或任务状态。
+
+`models` 定义部署表示。多锚点前端把 home surface、空间旋量和 query 都表达为相对完整 anchor constellation 的关系；graph-biased encoder-only Transformer 在全手 entities 间传播上下文；类型化 heads 输出逐 owner 的 $Z^{(0)}$ 与逐 JOINT 的 $z_i^{(1)}$。训练期 FiLM readers 只负责把 latent 还原成场值，SSL 后整体删除。
+
+`methods` 把 representation、model 与五项 objective 装配成对外封闭的科学方法。当前主损失是 density、显式 κ、由链式法则派生的 field sensitivity、同一 density predictor 的 q-JVP 与两条一阶路径的一致性。joint-sign rewrite 是输入增强，不是第六项主损失。每一项保留自己的单位、mask 和 $(asset,q)$ 等权归约。
+
+`ssl`、`rl` 与 `il` 定义生命周期。stage 可以更换 sampling、优化与评估协议，但不能复制或悄悄改写上述物理语义。当前 Geometry SSL 与 rl_games 路线可运行；IL 仍只是边界定义。
 
 ```mermaid
 flowchart LR
-    A[asset / kinematic evidence] --> R[representations<br/>source + field + query + target]
-    D[static hand definition + current q] --> I[implicit-route input adapter]
-    P[current support points from FK] -. reserved analytic candidate .-> J[future direct adapter]
-    I --> B[retained geometry backbone]
-    J --> B
-    B --> Z[Z0 entity latent + Z1 joint latent]
-    Z --> X[training-only decoder]
-    R --> O[objectives]
-    X --> O
-    Z --> H[action / value heads]
-    H --> RL[RL / IL stage]
-    O --> SSL[SSL stage]
-    SSL -. checkpoint .-> I
-    SSL -. checkpoint .-> Z
-    SSL --> G[diagnostics.recording + evaluation]
-    G --> L[logs/geometry_ssl]
+    A[typed hand semantics] --> S[physical source]
+    S --> R[field + query + target]
+    S --> E[retained geometry encoder]
+    E --> Z[owner Z0 + joint Z1]
+    Z --> D[SSL-only readers]
+    R --> M[method objectives]
+    D --> M
+    Z --> P[policy / value / history]
 ```
 
-核心边界是：
+## 信息边界为何重要
 
-1. `representations` 定义网络应保真的物理对象，不定义神经网络；
-2. route-specific input adapter、shared backbone 与 $z^{(0)}/z_i^{(1)}$ heads 构成 retained geometry encoder，预训练后迁入 PPO；
-3. representation decoder 默认只在训练期存在，不进入部署 forward；
-4. stage 目录负责编排，不复制共享模型；
-5. `tasks` 拥有 MDP，`distill` 不通过 wrapper 改写 observation、action、reward 或 reset 语义。
+retained encoder 只允许读取当前物理 $q$ 与静态手型证据：$q_{home}$、ordered screws、topology、真实 home boundary、palm normal 与无序 physical anchors。current distance、closest point、surface Jacobian、query stratum、contact、object state、action 和 future state 都是 privileged 或 task-specific 信息，不能进入这条路径。否则重建误差可能降低，但得到的是训练时答案泄漏，而不是可部署几何表示。
 
-## 可运行 RL 入口
+同样，坐标不变性必须与物理差异分开。`{h}` 绕 palm normal 的面内 $SO(2)$ 选择是 gauge；reflection/chirality 不是。joint-axis sign rewrite 只改变坐标约定，因此 $Z^{(0)}$ 应为偶，而 $z_i^{(1)}$、κ 与同坐标动作应为奇。模型与测试分别处理这些命题，避免用含糊的“frame robustness”掩盖错误不变性。
 
-在仓库根目录执行：
+## 已有证据与结论边界
+
+当前 deterministic contracts 覆盖 semantic lowering、FK/Jacobian、owner union、anchor/query/sigma provenance、$SO(2)$ 与 joint-sign rewrite、graph-bias lookup、FiLM 条件、跨结构 padding、schema 4 Python composition、五项 objective 归约、checkpoint resume 和 standalone retained artifact。synthetic geometry integration 已闭合到 objective backward；真实 CUDA/Warp integration 由运行环境条件决定。
+
+在 NVIDIA GeForce RTX 5070 Ti 上，canonical retained encoder 以 $B=4096$、20 次预热和 50 次 CUDA Event 测得 p95 20.13 ms，满足 40 ms 子预算。该结果只说明从 GPU-resident q/static evidence 到 $Z^{(0)}/z^{(1)}$ 的子路径达标；它排除了 decoder、policy、Isaac Sim 与 `env.step`，不能外推为完整 20 Hz 控制系统已经闭合。完整计时统计由 [`models/README.md`](models/README.md) 解释。
+
+正式 8192-asset cross-embodiment pilot、unseen-variant-set/unseen-mother 模型评估、official zero-shot、Isaac pose parity 与 PPO transfer 尚未运行，因此目前的证据支持“实现与物理合同闭合”，不支持“跨手型泛化已经成立”。
+
+## 阅读与运行
+
+物理定义见 [`representations/README.md`](representations/README.md)，方法聚合根见 [`methods/README.md`](methods/README.md)，网络与 retained/disposable 边界见 [`models/README.md`](models/README.md)，预训练协议见 [`ssl/README.md`](ssl/README.md)，实验统计见 [`diagnostics/README.md`](diagnostics/README.md)，rl_games 路线见 [`rl/README.md`](rl/README.md)。
 
 ```bash
-source /home/hac/isaac/env_isaaclab/bin/activate
+# task-free Geometry SSL；默认组合 schema 4 Python 实验
+python -m anymani.distill.ssl.pretrain
 
-/home/hac/isaac/IsaacLab/isaaclab.sh -p -m anymani.distill.train \
-  --task AnyMani-GM-SingleAsset-MLP-v0 \
-  --num_envs 4096 \
-  --headless
+# GM rl_games
+/home/hac/isaac/IsaacLab/isaaclab.sh -p -m anymani.distill.rl.train --task AnyMani-GM-SingleAsset-MLP-v0 --num_envs 4096 --headless
 ```
 
-```bash
-/home/hac/isaac/IsaacLab/isaaclab.sh -p -m anymani.distill.play \
-  --task AnyMani-GM-SingleAsset-MLP-v0 \
-  --num_envs 1 \
-  --checkpoint /absolute/path/to/checkpoint.pth \
-  --real-time
-```
-
-`tasks/inhand` 的既有 rl_games 路线仍使用仓库根 `scripts/rl_games/train.py` 与 `scripts/rl_games/play.py`，不要把两套入口误写成统一 CLI。未来若把 GM 入口迁入 `rl/`，必须把新模块、文档和调用方放在同一提交。
-
-## 可运行 Geometry SSL 入口
-
-在仓库根目录激活普通 AnyMani/Isaac Lab Python 环境后运行；该进程不启动 Isaac Sim：
-
-```bash
-python -m anymani.distill.ssl.pretrain \
-  'assets.train_paths=[/absolute/path/to/generated/hand_bundle]'
-```
-
-CLI 当前通过显式路径 manifest 接收 pre-made mother、post-mutate variants 与跨 family/generated 不同 DOF bundles；`HandBank` 自身也支持 `pre_made` discovery 与 `mixed` manifest，但这两个 collection mode 尚未作为 SSL CLI 字段暴露。
-
-## SSL 配置与证据边界
-
-`ssl/config/` 提供冻结 dataclass 与 Hydra/OmegaConf bridge；当前执行入口是 `ssl/pretrain.py`，`ssl/experiments/` 与 `ssl/runtime/` 仍只是未来 ownership。训练通过 `diagnostics/recording/` 把 manifest、resolved config、TensorBoard、JSONL/NPZ 证据与 checkpoint 写入 `logs/geometry_ssl/<experiment>/<UTC timestamp>/`；`diagnostics/analysis/` 仍是只读扩展边界。
-
-## 部署与验证约束
-
-- RTX 5070 Ti、$B=4096$、单结构组下，隐式主线完整在线 retained path 的快速 suite 使用 20 次预热与
-  50 次 CUDA Event 计时，要求 p95 不超过 40 ms；未来若激活解析直接候选，同一门槛必须计入批量
-  FK/刚体支撑点变换；离线 cache materialization、decoder、policy 与 Isaac Sim 均排除；
-- morphology-only raw 静态量应缓存，不在每个 policy step 重建 mesh；PPO full fine-tune 时不得缓存 stale
-  learned activation；
-- 纯公式、tensor shape、mask、routing 与 cache contract 使用普通 pytest；
-- 依赖 Isaac Sim、USD、PhysX handle 或完整 reset/step 生命周期的命题使用显式 runtime smoke；
-- 正式 checkpoint 至少记录代码 commit、asset version、task/obs/action schema、训练配置与评估协议。
-
-## 阅读路径
-
-1. 先读本页确定 active 与 future 边界；
-2. 运行已有 PPO 时从本页的入口和对应 task/agent 配置开始；
-3. 研究共享网络时读 [`models/README.md`](models/README.md)；
-4. 研究 physical-field target 时读 [`representations/README.md`](representations/README.md)；
-5. 研究 pretrain-to-PPO 生命周期时读 [`ssl/README.md`](ssl/README.md)；
-6. 研究 run 证据与分析时读 [`diagnostics/README.md`](diagnostics/README.md)；
-7. 查工程规范时读 [`doc/spec/README.md`](doc/spec/README.md)。
-
-更完整的 GM 实现现状见 [`../../docs/GM_TEACHER_IMPLEMENTATION_OVERVIEW.md`](../../docs/GM_TEACHER_IMPLEMENTATION_OVERVIEW.md)。
+`tasks/inhand` 的历史路线继续使用仓库根 `scripts/rl_games/train.py` / `play.py`，不与 `distill.rl` 合并入口。

@@ -1,4 +1,4 @@
-"""Schema 3 Hydra composition、在线预算与 physical realization fingerprint 合同。"""
+"""Schema 4 Hydra composition、五项 objective 与 physical realization fingerprint 合同。"""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def _compose() -> EmbodimentPretrainCfg:
 
 
 def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
-    """根五 role 与六个 objective term 必须保持 concrete dataclass 类型。"""
+    """根五 role 与五项 objective term 必须保持 concrete dataclass 类型。"""
 
     config = _compose()
     config.validate_composed()
@@ -53,15 +53,18 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
     assert type(config.trainer).__name__ == "EmbodimentPretrainTrainerCfg"
     assert type(config.method.representation).__name__ == "GeometryRepresentationCfg"
     assert type(config.method.model).__name__ == "GeometrySSLModelCfg"
-    assert set(config.method.objectives) == {
+    assert set(config.method.objectives.enabled()) == {
         "density",
         "kappa",
         "derived_field",
         "sobolev",
         "chain",
-        "paired",
     }
-    assert all(type(term).__name__.endswith("ObjectiveTermCfg") for term in config.method.objectives.values())
+    assert config.method.representation.source.anchors.bank_size == 8
+    assert tuple(config.method.representation.field.validation_bandwidths_m) == (0.004, 0.016, 0.064)
+    assert not hasattr(config.method.representation, "layout")
+    assert "paired" not in config.method.objectives.enabled()
+    assert all(term.qualified_func_name().endswith(f"{name}_objective") for name, term in config.method.objectives.enabled().items())
 
 
 def test_hydra_cli_override_changes_local_cfg_without_central_parser() -> None:
@@ -77,7 +80,7 @@ def test_hydra_cli_override_changes_local_cfg_without_central_parser() -> None:
     config = OmegaConf.to_object(composed)
     assert isinstance(config, EmbodimentPretrainCfg)
     assert config.trainer.optimizer.learning_rate == pytest.approx(7.0e-4)
-    assert resolved_config_dict(config)["schema_version"] == "3.0.0"
+    assert resolved_config_dict(config)["schema_version"] == "4.0.0"
 
 
 def test_experiment_constructor_has_no_filesystem_or_cuda_side_effect(tmp_path) -> None:
@@ -86,17 +89,17 @@ def test_experiment_constructor_has_no_filesystem_or_cuda_side_effect(tmp_path) 
     output_dir = tmp_path / "not-created-until-run"
     experiment = EmbodimentPretrain(_compose(), output_dir=output_dir)
 
-    assert experiment.config.schema_version == "3.0.0"
+    assert experiment.config.schema_version == "4.0.0"
     assert experiment.output_dir == output_dir
     assert not output_dir.exists()
 
 
 def test_schema_one_and_two_are_fail_closed() -> None:
-    """旧配置不通过 alias 或 parser 猜测进入 schema 3。"""
+    """旧配置不通过 alias 或 parser 猜测进入 schema 4。"""
 
     config = _compose()
     for version in ("1.0.0", "2.0.0"):
-        with pytest.raises(ValueError, match="schema must be exactly 3.0.0"):
+        with pytest.raises(ValueError, match="schema must be exactly 4.0.0"):
             replace(config, schema_version=version).validate_composed()
 
 
@@ -106,10 +109,13 @@ def test_model_does_not_freeze_target_sigma_sample_count() -> None:
     config = _compose()
     representation = replace(
         config.method.representation,
-        field=replace(config.method.representation.field, bandwidth_centers_m=(0.004, 0.008, 0.016, 0.032, 0.064)),
+        field=replace(
+            config.method.representation.field,
+            bandwidth_centers_m=(0.004, 0.008, 0.016, 0.032, 0.064),
+            validation_bandwidths_m=(0.004, 0.008, 0.016, 0.032, 0.064),
+        ),
     )
-    method = replace(config.method, representation=representation)
-    model = GeometrySSLModel(method.model)
+    model = GeometrySSLModel(config.method.model)
     assert len(representation.field.bandwidth_centers_m) == 5
     assert model.density_decoder.output.out_features == 1
 

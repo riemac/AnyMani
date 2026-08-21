@@ -4,7 +4,7 @@
 
 ## 一次观测应保留什么
 
-最小分析单位不是“某个 step 的 total loss”，而是带有 asset、q、owner、query stratum、sigma、distance shell、ancestor relation 与 validity mask 的预测—真值配对。训练记录同时保存六项 loss 的 numerator 与 denominator，使 tail asset group、跨结构 padding 和非光滑 mask 不会因先做 minibatch mean 而静默改变统计权重。
+最小分析单位不是“某个 step 的 total loss”，而是带有 asset、q、owner、query stratum、sigma、distance shell、ancestor relation 与 validity mask 的预测—真值配对。训练记录保存五项 method loss 的 $(asset,q)$ 等权均值，使 tail asset group、跨结构 padding 和非光滑 mask 不会因先做全局标量混合而静默改变统计权重。
 
 dense evidence 保留 $Z^{(0)}$、$Z^{(1)}$、density/κ errors、closest-source 与采样 provenance。被 mask 排除的一阶样本仍携带原始数值和排除原因；否则低误差可能只是有效区域不断缩小。runtime evidence 另外记录 resident assets、BVH/triangle 数、load/release 时间、显存变化与吞吐，从而把表示误差与资源退化分开。
 
@@ -29,6 +29,6 @@ initial baseline、历史 best 与完整 selection history 都属于 resume stat
 
 ## 证据边界
 
-上述诊断可以证伪输入泄漏、latent bypass、错误 routing、mask coverage 退化和 checkpoint lineage 漂移，但不能单独证明 official zero-shot、cross-topology 泛化或 PPO transfer。任何结论至少应共同引用 code revision、resolved config、asset manifest、calibrated objective、selection history 与 checkpoint；TensorBoard 曲线或最终平均值不能替代这些事实源。
+上述诊断可以证伪输入泄漏、latent bypass、错误 routing、mask coverage 退化和 checkpoint lineage 漂移，但不能单独证明 official zero-shot、cross-topology 泛化或 PPO transfer。任何结论至少应共同引用 code revision、resolved config、asset manifest、声明权重、calibration artifact hash、selection history 与 checkpoint；TensorBoard 曲线或最终平均值不能替代这些事实源。
 
 一次 run 的原始证据写入 `logs/ssl/<experiment>/<UTC timestamp>/`：dataset/resolved YAML 保存实验与资产选择事实，TensorBoard 用于在线观察，JSONL 保存 append-only 标量与 runtime 事件，NPZ 保存 dense arrays，YAML 保存 expanded manifest、calibration、q-bank、selection 与 ablation。`recording` 负责落盘，`evaluation` 负责固定前向与分层统计，`analysis` 只读这些产物并生成 bootstrap 等派生结果；三者都不反向参与模型输入或 optimizer。

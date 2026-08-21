@@ -20,19 +20,11 @@ from anymani.distill.diagnostics.evaluation.geometry_ssl import (
     geometry_ssl_stratified_components_per_sample,
     same_asset_q_permutation,
 )
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import PaddedOnlineGeometryBatch
 from anymani.distill.models.geometry_ssl import GeometrySSLForward, GeometrySSLModel
-from anymani.distill.representations.geometry import (
-    GeometryRepresentation,
-    GeometryRepresentationCfg,
-    PaddedOnlineGeometryBatch,
-)
 from anymani.distill.representations.sources.geometry_source import GeometrySource
-from anymani.distill.representations.targets.geometry_field import fixed_validation_gaussian_field_config
-from anymani.distill.ssl.runtime import (
-    GeometrySSLRuntimeCfg,
-    ResidentGeometryAssetWindow,
-    WindowedOnlineGeometryBatcher,
-)
+from anymani.distill.ssl.runtime import ResidentGeometryAssetWindow
+from anymani.distill.ssl.runtime.sampling import OnlineMinibatchSchedule, OnlineSamplingCfg
 
 
 def normalized_validation_score(metrics: dict[str, float], initial_metrics: dict[str, float]) -> float:
@@ -182,10 +174,9 @@ def fixed_validation_ablation_evidence(
 
 
 def stream_training_morphology_q_bank(
-    model: GeometrySSLModel,
+    method,
     runtimes: tuple[GeometrySource, ...],
     *,
-    representation_config: GeometryRepresentationCfg,
     seed: int,
     q_per_asset: int,
     assets_per_minibatch: int,
@@ -197,46 +188,53 @@ def stream_training_morphology_q_bank(
 ) -> dict[str, object]:
     r"""流式评估训练形态上的独立 q bank，并保存可确定性重放的逐样本 evidence。
 
-    初始与最终评估从独立 seed 的 cursor 0 重建同一序列；q、query、density teacher 与一阶 teacher
-    共同进入 SHA-256。bank 不常驻训练期 GPU，只在 initial/final 各流式执行一次。
+    该 bank 不复用训练 Sobol cursor，也不读取 `method.representation`。初始与最终评估从独立
+    seed 的 cursor 0 重建同一序列；q、query、density teacher 与一阶 teacher 共同进入 SHA-256。
+    bank 不常驻训练期 GPU，只在 initial/final 各流式执行一次，并使用 validation 的固定 sigma
+    与每 JOINT 4+4 边。
     """
 
     bank_seed = int(seed)  # 与 train/held-out/bootstrap seed 空间分离
-    runtime_config = GeometrySSLRuntimeCfg(
+    schedule = OnlineMinibatchSchedule(
+        len(runtimes),
+        OnlineSamplingCfg(
+            epochs=1,
+            q_per_asset_per_epoch=q_per_asset,
+            assets_per_minibatch=min(assets_per_minibatch, len(runtimes)),
+            q_per_asset_per_minibatch=q_per_asset_per_minibatch,
+            shuffle_assets=False,
+            seed=bank_seed,
+        ),
         max_resident_assets=max_resident_assets,
-        assets_per_minibatch=min(assets_per_minibatch, len(runtimes)),
-        q_per_asset_per_minibatch=q_per_asset_per_minibatch,
-        q_per_asset_per_epoch=q_per_asset,
-        epochs=1,
     )
-    representation = GeometryRepresentation(representation_config)
+    samplers = method.make_independent_samplers(runtimes, seed=bank_seed)
     window = ResidentGeometryAssetWindow(
         runtimes,
         device=str(device),
         dtype=dtype,
-        max_resident_assets=runtime_config.max_resident_assets,
-        loader=representation.to_device,
-    )
-    batcher = WindowedOnlineGeometryBatcher(
-        runtimes,
-        window,
-        seed=bank_seed,
-        runtime_config=runtime_config,
-        field_config=fixed_validation_gaussian_field_config(representation_config.field),
-        query_config=representation_config.query,
-        target_config=representation_config.target,
-        padding=representation_config.layout,
+        max_resident_assets=min(max_resident_assets, len(runtimes)),
+        loader=method.load_validation_device_state,
     )
     digest = hashlib.sha256()  # q/query/teacher byte-level identity
-    digest.update(b"geometry-ssl-train-morphology-q-bank-v2\0")
+    digest.update(b"geometry-ssl-train-morphology-q-bank-v3\0")
     records: list[dict[str, object]] = []
     cpu_rng_state = torch.get_rng_state()  # validation 不推进正式训练 RNG
     cuda_rng_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+    model = method.require_model()
     model.eval()
     try:
         with torch.no_grad():
-            while batcher.epoch < 1:
-                batch = batcher.sample()
+            while not schedule.complete:
+                item = schedule.next()
+                batch = method.realize_minibatch(
+                    item,
+                    sources=runtimes,
+                    samplers=samplers,
+                    window=window,
+                    seed=bank_seed,
+                    schedule=schedule,
+                    mode="eval",
+                )
                 prediction = model(
                     batch.q,
                     batch.evidence,
@@ -320,6 +318,7 @@ def _update_training_q_bank_digest(digest: _HashWriter, batch: PaddedOnlineGeome
         batch.sensitivity_targets.query_index,
         batch.sensitivity_targets.joint_index,
         batch.sensitivity_targets.ancestor_mask,
+        batch.sensitivity_targets.active_mask,
         batch.sensitivity_targets.closest_point,
         batch.sensitivity_targets.closest_source,
         batch.sensitivity_targets.uniqueness_margin,

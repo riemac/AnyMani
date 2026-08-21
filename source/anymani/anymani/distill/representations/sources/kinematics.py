@@ -183,6 +183,9 @@ class EmbodimentGeometrySpec:
     component_owner_local_transforms: torch.Tensor | None = None
     owner_ids: tuple[str, ...] = ()
     joint_names: tuple[str, ...] = ()
+    owner_roles: tuple[str, ...] = ()
+    owner_finger_names: tuple[str | None, ...] = ()
+    owner_joint_indices: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         r"""在运动学来源边界验证形状、数值类型与旋量单位轴。
@@ -222,6 +225,12 @@ class EmbodimentGeometrySpec:
             raise ValueError("owner_ids must align with owner_home_transforms")
         if self.joint_names and len(self.joint_names) != joint_count:
             raise ValueError("joint_names must align with space_screws")
+        if self.owner_roles and len(self.owner_roles) != owner_count:
+            raise ValueError("owner_roles must align with owner_home_transforms")
+        if self.owner_finger_names and len(self.owner_finger_names) != owner_count:
+            raise ValueError("owner_finger_names must align with owner_home_transforms")
+        if self.owner_joint_indices and len(self.owner_joint_indices) != owner_count:
+            raise ValueError("owner_joint_indices must align with owner_home_transforms")
         _validate_optional_graph_tensor(self.owner_parent_indices, (owner_count,), "owner_parent_indices")
         _validate_optional_graph_tensor(
             self.owner_graph_shortest, (owner_count, owner_count), "owner_graph_shortest"
@@ -279,6 +288,9 @@ class EmbodimentGeometrySpec:
             else self.component_owner_local_transforms.to(device=device, dtype=target_dtype),
             owner_ids=self.owner_ids,
             joint_names=self.joint_names,
+            owner_roles=self.owner_roles,
+            owner_finger_names=self.owner_finger_names,
+            owner_joint_indices=self.owner_joint_indices,
         )
 
 
@@ -432,6 +444,21 @@ def lower_hand_geometry_semantics(
         component_owner_local_transforms=component_owner_local_transforms,
         owner_ids=tuple(owner.owner_id for owner in semantics.owners),
         joint_names=semantics.active_joint_names,
+        owner_roles=tuple(str(owner.role) for owner in semantics.owners),
+        owner_finger_names=tuple(owner.finger_name for owner in semantics.owners),
+        owner_joint_indices=tuple(
+            next(
+                (
+                    int(item.active_joint_index)
+                    for item in semantics.kinematic_joints
+                    if item.joint_name == owner.joint_name and item.active_joint_index is not None
+                ),
+                -1,
+            )
+            if owner.role == "joint"
+            else -1
+            for owner in semantics.owners
+        ),
     )
 
 

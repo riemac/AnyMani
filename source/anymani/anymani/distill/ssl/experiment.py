@@ -1,4 +1,4 @@
-r"""Schema 3 embodiment pretraining 的最高声明配置与唯一副作用入口。"""
+r"""Schema 4 embodiment pretraining 的最高声明配置与唯一副作用入口。"""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from omegaconf import MISSING, OmegaConf
 
 from .contracts import build_runtime
 
-EMBODIMENT_PRETRAIN_SCHEMA_VERSION = "3.0.0"
-"""首个 distributed role config、standalone retained artifact 与 online minibatch schema。"""
+EMBODIMENT_PRETRAIN_SCHEMA_VERSION = "4.0.0"
+"""五项 objective、Python 完整实验装配、声明权重与 calibration artifact hash。"""
 
 
 class EmbodimentPretrain:
@@ -44,7 +44,7 @@ class EmbodimentPretrain:
 
 @dataclass(frozen=True)
 class EmbodimentPretrainCfg:
-    r"""Hydra 只组合五个 concrete roles 的 schema 3 根配置。
+    r"""Hydra 只组合五个 concrete roles 的 schema 4 根配置。
 
     五个槽位故意使用 ``Any``：OmegaConf 若把它们标为抽象基类，会在 config-group merge 后丢失
     concrete dataclass 类型及 ``runtime_type``。科学兼容性由 method/trainer compile gate 检查，根配置

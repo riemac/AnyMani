@@ -13,7 +13,7 @@ Warp BVH lease，返回 ``DeviceGeometrySource``；resident asset window 驱逐�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -36,34 +36,73 @@ from .kinematics import EmbodimentGeometrySpec, lower_hand_geometry_semantics
 
 
 @dataclass(frozen=True)
+class AnchorBankCfg:
+    r"""每资产独立的有限 physical anchor constellation bank。
+
+    训练按 q-block 均衡轮换 $A^{(k)}$；validation、独立 q-bank 与 PPO 固定 $A^{(0)}$。
+    数值锚点：每指 10 个 anchors、$R_a=0.05\,\mathrm m$、$\tau_a=0.025\,\mathrm m$，
+    surface/interior 各半，bank size $K=8$。
+    """
+
+    bank_size: int = 8  # 有限 Monte-Carlo realization 数
+    anchors_per_finger: int = 10  # 每根 finger mount seed 的 physical anchor 数
+    radius_m: float = 0.05  # palm seed 球形支持半径 $R_a$，单位 m
+    radial_decay_scale_m: float = 0.025  # 截断 Gaussian $\tau_a=R_a/2$，单位 m
+    surface_fraction: float = 0.5  # surface/interior 凸混合权重
+
+    def __post_init__(self) -> None:
+        r"""拒绝空 bank、非法米制半径和不可解释的采样混合。"""
+
+        if self.bank_size < 1 or self.anchors_per_finger < 1:
+            raise ValueError("anchor bank size and anchors_per_finger must be positive")
+        if not 0.0 < self.radial_decay_scale_m <= self.radius_m:
+            raise ValueError("anchor radial decay scale must lie in (0, radius_m]")
+        if not 0.0 <= self.surface_fraction <= 1.0:
+            raise ValueError("anchor surface_fraction must lie in [0,1]")
+
+
+@dataclass(frozen=True)
 class GeometrySourceCfg:
     r"""每项资产固定一次的静态 physical-source realization 配置。
 
-    数值锚点为：每 owner 64 个 boundary points、home-surface 候选 oversample factor 8、每根
-    finger 10 个 anchors、支持半径 $R_a=0.05\,\mathrm m$、径向衰减尺度
-    $\tau_a=0.025\,\mathrm m$，surface/interior 各半。workspace query 半径属于 query config，
-    不与 anchor 支持半径隐式绑定。
+    数值锚点为：每 owner 64 个 boundary points、home-surface 候选 oversample factor 8。
+    workspace query 半径属于 query config，不与 anchor 支持半径隐式绑定。
     """
 
     home_points_per_owner: int = 64  # $M_g$；每个 owner 的 retained boundary-point 预算
     home_surface_oversample_factor: int = 8  # 面积 proposal 数为 $8M_g$，随后做 farthest-point selection
-    anchors_per_finger: int = 10  # 每根 finger mount seed 的 physical anchor 数
-    anchor_radius_m: float = 0.05  # palm seed 球形支持半径 $R_a$，单位 m
-    anchor_radial_decay_scale_m: float = 0.025  # 截断 Gaussian $\tau_a=R_a/2$，单位 m
-    anchor_surface_fraction: float = 0.5  # anchor proposal 中 surface/interior 的凸混合权重
     static_sampling_seed: int = 0  # owner/finger ID 派生后的逐资产固定 seed
+    anchors: AnchorBankCfg = field(default_factory=AnchorBankCfg)
 
     def __post_init__(self) -> None:
-        r"""拒绝空点集、非法米制半径和不可解释的采样混合。"""
+        r"""拒绝空点集。"""
 
-        if self.home_points_per_owner < 1 or self.home_surface_oversample_factor < 1:  # surface evidence 非空
+        if self.home_points_per_owner < 1 or self.home_surface_oversample_factor < 1:
             raise ValueError("home-surface point and oversample budgets must be positive")
-        if self.anchors_per_finger < 1:  # 每个声明的 finger seed 必须产生至少一个物理 landmark
-            raise ValueError("anchors_per_finger must be positive")
-        if not 0.0 < self.anchor_radial_decay_scale_m <= self.anchor_radius_m:  # $0<\tau_a\le R_a$
-            raise ValueError("anchor radial decay scale must lie in (0, anchor_radius_m]")
-        if not 0.0 <= self.anchor_surface_fraction <= 1.0:  # 不 clamp 改变声明的物理测度
-            raise ValueError("anchor_surface_fraction must lie in [0,1]")
+
+    @property
+    def anchors_per_finger(self) -> int:
+        r"""兼容旧字段读取：每指 anchor 数来自 nested bank cfg。"""
+
+        return self.anchors.anchors_per_finger
+
+    @property
+    def anchor_bank_size(self) -> int:
+        r"""兼容旧字段读取：bank size 来自 nested bank cfg。"""
+
+        return self.anchors.bank_size
+
+    @property
+    def anchor_radius_m(self) -> float:
+        return self.anchors.radius_m
+
+    @property
+    def anchor_radial_decay_scale_m(self) -> float:
+        return self.anchors.radial_decay_scale_m
+
+    @property
+    def anchor_surface_fraction(self) -> float:
+        return self.anchors.surface_fraction
 
 
 @dataclass(frozen=True)
@@ -79,7 +118,8 @@ class GeometrySource:
     spec_cpu: EmbodimentGeometrySpec  # CPU float64 POE/graph/component transforms
     geometry_cache: OwnerGeometryCache  # owner-local strict surface/solid union
     home_surface: HomeSurfaceSamples  # `[G,M,3]` owner-local boundary-only realization
-    anchors: AnchorSamples  # `[K,3]` hand-frame palm surface/interior supports
+    anchors: AnchorSamples  # `[K,3]` canonical $A^{(0)}$，validation/PPO 固定使用
+    anchor_bank: tuple[AnchorSamples, ...]  # 有限 Monte-Carlo realization $\{A^{(0)},\ldots,A^{(K-1)}\}$
     identity: GeometryIdentity  # physical mapping 与 configuration-domain 双重身份
 
     @property
@@ -125,18 +165,21 @@ class GeometrySource:
             oversample_factor=config.home_surface_oversample_factor,
         )
 
-        # anchors 允许 palm interior，但支持域、径向测度和 surface 比例全部由 facade 显式声明。
-        anchors = sample_palm_anchor_supports(
-            geometry_cache,
-            semantics,
-            spec,
-            anchors_per_finger=config.anchors_per_finger,
-            sampling_seed=config.static_sampling_seed,
-            radial_support_radius_m=config.anchor_radius_m,
-            radial_decay_scale_m=config.anchor_radial_decay_scale_m,
-            surface_fraction=config.anchor_surface_fraction,
+        # 每套 anchors 独立采样；bank 是 retained-input realization，不改变 teacher 几何。
+        anchor_bank = tuple(
+            sample_palm_anchor_supports(
+                geometry_cache,
+                semantics,
+                spec,
+                anchors_per_finger=config.anchors.anchors_per_finger,
+                sampling_seed=config.static_sampling_seed + bank_index * 1_000_003,
+                radial_support_radius_m=config.anchors.radius_m,
+                radial_decay_scale_m=config.anchors.radial_decay_scale_m,
+                surface_fraction=config.anchors.surface_fraction,
+            )
+            for bank_index in range(config.anchors.bank_size)
         )
-        return cls(container, spec, geometry_cache, home_surface, anchors, identity)  # 同一 asset hash 的真源包
+        return cls(container, spec, geometry_cache, home_surface, anchor_bank[0], anchor_bank, identity)
 
     def to_device(
         self,
@@ -177,4 +220,4 @@ class DeviceGeometrySource:
         return release_warp_owner_geometry_cache(self.warp_cache)  # lease 归零后移除全局强引用
 
 
-__all__ = ["DeviceGeometrySource", "GeometrySource", "GeometrySourceCfg"]
+__all__ = ["AnchorBankCfg", "DeviceGeometrySource", "GeometrySource", "GeometrySourceCfg"]

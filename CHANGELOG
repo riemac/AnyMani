@@ -1,3 +1,12 @@
+0.6.5 - 2026-08-21
+==================
+
+- 将多锚点 Gaussian 隐式场提升为 `distill/methods` 科学聚合根：对内耦合 representation/model/objectives，对外只给 SSL trainer 封闭 `prepare / realize / forward / reduce / evaluate / export`。
+- 主损失收为 density、κ、derived-field、Sobolev 与 chain；paired 不再进入训练目标。joint-sign rewrite 改为每个 `(asset,q)` 以 0.20 概率恰好翻一个有效 JOINT 的输入增强。
+- representation 只交付物理 teacher；选 `A^(k)`、`StaticGeometryEvidence` 与跨结构 padding 迁入 method batch。每资产 8 套独立 anchor bank，validation 固定 `A^(0)` 与 4/16/64 mm。
+- schema 4 完整实验由 Python façade 装配；`calibrate_objectives` 前向预实验不更新参数，pretrain 按公式身份、采样语义、method/model/representation 与 code revision fail-closed 核对 artifact。
+- 删除联合六项 `GeometryFieldObjective` 运行时、旧 `ssl/methods` 与分片 YAML；Hydra 只保留兼容 CLI 名称。当前 `20×256` 仍是脚手架，不是已批准的 8192-asset 正式预算。
+
 0.6.4 - 2026-08-19
 ==================
 

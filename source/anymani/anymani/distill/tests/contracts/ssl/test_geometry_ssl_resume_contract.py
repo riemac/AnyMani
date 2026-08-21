@@ -101,7 +101,7 @@ def test_resume_rejects_best_score_without_selection_history() -> None:
 
 
 def _config() -> EmbodimentPretrainCfg:
-    """恢复 schema 3 canonical config，避免测试自己复制 concrete defaults。"""
+    """恢复 schema 4 canonical config，避免测试自己复制 concrete defaults。"""
 
     import anymani.distill.ssl.pretrain  # noqa: F401
 

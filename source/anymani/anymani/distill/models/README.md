@@ -73,6 +73,6 @@ canonical 完整模型有 590856 个参数，其中 retained encoder 350407 个�
 
 ## 证据与未决边界
 
-contracts 已检查三种 graph-bias 的精确 lookup 与相加、末距离桶仍参与全连接 attention、anchor permutation、$SO(2)$ rewrite、joint-sign parity、variable sigma、sigma detach、每层 FiLM、跨结构 output/gradient 和 retained/disposable keys。真实 LEAP integration 已完成 encoder、readers、六项目标与 backward。
+contracts 已检查三种 graph-bias 的精确 lookup 与相加、末距离桶仍参与全连接 attention、anchor permutation、$SO(2)$ rewrite、joint-sign parity、variable sigma、sigma detach、每层 FiLM、跨结构 output/gradient 和 retained/disposable keys。真实 LEAP integration 已完成 encoder、readers、五项 method objective 与 backward。
 
 这些证据尚未选择最优容量；2 layers、128/64 latent 和 FiLM width 128 只是 canonical 可执行锚点。任何缩小网络以满足吞吐的候选都必须在相同 q/query/target 与训练预算下比较，不能通过改变物理监督或缓存 stale learned activation 获得表面加速。正式 PPO transfer、cross-topology/cross-DOF 与 official hands 仍待实验。

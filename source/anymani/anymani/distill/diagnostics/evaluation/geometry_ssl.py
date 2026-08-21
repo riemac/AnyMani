@@ -19,12 +19,12 @@ from typing import Literal  # 只允许预注册 ablation，避免自由字符�
 
 import torch  # latent、query 与 batch permutation 全部保持 PyTorch 计算图
 
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import PaddedOnlineGeometryBatch
 from anymani.distill.models.geometry_ssl import GeometrySSLForward, GeometrySSLModel  # 完整 SSL 组装边界
 from anymani.distill.models.input_adapters.geometry import (  # retained latent/evidence 类型合同
     GeometryLatents,
     StaticGeometryEvidence,
 )
-from anymani.distill.representations.geometry import PaddedOnlineGeometryBatch
 
 GeometrySSLAblation = Literal[
     "query_only",

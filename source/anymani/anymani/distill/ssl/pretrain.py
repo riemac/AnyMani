@@ -1,4 +1,4 @@
-r"""Schema 3 embodiment pretraining 的 Hydra CLI façade。
+r"""Schema 4 embodiment pretraining 的 Hydra CLI façade。
 
 入口只登记 concrete ConfigStore schemas、组合 packaged YAML 并恢复 concrete dataclasses；资产、物理
 teacher、method objective、optimizer 与 checkpoint 全部由对应 runtime role 拥有。

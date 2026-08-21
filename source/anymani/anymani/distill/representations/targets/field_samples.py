@@ -108,7 +108,8 @@ class SensitivityTargetBatch:
     owner_index: torch.Tensor  # `[E]` 或跨结构 padding 后 `[B,E]`
     query_index: torch.Tensor  # 与 owner selector 同形状
     joint_index: torch.Tensor  # 与 owner selector 同形状
-    ancestor_mask: torch.Tensor  # 与 owner selector 同形状
+    ancestor_mask: torch.Tensor  # 与 owner selector 同形状；True 表示运动学祖先 / active edge
+    active_mask: torch.Tensor  # 与 owner selector 同形状；True=active descendant，False=structure-zero
     closest_point: torch.Tensor  # `[B,E,3]`，`{h}`，m
     closest_source: torch.Tensor  # `[B,E]`，稳定碰撞部件/三角面来源标识
     uniqueness_margin: torch.Tensor  # `[B,E]`，m
@@ -133,6 +134,7 @@ class SensitivityTargetBatch:
             ("query_index", self.query_index),
             ("joint_index", self.joint_index),
             ("ancestor_mask", self.ancestor_mask),
+            ("active_mask", self.active_mask),
         ):
             if selector.shape != selector_shape:
                 raise ValueError(f"{name} must share selector shape {selector_shape}, got {tuple(selector.shape)}")
@@ -152,8 +154,10 @@ class SensitivityTargetBatch:
                 raise ValueError(f"{name} must have shape [B,E]={edge_shape}, got {tuple(value.shape)}")
         if self.field_sensitivity.ndim != 3 or self.field_sensitivity.shape[:2] != edge_shape:
             raise ValueError("field_sensitivity must have shape [B,E,L]")
-        if self.ancestor_mask.dtype != torch.bool or self.valid_mask.dtype != torch.bool:
-            raise TypeError("ancestor_mask and valid_mask must use torch.bool")
+        if self.ancestor_mask.dtype != torch.bool or self.active_mask.dtype != torch.bool or self.valid_mask.dtype != torch.bool:
+            raise TypeError("ancestor_mask, active_mask and valid_mask must use torch.bool")
+        if torch.any(self.active_mask != self.ancestor_mask):
+            raise ValueError("active_mask must match ancestor_mask: active edges are kinematic descendants")
 
         nonancestor = ~self.ancestor_mask  # 跨指或 palm 等结构零 edges
         if self.ancestor_mask.ndim == 1:

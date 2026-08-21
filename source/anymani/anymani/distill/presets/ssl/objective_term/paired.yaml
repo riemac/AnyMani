@@ -1,4 +1,0 @@
-defaults: [schema_paired, _self_]
-
-weight: 1.0
-calibrate: true

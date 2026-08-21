@@ -1,4 +1,4 @@
-r"""Schema 3 full checkpoint 与 standalone retained artifact 合同。
+r"""Schema 4 full checkpoint 与 standalone retained artifact 合同。
 
 完整 checkpoint 只服务预训练 resume，保存 encoder、两个 SSL-only readers、optimizer、采样状态与审计
 metadata。IL/PPO 只能读取独立 retained artifact；其 loader 严格报告 missing/unexpected keys，且 artifact
@@ -14,12 +14,12 @@ from typing import Any  # optimizer/config metadata 含嵌套基础类型
 
 import torch  # tensor/optimizer state 使用官方 state_dict 序列化
 
+from anymani.distill.methods.contracts import FeatureSpec
 from anymani.distill.models.geometry_ssl import GeometrySSLModel  # 完整 retained+disposable 组装
 from anymani.distill.models.input_adapters.geometry import ImplicitGeometryEncoder  # PPO/IL transfer 目标
-from anymani.distill.ssl.contracts import FeatureSpec
 
-CHECKPOINT_SCHEMA_VERSION = "3.0.0"  # schema 1/2 明确拒绝；role config 与 sampling state 已重构
-RETAINED_ARTIFACT_SCHEMA_VERSION = "3.0.0"  # standalone transfer artifact 与 full checkpoint 同代但不同类型
+CHECKPOINT_SCHEMA_VERSION = "4.0.0"  # 五项 objective、声明权重与 calibration artifact hash
+RETAINED_ARTIFACT_SCHEMA_VERSION = "4.0.0"  # standalone transfer artifact 与 full checkpoint 同代但不同类型
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,10 @@ class GeometrySSLCheckpointMetadata:
     geometry_semantics_schema: str  # assets 静态语义 schema 版本
     asset_manifest: Mapping[str, Any]  # train/validation/evaluation 的展开 provenance 与物理身份
     resolved_config: Mapping[str, Any]  # Hydra/OmegaConf interpolation 后完整配置
-    calibrated_objective: Mapping[str, float]  # runtime evidence；不覆盖 declared objective config
+    declared_objective: Mapping[str, float]  # OBJECTIVES_CFG 中显式写出的五项权重
+    calibration_artifact_hash: str = ""  # 前向预实验 artifact 的 SHA-256；空表示未加载
+    worktree_dirty: bool = False  # True 表示运行代码不是干净 HEAD
+    worktree_fingerprint: str = ""  # dirty/untracked manifest 指纹，不把大 diff 写入每个 checkpoint
     frame_contract: str = "query/closest/surface in hand frame {h}"  # 全部几何点 frame
     unit_contract: str = "length=m,joint=rad,density=dimensionless,kappa=m/rad,g=1/rad"  # SI 量纲
     retained_namespaces: tuple[str, ...] = ("encoder.",)  # 迁入 PPO/IL
@@ -133,7 +136,7 @@ def save_retained_geometry_artifact(
     metadata: GeometrySSLCheckpointMetadata,
     source_checkpoint: Path,
 ) -> None:
-    r"""原子写出只含 retained encoder 的 schema 3 standalone artifact。
+    r"""原子写出只含 retained encoder 的 schema 4 standalone artifact。
 
     该 payload 不保存 optimizer、training q sampler、query/target backend、decoder 或 objective；下游
     只能从 ``retained_state`` 和输入/特征合同构造部署期消费路径。

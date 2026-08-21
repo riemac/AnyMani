@@ -72,7 +72,7 @@ uniform scale 验收同时缩放 geometry、query、anchor 与带宽：$x'=\lamb
 flowchart LR
     S[collision + kinematic source] --> P[posed semantic geometry]
     P --> F[physical field]
-    Q[query layout] --> T[target batch]
+    Q[query measure] --> T[target batch]
     F --> T
     T --> L[objective]
 ```
@@ -127,8 +127,8 @@ link-local URDF gauge、joint-axis sign/zero rewrite、`{h}` origin rewrite 与 
 
 ## 边界与验证
 
-- 不 import `torch.nn`，不持有 checkpoint；
+- 不 import `torch.nn` 或 `distill.models`，不持有 checkpoint；
 - learnable adapter/backbone/decoder 位于 [`../models/`](../models/README.md)；
-- scalar loss 位于 `../objectives/`，stage orchestration 位于 `../ssl/`、`../rl/`、`../il/`；
+- 五项比较公式与跨结构 padding 位于 [`../methods/`](../methods/AGENTS.md)；可复用的预测/真值合同位于 `../objectives/`；stage orchestration 位于 `../ssl/`、`../rl/`、`../il/`；
 - 纯公式、gauge pair、semantic coverage、query/target shape 与 cache key 使用 deterministic contract test；
 - heavy target generator 可以只用于预训练；retained encoder 的性能边界与实测证据由 [`../models/README.md`](../models/README.md) 解释。未来若激活解析直接候选，同一门槛必须包含其批量 FK/刚体支撑点变换。

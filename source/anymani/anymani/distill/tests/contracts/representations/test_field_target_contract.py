@@ -97,7 +97,7 @@ def test_log_uniform_sigma_sampling_is_bounded_shared_and_reproducible() -> None
         dtype=torch.float64,
         sampling_seed=99,
     )
-    expected_validation_sigma = torch.tensor([0.004, 0.008, 0.016, 0.032, 0.064], dtype=torch.float64)
+    expected_validation_sigma = torch.tensor([0.004, 0.016, 0.064], dtype=torch.float64)
     torch.testing.assert_close(
         validation_sigma,
         expected_validation_sigma.expand_as(validation_sigma),
@@ -140,6 +140,7 @@ def test_field_target_batch_keeps_query_and_sampled_edge_axes_distinct() -> None
         query_index=torch.tensor([2, 3], dtype=torch.long),
         joint_index=torch.tensor([0, 1], dtype=torch.long),
         ancestor_mask=torch.tensor([True, False]),
+        active_mask=torch.tensor([True, False]),
         closest_point=torch.zeros(batch_size, 2, 3),
         closest_source=torch.tensor([[4, 9], [4, 9]], dtype=torch.long),
         uniqueness_margin=torch.full((batch_size, 2), 0.003),

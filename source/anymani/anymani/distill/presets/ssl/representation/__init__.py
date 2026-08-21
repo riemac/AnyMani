@@ -1,1 +1,0 @@
-r"""Representation Hydra group。"""

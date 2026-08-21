@@ -12,7 +12,6 @@ from pathlib import Path  # immutable best checkpoint 与 mutable best.pt 发布
 import torch  # RNG states 与有限性验证
 
 from anymani.distill.ssl.experiment import EmbodimentPretrainCfg, resolved_config_dict
-from anymani.distill.ssl.runtime import ResidentGeometryAssetWindow, WindowedOnlineGeometryBatcher
 
 
 def resume_scientific_config(config: EmbodimentPretrainCfg | dict[str, object]) -> dict[str, object]:
@@ -34,8 +33,9 @@ def require_resume_scientific_config(
 ) -> None:
     r"""拒绝当前 CLI 与 checkpoint 的任一 scientific config 漂移。"""
 
-    if checkpoint_resolved.get("schema_version") != "3.0.0":
-        raise ValueError("resume checkpoint must contain schema 3 resolved configuration")
+    schema = checkpoint_resolved.get("schema_version")
+    if schema != "4.0.0":
+        raise ValueError("resume checkpoint must contain schema 4 resolved configuration")
     expected = resume_scientific_config(checkpoint_resolved)
     actual = resume_scientific_config(current)
     if actual != expected:
@@ -91,32 +91,6 @@ def restore_validation_selection_state(
     return initial, initial_strata, best_score, history
 
 
-def checkpoint_runtime_payload(
-    batcher: WindowedOnlineGeometryBatcher,
-    window: ResidentGeometryAssetWindow,
-    *,
-    initial_validation_metrics: dict[str, dict[str, float]] | None,
-    initial_validation_strata: dict[str, object] | None,
-    best_validation_score: float,
-    selection_history: list[dict[str, object]],
-) -> dict[str, object]:
-    r"""构造完整 optimizer-boundary runtime/selection/RNG payload。"""
-
-    state = batcher.state_dict()
-    return {
-        "epoch": state.epoch,
-        "block_index": state.block_index,
-        "resident_asset_ids": window.resident_asset_ids,
-        "batcher_state": state.batcher_state,
-        "torch_rng_state": torch.get_rng_state(),
-        "cuda_rng_state_all": torch.cuda.get_rng_state_all(),
-        "initial_validation_metrics": initial_validation_metrics,
-        "initial_validation_strata": initial_validation_strata,
-        "best_validation_score": None if best_validation_score == float("inf") else best_validation_score,
-        "selection_history": selection_history,
-    }
-
-
 def best_step_from_selection_history(history: list[dict[str, object]]) -> int | None:
     r"""返回 historical score 最小的 immutable best checkpoint step。"""
 
@@ -143,7 +117,6 @@ def publish_best_checkpoint(best_path: Path, immutable_path: Path) -> None:
 
 __all__ = [
     "best_step_from_selection_history",
-    "checkpoint_runtime_payload",
     "publish_best_checkpoint",
     "require_resume_scientific_config",
     "restore_validation_selection_state",

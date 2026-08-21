@@ -6,6 +6,7 @@ r"""AnyMani 跨手型训练管线、物理表征与共享模型 package。
 representations/  # physical source / field / query / target，不含神经网络
 models/           # SSL、RL、IL 共用的 adapter / backbone / decoder / heads
 objectives/       # representation 与未来 RL 的数学 loss
+methods/          # task-free 科学方法聚合根
 ssl/              # self-supervised pretraining stage
 rl/               # rl_games PPO training / playback / adapters
 il/               # imitation learning / teacher-student distillation stage
@@ -18,7 +19,7 @@ presets/          # Hydra component groups 与完整实验 recipe
 - ``python -m anymani.distill.train --task <gym-id>``；
 - ``python -m anymani.distill.play --task <gym-id> --checkpoint <ckpt>``。
 
-geometry SSL 的可运行入口为 ``python -m anymani.distill.ssl.pretrain``，默认组合 schema 3 concrete roles；IL 尚未建立 trainer。geometry SSL 模块不得 import 顶层 RL wrapper，避免 rl_games/Isaac Sim runtime 成为 SSL 的隐式依赖。
+geometry SSL 的可运行入口为 ``python -m anymani.distill.ssl.pretrain``，默认组合 schema 4 Python 实验；IL 尚未建立 trainer。geometry SSL 模块不得 import 顶层 RL wrapper，避免 rl_games/Isaac Sim runtime 成为 SSL 的隐式依赖。
 
 运行时 reset/step/PhysX 语义验证位于 ``source/anymani/anymani/smokes/``；distill 不复制
 tasks-owned env cfg，也不 import、解析或要求 Research vault 存在。

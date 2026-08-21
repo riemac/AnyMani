@@ -1,37 +1,31 @@
-r"""Schema 3 online procedural supervised pretraining lifecycle.
+r"""Schema 4 online procedural supervised pretraining lifecycle.
 
-该模块是新的最高级训练内核：Data runtime 解析 catalog，Method runtime 产生共享计算图，Trainer
-拥有 schedule/backward/update；Evaluation 只在固定 held-out batches 上读取 method。schema 3
-生命周期只依赖五个 role runtime，不读取集中式 experiment 字段。
+该模块是最高级训练内核：Data runtime 解析 catalog，Method 封闭产生 batch 与五项 objective，Trainer
+拥有 window-major schedule、backward 与 update；Evaluation 只在固定 held-out batches 上读取 method。
+生命周期不读取 representation 内部字段，也不解释 owner/query/edge 轴。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import shutil
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from pathlib import Path
-from statistics import median
 from typing import Any
 
 import torch
 import yaml
 
 from anymani.assets.asset_schema_geometry import SEMANTICS_SCHEMA_VERSION
-from anymani.distill.representations.geometry import (
-    GeometryRepresentation,
-    PaddedOnlineGeometryBatch,
-    SobolJointSampler,
-    split_online_geometry_sample,
-)
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import PaddedOnlineGeometryBatch
 from anymani.distill.representations.sources.collision_geometry import (
     geometry_identity,
     materialize_owner_geometry_cache,
 )
 from anymani.distill.representations.sources.kinematics import lower_hand_geometry_semantics
-from anymani.distill.representations.targets.geometry_field import fixed_validation_gaussian_field_config
 from anymani.distill.ssl.checkpoint import load_geometry_ssl_checkpoint, load_geometry_ssl_runtime_state
 from anymani.distill.ssl.runtime.assets import (
     anchor_realization_record,
@@ -43,6 +37,7 @@ from anymani.distill.ssl.runtime.checkpointing import (
     require_resume_scientific_config,
     restore_validation_selection_state,
 )
+from anymani.distill.ssl.runtime.run import PretrainRun
 from anymani.distill.ssl.runtime.sampling import OnlineMinibatchSchedule
 
 
@@ -170,47 +165,29 @@ def _build_manifest(
 def _build_batch(
     schedule_item: Any,
     *,
+    method: Any,
     sources: tuple[Any, ...],
-    states_by_id: dict[str, Any],
-    samplers: tuple[SobolJointSampler, ...],
-    representation: Any,
+    samplers: tuple[Any, ...],
     window: Any,
-    padding: Any,
     seed: int,
     schedule: OnlineMinibatchSchedule,
+    mode: str = "train",
 ) -> PaddedOnlineGeometryBatch:
-    r"""由 schedule item realization 一次同资产 q block，并合并为 padded model batch。"""
+    r"""把一次 schedule item 交给 method 封闭 realize，trainer 不读 representation 内部字段。"""
 
-    asset_ids = tuple(sources[index].asset_id for index in schedule_item.asset_indices)
-    states = window.ensure(asset_ids)
-    states_by_id.update({state.source.asset_id: state for state in states})
-    samples = []
-    for asset_index in schedule_item.asset_indices:
-        state = states_by_id[sources[asset_index].asset_id]
-        q_count = schedule_item.q_per_asset
-        q = samplers[asset_index].draw(
-            q_count, device=state.spec.space_screws.device, dtype=state.spec.space_screws.dtype
-        )
-        q_start = samplers[asset_index].cursor - q_count
-        schedule_index = (
-            schedule_item.epoch * schedule.minibatches_per_epoch
-            + schedule_item.q_round * schedule.asset_groups_per_round
-            + schedule_item.asset_group
-        )
-        sample = representation.sample(
-            state,
-            q,
-            sampling_seed=seed + schedule_index,
-            q_index=torch.arange(q_start, q_start + q_count, device=q.device, dtype=torch.long),
-        )
-        samples.extend(split_online_geometry_sample(sample))
-    from anymani.distill.representations.geometry import pad_online_geometry_samples
-
-    return pad_online_geometry_samples(samples, padding=padding)
+    return method.realize_minibatch(
+        schedule_item,
+        sources=sources,
+        samplers=samplers,
+        window=window,
+        seed=seed,
+        schedule=schedule,
+        mode=mode,
+    )
 
 
 def _sampling_state(
-    schedule: OnlineMinibatchSchedule, samplers: tuple[SobolJointSampler, ...], sources: tuple[Any, ...]
+    schedule: OnlineMinibatchSchedule, samplers: tuple[Any, ...], sources: tuple[Any, ...]
 ) -> dict[str, Any]:
     r"""合并 schedule permutation 与每资产 Sobol cursor，作为 optimizer boundary state。"""
 
@@ -224,7 +201,7 @@ def _sampling_state(
 def _restore_sampling_state(
     payload: dict[str, Any],
     schedule: OnlineMinibatchSchedule,
-    samplers: tuple[SobolJointSampler, ...],
+    samplers: tuple[Any, ...],
     sources: tuple[Any, ...],
 ) -> None:
     r"""严格恢复 schedule、asset order 与各自 q cursor。"""
@@ -233,7 +210,7 @@ def _restore_sampling_state(
         raise ValueError("checkpoint asset axis does not match resolved train catalog")
     raw_schedule = payload.get("schedule")
     if not isinstance(raw_schedule, dict):
-        raise ValueError("checkpoint lacks schema 3 online schedule state")
+        raise ValueError("checkpoint lacks schema 4 online schedule state")
     schedule.load_state_dict(raw_schedule)
     raw_samplers = payload.get("samplers")
     if not isinstance(raw_samplers, (tuple, list)) or len(raw_samplers) != len(samplers):
@@ -244,129 +221,139 @@ def _restore_sampling_state(
         sampler.load_state_dict(state)
 
 
-def _term_denominators(result_blocks: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-    r"""按 component 名合并本次 optimizer update 的有效标量分母。"""
+def _declared_objective_weights(method: Any) -> dict[str, float]:
+    r"""读取 method 显式声明的五项权重，不经过自动梯度标定。"""
 
-    totals: dict[str, torch.Tensor] = {}
-    for results in result_blocks:
-        for result in results.values():
-            for component in result.components:
-                value = component.denominator.detach()
-                if component.name in totals:
-                    totals[component.name] = totals[component.name] + value
-                else:
-                    totals[component.name] = value
-    if not totals or any(float(value) <= 0.0 for value in totals.values()):
-        raise ValueError("optimizer update contains no positive objective component denominators")
-    return totals
+    if hasattr(method, "declared_objective_weights"):
+        return dict(method.declared_objective_weights())
+    enabled = method.config.objectives.enabled()
+    return {name: float(term.weight) for name, term in enabled.items()}
 
 
-def _loss_for_results(results: dict[str, Any], totals: dict[str, torch.Tensor], method: Any) -> torch.Tensor:
-    r"""把 term-owned additive numerators按 update-wide denominator 组成一个 scalar。"""
+def _scientific_pretrain_identity(resolved_config: dict[str, Any], *, formula_identity: dict[str, str]) -> dict[str, Any]:
+    r"""抽出 pretrain 必须与 calibration 一致的科学身份，排除可事后改写的 objective 权重。"""
 
-    loss: torch.Tensor | None = None
-    for name, result in results.items():
-        weight = float(method.objective_weights[name])
-        for component in result.components:
-            value = weight * component.numerator / totals[component.name]
-            loss = value if loss is None else loss + value
-    if loss is None:
-        raise ValueError("method returned no objective components")
-    return loss
-
-
-def _mean_terms(result_blocks: list[dict[str, Any]]) -> dict[str, float]:
-    r"""记录本 update 各 term 的 numerator/denominator 聚合均值。"""
-
-    values: dict[str, dict[str, tuple[float, float]]] = {}
-    for results in result_blocks:
-        for name, result in results.items():
-            by_component = values.setdefault(name, {})
-            for component in result.components:
-                numerator, denominator = by_component.get(component.name, (0.0, 0.0))
-                by_component[component.name] = (
-                    numerator + float(component.numerator.detach()),
-                    denominator + float(component.denominator.detach()),
-                )
+    method = resolved_config.get("method")
+    trainer = resolved_config.get("trainer")
+    if not isinstance(method, dict) or not isinstance(trainer, dict):
+        raise ValueError("resolved config must contain method and trainer mappings")
+    sampling = trainer.get("sampling")
+    if not isinstance(sampling, dict) or not sampling:
+        raise ValueError("resolved config lacks trainer sampling semantics")
+    if not formula_identity:
+        raise ValueError("method formula identity must be non-empty")
     return {
-        name: sum(numerator / denominator for numerator, denominator in by_component.values())
-        for name, by_component in values.items()
+        "formula_identity": dict(formula_identity),
+        "state_measure": method.get("state_measure"),
+        "representation": method.get("representation"),
+        "model": method.get("model"),
+        "sampling": sampling,
     }
+
+
+def _worktree_fingerprint() -> tuple[bool, str]:
+    r"""记录 dirty/untracked 指纹；不把大型 diff 写入每个 checkpoint。"""
+
+    import subprocess
+
+    try:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False, "unknown"
+    dirty = bool(status.strip())
+    digest = hashlib.sha256(status.encode("utf-8")).hexdigest() if dirty else ""
+    return dirty, digest
 
 
 def _evaluate_validation(method: Any, batches: tuple[PaddedOnlineGeometryBatch, ...]) -> dict[str, float]:
-    r"""在固定 validation bank 上聚合六项 term；JVP 需要启用 autograd 但不更新参数。"""
+    r"""在固定 validation bank 上按 $(asset,q)$ 等权聚合五项 term。"""
 
-    totals: dict[str, dict[str, tuple[float, float]]] = {}
-    method.require_model().eval()
-    with torch.enable_grad():
-        for index, batch in enumerate(batches):
-            results = method.forward_objectives(batch, pair_step=index).objectives
-            for name, result in results.items():
-                by_component = totals.setdefault(name, {})
-                for component in result.components:
-                    numerator, denominator = by_component.get(component.name, (0.0, 0.0))
-                    by_component[component.name] = (
-                        numerator + float(component.numerator.detach()),
-                        denominator + float(component.denominator.detach()),
-                    )
-    return {
-        name: sum(numerator / denominator for numerator, denominator in by_component.values())
-        for name, by_component in totals.items()
-    }
+    return method.evaluate(batches)
 
 
-def _calibrate_objective_weights(method: Any, batches: tuple[PaddedOnlineGeometryBatch, ...], output: Path) -> None:
-    r"""测量每项 shared-encoder gradient median，并冻结一次 runtime 权重。"""
+def _write_calibration_artifact(
+    method: Any,
+    batches: tuple[PaddedOnlineGeometryBatch, ...],
+    output: Path,
+    *,
+    manifest_hash: str,
+    resolved_config: dict[str, Any] | None = None,
+) -> str:
+    r"""前向预实验：算五项统计，不更新参数，不改权重。"""
 
     if not batches:
         raise ValueError("objective calibration requires at least one generated train minibatch")
-    model = method.require_model()
-    encoder_parameters = tuple(parameter for parameter in model.encoder.parameters() if parameter.requires_grad)
-    measurements: dict[str, list[float]] = {name: [] for name in method.objectives}
-    for batch_index, batch in enumerate(batches):
-        for name in method.objectives:
-            model.zero_grad(set_to_none=True)
-            results = method.forward_objectives(batch, pair_step=batch_index).objectives
-            term = results[name]
-            term_loss = term.components[0].mean
-            for component in term.components[1:]:
-                term_loss = term_loss + component.mean
-            term_loss.backward()
-            squared_norm = torch.zeros((), device=next(model.parameters()).device)
-            for parameter in encoder_parameters:
-                if parameter.grad is not None:
-                    squared_norm = squared_norm + parameter.grad.detach().square().sum()
-            measurements[name].append(float(torch.sqrt(squared_norm)))
-    medians = {name: float(median(values)) for name, values in measurements.items()}
-    reference_name = method.config.calibration.reference_term
-    reference = medians.get(reference_name, 0.0)
-    if reference <= 0.0:
-        raise FloatingPointError(f"objective calibration reference {reference_name!r} gradient must be positive")
-    weights: dict[str, float] = {}
-    for name, value in medians.items():
-        declared = float(method.config.objectives[name].weight)
-        if declared == 0.0 or not method.config.objectives[name].calibrate:
-            weights[name] = declared
-        else:
-            ratio = method.config.calibration.max_weight if value <= 0.0 else reference / value
-            weights[name] = min(max(ratio, method.config.calibration.min_weight), method.config.calibration.max_weight)
-    method.set_objective_weights(weights)
-    _write_yaml(
-        output,
-        {
-            "source": "generated_train_fixed_calibration_minibatches",
-            "minibatch_count": len(batches),
-            "gradient_norms": measurements,
-            "median_gradient_norms": medians,
-            "reference": reference_name,
-            "weights": weights,
-            "clip": {
-                "min": method.config.calibration.min_weight,
-                "max": method.config.calibration.max_weight,
-            },
-        },
-    )
+    terms: dict[str, list[float]] = {name: [] for name in _declared_objective_weights(method)}
+    method.require_model().eval()
+    with torch.enable_grad():
+        for index, batch in enumerate(batches):
+            step = method.forward_objectives(batch, step=index, mode="train")
+            for name, result in step.objectives.items():
+                terms.setdefault(name, []).append(float(result.metrics["loss"].detach()))
+    formula_identity = dict(method.formula_identity()) if hasattr(method, "formula_identity") else {}
+    recorded_config = dict(resolved_config or {})
+    payload = {
+        "schema_version": "4.0.0",
+        "source": "formal_train_forward_preflight",
+        "minibatch_count": len(batches),
+        "dataset_source_sha256": manifest_hash,
+        "declared_objective": _declared_objective_weights(method),
+        "formula_identity": formula_identity,
+        "method_type": f"{type(method).__module__}.{type(method).__qualname__}",
+        "code_revision": PretrainRun.code_revision(),
+        "resolved_config": recorded_config,
+        "scientific_identity": (
+            _scientific_pretrain_identity(recorded_config, formula_identity=formula_identity)
+            if recorded_config
+            else {}
+        ),
+        "term_means": {name: float(sum(values) / len(values)) for name, values in terms.items() if values},
+        "term_traces": terms,
+    }
+    _write_yaml(output, payload)
+    return hashlib.sha256(output.read_bytes()).hexdigest()
+
+
+def _require_calibration_identity(
+    artifact: Path,
+    *,
+    method: Any,
+    manifest_hash: str,
+    resolved_config: dict[str, Any],
+) -> str:
+    r"""核对 calibration artifact 的数据集、公式身份与采样语义；权重以当前 OBJECTIVES_CFG 为准。"""
+
+    payload = yaml.safe_load(artifact.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("calibration artifact must be a mapping")
+    if payload.get("schema_version") != "4.0.0":
+        raise ValueError("calibration artifact schema must be 4.0.0")
+    if payload.get("dataset_source_sha256") != manifest_hash:
+        raise ValueError("calibration artifact dataset hash does not match the formal ssl.yaml")
+    expected_formula = dict(method.formula_identity()) if hasattr(method, "formula_identity") else {}
+    if not expected_formula:
+        raise ValueError("current method lacks objective formula identity")
+    recorded_formula = payload.get("formula_identity")
+    if not isinstance(recorded_formula, dict) or recorded_formula != expected_formula:
+        raise ValueError("calibration artifact objective formula identity does not match current method")
+    expected_method_type = f"{type(method).__module__}.{type(method).__qualname__}"
+    if payload.get("method_type") != expected_method_type:
+        raise ValueError("calibration artifact method type does not match current method")
+    recorded_revision = payload.get("code_revision")
+    current_revision = PretrainRun.code_revision()
+    if not recorded_revision or recorded_revision != current_revision:
+        raise ValueError("calibration artifact code revision does not match current HEAD")
+    expected_identity = _scientific_pretrain_identity(resolved_config, formula_identity=expected_formula)
+    recorded_identity = payload.get("scientific_identity")
+    if not isinstance(recorded_identity, dict) or recorded_identity != expected_identity:
+        raise ValueError("calibration artifact scientific identity does not match current representation/model/sampling")
+    return hashlib.sha256(artifact.read_bytes()).hexdigest()
 
 
 def _write_metrics(path: Path, record: dict[str, Any]) -> None:
@@ -398,23 +385,17 @@ def fit_embodiment_pretrain(
     dtype = _torch_dtype(trainer.config.dtype)
     output_dir = run.prepare_output_dir(output_dir_override)
     catalog = data.resolve()
-    train_sources = method.materialize_sources(catalog.train)
-    validation_sources = {
-        suite_name: method.materialize_sources(suite_assets)
-        for suite_name, suite_assets in catalog.validation.items()
-    }  # 每条泛化轴独立 materialize，后续指标先 suite 内聚合
+    method.prepare(catalog, device=device, dtype=dtype)
+    train_sources = method.train_sources
+    validation_sources = method.validation_sources
     manifest = _build_manifest(catalog, train_sources, validation_sources)
     _write_yaml(output_dir / "resolved_config.yaml", resolved_config)
     _write_yaml(output_dir / "asset_dataset.yaml", catalog.dataset.config_dict())
     _write_yaml(output_dir / "asset_manifest.yaml", manifest)
+    dirty, fingerprint = _worktree_fingerprint()
+    declared_weights = _declared_objective_weights(method)
+    calibration_hash = ""
 
-    representation = method.representation
-    validation_representation = GeometryRepresentation(
-        replace(
-            representation.config,
-            field=fixed_validation_gaussian_field_config(representation.config.field),
-        )
-    )
     train_window = None
     validation_windows: dict[str, Any] = {}
     model = method.initialize_model(device=device, dtype=dtype)
@@ -423,11 +404,19 @@ def fit_embodiment_pretrain(
         lr=trainer.config.optimizer.learning_rate,
         weight_decay=trainer.config.optimizer.weight_decay,
     )
-    train_schedule = OnlineMinibatchSchedule(len(train_sources), trainer.config.sampling)
-    train_samplers = tuple(
-        SobolJointSampler(source.spec_cpu, seed=trainer.config.sampling.seed + index)
-        for index, source in enumerate(train_sources)
+    train_schedule = OnlineMinibatchSchedule(
+        len(train_sources),
+        trainer.config.sampling,
+        max_resident_assets=trainer.config.max_resident_assets,
     )
+    method.initialize_samplers(
+        train_seed=trainer.config.sampling.seed,
+        validation_seeds={
+            suite_name: run.config.seed + evaluation.validation_seed + suite_index * 1_000_003
+            for suite_index, suite_name in enumerate(validation_sources)
+        },
+    )
+    train_samplers = method.train_samplers
     validation_schedules = {
         suite_name: OnlineMinibatchSchedule(
             len(suite_sources),
@@ -436,20 +425,12 @@ def fit_embodiment_pretrain(
                 run_seed=run.config.seed,
                 asset_count=len(suite_sources),
             ),
+            max_resident_assets=trainer.config.max_resident_assets,
         )
         for suite_name, suite_sources in validation_sources.items()
         if suite_sources
     }
-    validation_samplers = {
-        suite_name: tuple(
-            SobolJointSampler(
-                source.spec_cpu,
-                seed=run.config.seed + evaluation.validation_seed + suite_index * 1_000_003 + source_index,
-            )
-            for source_index, source in enumerate(suite_sources)
-        )
-        for suite_index, (suite_name, suite_sources) in enumerate(validation_sources.items())
-    }  # suite seed 域显式错开，且不依赖进程/字典遍历之外的运行时状态
+    validation_samplers = method.validation_samplers
     updates_per_epoch = math.ceil(train_schedule.minibatches_per_epoch / trainer.config.gradient_accumulation_steps)
     required_updates = updates_per_epoch * trainer.config.sampling.epochs
     if trainer.config.run_safety_step_limit < required_updates:
@@ -473,15 +454,15 @@ def fit_embodiment_pretrain(
         if loaded_metadata.get("asset_manifest") != manifest:
             raise ValueError("resume checkpoint asset manifest does not match resolved dataset roles")
         checkpoint_resolved = loaded_metadata.get("resolved_config")
-        calibrated_weights = loaded_metadata.get("calibrated_objective")
-        if not isinstance(checkpoint_resolved, dict) or not isinstance(calibrated_weights, dict):
-            raise ValueError("resume checkpoint lacks resolved config or calibrated objective evidence")
+        declared = loaded_metadata.get("declared_objective")
+        if not isinstance(checkpoint_resolved, dict) or not isinstance(declared, dict):
+            raise ValueError("resume checkpoint lacks resolved config or declared objective evidence")
         require_resume_scientific_config(resolved_config, checkpoint_resolved)
-        method.set_objective_weights({str(name): float(value) for name, value in calibrated_weights.items()})
+        calibration_hash = str(loaded_metadata.get("calibration_artifact_hash", ""))
         runtime_state = load_geometry_ssl_runtime_state(resume_path, map_location="cpu")
         sampling_state = runtime_state.get("sampling")
         if not isinstance(sampling_state, dict):
-            raise ValueError("resume checkpoint lacks schema 3 trainer sampling state")
+            raise ValueError("resume checkpoint lacks schema 4 trainer sampling state")
         _restore_sampling_state(sampling_state, train_schedule, train_samplers, train_sources)
         initial_validation, _initial_strata, best_score, selection_history = restore_validation_selection_state(
             runtime_state
@@ -502,34 +483,59 @@ def fit_embodiment_pretrain(
             device=str(device),
             dtype=dtype,
             max_resident_assets=trainer.config.max_resident_assets,
-            loader=representation.to_device,
+            loader=method.load_device_state,
         )
-        if resume_path is None:
-            if method.config.calibration.minibatches > train_schedule.minibatches_remaining_in_epoch:
-                raise ValueError("objective calibration minibatches exceed one train coverage epoch")
-            initial_sampling_state = _sampling_state(train_schedule, train_samplers, train_sources)
+        if resume_path is None and run.config.phase == "calibrate_objectives":
+            from anymani.distill.ssl.runtime.sampling import OnlineSamplingCfg
+
+            calibration_schedule = OnlineMinibatchSchedule(
+                len(train_sources),
+                OnlineSamplingCfg(
+                    epochs=1,
+                    q_per_asset_per_epoch=trainer.config.sampling.q_per_asset_per_minibatch,
+                    assets_per_minibatch=trainer.config.sampling.assets_per_minibatch,
+                    q_per_asset_per_minibatch=trainer.config.sampling.q_per_asset_per_minibatch,
+                    shuffle_assets=trainer.config.sampling.shuffle_assets,
+                    seed=trainer.config.sampling.seed,
+                ),
+                max_resident_assets=trainer.config.max_resident_assets,
+            )
             calibration_batches: list[PaddedOnlineGeometryBatch] = []
-            calibration_state_cache: dict[str, Any] = {}
-            for _ in range(method.config.calibration.minibatches):
-                item = train_schedule.next()
+            while not calibration_schedule.complete:
+                item = calibration_schedule.next()
                 calibration_batches.append(
                     _build_batch(
                         item,
+                        method=method,
                         sources=train_sources,
-                        states_by_id=calibration_state_cache,
                         samplers=train_samplers,
-                        representation=representation,
                         window=train_window,
-                        padding=representation.config.layout,
                         seed=trainer.config.sampling.seed,
-                        schedule=train_schedule,
+                        schedule=calibration_schedule,
+                        mode="train",
                     )
                 )
-            _calibrate_objective_weights(method, tuple(calibration_batches), output_dir / "loss_calibration.yaml")
-            _restore_sampling_state(initial_sampling_state, train_schedule, train_samplers, train_sources)
-            model.zero_grad(set_to_none=True)
-            train_window.release_all()
+            _write_calibration_artifact(
+                method,
+                tuple(calibration_batches),
+                output_dir / "loss_calibration.yaml",
+                manifest_hash=str(catalog.dataset.source_sha256),
+                resolved_config=resolved_config,
+            )
+            return output_dir
+        if resume_path is None and run.config.phase == "pretrain":
+            artifact_path = Path(run.config.calibration_artifact).expanduser() if run.config.calibration_artifact else None
+            if artifact_path is None or not artifact_path.is_file():
+                raise ValueError("pretrain requires run.calibration_artifact pointing to a schema 4 loss_calibration.yaml")
+            calibration_hash = _require_calibration_identity(
+                artifact_path,
+                method=method,
+                manifest_hash=str(catalog.dataset.source_sha256),
+                resolved_config=resolved_config,
+            )
         elif selection_history:
+            if resume_path is None:
+                raise RuntimeError("historical best inheritance requires a resume checkpoint path")
             historical_best_step = int(min(selection_history, key=lambda item: float(item["score"]))["step"])
             source_best = resume_path.parent / f"best_step_{historical_best_step:08d}.pt"
             if not source_best.is_file():
@@ -549,24 +555,22 @@ def fit_embodiment_pretrain(
                 device=str(device),
                 dtype=dtype,
                 max_resident_assets=trainer.config.max_resident_assets,
-                loader=validation_representation.to_device,
+                loader=method.load_validation_device_state,
             )
             validation_windows[suite_name] = suite_window
             suite_batches: list[PaddedOnlineGeometryBatch] = []
-            suite_state_cache: dict[str, Any] = {}
             while not suite_schedule.complete:
                 item = suite_schedule.next()
                 suite_batches.append(
                     _build_batch(
                         item,
+                        method=method,
                         sources=suite_sources,
-                        states_by_id=suite_state_cache,
                         samplers=suite_samplers,
-                        representation=validation_representation,
                         window=suite_window,
-                        padding=representation.config.layout,
                         seed=run.config.seed + evaluation.validation_seed + suite_index * 1_000_003,
                         schedule=suite_schedule,
+                        mode="eval",
                     )
                 )
             suite_window.release_all()
@@ -586,9 +590,8 @@ def fit_embodiment_pretrain(
         training_q_bank_path = output_dir / "training_morphology_q_bank.yaml"
         if resume_path is None:
             initial_training_q_bank = stream_training_morphology_q_bank(
-                model,
+                method,
                 train_sources,
-                representation_config=representation.config,
                 seed=run.config.seed + evaluation.q_bank_seed,
                 q_per_asset=evaluation.config.q_per_asset,
                 assets_per_minibatch=trainer.config.sampling.assets_per_minibatch,
@@ -617,34 +620,31 @@ def fit_embodiment_pretrain(
             model.train()
             optimizer.zero_grad(set_to_none=True)
             update_batches: list[PaddedOnlineGeometryBatch] = []
-            update_results: list[dict[str, Any]] = []
             remaining = min(trainer.config.gradient_accumulation_steps, train_schedule.minibatches_remaining_in_epoch)
-            train_state_cache: dict[str, Any] = {}
+            update_steps: list[Any] = []
             for _ in range(remaining):
                 item = train_schedule.next()
                 batch = _build_batch(
                     item,
+                    method=method,
                     sources=train_sources,
-                    states_by_id=train_state_cache,
                     samplers=train_samplers,
-                    representation=representation,
                     window=train_window,
-                    padding=representation.config.layout,
                     seed=trainer.config.sampling.seed,
                     schedule=train_schedule,
+                    mode="train",
                 )
-                step_result = method.forward_objectives(batch, pair_step=step + len(update_batches))
+                step_result = method.forward_objectives(batch, step=step + len(update_steps), mode="train")
                 update_batches.append(batch)
-                update_results.append(step_result.objectives)
-            denominators = _term_denominators(update_results)
-            for results in update_results:
-                _loss_for_results(results, denominators, method).backward()
+                update_steps.append(step_result)
+            update = method.reduce_update(tuple(update_steps))
+            update.loss.backward()
             gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), trainer.config.max_gradient_norm)
             if not torch.isfinite(gradient_norm):
                 raise FloatingPointError(f"non-finite gradient norm at optimizer step {step + 1}")
             optimizer.step()
             step += 1
-            means = _mean_terms(update_results)
+            means = update.terms
             _write_metrics(
                 output_dir / "metrics.jsonl",
                 {
@@ -674,7 +674,10 @@ def fit_embodiment_pretrain(
                         geometry_semantics_schema=SEMANTICS_SCHEMA_VERSION,
                         asset_manifest=manifest,
                         resolved_config=resolved_config,
-                        calibrated_objective=method.objective_weights,
+                        declared_objective=declared_weights,
+                        calibration_artifact_hash=calibration_hash,
+                        worktree_dirty=dirty,
+                        worktree_fingerprint=fingerprint,
                     )
                     run.save_full_checkpoint(
                         output_dir / "checkpoints" / f"best_step_{step:08d}.pt",
@@ -702,7 +705,10 @@ def fit_embodiment_pretrain(
                     geometry_semantics_schema=SEMANTICS_SCHEMA_VERSION,
                     asset_manifest=manifest,
                     resolved_config=resolved_config,
-                    calibrated_objective=method.objective_weights,
+                    declared_objective=declared_weights,
+                    calibration_artifact_hash=calibration_hash,
+                    worktree_dirty=dirty,
+                    worktree_fingerprint=fingerprint,
                 )
                 run.save_full_checkpoint(
                     output_dir / "checkpoints" / f"step_{step:08d}.pt",
@@ -725,7 +731,10 @@ def fit_embodiment_pretrain(
             geometry_semantics_schema=SEMANTICS_SCHEMA_VERSION,
             asset_manifest=manifest,
             resolved_config=resolved_config,
-            calibrated_objective=method.objective_weights,
+            declared_objective=declared_weights,
+            calibration_artifact_hash=calibration_hash,
+            worktree_dirty=dirty,
+            worktree_fingerprint=fingerprint,
         )
         run.save_full_checkpoint(
             output_dir / "checkpoints" / "last.pt",
@@ -744,9 +753,8 @@ def fit_embodiment_pretrain(
             },
         )
         final_training_q_bank = stream_training_morphology_q_bank(
-            model,
+            method,
             train_sources,
-            representation_config=representation.config,
             seed=run.config.seed + evaluation.q_bank_seed,
             q_per_asset=evaluation.config.q_per_asset,
             assets_per_minibatch=trainer.config.sampling.assets_per_minibatch,

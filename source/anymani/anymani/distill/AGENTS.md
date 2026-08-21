@@ -1,51 +1,90 @@
 # AGENTS.md
 
-`distill` 是 AnyMani 的训练、共享模型与学习目标层。它消费 `assets -> robots -> tasks` 已定义的资产、embodiment 与环境接口，不反向接管这些层的物理职责。
+`distill` 拥有学习表征、共享模型、objective 与 SSL/IL/RL 编排。它消费 `assets` 的 typed geometry semantics 与 `tasks` 的环境接口；不解析 `hand.yaml`/URDF，不改写 scene/MDP，不 import `Research/`。
 
-## 边界
+## Project Structure
 
-`distill` 拥有物理场/query/target、可学习模型、objective、SSL/IL/RL 编排、checkpoint 与实验诊断。
-
-不要在这里解析 `hand.yaml`、URDF、link 名或推断 PALM/JOINT/TIP；静态语义由 `assets.bank.HandContainer.geometry_semantics` 交付，批量 FK、owner 位姿、当前轴线、点 Jacobian 与 owner-local collision cache 由 `robots` 交付。不要用训练配置重新定义资产 owner 或运动学。
-
-不要在这里改写 scene、observation、action、reward、reset 或 termination；这些属于 `tasks`。source code 不 import、解析或要求 `Research/` vault 存在。
-
-## 子目录
+```text
+distill/
+├── representations/
+│   ├── geometry.py                 物理 teacher 组合根；不 import model
+│   ├── sources/                    POE/FK/Jacobian、owner union、home/anchor、Warp lease
+│   ├── fields/                     d、ρ、κ、g 的场定义
+│   ├── queries/                    50/25/25 workspace/shell/adjacent
+│   └── targets/                    物理标签、有效性、active/zero、provenance
+├── methods/
+│   ├── contracts.py                EmbodimentMethod 窄 Protocol
+│   └── multi_anchor_gaussian_implicit_field/
+│       ├── method.py               prepare/realize/forward/reduce/evaluate/export
+│       ├── batch.py                选 A^(k)、evidence、padding、三块视图
+│       └── objectives.py           五项比较公式
+├── models/
+│   ├── input_adapters/geometry.py  StaticGeometryEvidence 与 retained encoder
+│   ├── backbones/                  graph-biased Transformer
+│   ├── decoders/representations/   SSL-only density/κ readers
+│   └── geometry_ssl.py             retained/disposable 组装
+├── objectives/
+│   ├── contracts.py                AdditiveStatistic / ObjectiveTermResult
+│   └── representations/            JVP 原语、gauge rewrite；五项公式不在这里
+├── ssl/
+│   ├── experiments/                完整 Python 实验装配
+│   ├── runtime/                    sampling、resident window、lifecycle、checkpoint
+│   └── pretrain.py                 python -m CLI
+├── rl/                             rl_games 入口、YAML、masked PPO
+├── il/                             边界占位，尚无 trainer
+├── diagnostics/                    recording / evaluation / analysis
+├── presets/ssl/                    旧 CLI 名称的最小 YAML
+└── tests/                          contracts / integration / performance / training_sanity
+```
 
 | 目录 | 拥有 | 不拥有 |
 | --- | --- | --- |
-| `representations/` | field、query、target、mask 与 provenance | 资产/运动学真源、`torch.nn`、trainer |
-| `models/` | input adapter、retained backbone、decoder、action/value heads | target generation、loss、MDP |
-| `objectives/` | prediction/target/mask/weight 到 scalar loss | sampling、optimizer、advantage |
-| `ssl/`、`il/`、`rl/` | 各训练阶段的数据流、配置、运行入口与 checkpoint | 共享模型的重复实现 |
-| `diagnostics/` | run recording、固定 evaluation 与只读 analysis | 物理真值、trainer 与实验选择 |
+| `representations/` | 物理 source/field/query/target | `torch.nn`、padding、loss 权重 |
+| `methods/` | 科学聚合根；对外封闭给 trainer | catalog、optimizer、MDP |
+| `models/` | adapter、backbone、decoder、policy heads | teacher、loss |
+| `objectives/` | 可复用比较合同 | sampling、五项公式 |
+| `ssl/` `rl/` `il/` | 各阶段数据流、入口、checkpoint | 共享 trunk 的重复实现 |
+| `diagnostics/` | 记录、固定 evaluation、只读分析 | 训练选择或物理真值 |
 
-移动内容时同步迁移 TODO、docstring 和 tests，保证 target、模型、loss、stage 与 retained/disposable 生命周期各有一个事实源。不要用通用 Manager façade 或深配置继承隐藏真实耦合。
+移动内容时同步 TODO、docstring 和 tests。不要用万能 Manager 或深配置继承隐藏耦合。
 
-## 几何 SSL
+## Development Style And Conventions
 
-主线是 task-free、cross-embodiment 的多锚点条件隐式 Gaussian 场。部署保留输入只能包含当前物理 q 与静态手型证据；joint limits 只用于采样，不进入编码器。
+### 环境与入口
 
-训练期监督逐 owner 的多带宽邻近场 ρ、距离灵敏度 κ=∇q d、由链式法则派生的 g、同一密度预测器的 Sobolev/JVP 自导数与 chain consistency。current distance、最近点、surface Jacobian、query stratum、contact、action、history 和 object state 都不得进入 retained encoder。
+使用 `source ~/isaac/env_isaaclab/bin/activate`。SSL：`python -m anymani.distill.ssl.pretrain`。GM RL：`python -m anymani.distill.rl.train` / `play`。`tasks/inhand` 仍走仓库根 `scripts/rl_games/`。IL 尚未建立 trainer。
 
-PALM/JOINT/TIP entity、owner 与 decoder 轴同索引。physical anchors 在网络中是完整、无序、等地位的 K 集合；finger seed 只属于采样 provenance。home geometry 只含真实 owner union boundary，不混入 interior；interior 只允许进入 anchor 支持。
+### 出清与注释
 
-零阶表征对 joint-sign 成对改写为偶，一阶表征、κ/g 与对应动作坐标为奇。`{h}` 面内 SO(2) 重写不是 reflection；镜像手性不能被错误消除。所有 feature group 必须声明 frame、单位、reference 和变换方向。
+稳定后删除旧实现、旧字段、旧测试。科研核心文件遵守 `annotation` skill。完整目录 Ruff 的既有债不在触及路径外清理。
 
-input adapter、backbone 与零/一阶 heads 构成 retained geometry encoder。representation decoder、最近点教师和 target backend 只在 SSL 存在，导出到 PPO 时必须删除。RL、IL 与 SSL 不复制科研语义相同的 trunk。
+### 测试分层
 
-Geometry SSL 使用 schema 3 的 `data / method / trainer / evaluation / run` Hydra composition；局部 concrete cfg 绑定本地 runtime，禁止恢复集中式配置 parser 或 Python canonical 子类。full checkpoint 只服务预训练 resume，RL/IL 只能消费 standalone retained artifact。
+默认 pytest 只跑 `distill/tests/contracts` 与 `integration`。`performance` / `training_sanity` 必须显式路径。Isaac Sim 证据在 `smokes/distill/`，不进本树。spawn/articulation 合同属于 `robots/tests/`。
 
-official LEAP/Allegro 不参与 generated 训练、辅助权重校准或 checkpoint 选择；冻结后的 zero-shot 与独立 geometry-only adaptation 必须使用分离配置和证据。
+## Important Semantics
 
-generated train/validation 必须按 `physical_geometry_hash` 整组划分；路径、asset ID 或完整 sidecar `content_hash` 不足以识别 limit-only 物理重复。`configuration_domain_hash` 只记录 joint names/limits 采样域，不得把同一物理映射拆到两个 split。
+### 信息边界
 
-## 入口与测试
+retained encoder 只读当前物理 `q` 与静态证据。distance、最近点、Jacobian、query stratum、contact、action、history、object state 不得进入。joint limits 只定义采样域。`z_i^(1)` 是整手场 Jacobian 第 `i` 列，不是对自身 `z_i^(0)` 求导。
 
-当前 GM RL 入口仍为 `python -m anymani.distill.train` 与 `python -m anymani.distill.play`；`tasks/inhand` 的既有路线使用仓库根 `scripts/rl_games/train.py` / `play.py`。若未来迁移到 `rl/`，入口、文档与调用方必须在同一提交闭合。SSL/IL 入口只有在 resolved config、日志、checkpoint 和 sanity tests 闭合后才可声明可运行。
+### 几何 SSL 合同
 
-纯公式、query/target、模型、objective、checkpoint 与训练配置合同放在 `distill/tests/`。资产 lowering、FK/Jacobian 与 owner union 测试属于 `robots/tests/`。依赖 Isaac Sim 的 distill runtime 证据以后放在 `source/anymani/anymani/smokes/distill/`，不要混入默认 pytest。
+主线是多锚点条件 Gaussian 场。五项损失：density、κ、derived-field、Sobolev、chain；paired 不是主损失。schema 4：`data / method / trainer / evaluation / run`。Trainer 只调 method 封闭接口，不得读 `method.representation` 或直接改 sigma。full checkpoint 只服务 SSL resume；RL/IL 只消费 standalone retained artifact。
 
-隐式主线 retained encoder 的硬门槛为 RTX 5070 Ti、B=4096、单结构组、20 次预热和 50 次 CUDA Event，p95 不超过 40 ms。计时覆盖 adapter、集合聚合、backbone 与零/一阶 heads；排除磁盘/CPU cache materialization、decoder、target、policy、Isaac Sim 和 host-to-device copy。PPO full fine-tune 时不得缓存会随优化器更新而陈旧的 learned activation。
+official LEAP/Allegro 不参与 train、calibration 或 checkpoint selection。split 按 `physical_geometry_hash` 隔离；路径、asset ID 或 `content_hash` 不足以识别 limit-only 重复。
 
-具体测试分层见 `tests/AGENTS.md`；人类阅读入口见 `README.md`、`representations/README.md`、`models/README.md` 与 `ssl/README.md`。
+### 性能门槛
+
+RTX 5070 Ti、`B=4096`、单结构组、20 预热 + 50 CUDA Event，p95 ≤ 40 ms。覆盖 adapter、聚合、backbone、零/一阶 heads；排除 materialization、decoder、policy、Isaac Sim。PPO full fine-tune 不得缓存会 stale 的 learned activation。
+
+## Common Operations And Tools
+
+```bash
+source /home/hac/isaac/env_isaaclab/bin/activate
+pytest source/anymani/anymani/distill/tests/contracts -q
+pytest source/anymani/anymani/distill/tests/integration -q
+ruff check source/anymani/anymani/distill/methods source/anymani/anymani/distill/ssl
+```
+
+嵌套合同见 `methods/`、`representations/`、`models/`、`objectives/`、`ssl/`、`rl/`、`tests/` 的 `AGENTS.md`。人类阅读入口见各目录 README。没有正式 pilot 或 PPO transfer 时，不得声明跨手型泛化成立。

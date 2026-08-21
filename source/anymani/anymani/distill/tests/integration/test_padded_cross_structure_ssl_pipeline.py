@@ -3,6 +3,17 @@
 from __future__ import annotations
 
 import torch
+from anymani.distill.methods.contracts import MethodStep
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import (
+    OnlineGeometrySample,
+    pad_online_geometry_samples,
+)
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import MultiAnchorGaussianObjectivesCfg
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.context import MultiAnchorObjectiveContext
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives import (
+    evaluate_objectives,
+    reduce_method_steps,
+)
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.decoders.representations.implicit_field import (
     DistanceSensitivityDecoderCfg,
@@ -17,11 +28,6 @@ from anymani.distill.models.input_adapters.geometry import (
     SO2AnchorFrontendCfg,
     StaticGeometryEvidence,
 )
-from anymani.distill.objectives.representations.field_reconstruction import (
-    GeometryFieldObjective,
-    GeometryFieldObjectiveCfg,
-)
-from anymani.distill.representations.geometry import OnlineGeometrySample, pad_online_geometry_samples
 from anymani.distill.representations.queries.spatial_sampling import SpatialQueryBatch
 from anymani.distill.representations.targets.field_samples import FieldTargetBatch, SensitivityTargetBatch
 
@@ -96,6 +102,7 @@ def _sample(joint_count: int, asset_id: str) -> OnlineGeometrySample:
         query_index=torch.arange(joint_count, dtype=torch.long) % query_count,
         joint_index=torch.arange(joint_count, dtype=torch.long),
         ancestor_mask=torch.ones(joint_count, dtype=torch.bool),
+        active_mask=torch.ones(joint_count, dtype=torch.bool),
         closest_point=torch.zeros(1, joint_count, 3, dtype=torch.float64),
         closest_source=torch.zeros(1, joint_count, dtype=torch.long),
         uniqueness_margin=torch.ones(1, joint_count, dtype=torch.float64),
@@ -148,19 +155,18 @@ def test_padded_cross_structure_model_objective_and_backward() -> None:
         query_index=batch.sensitivity_targets.query_index,
         joint_index=batch.sensitivity_targets.joint_index,
     )
-    terms = GeometryFieldObjective(GeometryFieldObjectiveCfg())(
-        q=q,
-        density_prediction=prediction.density,
-        kappa_prediction=prediction.kappa,
-        field_targets=batch.field_targets,
-        sensitivity_targets=batch.sensitivity_targets,
+    context = MultiAnchorObjectiveContext(model=model, q=q, prediction=prediction, batch=batch)
+    objectives_cfg = MultiAnchorGaussianObjectivesCfg()
+    update = reduce_method_steps(
+        (MethodStep(objectives=evaluate_objectives(context, objectives_cfg), sample_count=2),),
+        objectives_cfg,
     )
-    terms.total.backward()
+    update.loss.backward()
 
     assert batch.q.shape == (2, 20)
     assert batch.evidence.entity_valid_mask.shape == (2, 26)
     assert batch.sensitivity_targets.valid_mask.tolist() == [[True, False], [True, True]]
     assert torch.count_nonzero(prediction.latents.zero_order[0, 3:]) == 0
     assert torch.count_nonzero(prediction.latents.first_order[0, 1:]) == 0
-    assert torch.isfinite(terms.total)
+    assert torch.isfinite(update.loss)
     assert all(parameter.grad is not None for parameter in model.parameters())
