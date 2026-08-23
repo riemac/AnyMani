@@ -38,19 +38,27 @@ from anymani.distill.representations.targets.geometry_field import (
 )
 from anymani.distill.ssl.data import HandAssetCatalogCfg
 from anymani.distill.ssl.experiment import EmbodimentPretrainCfg
-from anymani.distill.ssl.runtime.evaluation import MultiAnchorEvaluationCfg
-from anymani.distill.ssl.runtime.pretrainer import EmbodimentPretrainTrainerCfg
+from anymani.distill.ssl.runtime.pretrainer import (
+    EmbodimentPretrainTrainerCfg,
+    FinalEvaluationCfg,
+    ValidationCfg,
+)
 from anymani.distill.ssl.runtime.run import PretrainRunCfg
 from anymani.distill.ssl.runtime.sampling import OnlineSamplingCfg
 
 # Dataset manifest 已完整冻结 train/validation/evaluation；实验层不再重复声明 partition。
+
+# 资产数据集配置层
 DATA_CFG = HandAssetCatalogCfg(
     manifest="source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ssl.yaml",
     expected_sha256="f1398417888e7c237cbb2583dcf8e9cd10bef7fee792b307c67dfa74fb6e0698",
 )
 
+# 方法配置层-多锚点隐式高斯密度场
+## 状态度量配置
 STATE_MEASURE_CFG = JointConfigurationMeasureCfg()
 
+## 表征配置
 REPRESENTATION_CFG = GeometryRepresentationCfg(
     source=GeometrySourceCfg(
         home_points_per_owner=64,
@@ -89,6 +97,7 @@ REPRESENTATION_CFG = GeometryRepresentationCfg(
     ),
 )
 
+## 网络模型配置
 MODEL_CFG = GeometrySSLModelCfg(
     encoder=GeometryEncoderCfg(
         frontend=SO2AnchorFrontendCfg(
@@ -126,6 +135,7 @@ MODEL_CFG = GeometrySSLModelCfg(
     ),
 )
 
+## 目标配置
 OBJECTIVES_CFG = MultiAnchorGaussianObjectivesCfg(
     density=DensityObjectiveCfg(weight=1.0),
     kappa=KappaObjectiveCfg(weight=1.0),
@@ -134,8 +144,10 @@ OBJECTIVES_CFG = MultiAnchorGaussianObjectivesCfg(
     chain=ChainObjectiveCfg(weight=1.0),
 )
 
+## 数据增强配置
 JOINT_SIGN_REWRITE_CFG = JointSignRewriteCfg(probability=0.20, seed_offset=17)
 
+## 方法聚合
 METHOD_CFG = MultiAnchorGaussianMethodCfg(
     state_measure=STATE_MEASURE_CFG,
     representation=REPRESENTATION_CFG,
@@ -144,20 +156,53 @@ METHOD_CFG = MultiAnchorGaussianMethodCfg(
     joint_sign_rewrite=JOINT_SIGN_REWRITE_CFG,
 )
 
-# 下面的 20 epoch × 256 q/asset 只是当前脚手架默认值，不是已批准的 8192-asset 正式预算。
+# 训练器配置层：预实验与正式实验复用同一套显式 minibatch/mini-epoch 接口。
+## 验证器配置
+VALIDATION_CFG = ValidationCfg(
+    q_per_asset=64,
+    assets_per_minibatch=2,
+    q_per_asset_per_minibatch=2,
+    every_optimizer_updates=250,
+    selection_metrics=("density", "kappa", "derived_field"),
+    seed_offset=1_000_003,
+)
+
+## 评估器配置
+FINAL_EVALUATION_CFG = FinalEvaluationCfg(
+    q_per_asset=64,
+    assets_per_minibatch=2,
+    q_per_asset_per_minibatch=2,
+    final_ablations=(
+        "query_only",
+        "same_asset_q_shuffle",
+        "cross_asset_shuffle",
+        "first_order_zero",
+        "first_order_joint_shuffle",
+        "first_order_sign_flip",
+    ),
+    bootstrap_replicates=2_000,
+    evaluation_seed_offset=2_000_003,
+    training_q_bank_seed_offset=3_000_003,
+    bootstrap_seed_offset=4_000_003,
+)
+
+## 训练器聚合
+## preset：128 个 minibatch 覆盖 8192 项资产，每项生成 8 个 q，并循环训练 5 遍。
 TRAINER_CFG = EmbodimentPretrainTrainerCfg(
     sampling=OnlineSamplingCfg(
-        epochs=20,
-        q_per_asset_per_epoch=256,
-        assets_per_minibatch=2,
-        q_per_asset_per_minibatch=2,
+        assets_per_minibatch=64,
+        q_per_asset_per_minibatch=8,
         shuffle_assets=True,
         seed=20260813,
     ),
+    num_minibatches=128,
+    mini_epochs=5,
+    validation=VALIDATION_CFG,
+    final_evaluation=FINAL_EVALUATION_CFG,
+    max_resident_assets=64,
 )
 
-EVALUATION_CFG = MultiAnchorEvaluationCfg()
-
+# 运行配置层：输出目录、实验名、随机种子、阶段
 RUN_CFG = PretrainRunCfg(
     output_dir="logs/ssl",
     experiment_name="canonical_multi_anchor_gaussian",
@@ -165,18 +210,18 @@ RUN_CFG = PretrainRunCfg(
     phase="pretrain",
 )
 
+# 完整实验语义配置
 EXPERIMENT = EmbodimentPretrainCfg(
     data=DATA_CFG,
     method=METHOD_CFG,
     trainer=TRAINER_CFG,
-    evaluation=EVALUATION_CFG,
     run=RUN_CFG,
 )
 
 __all__ = [
     "DATA_CFG",
-    "EVALUATION_CFG",
     "EXPERIMENT",
+    "FINAL_EVALUATION_CFG",
     "JOINT_SIGN_REWRITE_CFG",
     "METHOD_CFG",
     "MODEL_CFG",
@@ -185,4 +230,5 @@ __all__ = [
     "RUN_CFG",
     "STATE_MEASURE_CFG",
     "TRAINER_CFG",
+    "VALIDATION_CFG",
 ]

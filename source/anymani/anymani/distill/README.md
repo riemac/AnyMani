@@ -59,7 +59,7 @@ retained encoder 只允许读取当前物理 $q$ 与静态手型证据：$q_{hom
 
 ## 已有证据与结论边界
 
-当前 deterministic contracts 覆盖 semantic lowering、FK/Jacobian、owner union、anchor/query/sigma provenance、$SO(2)$ 与 joint-sign rewrite、graph-bias lookup、FiLM 条件、跨结构 padding、schema 4 Python composition、五项 objective 归约、checkpoint resume 和 standalone retained artifact。synthetic geometry integration 已闭合到 objective backward；真实 CUDA/Warp integration 由运行环境条件决定。
+当前 deterministic contracts 覆盖 semantic lowering、FK/Jacobian、owner union、anchor/query/sigma provenance、$SO(2)$ 与 joint-sign rewrite、graph-bias lookup、FiLM 条件、跨结构 padding、schema 5 Python composition、五项 objective 归约、checkpoint resume 和 standalone retained artifact。synthetic geometry integration 已闭合到 objective backward；真实 CUDA/Warp integration 由运行环境条件决定。
 
 在 NVIDIA GeForce RTX 5070 Ti 上，canonical retained encoder 以 $B=4096$、20 次预热和 50 次 CUDA Event 测得 p95 20.13 ms，满足 40 ms 子预算。该结果只说明从 GPU-resident q/static evidence 到 $Z^{(0)}/z^{(1)}$ 的子路径达标；它排除了 decoder、policy、Isaac Sim 与 `env.step`，不能外推为完整 20 Hz 控制系统已经闭合。完整计时统计由 [`models/README.md`](models/README.md) 解释。
 
@@ -70,8 +70,8 @@ retained encoder 只允许读取当前物理 $q$ 与静态手型证据：$q_{hom
 物理定义见 [`representations/README.md`](representations/README.md)，方法聚合根见 [`methods/README.md`](methods/README.md)，网络与 retained/disposable 边界见 [`models/README.md`](models/README.md)，预训练协议见 [`ssl/README.md`](ssl/README.md)，实验统计见 [`diagnostics/README.md`](diagnostics/README.md)，rl_games 路线见 [`rl/README.md`](rl/README.md)。
 
 ```bash
-# task-free Geometry SSL；默认组合 schema 4 Python 实验
-python -m anymani.distill.ssl.pretrain
+# task-free Geometry SSL 前向预实验
+python -m anymani.distill.ssl.pretrain --phase calibrate_objectives --num_minibatches 128 --assets_per_minibatch 64 --q_per_asset_per_minibatch 8 --mini_epochs 5 --seed 20260813
 
 # GM rl_games
 /home/hac/isaac/IsaacLab/isaaclab.sh -p -m anymani.distill.rl.train --task AnyMani-GM-SingleAsset-MLP-v0 --num_envs 4096 --headless

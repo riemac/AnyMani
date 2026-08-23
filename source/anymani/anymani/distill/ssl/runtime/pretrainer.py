@@ -36,12 +36,11 @@ class EmbodimentPretrainTrainer:
         *,
         data: Any,
         method: Any,
-        evaluation: Any,
         run: Any,
         output_dir_override: Path | None,
         resolved_config: dict[str, Any],
     ) -> Path:
-        r"""把五个 role runtime 交给显式 lifecycle 内核。"""
+        r"""把 data/method/run 与 Trainer 自身交给显式 lifecycle 内核。"""
 
         from .lifecycle import fit_embodiment_pretrain
 
@@ -49,23 +48,134 @@ class EmbodimentPretrainTrainer:
             trainer=self,
             data=data,
             method=method,
-            evaluation=evaluation,
             run=run,
             output_dir_override=output_dir_override,
             resolved_config=resolved_config,
         )
 
+    def selection_baseline(self, metrics: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
+        r"""按 validation suite 独立冻结三项重建指标的初始化尺度。"""
+
+        if not metrics:
+            raise ValueError("validation selection requires at least one named suite")
+        baseline: dict[str, dict[str, float]] = {}
+        for suite_name, suite_metrics in metrics.items():
+            missing = set(self.config.validation.selection_metrics) - suite_metrics.keys()
+            if missing:
+                raise ValueError(f"validation suite {suite_name!r} lacks selection terms: {sorted(missing)}")
+            baseline[suite_name] = {
+                name: float(suite_metrics[name]) for name in self.config.validation.selection_metrics
+            }
+        if any(value <= 0.0 for suite in baseline.values() for value in suite.values()):
+            raise FloatingPointError("initial validation selection metrics must be positive")
+        return baseline
+
+    def normalized_validation_score(
+        self,
+        metrics: dict[str, dict[str, float]],
+        baseline: dict[str, dict[str, float]],
+    ) -> float:
+        r"""先对三项重建指标等权，再对 validation suites 等权形成 promotion score。"""
+
+        if set(metrics) != set(baseline):
+            raise ValueError("validation metrics and initialization baseline suites do not match")
+        suite_scores = [
+            sum(
+                metrics[suite_name][name] / suite_baseline[name]
+                for name in self.config.validation.selection_metrics
+            )
+            / len(self.config.validation.selection_metrics)
+            for suite_name, suite_baseline in baseline.items()
+        ]
+        return sum(suite_scores) / len(suite_scores)
+
+
+@dataclass(frozen=True)
+class ValidationCfg:
+    r"""训练中固定 validation bank、执行 cadence 与 best-checkpoint 选择协议。"""
+
+    q_per_asset: int = 64
+    assets_per_minibatch: int = 2
+    q_per_asset_per_minibatch: int = 2
+    every_optimizer_updates: int = 250
+    selection_metrics: tuple[str, ...] = ("density", "kappa", "derived_field")
+    seed_offset: int = 1_000_003
+
+    def __post_init__(self) -> None:
+        r"""验证固定 bank 的显式 q/batch 轴和三项 selection 指标。"""
+
+        object.__setattr__(self, "selection_metrics", tuple(self.selection_metrics))
+        counts = (
+            self.q_per_asset,
+            self.assets_per_minibatch,
+            self.q_per_asset_per_minibatch,
+            self.every_optimizer_updates,
+            self.seed_offset,
+        )
+        if min(counts) < 1 or not self.selection_metrics:
+            raise ValueError("validation q/batch/cadence/seed values and selection metrics must be non-empty")
+
+
+@dataclass(frozen=True)
+class FinalEvaluationCfg:
+    r"""冻结 best checkpoint 后的 unseen-suite、独立 q-bank 与消融报告协议。"""
+
+    q_per_asset: int = 64
+    assets_per_minibatch: int = 2
+    q_per_asset_per_minibatch: int = 2
+    final_ablations: tuple[str, ...] = (
+        "query_only",
+        "same_asset_q_shuffle",
+        "cross_asset_shuffle",
+        "first_order_zero",
+        "first_order_joint_shuffle",
+        "first_order_sign_flip",
+    )
+    bootstrap_replicates: int = 2_000
+    evaluation_seed_offset: int = 2_000_003
+    training_q_bank_seed_offset: int = 3_000_003
+    bootstrap_seed_offset: int = 4_000_003
+
+    def __post_init__(self) -> None:
+        r"""验证冻结评估预算、消融集合与互不重叠的随机域。"""
+
+        object.__setattr__(self, "final_ablations", tuple(self.final_ablations))
+        counts = (
+            self.q_per_asset,
+            self.assets_per_minibatch,
+            self.q_per_asset_per_minibatch,
+            self.bootstrap_replicates,
+        )
+        offsets = (
+            self.evaluation_seed_offset,
+            self.training_q_bank_seed_offset,
+            self.bootstrap_seed_offset,
+        )
+        if min(counts) < 1 or not self.final_ablations:
+            raise ValueError("final evaluation q/batch/bootstrap budgets and ablations must be non-empty")
+        if min(offsets) < 1 or len(set(offsets)) != len(offsets):
+            raise ValueError("final evaluation seed offsets must be positive and distinct")
+
 
 @dataclass(frozen=True)
 class EmbodimentPretrainTrainerCfg:
-    r"""在线 sampling/update 算法、optimizer、设备资源和记录 cadence。"""
+    r"""在线新数据预算、数据复用次数、optimizer、设备资源和记录 cadence。
+
+    首个 8192-asset 数值锚点为 ``128 minibatches × 64 assets × 8 q``，即生成
+    65536 个不同 ``(asset,q)`` 样本；``mini_epochs=5`` 只增加同一批数据的训练次数，
+    不推进资产或 Sobol q 游标。
+    """
 
     runtime_type: ClassVar[type[EmbodimentPretrainTrainer]] = EmbodimentPretrainTrainer
     sampling: OnlineSamplingCfg = field(default_factory=OnlineSamplingCfg)
+    num_minibatches: int = 128  # 新生成数据批数；直接决定资产使用次数与 q 样本总数
+    mini_epochs: int = 5  # 每组新数据的循环利用次数；每次执行独立 forward
+    validation: ValidationCfg = field(default_factory=ValidationCfg)
+    final_evaluation: FinalEvaluationCfg = field(default_factory=FinalEvaluationCfg)
     optimizer: AdamWCfg = field(default_factory=AdamWCfg)
     gradient_accumulation_steps: int = 4  # 最后一个 update group 可以少于该值
     max_gradient_norm: float = 10.0
-    max_resident_assets: int = 20  # 资源上限，不改变全资产 shuffle 的统计顺序
+    max_resident_assets: int = 64  # 首个 preset 恰好驻留一个 64-asset 训练 minibatch
     device: str = "cuda:0"
     dtype: str = "float32"
     log_every_updates: int = 10
@@ -73,9 +183,11 @@ class EmbodimentPretrainTrainerCfg:
     run_safety_step_limit: int = 30_000
 
     def __post_init__(self) -> None:
-        r"""验证 update、设备与记录轴，不要求 epoch minibatches 可整除 accumulation。"""
+        r"""验证新数据预算、复用次数、设备资源与记录轴严格为正。"""
 
         counts = (
+            self.num_minibatches,
+            self.mini_epochs,
             self.gradient_accumulation_steps,
             self.max_resident_assets,
             self.log_every_updates,
@@ -84,10 +196,18 @@ class EmbodimentPretrainTrainerCfg:
         )
         if min(counts) < 1 or self.max_gradient_norm <= 0.0:
             raise ValueError("trainer update/resource/cadence values must be positive")
+        if self.max_resident_assets < self.sampling.assets_per_minibatch:
+            raise ValueError("max_resident_assets must cover one training asset minibatch")
         if not (self.device == "cuda" or (self.device.startswith("cuda:") and self.device[5:].isdigit())):
             raise ValueError("embodiment pretraining device must be 'cuda' or 'cuda:<index>'")
         if self.dtype != "float32":
             raise ValueError("current Warp online supervision requires trainer dtype='float32'")
 
 
-__all__ = ["AdamWCfg", "EmbodimentPretrainTrainer", "EmbodimentPretrainTrainerCfg"]
+__all__ = [
+    "AdamWCfg",
+    "EmbodimentPretrainTrainer",
+    "EmbodimentPretrainTrainerCfg",
+    "FinalEvaluationCfg",
+    "ValidationCfg",
+]

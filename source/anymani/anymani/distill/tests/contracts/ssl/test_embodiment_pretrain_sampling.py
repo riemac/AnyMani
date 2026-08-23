@@ -1,138 +1,127 @@
-r"""Trainer-owned asset permutation、coverage、tail 与 resume 日程合同。"""
+r"""Trainer-owned 显式 minibatch 预算、资产排列、固定评估尾块与 resume 合同。"""
 
 from __future__ import annotations
 
 from collections import Counter
 
 import pytest
-from anymani.distill.ssl.runtime.sampling import OnlineMinibatchSchedule, OnlineSamplingCfg
+from anymani.distill.ssl.runtime.sampling import (
+    FixedAssetQSchedule,
+    OnlineMinibatchSchedule,
+    OnlineSamplingCfg,
+)
 
 
-def test_each_q_round_is_one_deterministic_permutation_of_all_assets() -> None:
-    r"""每个 epoch 的第一窗覆盖全部资产一次；顺序由 seed/epoch 唯一决定。"""
+def test_training_schedule_emits_exact_num_minibatches_and_replays_from_seed() -> None:
+    r"""两个同配置日程必须逐项相同，并恰好在显式批数处停止。"""
 
-    config = OnlineSamplingCfg(
-        epochs=1,
-        q_per_asset_per_epoch=4,
-        assets_per_minibatch=3,
-        q_per_asset_per_minibatch=2,
-        seed=29,
-    )
-    first = OnlineMinibatchSchedule(7, config)
-    replay = OnlineMinibatchSchedule(7, config)
-    first_round = tuple(first.next() for _ in range(first.asset_groups_per_round))
-    replay_round = tuple(replay.next() for _ in range(replay.asset_groups_per_round))
-    flattened = tuple(index for minibatch in first_round for index in minibatch.asset_indices)
+    config = OnlineSamplingCfg(assets_per_minibatch=2, q_per_asset_per_minibatch=3, seed=29)
+    first = OnlineMinibatchSchedule(8, config, num_minibatches=6, max_resident_assets=4)
+    replay = OnlineMinibatchSchedule(8, config, num_minibatches=6, max_resident_assets=4)
+    first_items = tuple(first.next() for _ in range(6))
+    replay_items = tuple(replay.next() for _ in range(6))
 
-    assert first_round == replay_round
-    assert Counter(flattened) == Counter(range(7))
-    assert len(first_round[-1].asset_indices) == 1
+    assert first_items == replay_items
+    assert all(len(item.asset_indices) == 2 and item.q_per_asset == 3 for item in first_items)
+    assert first.complete and first.minibatches_remaining == 0
+    with pytest.raises(StopIteration):
+        first.next()
 
 
-def test_tail_q_block_and_tail_accumulation_do_not_repeat_samples() -> None:
-    r"""不能整除的 q coverage 和 accumulation 都以较小真实组结束。"""
-
-    schedule = OnlineMinibatchSchedule(
-        5,
-        OnlineSamplingCfg(
-            epochs=1,
-            q_per_asset_per_epoch=5,
-            assets_per_minibatch=2,
-            q_per_asset_per_minibatch=2,
-            seed=41,
-        ),
-    )
-    q_count_by_asset: Counter[int] = Counter()
-    update_group_sizes: list[int] = []
-    while not schedule.complete:
-        accumulation = min(4, schedule.minibatches_remaining_in_epoch)
-        update_group_sizes.append(accumulation)
-        for _ in range(accumulation):
-            minibatch = schedule.next()
-            for asset_index in minibatch.asset_indices:
-                q_count_by_asset[asset_index] += minibatch.q_per_asset
-
-    assert q_count_by_asset == Counter({index: 5 for index in range(5)})
-    assert update_group_sizes == [4, 4, 1]
-
-
-def test_schedule_checkpoint_restores_the_exact_next_minibatch() -> None:
-    r"""cursor、current permutation 与 seed 恢复后，下一个 asset group 必须逐项一致。"""
+def test_first_catalog_cycle_uses_each_asset_once_then_reshuffles() -> None:
+    r"""一个完整 catalog 轮次不重复资产，下一批进入新的确定性排列。"""
 
     config = OnlineSamplingCfg(
-        epochs=2,
-        q_per_asset_per_epoch=7,
         assets_per_minibatch=2,
-        q_per_asset_per_minibatch=3,
-        seed=53,
+        q_per_asset_per_minibatch=1,
+        shuffle_assets=True,
+        seed=41,
     )
-    uninterrupted = OnlineMinibatchSchedule(6, config)
+    schedule = OnlineMinibatchSchedule(8, config, num_minibatches=5)
+    items = tuple(schedule.next() for _ in range(5))
+    first_cycle = tuple(index for item in items[:4] for index in item.asset_indices)
+
+    assert Counter(first_cycle) == Counter(range(8))
+    assert items[3].q_block_index == 0
+    assert items[4].q_block_index == 1
+    assert items[4].minibatch_index == 4
+
+
+def test_training_requires_full_asset_minibatches() -> None:
+    r"""训练预算不允许较小尾批隐式改变 $N_{mb}N_{asset}^{mb}$。"""
+
+    config = OnlineSamplingCfg(assets_per_minibatch=3, q_per_asset_per_minibatch=2)
+    with pytest.raises(ValueError, match="must be divisible"):
+        OnlineMinibatchSchedule(8, config, num_minibatches=1)
+
+
+def test_schedule_checkpoint_restores_exact_next_minibatch() -> None:
+    r"""全局 cursor、当前 permutation 与 session Sobol cursor 共同锁定下一批。"""
+
+    config = OnlineSamplingCfg(assets_per_minibatch=2, q_per_asset_per_minibatch=3, seed=53)
+    uninterrupted = OnlineMinibatchSchedule(8, config, num_minibatches=7, max_resident_assets=4)
     for _ in range(5):
         uninterrupted.next()
     state = uninterrupted.state_dict()
     expected = uninterrupted.next()
 
-    resumed = OnlineMinibatchSchedule(6, config)
+    resumed = OnlineMinibatchSchedule(8, config, num_minibatches=7, max_resident_assets=4)
     resumed.load_state_dict(state)
     assert resumed.next() == expected
 
 
-def test_window_major_schedule_finishes_each_resident_window_before_switching() -> None:
-    r"""超过 resident cap 时，同一窗内资产先完成全部 q coverage，再切到下一窗。"""
+def test_schedule_checkpoint_rejects_budget_drift() -> None:
+    r"""恢复时不得把旧游标静默解释到不同的 ``num_minibatches`` 预算。"""
+
+    config = OnlineSamplingCfg(assets_per_minibatch=2, q_per_asset_per_minibatch=1, seed=61)
+    source = OnlineMinibatchSchedule(8, config, num_minibatches=4)
+    state = source.state_dict()
+    changed = OnlineMinibatchSchedule(8, config, num_minibatches=5)
+
+    with pytest.raises(ValueError, match="num_minibatches"):
+        changed.load_state_dict(state)
+
+
+def test_resident_window_contains_complete_training_minibatches() -> None:
+    r"""设备窗口只打包完整训练批，容量余数不产生统计尾组。"""
 
     schedule = OnlineMinibatchSchedule(
-        5,
+        8,
         OnlineSamplingCfg(
-            epochs=1,
-            q_per_asset_per_epoch=2,
             assets_per_minibatch=2,
             q_per_asset_per_minibatch=1,
             shuffle_assets=False,
-            seed=7,
         ),
-        max_resident_assets=4,
+        num_minibatches=4,
+        max_resident_assets=5,
     )
-    items = tuple(schedule.next() for _ in range(schedule.minibatches_per_epoch))
-    windows = tuple(item.resident_asset_indices for item in items)
-    assert windows == (
+    items = tuple(schedule.next() for _ in range(4))
+
+    assert tuple(item.resident_asset_indices for item in items) == (
         (0, 1, 2, 3),
         (0, 1, 2, 3),
-        (0, 1, 2, 3),
-        (0, 1, 2, 3),
-        (4,),
-        (4,),
+        (4, 5, 6, 7),
+        (4, 5, 6, 7),
     )
-    assert tuple(item.asset_indices for item in items) == (
-        (0, 1),
-        (2, 3),
-        (0, 1),
-        (2, 3),
-        (4,),
-        (4,),
-    )
-    assert tuple(item.q_per_asset for item in items) == (1, 1, 1, 1, 1, 1)
-    assert schedule.minibatches_per_epoch == 6
 
 
-def test_completed_schedule_checkpoint_restores_as_complete() -> None:
-    """last checkpoint 的空 permutation 是完成态，不应被解释成不存在的下一 epoch。"""
+def test_fixed_evaluation_keeps_real_asset_and_q_tails() -> None:
+    r"""固定评估 bank 可保留较短资产尾批和 q 尾块，不污染训练预算。"""
 
-    config = OnlineSamplingCfg(
-        epochs=1,
-        q_per_asset_per_epoch=3,
+    schedule = FixedAssetQSchedule(
+        5,
+        q_per_asset=5,
         assets_per_minibatch=2,
         q_per_asset_per_minibatch=2,
-        seed=61,
+        max_resident_assets=4,
     )
-    schedule = OnlineMinibatchSchedule(3, config)
+    q_count_by_asset: Counter[int] = Counter()
+    final_asset_group_sizes: list[int] = []
     while not schedule.complete:
-        schedule.next()
-    state = schedule.state_dict()
-    assert state["permutation"] == ()
+        item = schedule.next()
+        final_asset_group_sizes.append(len(item.asset_indices))
+        for asset_index in item.asset_indices:
+            q_count_by_asset[asset_index] += item.q_per_asset
 
-    resumed = OnlineMinibatchSchedule(3, config)
-    resumed.load_state_dict(state)
-
-    assert resumed.complete
-    with pytest.raises(StopIteration):
-        resumed.next()
+    assert q_count_by_asset == Counter({index: 5 for index in range(5)})
+    assert final_asset_group_sizes == [2, 2, 2, 2, 2, 2, 1, 1, 1]

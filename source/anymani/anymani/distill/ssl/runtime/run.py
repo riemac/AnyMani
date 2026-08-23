@@ -65,11 +65,11 @@ class PretrainRun:
         worktree_dirty: bool = False,
         worktree_fingerprint: str = "",
     ) -> Any:
-        r"""构造一次 run 共用的 schema 4 checkpoint lineage。"""
+        r"""构造一次 run 共用的 schema 5 checkpoint lineage。"""
 
-        from anymani.distill.ssl.checkpoint import GeometrySSLCheckpointMetadata
+        from anymani.distill.ssl.checkpoint import PretrainCheckpointMetadata
 
-        return GeometrySSLCheckpointMetadata(
+        return PretrainCheckpointMetadata(
             code_revision=self.code_revision(),
             package_version=self.package_version(),
             geometry_semantics_schema=geometry_semantics_schema,
@@ -85,17 +85,17 @@ class PretrainRun:
     def save_full_checkpoint(path: Path, **payload: Any) -> None:
         r"""把 full resume payload 写出职责路由到 checkpoint owner。"""
 
-        from anymani.distill.ssl.checkpoint import save_geometry_ssl_checkpoint
+        from anymani.distill.ssl.checkpoint import save_pretrain_checkpoint
 
-        save_geometry_ssl_checkpoint(path, **payload)
+        save_pretrain_checkpoint(path, **payload)
 
     @staticmethod
-    def save_retained_artifact(path: Path, **payload: Any) -> None:
-        r"""把 validation-best standalone export 路由到 checkpoint owner。"""
+    def save_retained_artifact(path: Path, payload: Mapping[str, Any]) -> None:
+        r"""原子写出 concrete Method 已闭合的 standalone payload。"""
 
-        from anymani.distill.ssl.checkpoint import save_retained_geometry_artifact
+        from anymani.distill.ssl.checkpoint import save_retained_artifact
 
-        save_retained_geometry_artifact(path, **payload)
+        save_retained_artifact(path, payload)
 
 
 @dataclass(frozen=True)
@@ -109,7 +109,7 @@ class PretrainRunCfg:
     seed: int = 0  # model 初始化及各 role 派生 seed 的唯一根
     deterministic_algorithms: bool = True
     phase: str = "pretrain"  # `calibrate_objectives` 或 `pretrain`
-    calibration_artifact: str = ""  # pretrain 可显式加载的 calibration YAML
+    calibration_artifact: str = ""  # 可选预实验 YAML；只提供权重判断证据和 lineage
 
     def __post_init__(self) -> None:
         r"""拒绝空 experiment identity、负随机种子和未知 phase。"""

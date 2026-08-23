@@ -52,12 +52,29 @@ def analyze_geometry_ssl_ablation_file(
     evidence = yaml.safe_load(input_path.read_text(encoding="utf-8"))  # 只读 frozen validation artifact
     if not isinstance(evidence, dict):  # 顶层 schema 必须是 mapping
         raise ValueError("ablation evidence must be a YAML mapping")
+    return analyze_geometry_ssl_ablation_evidence(
+        evidence,
+        bootstrap_samples=bootstrap_samples,
+        seed=seed,
+        input_label=str(input_path),
+    )
+
+
+def analyze_geometry_ssl_ablation_evidence(
+    evidence: dict[str, Any],
+    *,
+    bootstrap_samples: int = 2_000,
+    seed: int = 20260813,
+    input_label: str = "in_memory_method_report",
+) -> dict[str, Any]:
+    r"""直接分析 Method 返回的配对 ablation evidence，不要求中间 YAML 文件。"""
+
     if evidence.get("pairing_key") != ["asset_id", "q_index"]:  # 配对身份不能由路径猜测
         raise ValueError("ablation evidence must declare pairing_key=['asset_id','q_index']")
     raw_ablations = evidence.get("ablations")  # 预注册 ablation namespace
     records = evidence.get("records")  # 每个 q 的可配对 raw metrics
-    if not isinstance(raw_ablations, list) or not isinstance(records, list) or not records:
-        raise ValueError("ablation evidence requires non-empty ablations and records lists")
+    if not isinstance(raw_ablations, (tuple, list)) or not isinstance(records, list) or not records:
+        raise ValueError("ablation evidence requires non-empty ablation names and records")
     ablations = tuple(str(name) for name in raw_ablations)  # 稳定输出顺序
     if "full" not in ablations:  # 差值参考必须是完整 frozen model
         raise ValueError("ablation evidence must contain the full reference")
@@ -82,7 +99,7 @@ def analyze_geometry_ssl_ablation_file(
     # 每个 asset 内先等权平均 q，再把 asset 等权平均；这对应 morphology-level evidence。
     asset_ids = tuple(dict.fromkeys(asset_id for asset_id, _ in samples))
     summary: dict[str, Any] = {
-        "input": str(input_path),
+        "input": input_label,
         "pairing_key": ["asset_id", "q_index"],
         "bootstrap": {
             "method": "hierarchical_asset_q_paired_resample",
@@ -261,6 +278,7 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "analyze_geometry_ssl_ablation_evidence",
     "analyze_geometry_ssl_ablation_file",
     "write_geometry_ssl_ablation_analysis",
 ]

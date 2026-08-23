@@ -1,6 +1,6 @@
 # AGENTS.md
 
-`distill` 拥有学习表征、共享模型、objective 与 SSL/IL/RL 编排。它消费 `assets` 的 typed geometry semantics 与 `tasks` 的环境接口；不解析 `hand.yaml`/URDF，不改写 scene/MDP，不 import `Research/`。
+`distill` 负责学习表征、共享模型、objective 与 SSL/IL/RL 编排。typed geometry semantics 由 `assets` 交付，环境接口由 `tasks` 交付；`hand.yaml`/URDF 解析、scene/MDP 和 Research 记录各自在原有模块维护。
 
 ## Project Structure
 
@@ -33,11 +33,10 @@ distill/
 ├── rl/                             rl_games 入口、YAML、masked PPO
 ├── il/                             边界占位，尚无 trainer
 ├── diagnostics/                    recording / evaluation / analysis
-├── presets/ssl/                    旧 CLI 名称的最小 YAML
 └── tests/                          contracts / integration / performance / training_sanity
 ```
 
-| 目录 | 拥有 | 不拥有 |
+| 目录 | 核心职责 | 相邻职责归属 |
 | --- | --- | --- |
 | `representations/` | 物理 source/field/query/target | `torch.nn`、padding、loss 权重 |
 | `methods/` | 科学聚合根；对外封闭给 trainer | catalog、optimizer、MDP |
@@ -46,7 +45,7 @@ distill/
 | `ssl/` `rl/` `il/` | 各阶段数据流、入口、checkpoint | 共享 trunk 的重复实现 |
 | `diagnostics/` | 记录、固定 evaluation、只读分析 | 训练选择或物理真值 |
 
-移动内容时同步 TODO、docstring 和 tests。不要用万能 Manager 或深配置继承隐藏耦合。
+移动内容时同步 TODO、docstring 和 tests。采用明确的 role 与浅层组合，让科研依赖保持可见。
 
 ## Development Style And Conventions
 
@@ -66,17 +65,17 @@ distill/
 
 ### 信息边界
 
-retained encoder 只读当前物理 `q` 与静态证据。distance、最近点、Jacobian、query stratum、contact、action、history、object state 不得进入。joint limits 只定义采样域。`z_i^(1)` 是整手场 Jacobian 第 `i` 列，不是对自身 `z_i^(0)` 求导。
+retained encoder 的输入是当前物理 `q` 与静态证据；distance、最近点、Jacobian、query stratum、contact、action、history 和 object state 留在监督或下游任务侧。joint limits 定义采样域。`z_i^(1)` 表示整手场 Jacobian 第 `i` 列，而非自身 `z_i^(0)` 的普通导数。
 
 ### 几何 SSL 合同
 
-主线是多锚点条件 Gaussian 场。五项损失：density、κ、derived-field、Sobolev、chain；paired 不是主损失。schema 4：`data / method / trainer / evaluation / run`。Trainer 只调 method 封闭接口，不得读 `method.representation` 或直接改 sigma。full checkpoint 只服务 SSL resume；RL/IL 只消费 standalone retained artifact。
+主线是多锚点条件 Gaussian 场。五项损失：density、κ、derived-field、Sobolev、chain；paired 不是主损失。schema 5 根配置为 `data / method / trainer / run`，训练预算由 `num_minibatches` 与 `mini_epochs` 直接声明。Trainer 只调 Method/session 封闭接口；full checkpoint 只服务 SSL resume，RL/IL 只消费 standalone retained artifact。
 
 official LEAP/Allegro 不参与 train、calibration 或 checkpoint selection。split 按 `physical_geometry_hash` 隔离；路径、asset ID 或 `content_hash` 不足以识别 limit-only 重复。
 
 ### 性能门槛
 
-RTX 5070 Ti、`B=4096`、单结构组、20 预热 + 50 CUDA Event，p95 ≤ 40 ms。覆盖 adapter、聚合、backbone、零/一阶 heads；排除 materialization、decoder、policy、Isaac Sim。PPO full fine-tune 不得缓存会 stale 的 learned activation。
+RTX 5070 Ti、`B=4096`、单结构组、20 预热 + 50 CUDA Event，p95 ≤ 40 ms。计时覆盖 adapter、聚合、backbone、零/一阶 heads，边界从 GPU-resident 输入开始并止于 retained 表征。PPO full fine-tune 每次重算 learned activation，以保持参数更新后的特征一致。
 
 ## Common Operations And Tools
 
@@ -87,4 +86,4 @@ pytest source/anymani/anymani/distill/tests/integration -q
 ruff check source/anymani/anymani/distill/methods source/anymani/anymani/distill/ssl
 ```
 
-嵌套合同见 `methods/`、`representations/`、`models/`、`objectives/`、`ssl/`、`rl/`、`tests/` 的 `AGENTS.md`。人类阅读入口见各目录 README。没有正式 pilot 或 PPO transfer 时，不得声明跨手型泛化成立。
+嵌套合同见 `methods/`、`representations/`、`models/`、`objectives/`、`ssl/`、`rl/`、`tests/` 的 `AGENTS.md`。人类阅读入口见各目录 README。跨手型泛化结论以正式 pilot、unseen-suite evaluation 和 PPO transfer 证据为准。

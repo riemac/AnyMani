@@ -87,14 +87,21 @@ task-specific contract tests or Isaac Sim runtime smoke tests.
 
 ### Geometry SSL
 
-Geometry SSL is a task-free PyTorch/Warp process and does not launch Isaac Sim. Asset selection is provided by one reusable dataset manifest:
+Geometry SSL is a task-free PyTorch/Warp process and does not launch Isaac Sim. The Python preset defines the method and dataset; ordinary flags define one run:
 
 ```bash
+source /home/hac/isaac/env_isaaclab/bin/activate
 python -m anymani.distill.ssl.pretrain \
-  data.manifest=source/anymani/anymani/assets/datasets/canonical_cross_mother_v1.yaml
+  --phase calibrate_objectives \
+  --num_minibatches 128 \
+  --assets_per_minibatch 64 \
+  --q_per_asset_per_minibatch 8 \
+  --mini_epochs 5 \
+  --seed 20260813 \
+  --experiment_name canonical_multi_anchor_gaussian_preexperiment
 ```
 
-Schema 3 composes concrete `data / method / trainer / evaluation / run` roles from packaged Hydra YAML. Resolved configuration, dataset and expanded physical manifests, JSONL metrics, validation evidence, full resume checkpoints, and the standalone retained artifact are written under `logs/ssl/<experiment>/<UTC timestamp>/`. See `source/anymani/anymani/distill/ssl/README.md` for the physical target and lifecycle contract.
+Schema 5 composes concrete `data / method / trainer / run` roles from the Python preset. Resolved configuration, dataset and expanded physical manifests, JSONL metrics, validation evidence, full resume checkpoints, and the standalone retained artifact are written under `logs/ssl/<experiment>/<UTC timestamp>/`. See `source/anymani/anymani/distill/ssl/README.md` for the physical target and lifecycle contract.
 
 ## Tests
 

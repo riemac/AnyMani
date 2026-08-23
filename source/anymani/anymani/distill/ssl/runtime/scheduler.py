@@ -1,56 +1,18 @@
-r"""可恢复的 Geometry SSL resident-window 与 Sobol/q/epoch scheduler。
+r"""Geometry SSL resident-window 的有界设备资源生命周期。
 
-本层只编排三个离散轴：资产 window、每资产 Sobol 构型游标和 optimizer/epoch block；物理
-FK、owner surface、Warp target 与模型仍由各自模块拥有。CPU catalog 可以包含完整 family，
-GPU 只持有当前 ``max_resident_assets`` 项，驱逐时释放 owner BVH lease。
+训练 minibatch 与 Sobol 游标由 ``runtime.sampling`` 和 Method session 拥有。本层只把 CPU
+catalog 的指定资产 window 映射到 GPU，并在驱逐时释放 owner BVH lease。
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from time import perf_counter
 
 import torch
 
 from anymani.distill.representations.geometry import GeometryRepresentationState
 from anymani.distill.representations.sources.geometry_source import GeometrySource
-
-
-@dataclass(frozen=True)
-class GeometrySSLRuntimeCfg:
-    r"""resident window 与声明式 online batch 轴。"""
-
-    max_resident_assets: int = 20
-    assets_per_minibatch: int = 2
-    q_per_asset_per_minibatch: int = 2
-    q_per_asset_per_epoch: int = 256
-    epochs: int = 20
-
-    def __post_init__(self) -> None:
-        if (
-            min(
-                self.max_resident_assets,
-                self.assets_per_minibatch,
-                self.q_per_asset_per_minibatch,
-                self.q_per_asset_per_epoch,
-                self.epochs,
-            )
-            < 1
-        ):
-            raise ValueError("runtime capacities and epoch counts must be positive")
-        if self.assets_per_minibatch > self.max_resident_assets:
-            raise ValueError("assets_per_minibatch cannot exceed max_resident_assets")
-
-
-@dataclass(frozen=True)
-class GeometrySSLRuntimeState:
-    r"""optimizer boundary 可恢复的调度事实。"""
-
-    epoch: int
-    block_index: int
-    resident_asset_ids: tuple[str, ...]
-    batcher_state: dict[str, object]
 
 
 class ResidentGeometryAssetWindow:
@@ -299,7 +261,5 @@ def _memory_allocator_delta(
 
 
 __all__ = [
-    "GeometrySSLRuntimeCfg",
-    "GeometrySSLRuntimeState",
     "ResidentGeometryAssetWindow",
 ]

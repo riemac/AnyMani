@@ -1,4 +1,0 @@
-# 兼容旧 CLI 名称；实际实验由 Python façade 装配。
-defaults:
-  - multi_anchor_gaussian_implicit_field
-  - _self_

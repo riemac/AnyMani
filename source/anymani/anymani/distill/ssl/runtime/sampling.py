@@ -1,7 +1,8 @@
-r"""Trainer-owned 在线资产打乱、minibatch 分组与 coverage epoch 日程。
+r"""Trainer-owned 在线 minibatch 日程与固定评估 q-bank 日程。
 
-该层只决定每次选择哪些 catalog rows、每项资产需要多少个新 q。具体 q 分布由 method 提供的
-state sampler 实现；query、sigma、edge 与 privileged target 仍由 representation realization 负责。
+训练预算由 ``num_minibatches`` 直接给出。每个训练 minibatch 包含固定数量的资产，每项资产产生
+固定数量的新 Sobol 构型；训练集走完后以新的确定性 permutation 继续，不引入 epoch 预算。
+validation/final evaluation 仍按每资产固定 q-bank 完整遍历，因此使用独立的评估日程。
 """
 
 from __future__ import annotations
@@ -14,63 +15,60 @@ import torch
 
 @dataclass(frozen=True)
 class OnlineSamplingCfg:
-    r"""每资产 coverage、minibatch 两个基本轴与 deterministic asset shuffle。"""
+    r"""一次新训练 minibatch 的资产轴、q 轴与确定性资产打乱。
 
-    epochs: int = 20  # coverage epochs；每轮每资产都获得同样的新 q 数
-    q_per_asset_per_epoch: int = 256  # $N_q^{epoch}$
-    assets_per_minibatch: int = 2  # $N_{asset}^{mb}$，尾组可以更小
-    q_per_asset_per_minibatch: int = 2  # $N_q^{mb}$，尾 q round 可以更小
-    shuffle_assets: bool = True  # 每个 epoch 打乱一次；窗内各 q round 共用该 permutation 切片
-    seed: int = 0  # asset permutation 与每资产 state sampler 的根 seed
+    数值锚点 ``64 assets × 8 q/asset`` 对应一次模型 forward 的 512 个等权
+    ``(asset,q)`` 样本。总共生成多少批由 Trainer 的 ``num_minibatches`` 声明。
+    """
+
+    assets_per_minibatch: int = 64  # 每批互异训练资产数 $N_{asset}^{mb}$
+    q_per_asset_per_minibatch: int = 8  # 每项资产新生成的 Sobol 构型数 $N_q^{mb}$
+    shuffle_assets: bool = True  # 每次走完 train catalog 后生成新的确定性排列
+    seed: int = 0  # asset permutation 与每资产 state sampler 的共同根 seed
 
     def __post_init__(self) -> None:
-        r"""验证所有 coverage 与 minibatch 轴严格为正。"""
+        r"""验证训练 minibatch 的两个统计轴严格为正。"""
 
-        values = (
-            self.epochs,
-            self.q_per_asset_per_epoch,
-            self.assets_per_minibatch,
-            self.q_per_asset_per_minibatch,
-        )
-        if min(values) < 1 or self.seed < 0:
-            raise ValueError("online sampling epochs/batch axes must be positive and seed must be non-negative")
+        if min(self.assets_per_minibatch, self.q_per_asset_per_minibatch) < 1 or self.seed < 0:
+            raise ValueError("online sampling batch axes must be positive and seed must be non-negative")
 
 
 @dataclass(frozen=True)
 class ScheduledMinibatch:
-    r"""一个尚未 realization 的资产组、每资产 q 数，以及必须整窗驻留的资产。"""
+    r"""一个尚未 realization 的资产组及其完整 resident window。
 
-    epoch: int  # 从 0 开始的当前 coverage epoch
-    q_round: int  # 当前 window 内第几个 q block
-    asset_group: int  # 当前 window 内第几个资产 minibatch
-    asset_indices: tuple[int, ...]  # catalog row indices；尾组保持真实长度
-    q_per_asset: int  # 当前 round 每项资产需要的新 q 数
-    resident_asset_indices: tuple[int, ...]  # 当前 GPU window 的完整 catalog 下标，含本 minibatch
-    window_index: int = 0  # 当前 epoch 内第几个 resident window
+    ``q_block_index`` 是同一资产第几次获得新 Sobol q-block。训练时它等于 catalog
+    permutation 的轮次；固定评估时它等于该资产的 q-bank block 序号。
+    """
+
+    minibatch_index: int  # 当前日程中的全局 minibatch 序号，从 0 开始
+    q_block_index: int  # 当前资产组的 q-block 序号，用于 anchor bank 轮换
+    asset_group: int  # 当前 catalog permutation 或固定 q-round 内的资产组序号
+    asset_indices: tuple[int, ...]  # catalog row indices；训练批固定长度，评估尾批可较短
+    q_per_asset: int  # 当前组中每项资产需要生成的新 q 数
+    resident_asset_indices: tuple[int, ...]  # 当前 GPU window 的完整 catalog 下标
+    window_index: int = 0  # 当前 catalog permutation 中的 resident window 序号
 
     @property
     def sample_count(self) -> int:
-        r"""返回模型 forward 的 realization batch size。"""
+        r"""返回本次模型 forward 的等权 ``(asset,q)`` 样本数。"""
 
         return len(self.asset_indices) * self.q_per_asset
 
 
 @dataclass(frozen=True)
 class OnlineSamplingState:
-    r"""checkpoint optimizer boundary 可恢复的显式 schedule cursor。"""
+    r"""checkpoint optimizer boundary 可恢复的全局训练 minibatch 游标。"""
 
-    epoch: int
-    q_round: int
-    asset_group: int
-    window_index: int = 0
+    minibatch_cursor: int  # 已经完成 realization 的新 minibatch 数
 
 
 class OnlineMinibatchSchedule:
-    r"""按 epoch 打乱资产，并让每个 resident window 先完成全部 q coverage 再切窗。
+    r"""生成恰好 ``num_minibatches`` 个固定形状训练批。
 
-    GPU window 是资源上限，不改变每资产 Sobol 覆盖次数，也不填充虚假资产。它会改变
-    minibatch 的出现顺序：同一窗内的资产连续消费完 $N_q^{\mathrm{epoch}}$，然后才加载下一窗。
-    每个 epoch 只打乱一次；窗内各 q round 共用该 permutation 切片。
+    训练资产数必须被 ``assets_per_minibatch`` 整除，以保证显式预算恒等式
+    $N_{asset-use}=N_{mb}N_{asset}^{mb}$ 不被隐式尾批改变。``max_resident_assets``
+    只决定多少个完整 minibatch 同时驻留，不改变资产顺序或统计预算。
     """
 
     def __init__(
@@ -78,208 +76,215 @@ class OnlineMinibatchSchedule:
         asset_count: int,
         config: OnlineSamplingCfg,
         *,
+        num_minibatches: int,
         max_resident_assets: int | None = None,
     ) -> None:
-        r"""保存 catalog 长度、window 上限和纯离散日程；不创建 q sampler 或设备状态。"""
+        r"""保存训练 catalog、显式批数、设备窗口上限和确定性游标。"""
 
-        if asset_count < 1:
-            raise ValueError("online minibatch schedule requires at least one train asset")
-        self.asset_count = int(asset_count)
-        self.config = config
-        # 未声明时整表视为一窗，便于不含 GPU cap 的纯日程测试。
-        self.max_resident_assets = int(max_resident_assets or asset_count)
-        if self.max_resident_assets < 1:
-            raise ValueError("max_resident_assets must be positive")
-        if self.max_resident_assets > self.asset_count:
-            self.max_resident_assets = self.asset_count
-        self.epoch = 0
-        self.window_index = 0
-        self.q_round = 0
-        self.asset_group = 0
-
-    @property
-    def q_rounds_per_epoch(self) -> int:
-        r"""返回覆盖每资产 q budget 所需 round 数，最后一轮可较小。"""
-
-        return math.ceil(self.config.q_per_asset_per_epoch / self.config.q_per_asset_per_minibatch)
+        if asset_count < 1 or num_minibatches < 1:
+            raise ValueError("online minibatch schedule requires positive asset and minibatch counts")
+        if asset_count % config.assets_per_minibatch != 0:
+            raise ValueError("training asset count must be divisible by assets_per_minibatch")
+        self.asset_count = int(asset_count)  # 当前 train split 的互异资产总数
+        self.config = config  # 每个新 minibatch 的固定资产/q 轴
+        self.num_minibatches = int(num_minibatches)  # 本次运行需要生成的新数据批数
+        requested_resident = int(max_resident_assets or asset_count)  # 用户声明的设备资产容量
+        if requested_resident < config.assets_per_minibatch:
+            raise ValueError("max_resident_assets must cover one complete training minibatch")
+        self.max_resident_assets = min(requested_resident, self.asset_count)  # 不超过真实 catalog
+        self.minibatches_per_cycle = self.asset_count // config.assets_per_minibatch  # 一次全 catalog 的完整批数
+        self.minibatches_per_window = max(1, self.max_resident_assets // config.assets_per_minibatch)
+        self.minibatch_cursor = 0  # 下一个尚未 realization 的全局 minibatch 序号
 
     @property
-    def windows_per_epoch(self) -> int:
-        r"""返回一个 epoch 需要切换的 resident window 数，最后一窗可较小。"""
+    def minibatches_remaining(self) -> int:
+        r"""返回尚未生成的新训练 minibatch 数。"""
 
-        return math.ceil(self.asset_count / self.max_resident_assets)
-
-    @property
-    def asset_groups_per_round(self) -> int:
-        r"""返回一次全资产 permutation 切成 minibatch 的组数；仅作覆盖审计，不是窗内循环长度。"""
-
-        return math.ceil(self.asset_count / self.config.assets_per_minibatch)
-
-    @property
-    def minibatches_per_epoch(self) -> int:
-        r"""返回 window-major 展开后的完整 epoch minibatch 数。"""
-
-        return sum(
-            self._groups_in_window(self._window_size(window_index)) * self.q_rounds_per_epoch
-            for window_index in range(self.windows_per_epoch)
-        )
-
-    @property
-    def minibatches_remaining_in_epoch(self) -> int:
-        r"""返回当前 epoch 还未消费的真实 minibatch 数。"""
-
-        if self.complete:
-            return 0
-        remaining = 0
-        current_groups = self._groups_in_window(self._window_size(self.window_index))
-        remaining += current_groups - self.asset_group
-        remaining += (self.q_rounds_per_epoch - 1 - self.q_round) * current_groups
-        for window_index in range(self.window_index + 1, self.windows_per_epoch):
-            remaining += self._groups_in_window(self._window_size(window_index)) * self.q_rounds_per_epoch
-        return remaining
-
-    @property
-    def current_permutation(self) -> tuple[int, ...]:
-        r"""返回当前 epoch 的确定性资产 permutation，供 checkpoint 审计。"""
-
-        return self._epoch_permutation() if not self.complete else tuple()
+        return self.num_minibatches - self.minibatch_cursor
 
     @property
     def complete(self) -> bool:
-        r"""返回全部 coverage epochs 是否完成。"""
+        r"""返回显式 ``num_minibatches`` 预算是否已经耗尽。"""
 
-        return self.epoch >= self.config.epochs
+        return self.minibatch_cursor >= self.num_minibatches
 
-    def _epoch_permutation(self) -> tuple[int, ...]:
-        r"""由 `(seed,epoch)` 无状态重建当前 epoch 的全资产顺序。"""
+    @property
+    def current_permutation(self) -> tuple[int, ...]:
+        r"""返回下一批所属的确定性 train-catalog permutation，供 checkpoint 审计。"""
 
-        return self._permutation_for_epoch(self.epoch)
-
-    def _permutation_for_epoch(self, epoch: int) -> tuple[int, ...]:
-        r"""重建指定 epoch 的 permutation；完成态没有下一 epoch 顺序。"""
-
-        if epoch >= self.config.epochs:
+        if self.complete:
             return tuple()
+        cycle_index = self.minibatch_cursor // self.minibatches_per_cycle
+        return self._permutation_for_cycle(cycle_index)
+
+    def _permutation_for_cycle(self, cycle_index: int) -> tuple[int, ...]:
+        r"""由 ``(seed,cycle_index)`` 无状态重建一轮资产排列。"""
+
         if not self.config.shuffle_assets:
             return tuple(range(self.asset_count))
         generator = torch.Generator(device="cpu")
-        generator.manual_seed(self.config.seed + epoch * 1_000_003)
+        generator.manual_seed(self.config.seed + cycle_index * 1_000_003)
         return tuple(int(index) for index in torch.randperm(self.asset_count, generator=generator).tolist())
 
-    def _window_size(self, window_index: int) -> int:
-        r"""返回指定 window 的真实资产数，最后一窗可以不足 `max_resident_assets`。"""
-
-        start = window_index * self.max_resident_assets
-        return min(self.max_resident_assets, self.asset_count - start)
-
-    def _groups_in_window(self, window_size: int) -> int:
-        r"""把一个 window 切成真实 minibatch 组数，尾组保持较短长度。"""
-
-        if window_size < 1:
-            raise ValueError("resident window must contain at least one asset")
-        return math.ceil(window_size / self.config.assets_per_minibatch)
-
-    def _q_count(self) -> int:
-        r"""返回当前 q round 的真实每资产 q 数，不重复样本补齐尾块。"""
-
-        consumed = self.q_round * self.config.q_per_asset_per_minibatch
-        remaining = self.config.q_per_asset_per_epoch - consumed
-        return min(self.config.q_per_asset_per_minibatch, remaining)
-
     def next(self) -> ScheduledMinibatch:
-        r"""返回下一资产组并推进 window-major cursor。"""
+        r"""返回下一完整训练批，并把全局新数据游标推进一位。"""
 
         if self.complete:
-            raise StopIteration("all configured coverage epochs are complete")
-        permutation = self._epoch_permutation()
-        window_start = self.window_index * self.max_resident_assets
-        window = permutation[window_start : window_start + self._window_size(self.window_index)]
-        group_start = self.asset_group * self.config.assets_per_minibatch
-        group_stop = min(group_start + self.config.assets_per_minibatch, len(window))
+            raise StopIteration("all configured training minibatches are complete")
+        minibatch_index = self.minibatch_cursor  # 当前批的稳定全局身份
+        cycle_index, group_index = divmod(minibatch_index, self.minibatches_per_cycle)
+        permutation = self._permutation_for_cycle(cycle_index)  # 当前 catalog 轮次的资产排列
+        group_start = group_index * self.config.assets_per_minibatch  # 当前批在排列中的左边界
+        group_stop = group_start + self.config.assets_per_minibatch  # 训练批禁止隐式尾组
+        window_index = group_index // self.minibatches_per_window  # 当前批所属的 GPU 驻留窗口
+        window_group_start = window_index * self.minibatches_per_window
+        window_group_stop = min(window_group_start + self.minibatches_per_window, self.minibatches_per_cycle)
+        window_start = window_group_start * self.config.assets_per_minibatch
+        window_stop = window_group_stop * self.config.assets_per_minibatch
         result = ScheduledMinibatch(
-            epoch=self.epoch,
-            q_round=self.q_round,
-            asset_group=self.asset_group,
-            asset_indices=window[group_start:group_stop],
-            q_per_asset=self._q_count(),
-            resident_asset_indices=window,
-            window_index=self.window_index,
+            minibatch_index=minibatch_index,
+            q_block_index=cycle_index,
+            asset_group=group_index,
+            asset_indices=permutation[group_start:group_stop],
+            q_per_asset=self.config.q_per_asset_per_minibatch,
+            resident_asset_indices=permutation[window_start:window_stop],
+            window_index=window_index,
         )
-        self.asset_group += 1
-        if self.asset_group >= self._groups_in_window(len(window)):
-            self.asset_group = 0
-            self.q_round += 1
-            if self.q_round >= self.q_rounds_per_epoch:
-                self.q_round = 0
-                self.window_index += 1
-                if self.window_index >= self.windows_per_epoch:
-                    self.window_index = 0
-                    self.epoch += 1
+        self.minibatch_cursor += 1  # realization 后下一次读取下一批新资产/q
         return result
 
     def state_dict(self) -> dict[str, object]:
-        r"""返回 cursor、当前 permutation 与采样 seed 的可序列化状态。"""
+        r"""返回显式预算、当前游标、下一轮排列与采样 seed。"""
 
         return {
-            "epoch": self.epoch,
-            "window_index": self.window_index,
-            "q_round": self.q_round,
-            "asset_group": self.asset_group,
+            "minibatch_cursor": self.minibatch_cursor,
+            "num_minibatches": self.num_minibatches,
             "permutation": self.current_permutation,
             "seed": self.config.seed,
             "max_resident_assets": self.max_resident_assets,
         }
 
     def load_state_dict(self, state: OnlineSamplingState | dict[str, object]) -> None:
-        r"""恢复 cursor，并拒绝越出当前 config 预算的状态。"""
+        r"""恢复全局游标，并拒绝预算、seed、窗口或排列身份漂移。"""
 
         if isinstance(state, dict):
             parsed = sampling_state_from_dict(state)
-            raw_permutation = state.get("permutation")
-            if raw_permutation is not None:
-                if not isinstance(raw_permutation, (tuple, list)) or not all(
-                    isinstance(index, int) for index in raw_permutation
-                ):
-                    raise ValueError("sampling checkpoint permutation must be an integer sequence")
-                if tuple(raw_permutation) != self._permutation_for_epoch(parsed.epoch):
-                    raise ValueError("sampling checkpoint permutation does not match deterministic schedule")
+            if state.get("num_minibatches") != self.num_minibatches:
+                raise ValueError("sampling checkpoint num_minibatches does not match trainer config")
             if state.get("seed") != self.config.seed:
                 raise ValueError("sampling checkpoint seed does not match trainer config")
-            if state.get("max_resident_assets") not in {None, self.max_resident_assets}:
+            if state.get("max_resident_assets") != self.max_resident_assets:
                 raise ValueError("sampling checkpoint resident window cap does not match trainer config")
+            raw_permutation = state.get("permutation")
+            if not isinstance(raw_permutation, (tuple, list)):
+                raise ValueError("sampling checkpoint permutation must be an integer sequence")
+            expected_permutation = tuple()
+            if parsed.minibatch_cursor < self.num_minibatches:
+                cycle_index = parsed.minibatch_cursor // self.minibatches_per_cycle
+                expected_permutation = self._permutation_for_cycle(cycle_index)
+            if tuple(raw_permutation) != expected_permutation:
+                raise ValueError("sampling checkpoint permutation does not match deterministic schedule")
             state = parsed
-        if state.epoch < 0 or state.epoch > self.config.epochs:
-            raise ValueError("sampling state epoch lies outside configured coverage")
-        if state.epoch == self.config.epochs:
-            if state.q_round != 0 or state.asset_group != 0 or state.window_index != 0:
-                raise ValueError("completed sampling state must have zero inner cursors")
-        elif not (0 <= state.window_index < self.windows_per_epoch):
-            raise ValueError("sampling state window_index lies outside one epoch")
-        elif not (0 <= state.q_round < self.q_rounds_per_epoch):
-            raise ValueError("sampling state q_round lies outside one window")
-        elif not (0 <= state.asset_group < self._groups_in_window(self._window_size(state.window_index))):
-            raise ValueError("sampling state asset_group lies outside one q round of the current window")
-        self.epoch = int(state.epoch)
-        self.window_index = int(state.window_index)
-        self.q_round = int(state.q_round)
-        self.asset_group = int(state.asset_group)
+        if not 0 <= state.minibatch_cursor <= self.num_minibatches:
+            raise ValueError("sampling minibatch cursor lies outside configured budget")
+        self.minibatch_cursor = int(state.minibatch_cursor)
+
+
+class FixedAssetQSchedule:
+    r"""完整遍历每项评估资产的固定 q-bank，保留真实资产尾批与 q 尾块。
+
+    该日程只服务 validation、training-q-bank 和 final evaluation，不参与训练预算或 resume。
+    """
+
+    def __init__(
+        self,
+        asset_count: int,
+        *,
+        q_per_asset: int,
+        assets_per_minibatch: int,
+        q_per_asset_per_minibatch: int,
+        max_resident_assets: int | None = None,
+    ) -> None:
+        r"""保存固定评估 bank 的三个离散轴和流式游标。"""
+
+        counts = (asset_count, q_per_asset, assets_per_minibatch, q_per_asset_per_minibatch)
+        if min(counts) < 1:
+            raise ValueError("fixed evaluation schedule counts must be positive")
+        self.asset_count = int(asset_count)
+        self.q_per_asset = int(q_per_asset)
+        self.assets_per_minibatch = int(assets_per_minibatch)
+        self.q_per_asset_per_minibatch = int(q_per_asset_per_minibatch)
+        self.max_resident_assets = min(int(max_resident_assets or asset_count), self.asset_count)
+        if self.max_resident_assets < self.assets_per_minibatch:
+            raise ValueError("evaluation resident window must cover one asset minibatch")
+        self.q_blocks = math.ceil(self.q_per_asset / self.q_per_asset_per_minibatch)
+        self.minibatches_per_q_block = math.ceil(self.asset_count / self.assets_per_minibatch)
+        self.minibatches_per_window = max(1, self.max_resident_assets // self.assets_per_minibatch)
+        self.num_minibatches = self.minibatches_per_q_block * self.q_blocks
+        self.minibatch_cursor = 0
+
+    @property
+    def complete(self) -> bool:
+        r"""返回固定评估 q-bank 是否已经完整遍历。"""
+
+        return self.minibatch_cursor >= self.num_minibatches
+
+    def next(self) -> ScheduledMinibatch:
+        r"""按 resident-window → q-block → asset-group 顺序返回下一评估批。
+
+        一个 window 内先完成全部固定 q-bank，再切换设备资产，从而让 validation/final evaluation
+        保持真实尾块的同时复用已物化的 Warp BVH。
+        """
+
+        if self.complete:
+            raise StopIteration("fixed evaluation q-bank is complete")
+        minibatch_index = self.minibatch_cursor
+        remaining = minibatch_index  # 在 window-major 展开序列中的局部游标
+        window_index = 0
+        window_group_start = 0
+        while True:
+            groups_in_window = min(
+                self.minibatches_per_window,
+                self.minibatches_per_q_block - window_group_start,
+            )
+            minibatches_in_window = groups_in_window * self.q_blocks
+            if remaining < minibatches_in_window:
+                break
+            remaining -= minibatches_in_window
+            window_index += 1
+            window_group_start += groups_in_window
+        q_block_index, group_in_window = divmod(remaining, groups_in_window)
+        asset_group = window_group_start + group_in_window
+        group_start = asset_group * self.assets_per_minibatch
+        group_stop = min(group_start + self.assets_per_minibatch, self.asset_count)
+        window_group_stop = min(window_group_start + self.minibatches_per_window, self.minibatches_per_q_block)
+        window_start = window_group_start * self.assets_per_minibatch
+        window_stop = min(window_group_stop * self.assets_per_minibatch, self.asset_count)
+        q_consumed = q_block_index * self.q_per_asset_per_minibatch
+        result = ScheduledMinibatch(
+            minibatch_index=minibatch_index,
+            q_block_index=q_block_index,
+            asset_group=asset_group,
+            asset_indices=tuple(range(group_start, group_stop)),
+            q_per_asset=min(self.q_per_asset_per_minibatch, self.q_per_asset - q_consumed),
+            resident_asset_indices=tuple(range(window_start, window_stop)),
+            window_index=window_index,
+        )
+        self.minibatch_cursor += 1
+        return result
 
 
 def sampling_state_from_dict(payload: dict[str, object]) -> OnlineSamplingState:
-    r"""把 checkpoint 基础 mapping 重建为严格 schedule state。"""
+    r"""把 checkpoint 基础 mapping 重建为严格的全局 minibatch 游标。"""
 
-    epoch = payload.get("epoch")
-    q_round = payload.get("q_round")
-    asset_group = payload.get("asset_group")
-    window_index = payload.get("window_index", 0)
-    if not isinstance(epoch, int) or not isinstance(q_round, int) or not isinstance(asset_group, int):
-        raise ValueError("sampling checkpoint requires integer epoch/q_round/asset_group")
-    if not isinstance(window_index, int):
-        raise ValueError("sampling checkpoint window_index must be an integer")
-    return OnlineSamplingState(epoch, q_round, asset_group, window_index)
+    minibatch_cursor = payload.get("minibatch_cursor")
+    if not isinstance(minibatch_cursor, int):
+        raise ValueError("sampling checkpoint requires integer minibatch_cursor")
+    return OnlineSamplingState(minibatch_cursor=minibatch_cursor)
 
 
 __all__ = [
+    "FixedAssetQSchedule",
     "OnlineMinibatchSchedule",
     "OnlineSamplingCfg",
     "OnlineSamplingState",

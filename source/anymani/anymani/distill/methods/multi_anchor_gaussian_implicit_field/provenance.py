@@ -1,4 +1,4 @@
-r"""Expanded physical manifest 的 realization fingerprints 与 split-isolation gate。"""
+r"""多锚点 Gaussian Method 的 physical realization fingerprints 与 split-isolation gate。"""
 
 from __future__ import annotations
 

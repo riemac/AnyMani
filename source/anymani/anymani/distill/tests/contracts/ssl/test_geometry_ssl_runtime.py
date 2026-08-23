@@ -1,4 +1,4 @@
-r"""Geometry SSL runtime 的 q cursor、Q block 与 resident window 合同。"""
+r"""Geometry SSL runtime 的 q cursor、minibatch 与 resident window 合同。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field import evaluation as method_evaluation
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.augmentation import maybe_rewrite_batch
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import (
     OnlineGeometrySample,
@@ -16,6 +17,7 @@ from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import (
     split_online_geometry_sample,
 )
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import JointSignRewriteCfg
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.evaluation import update_evaluation_digest
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.state_measure import SobolJointSampler
 from anymani.distill.models.input_adapters.geometry import GeometryPaddingCfg, StaticGeometryEvidence
 from anymani.distill.representations.queries.spatial_sampling import SpatialQueryBatch
@@ -24,10 +26,7 @@ from anymani.distill.representations.targets.field_samples import (
     QueryStratum,
     SensitivityTargetBatch,
 )
-from anymani.distill.ssl.runtime import GeometrySSLRuntimeCfg, ResidentGeometryAssetWindow
-from anymani.distill.ssl.runtime import validation as validation_runtime
-from anymani.distill.ssl.runtime.sampling import OnlineMinibatchSchedule, OnlineSamplingCfg
-from anymani.distill.ssl.runtime.validation import _update_training_q_bank_digest
+from anymani.distill.ssl.runtime import ResidentGeometryAssetWindow
 
 pytestmark = pytest.mark.contract
 
@@ -149,17 +148,47 @@ def test_joint_sign_rewrite_keeps_density_and_flips_matching_kappa(monkeypatch: 
     )
 
 
-def test_trainer_modules_do_not_construct_sobol_or_read_method_representation() -> None:
-    """lifecycle 与 independent q-bank 必须走 method 封闭 sampler，不得直接读 representation。"""
+def test_reused_batch_draws_a_new_joint_sign_rewrite_for_each_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""同一 teacher batch 的相邻 mini-epoch 使用不同 forward index，并重新选择等价 JOINT 坐标。"""
 
-    from anymani.distill.ssl.runtime import lifecycle, validation
+    sample = _sample(torch.tensor([[0.25, -0.4]], dtype=torch.float64))
+    batch = pad_online_geometry_samples(
+        list(split_online_geometry_sample(sample)),
+        padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
+    )
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.zeros(*args))
+    first = maybe_rewrite_batch(batch, config=JointSignRewriteCfg(probability=0.20, seed_offset=0), step=0, seed=0)
+    second = maybe_rewrite_batch(batch, config=JointSignRewriteCfg(probability=0.20, seed_offset=0), step=1, seed=0)
 
-    forbidden = ("SobolJointSampler(", "method.representation.")
-    for module in (lifecycle, validation):
+    first_flipped = torch.where((first.q[0] / batch.q[0]) < 0)[0]
+    second_flipped = torch.where((second.q[0] / batch.q[0]) < 0)[0]
+    assert first_flipped.tolist() == [0]
+    assert second_flipped.tolist() == [1]
+
+
+def test_trainer_and_checkpoint_only_use_method_contract() -> None:
+    """Trainer/checkpoint 不得读取 concrete geometry model、batch、source、sampler 或 config。"""
+
+    from anymani.distill.ssl import checkpoint
+    from anymani.distill.ssl.runtime import lifecycle
+
+    forbidden = (
+        "GeometrySSLModel",
+        "PaddedOnlineGeometryBatch",
+        "SobolJointSampler",
+        "method.config",
+        "method.train_sources",
+        "method.require_model",
+    )
+    for module in (lifecycle, checkpoint):
         source = Path(inspect.getsourcefile(module) or "").read_text(encoding="utf-8")
         for token in forbidden:
             assert token not in source, f"{module.__name__} still contains {token}"
-    assert "make_independent_samplers" in Path(inspect.getsourcefile(validation) or "").read_text(encoding="utf-8")
+    lifecycle_source = Path(inspect.getsourcefile(lifecycle) or "").read_text(encoding="utf-8")
+    assert "method.open_session" in lifecycle_source
+    assert "method.evaluate_session" in lifecycle_source
 
 
 def test_q_block_split_matches_padding_of_individual_q_samples() -> None:
@@ -194,7 +223,7 @@ def test_validation_digest_covers_sigma_query_routing_and_valid_support() -> Non
 
     def digest_for(value) -> str:
         digest = hashlib.sha256()
-        _update_training_q_bank_digest(digest, value)
+        update_evaluation_digest(digest, value)
         return digest.hexdigest()
 
     baseline = digest_for(batch)
@@ -249,68 +278,14 @@ def test_resident_window_evicts_old_asset_and_enforces_cap() -> None:
     assert [event["event"] for event in final_events] == ["resident_window", "resident_window_release_all"]
 
 
-def test_runtime_config_freezes_declared_minibatch_axes() -> None:
-    """配置中的逻辑 batch 必须与 A_mb*Q_mb 一致，避免 silent reshape。"""
-
-    config = GeometrySSLRuntimeCfg(assets_per_minibatch=2, q_per_asset_per_minibatch=2)
-    assert config.max_resident_assets == 20
-    with pytest.raises(ValueError, match="resident"):
-        GeometrySSLRuntimeCfg(max_resident_assets=1, assets_per_minibatch=2)
-
-
-def test_epoch_scheduler_finishes_each_resident_window_before_switching() -> None:
-    """资产数超过 cap 时，同一 window 的全部 q coverage 应连续完成，避免反复重建 BVH。"""
-
-    schedule = OnlineMinibatchSchedule(
-        5,
-        OnlineSamplingCfg(
-            epochs=1,
-            q_per_asset_per_epoch=2,
-            assets_per_minibatch=2,
-            q_per_asset_per_minibatch=1,
-            shuffle_assets=False,
-            seed=7,
-        ),
-        max_resident_assets=4,
-    )
-    items = tuple(schedule.next() for _ in range(schedule.minibatches_per_epoch))
-    assert tuple(item.resident_asset_indices for item in items) == (
-        (0, 1, 2, 3),
-        (0, 1, 2, 3),
-        (0, 1, 2, 3),
-        (0, 1, 2, 3),
-        (4,),
-        (4,),
-    )
-
-
-def test_epoch_scheduler_preserves_a_smaller_tail_q_block() -> None:
-    """不可整除的 q coverage 必须保留真实尾块，不能拒绝配置或重复补齐样本。"""
-
-    schedule = OnlineMinibatchSchedule(
-        2,
-        OnlineSamplingCfg(
-            epochs=1,
-            q_per_asset_per_epoch=5,
-            assets_per_minibatch=2,
-            q_per_asset_per_minibatch=2,
-            shuffle_assets=False,
-            seed=11,
-        ),
-        max_resident_assets=2,
-    )
-    items = tuple(schedule.next() for _ in range(schedule.minibatches_per_epoch))
-    assert tuple(item.q_per_asset for item in items) == (2, 2, 1)
-
-
 def test_validation_ablation_marks_single_q_same_asset_shuffle_as_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """单 q 尾块没有合法同资产置换，应记录缺测而不是补样本或终止生命周期。"""
 
-    monkeypatch.setattr(validation_runtime, "geometry_ssl_ablation_forward", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(method_evaluation, "geometry_ssl_ablation_forward", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(
-        validation_runtime,
+        method_evaluation,
         "geometry_ssl_reconstruction_metrics_per_sample",
         lambda _prediction, _batch: {"density": [1.0], "kappa": [2.0], "derived_field": [3.0]},
     )
@@ -331,6 +306,6 @@ def test_validation_ablation_marks_single_q_same_asset_shuffle_as_missing(
     def model(*_args: object, **_kwargs: object) -> object:
         return object()
 
-    evidence = validation_runtime.fixed_validation_ablation_evidence(model, (batch,))
+    evidence = method_evaluation.fixed_evaluation_ablation_evidence(model, (batch,))
 
     assert evidence["records"][0]["metrics"]["same_asset_q_shuffle"] is None

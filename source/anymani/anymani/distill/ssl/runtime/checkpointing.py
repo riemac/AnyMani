@@ -1,7 +1,7 @@
 r"""Geometry SSL runtime 的 resume 科学合同与 checkpoint-selection lineage。
 
 底层 tensor payload 的原子读写由 ``ssl.checkpoint`` 拥有；本模块只定义 runtime 必须恢复的
-epoch/window/Sobol/RNG/initialization-baseline/historical-best 状态，并拒绝当前 CLI 与 checkpoint
+minibatch/Sobol/RNG/initialization-baseline/historical-best 状态，并拒绝当前 CLI 与 checkpoint
 之间的科学配置或 asset manifest 漂移。
 """
 
@@ -34,8 +34,8 @@ def require_resume_scientific_config(
     r"""拒绝当前 CLI 与 checkpoint 的任一 scientific config 漂移。"""
 
     schema = checkpoint_resolved.get("schema_version")
-    if schema != "4.0.0":
-        raise ValueError("resume checkpoint must contain schema 4 resolved configuration")
+    if schema != "5.0.0":
+        raise ValueError("resume checkpoint must contain schema 5 resolved configuration")
     expected = resume_scientific_config(checkpoint_resolved)
     actual = resume_scientific_config(current)
     if actual != expected:

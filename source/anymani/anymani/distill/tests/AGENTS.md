@@ -10,14 +10,14 @@ tests/
 │   ├── representations/     frame/unit、PoE、gauge、field/query、cache/provenance
 │   ├── models/              entity/joint/anchor shape、奇偶性、routing、retained keys
 │   ├── objectives/          JVP/selector、stop-gradient；五项公式在 method 测试中验收
-│   ├── ssl/                 façade、split、calibration、checkpoint、window-major
+│   ├── ssl/                 façade、split、预实验、minibatch/复用、checkpoint
 │   └── rl/                  alias、YAML、adapter、observer、masked PPO
 ├── integration/             synthetic / padded / real mother：encoder → loss → backward
 ├── performance/             RTX 5070 Ti retained encoder latency
 └── training_sanity/         真实 mother 固定 batch tiny-overfit
 ```
 
-| 路径 | 拥有 | 不拥有 |
+| 路径 | 验证对象 | 结论边界 |
 | --- | --- | --- |
 | `contracts/representations/` | 物理真值与 provenance | 网络学习能力 |
 | `contracts/models/` | 张量合同与 retained keys | teacher 生成 |
@@ -46,11 +46,11 @@ tests/
 
 ### 当前 SSL 合同
 
-配置测试必须看到五项、无 paired、validation sigma `4/16/64 mm`、`anchor bank=8`、无 `layout`。calibration artifact 缺 formula identity、sampling、code revision 时 fail-closed。integration 走 method objective，不复活 `GeometryFieldObjective`。
+配置测试锁定四角色根配置、唯一 `num_minibatches / mini_epochs` 预算接口、五项主损失、validation sigma `4/16/64 mm`、`anchor bank=8` 和当前 representation schema。预实验 artifact 核对 dataset/formula/method identity，并保存 code/worktree lineage 供对照；正式 preset 与预实验 preset 可以不同。Trainer/checkpoint 通过 Method 窄接口工作；integration 直接运行 method objective。
 
 ### Retained encoder 性能门槛
 
-RTX 5070 Ti、`B=4096`、单结构组、20 预热 + 50 CUDA Event，p95 ≤ 40 ms。从 GPU-resident `q` 与静态证据开始，覆盖 adapter、聚合、backbone、零/一阶 heads。禁止语义删减、缓存会 stale 的 activation、缩小已声明 shape。200 次 profile 是显式诊断。
+RTX 5070 Ti、`B=4096`、单结构组、20 预热 + 50 CUDA Event，p95 ≤ 40 ms。从 GPU-resident `q` 与静态证据开始，覆盖 adapter、聚合、backbone、零/一阶 heads。计时保持已声明语义和 shape，并对 learned activation 每次重算；200 次 profile 用于显式诊断。
 
 ### 失败信息
 

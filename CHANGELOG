@@ -1,3 +1,21 @@
+0.6.7 - 2026-08-23
+==================
+
+- Geometry SSL 删除 phase epoch 与每资产 epoch-q 配额，改由唯一 `num_minibatches / assets_per_minibatch / q_per_asset_per_minibatch` 接口直接声明新数据预算；首个 8192-asset preset 固定为 `128 × 64 × 8`。
+- 新增 `mini_epochs=5` 数据复用：每 4 个新 minibatch 只 realization 一次 q/query/teacher，再执行 5 次独立 forward/backward/update，每遍重新抽 joint-sign rewrite；预实验执行相同前向顺序但不更新参数。
+- 预实验 artifact 分别记录新数据量与复用后前向量，并允许正式实验引用不同 preset 后的产物辅助人工决定五项权重；程序不自动改权重。
+- 配置与 full checkpoint 升级为 schema 5，全局 minibatch cursor 取代 epoch/window/q-round cursor；固定 validation/final q-bank 使用独立评估日程，旧 schema 明确拒绝。
+- SSL 运行入口改为普通 `--phase / --num_minibatches / --mini_epochs / --seed / --experiment_name` flags；Hydra 只在内部组合 Python preset，shell 不再直接操作配置树路径。
+
+0.6.6 - 2026-08-21
+==================
+
+- Geometry SSL 根配置收为 `data / method / trainer / run`；Trainer 显式声明 calibration/pretrain epochs、validation 与 final evaluation，runtime 不再临时构造科研采样配置。
+- calibration 与正式训练共用完整 train partition 和同一单 epoch q/minibatch/增强语义；预实验只流式累计五项 additive statistics，不执行参数 backward、optimizer update 或自动权重 multiplier。
+- `MethodSplitSession` 封装 source、Sobol cursor、resident window、固定评估和具体 batch；通用 checkpoint 只保存 method/optimizer/trainer state，GeometrySSL namespace、frame/unit 与 retained loader 归 concrete Method。
+- validation 以 density、κ、derived-field 三项初始化归一化分数选择 best；冻结后在 evaluation unseen suites 上运行固定测度、六项 ablation 与 bootstrap，并显式报告空 official-zero-shot。
+- 删除 `distill/presets`、独立 `MultiAnchorEvaluation` 和 geometry-specific SSL validation/checkpoint 运行时；新增正式 fit CUDA double 与真实 generated-asset lifecycle smoke。
+
 0.6.5 - 2026-08-21
 ==================
 

@@ -5,13 +5,12 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+from anymani.distill.ssl.config_store import compose_pretrain_cfg
 from anymani.distill.ssl.experiment import EmbodimentPretrainCfg, resolved_config_dict
 from anymani.distill.ssl.runtime.checkpointing import (
     require_resume_scientific_config,
     restore_validation_selection_state,
 )
-from hydra import compose, initialize_config_module
-from omegaconf import OmegaConf
 
 pytestmark = pytest.mark.contract
 
@@ -33,9 +32,9 @@ def test_resume_allows_only_run_location_fields_to_change() -> None:
     require_resume_scientific_config(current, resolved_config_dict(checkpoint_config))
 
 
-@pytest.mark.parametrize("section", ["query", "coverage", "seed"])
-def test_resume_rejects_query_or_q_budget_drift(section: str) -> None:
-    r"""query 测度或每资产 q coverage 改变都不是同一训练轨迹。"""
+@pytest.mark.parametrize("section", ["query", "num_minibatches", "mini_epochs", "seed"])
+def test_resume_rejects_query_or_training_budget_drift(section: str) -> None:
+    r"""query 测度、新数据批数、复用次数或根 seed 改变都不是同一训练轨迹。"""
 
     checkpoint_config = _config()
     if section == "query":
@@ -49,14 +48,13 @@ def test_resume_rejects_query_or_q_budget_drift(section: str) -> None:
                 ),
             ),
         )
-    elif section == "coverage":
+    elif section == "num_minibatches":
         current = replace(
             checkpoint_config,
-            trainer=replace(
-                checkpoint_config.trainer,
-                sampling=replace(checkpoint_config.trainer.sampling, q_per_asset_per_epoch=128),
-            ),
+            trainer=replace(checkpoint_config.trainer, num_minibatches=64),
         )
+    elif section == "mini_epochs":
+        current = replace(checkpoint_config, trainer=replace(checkpoint_config.trainer, mini_epochs=3))
     else:
         current = replace(checkpoint_config, run=replace(checkpoint_config.run, seed=19))
 
@@ -101,12 +99,6 @@ def test_resume_rejects_best_score_without_selection_history() -> None:
 
 
 def _config() -> EmbodimentPretrainCfg:
-    """恢复 schema 4 canonical config，避免测试自己复制 concrete defaults。"""
+    """从 ConfigStore 恢复 schema 5 实验，避免测试自己复制 concrete defaults。"""
 
-    import anymani.distill.ssl.pretrain  # noqa: F401
-
-    with initialize_config_module(config_module="anymani.distill.presets.ssl", version_base="1.3"):
-        composed = compose(config_name="canonical_multi_anchor_gaussian")
-    config = OmegaConf.to_object(composed)
-    assert isinstance(config, EmbodimentPretrainCfg)
-    return config
+    return compose_pretrain_cfg()

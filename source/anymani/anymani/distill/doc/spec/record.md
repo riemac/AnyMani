@@ -8,7 +8,7 @@
 
 本轮用户明确的工作优先级是：第一，科研语义、物理对象、采样测度和 lifecycle；第二，项目中 `method -> representation / model / objectives` 的结构组织；第三，才是 resident window、日志、Hydra、registry、checkpoint 接线等 infra 工程。`source/anymani/anymani/distill/doc/spec/question.md` 作为旧重构遗留的工程问题清单读取，但不能反过来主导科研路线。
 
-本轮后半段是讨论和只读审计，没有实现 method、representation、model、objectives 或 trainer 的新行为。除本文外，不应根据本记录声称相关设计已落地或通过实验。
+2026-08-21 后续实现已完成本文所述结构收口：根配置改为四角色，Method session 封装 source/sampler/model-specific evaluation/checkpoint，Trainer 显式统筹 calibration/pretrain/validation/final evaluation。本文早期段落仍保留讨论形成过程；当前执行事实以本节更新、源码和 tests 为准。
 
 ## 1. 当前 Git 与资产配置事实
 
@@ -32,7 +32,7 @@ f1398417888e7c237cbb2583dcf8e9cd10bef7fee792b307c67dfa74fb6e0698
 742fbf7 refactor(ssl): own asset config in experiment facade
 ```
 
-该提交已经把先前两个重复提交折叠成一个。当前 `source/anymani/anymani/distill/ssl/experiments/multi_anchor_gaussion_implicit_field.py` 采用用户偏好的 IsaacLab 式装配顺序：先独立定义 `DATA_CFG = HandAssetCatalogCfg(...)`，再通过 `EXPERIMENT = EmbodimentPretrainCfg(data=DATA_CFG, ...)` 交给最高配置。`method / trainer / evaluation / run` 仍暂由既有 Hydra groups 注入，等待逐项审计。
+当前 `source/anymani/anymani/distill/ssl/experiments/multi_anchor_gaussion_implicit_field.py` 逐项声明 `DATA_CFG / METHOD_CFG / TRAINER_CFG / RUN_CFG`；Hydra 只从 ConfigStore 读取这一完整 Python 实验，不再组合 distill YAML groups。
 
 原 `distill/presets/ssl/data/hand_asset_catalog.yaml` 与该 data group 的 `__init__.py` 已删除；canonical Hydra root 改为从已含 `data` 的 Python experiment schema 开始组合。正式 `ssl.yaml` 已纳入上述提交，否则干净 checkout 会产生悬空配置。没有做 VERSION 或 CHANGELOG bump。
 
@@ -53,12 +53,11 @@ EXPERIMENT = EmbodimentPretrainCfg(
     data=DATA_CFG,
     method=METHOD_CFG,
     trainer=TRAINER_CFG,
-    evaluation=EVALUATION_CFG,
     run=RUN_CFG,
 )
 ```
 
-具体最终使用普通 frozen dataclass、IsaacLab `@configclass`、Python 模块还是保留少量 YAML，要等科研语义收束后决定。本轮已经明确不希望再次建立碎片化的二层资产 YAML。
+当前确定使用 frozen dataclass + 单一 Python experiment 主配置；后续只有复杂度实际上升时，才考虑迁移为一份完整 YAML，不恢复分片 presets。
 
 ### 1.2 正式数据集规模已改变旧训练预算前提
 
@@ -103,7 +102,7 @@ Research 仓库自身存在用户未提交改动，本轮没有修改这些笔�
 
 ## 3. Method 的当前边界与项目组织目标
 
-最高实验 façade 继续是 schema 3 `EmbodimentPretrainCfg`，公开组合 `data / method / trainer / evaluation / run`。用户认可把联系紧密的 representation、model 和 objectives 放入 concrete method，由 method 建立完整计算图，而不是让最高 façade 或 trainer 理解 Gaussian、owner、query、edge 或 JVP。
+最高实验 façade 是 schema 4 `EmbodimentPretrainCfg`，公开组合 `data / method / trainer / run`。representation、model、objectives、固定评估测度、ablation 与 retained artifact 均由 concrete method 建立和封装。
 
 本轮形成的目标边界是：
 
@@ -111,11 +110,10 @@ Research 仓库自身存在用户未提交改动，本轮没有修改这些笔�
 - `model` 定义 retained encoder、zero/first-order outputs 和 SSL-only density/sensitivity decoders；
 - `objectives` 定义 prediction 与 target 的比较、mask、reduction 和诊断；
 - `method` 组合三者，拥有 shared derived-field、Sobolev/JVP、joint-sign rewrite 等跨模块计算图语义，并执行兼容性检查；
-- `trainer` 只负责资产和样本预算、minibatch/accumulation、反向、optimizer、checkpoint 与调度，不应知道 Gaussian field、owner/query axis 或 edge sampling；
-- `evaluation` 负责 fixed bank、分层指标、checkpoint selection 和最终诊断；
+- `trainer` 负责 phase epochs、minibatch/accumulation、反向、optimizer、validation promotion、final-evaluation 编排与通用 checkpoint，不知道 Gaussian field、owner/query axis 或 edge sampling；
 - `run` 负责执行阶段、输出、resume 和 artifact lineage。
 
-当前代码还没有完全兑现该封装：`ssl/runtime/lifecycle.py` 直接访问 `method.representation`，直接构造 validation `GeometryRepresentation`，直接替换 Gaussian sigma config，直接读取 representation padding layout，并直接知道 `SobolJointSampler` 和 `PaddedOnlineGeometryBatch`。这是后续工程重构对象，但用户要求先冻结科研语义。
+当前 lifecycle 只通过 Method/session 窄接口访问 split 数量、opaque batch、五项 update、固定评估报告与 state/artifact；具体 GeometrySSL 模型、padding batch、sources、Sobol sampler、sigma 和 ablation 已移出 Trainer/checkpoint。
 
 用户认可未来在出现第二个真实 concrete method 后，再从共同外部行为中提取窄的 task-free robot pretrain method Protocol；当前不应提前建立万能 registry、`Any + MISSING` parser 或字段很多的抽象基类。
 
@@ -429,13 +427,13 @@ Method 继续拥有 lazy context：derived field、density q-JVP 和 joint-sign 
 
 当前五项 loss 的数值尺度和单位不同。Density error 无量纲；kappa error 基于 m/rad；field-sensitivity error 基于 `1/rad`。此前提出用固定 reference scale 先无量纲化，用户明确质疑：任意除以一个“一厢情愿”的参考值可能只是形式上消除量纲，不能代替科学调参。因此本轮没有锁定固定 kappa/g reference scale。
 
-当前实现使用 8 个 train minibatches，分别测 objective 对整个 encoder 的 gradient norm，以 density median 为 reference，将 multiplier clip 到 `[1e-2,1e3]`。问题包括：样本少、只有一个初始化、混合了公共网络与 term-specific heads、没有测梯度方向冲突、且 calibratable term 的 declared weight 基本退化成启停开关。
+历史自动梯度 multiplier 路线已放弃。当前 calibration 只在真实训练采样分布上流式记录五项 additive statistics 和逐 batch trace，由研究者依据 artifact 人工修改显式权重。
 
-### 9.2 当前倾向：静态梯度标定，不用动态多任务算法
+### 9.2 当前决定：前向预实验与人工权重选择
 
-当前推荐且用户原则上接受的是：正式训练前用固定 calibration evidence 测量各 objective 对共享几何网络的天然更新压力，生成静态 multiplier；正式预训练全程冻结，不使用动态 GradNorm。
+正式训练前先运行 `calibrate_objectives`：完整复用 train partition、每 epoch 的 q coverage、minibatch shape、query/sigma jitter、anchor 轮换与 joint-sign rewrite，只减少显式 epoch 数，并取消参数 backward 和 optimizer update。Artifact 记录五项真实量级，研究者人工选择正式权重。
 
-首轮不建议引入 GradNorm、MGDA、PCGrad 或 CAGrad：它们会动态改变五项物理目标的相对作用，增加 Sobolev 高阶导数下的计算/显存成本，使 objective attribution、checkpoint resume 和复现更复杂。应先记录五项 gradient norm 与两两 cosine similarity；若正式 pilot 证明存在持续严重冲突，再引入 targeted 对照，而不是预先堆叠多任务优化器。
+首轮不引入 GradNorm、MGDA、PCGrad、CAGrad、自动 multiplier、参数梯度范数或梯度余弦。若预实验或正式 pilot 暴露持续冲突，再单独设计对照。
 
 此前术语 `reader` 已向用户澄清为“训练专用解码器”，不再单独引入奇怪概念。模型可按人话分为：
 
@@ -443,7 +441,7 @@ Method 继续拥有 lazy context：derived field、density q-JVP 和 joint-sign 
 2. retained zero/first-order 输出头；
 3. SSL-only density decoder 与 sensitivity decoder，训练后删除。
 
-权重标定主要应观察第一类共享几何网络，因为五项 objective 在这里竞争对 retained representation 的塑造；zero/first heads 和两个训练专用解码器的梯度另行记录，检查某项是否只训练了自己的输出模块。精确参数集合尚未实现。
+当前预实验只回答“五项在真实训练采样下各自多大、分层误差在哪里”，不把一次初始化的参数梯度解释成自动权重。
 
 ### 9.3 同一 EmbodimentPretrain façade 下的 calibration phase
 
@@ -454,19 +452,19 @@ phase = calibrate_objectives
 phase = pretrain
 ```
 
-`calibrate_objectives` 与正式训练使用同一个 data/method/representation/model/objectives/trainer/evaluation/run 配置和同一资产数据集语义，不构造第二套资产 YAML 或新的 catalog 配置类。它不执行 optimizer update，输出带完整 provenance 的 calibration artifact 后结束。
+`calibrate_objectives` 与正式训练使用同一个 `data/method/trainer/run` 根配置和同一资产数据集语义，不构造第二套资产 YAML。`OnlineSamplingCfg` 只声明共同的单 epoch 采样轴；Trainer 分别声明 `calibration_epochs` 与 `pretrain_epochs`。
 
-`pretrain` 显式加载 calibration artifact，严格核对 dataset manifest hash、method/model/objective callable、sampling、代码 revision 和 term set，取得冻结 multiplier 后开始大规模训练。Artifact 至少应记录：schema、`ssl.yaml` hash、method config hash、objective callable identities、实际资产/q/anchor/query/sigma/edge evidence、model init seeds、raw losses、gradient norms、gradient cosine、跨 seed 统计、declared weights、最终 multipliers、Git commit/dirty 状态与 artifact hash。
+`pretrain` 显式加载 calibration artifact，核对 dataset hash、method/model/representation/augmentation、objective callable、共同 sampling、phase epochs、Git HEAD 与 dirty 内容指纹；只有 objective 权重、run phase 和 artifact 定位允许变化。Artifact 记录实际资产数、epoch、样本/minibatch 数、五项精确均值和 traces，不产生 multiplier。
 
-本轮选择 calibration 使用 3 个 model initialization seeds，以跨 seed 中位数降低一次随机初始化决定权重的风险。
+当前 calibration 使用 run seed 对应的一次初始化；多 seed 统计不是首轮执行合同。
 
-### 9.4 Calibration bank 规模存在最新未决修改
+### 9.4 Calibration 与 pretrain 的覆盖关系
 
-讨论中一度选择 `32 assets x 2 q x 3 initialization seeds`，并提出按 macro family、full/missing、DOF 分层。随后用户明确反对为 calibration 固定 32 assets x 2 q 或建立第二套资产配置，倾向直接使用正式训练相同的 `ssl.yaml`、相同采样语义，运行几小轮短 epoch，既测权重又提前暴露工程 bug。
+Calibration 与 pretrain 使用相同完整 train partition，以及相同的 `q_per_asset_per_epoch / assets_per_minibatch / q_per_asset_per_minibatch / shuffle / seed`。两阶段只允许显式 epoch 数和参数更新行为不同。
 
-因此 `32 x 2 x 3` 不能再写成已锁定实现。当前真正已锁定的只有 3 initialization seeds、同一 `EmbodimentPretrainCfg` 和独立 artifact。Calibration 遍历多少 assets、多少 q、多少短 epoch，是否完整扫 8192 train assets，仍需结合计算成本重新决定。
+当前 Python façade 显式写出 `calibration_epochs=1`、`pretrain_epochs=20` 和 `q_per_asset_per_epoch=256`，但这些仍是待预实验前确认的 8192-asset 脚手架预算，不是正式数值。
 
-还有一处必须在 compact 后优先澄清：若要测 gradient norm/cosine，必须调用 autograd backward 或 `autograd.grad`，只是**不执行 optimizer.step、不更新参数**。用户最新描述“只 forward rollout 和记录指标，不 backwards 更新网络参数”可能是指“不做参数更新”，也可能是希望完全不做反向；后者无法产生梯度标定。实施前必须把“反向计算梯度”和“optimizer 更新参数”明确区分。
+Sobolev/JVP 仍需要对物理输入 $q$ 的局部 autograd；calibration 不对模型参数执行 `backward()` 或 `autograd.grad`，参数 `.grad` 保持为空。
 
 ## 10. Method nested config 的当前目标形态
 
@@ -478,7 +476,6 @@ REPRESENTATION_CFG = GeometryRepresentationCfg(...)
 MODEL_CFG = GeometrySSLModelCfg(...)
 OBJECTIVES_CFG = MultiAnchorGaussianObjectivesCfg(...)
 JOINT_SIGN_REWRITE_CFG = JointSignRewriteCfg(...)
-CALIBRATION_CFG = ObjectiveCalibrationCfg(...)
 
 METHOD_CFG = MultiAnchorGaussianMethodCfg(
     state_measure=STATE_MEASURE_CFG,
@@ -486,13 +483,12 @@ METHOD_CFG = MultiAnchorGaussianMethodCfg(
     model=MODEL_CFG,
     objectives=OBJECTIVES_CFG,
     joint_sign_rewrite=JOINT_SIGN_REWRITE_CFG,
-    calibration=CALIBRATION_CFG,
 )
 ```
 
 `state_measure` 放在 method 而不是 Trainer，是因为 Trainer 只声明每资产需要多少 q 和何时更新；具体 `q ~ mu(q|asset)` 是 task-free method 的物理采样测度。首轮 concrete measure 仍是完整 limit Sobol。用户偏向该解耦方向，但精确类型尚未实现。
 
-`JointSignRewriteCfg` 是 multi-anchor Gaussian method-specific augmentation；anchor bank 数量/生成测度属于 representation/source；objective callable aggregate 属于 method objectives；training budget 和 optimizer 属于 Trainer。
+`JointSignRewriteCfg` 是 multi-anchor Gaussian method-specific augmentation；anchor bank 数量/生成测度属于 representation/source；objective callable aggregate 属于 method objectives；calibration/pretrain epochs、validation/final evaluation、training budget 和 optimizer 属于 Trainer。
 
 ### 10.1 Representation 内部组织
 
@@ -514,7 +510,7 @@ METHOD_CFG = MultiAnchorGaussianMethodCfg(
 
 另一个等价组织是 2 个 epoch、每 asset 每 epoch 16 q，使 8 套 anchor bank 在每个 epoch 中各出现一次；这会改变 epoch/validation 语义但不改变总 q 数。需要以后从 checkpoint cadence、anchor bank rotation 和研究报告习惯选择，而不是沿用旧 `20 epochs` 作为心理默认。
 
-正式 validation 资产也已扩展到 512 unseen-variant、512 unseen-mother；evaluation 另有 1024 + 1024，official zero-shot 为空。当前 `MultiAnchorEvaluationCfg` 和 lifecycle 只真正运行 validation，evaluation suites 尚未进入独立 frozen checkpoint evaluation。正式 pilot 前必须明确：validation 的固定 q/query/sigma bank 大小、每 suite 的资产等权、checkpoint selection cadence，以及 evaluation 是否在训练结束后独立运行。
+Validation 以 density、κ、derived-field 三项初始化归一化后等权，并对 suites 等权选择 best；Sobolev/chain 不参与选点。训练结束后加载冻结 best，独立运行 evaluation unseen-variant/unseen-mother 的固定测度、分层指标、六项 ablation 和 bootstrap；official-zero-shot 为空时显式报告空集。
 
 ## 12. `question.md` 中的工程债与科研边界
 
@@ -522,16 +518,16 @@ METHOD_CFG = MultiAnchorGaussianMethodCfg(
 
 ### S0，正式 pilot 前需要处理
 
-1. 当前正式 lifecycle 的 `_build_batch()` 只把当前 minibatch 的两个 asset 传给 `ResidentGeometryAssetWindow.ensure()`，可能导致 window 退化成每 minibatch 两资产切换，`max_resident_assets=20` 没有兑现。应让一个 resident window 完成其 q coverage，再切换窗口，同时不改变全资产 shuffle、每资产 Sobol cursor、尾组和 resume 语义。
-2. lifecycle 的 `states_by_id`、calibration cache、validation cache 可能持有已驱逐 `GeometryRepresentationState` 和 Warp mesh 强引用，导致 lease 释放后 GPU 资源仍不能回收。需要检查 window、exception、validation、calibration 的 finally teardown 和可回收性。
-3. 当前 contract/integration 没有覆盖正式 `MultiAnchorGaussianMethod.forward_objectives()` 的真实闭环。需要最小真实资产 smoke：manifest/source -> online q/query/Warp teacher -> 五项 objective -> update-wide reduction -> backward/clip/step -> checkpoint reload -> retained artifact 删除训练专用解码器。该 smoke 只证明执行闭环，不证明泛化。
-4. `PretrainRun.code_revision()` 只记 HEAD，dirty worktree 会造成运行代码与 checkpoint provenance 不一致。正式训练应优先在已提交工作树运行，并记录 commit、dirty 状态和 diff/untracked manifest hash。
+1. DONE：window-major schedule 和 Method session 让同一 resident window 完成 q coverage 后再切换。
+2. DONE：calibration/validation/final evaluation 流式消费 batch，各 session 在 `finally` 中释放 resident state。
+3. DONE：真实 generated-asset smoke 走通 calibration、update、validation、best reload、retained export 与 final evaluation。
+4. DONE：checkpoint/calibration 同时记录 HEAD、dirty 状态和 tracked diff/untracked 内容摘要；正式实验仍应在干净提交上运行。
 
 ### S1，科研结论前需要处理
 
-5. unseen-variant、unseen-mother 和 official-zero-shot 的 model evaluation 尚未完整接入；official-zero-shot 当前为空集也必须显式报告为空，不能隐式当作成功。
+5. DONE（执行路径）：冻结 best 后运行 evaluation suites；official-zero-shot 空集显式报告。
 6. diagnostics logger 尚未接入正式 lifecycle。需要记录五项 raw numerator/denominator、按 asset/owner/query stratum/sigma/distance shell/ancestor 分层的 error 与 valid rate、gradient norm、resident telemetry、q/query/teacher digest、validation 与 independent q-bank provenance。
-7. 当前 validation `_evaluate_validation()` 把所有 batch 的 component numerator/denominator 全局合并，可能让 owner 更多、DOF 更大或有效 query 更多的 morphology 主导 selection。它必须改成与已确认科研测度一致的 suite 内 asset/q 等权聚合；训练 reduction 与 selection metric 必须分开声明。
+7. DONE：Method 返回 morphology/bin/axis 分层统计，Trainer 只使用三项重建指标并对 suites 等权选点。
 8. 当前最近面 mask 只有 face validity、owner-shell、distance epsilon 和 triangle feature margin，没有 global second-nearest/medial-axis margin。首轮至少要报告按 owner/query stratum/distance shell 的 valid rate、mask 原因和 source stability，不能把 local feature margin 写成全局唯一性证明。
 
 ### S2，后续清理
@@ -546,26 +542,16 @@ METHOD_CFG = MultiAnchorGaussianMethodCfg(
 ### 高优先级
 
 - 8192 train assets 下的总 q budget、epoch 定义、每 asset coverage 和 validation cadence；
-- `calibrate_objectives` 是否使用完整正式 dataset 的短 rollout，还是只使用同一 manifest 语义下的内部有界采样；
-- gradient calibration 需要 backward/autograd 但不 optimizer update 的语义澄清；
-- 五项 loss 的静态梯度标定是否以共享几何网络为主，以及 declared weight 与 calibration multiplier 的组合规则；
-- 5 项 objective 的每 asset-q 等权 reduction 具体如何返回 numerator/denominator；
-- joint-first active/zero edge 采样的实现、balanced owner stratum 和 zero/active 分开 mask；
-- validation 固定 4/16/64 sigma、4 active + 4 zero edge bank 和分层指标；
-- 8 套 independent anchor bank 的 materialization、rotation、storage、q-block deterministic scheduling 和 `A^(0)` canonical validation/PPO binding；
 - 现有普通 MLP screw path 是否改成严格 even/odd typed architecture，还是首轮继续软 parity 并用 20% rewrite 训练。
+- diagnostics logger、resident telemetry 和最近 source 非光滑区域的正式分层证据。
 
 ### 中优先级
 
-- `GeometryRepresentationCfg` 是否拆出/移除 padding layout，并由 resolved dataset 结构上限和 model graph bucket fail-closed 推导；
-- `state_measure` 的 typed config 是否在 method 中拥有，Trainer 只拥有 q budget；
-- Callable `ObjectiveTermCfg` 的准确 dataclass、是否需要 term-specific typed subclasses、如何记录 callable provenance；
 - active edge 是否继续只从 shell 采样，以及 global source stability mask 是否首轮只报告不物化；
 - home surface 64 点的 remesh/seed/point-density 稳健性；
 - first_order_width 的 16/32/64 容量消融，首轮保持 64；
 - anchor workspace 5 cm mount-centered sphere 是否覆盖足够的 palm/finger spatial region，首轮不回到 enclosing box；
 - owner-adjacent 是否长期保持 one-hop graph-only，首轮不增加 cross-finger pure spatial query；
-- validation/evaluation official empty suite 的严格空集语义。
 
 ### 明确不属于本轮
 
@@ -577,15 +563,19 @@ METHOD_CFG = MultiAnchorGaussianMethodCfg(
 - PPO runtime mesh distance、closest point、完整 Jacobian 或学习 latent history cache；
 - 在没有证据的情况下声称 cross-topology、cross-DOF、official zero-shot 或 policy generalization 成立。
 
-## 14. Compact 后建议继续顺序
+## 14. 下一步实验顺序
 
-1. 先确认本记录中的“已确认合意”与“未决项”没有把讨论建议误写成批准实现，尤其是严格 even/odd 前端、calibration bank 遍历范围、padding 自动推导和训练总预算。
-2. 补一段当前 Research canonical 文档的 Jacobian-column 解释，保留早期手写笔记的正确推导，但由 `Research/总体/ssl/当前设计/` 作为科研真源；本记录不自动修改 Research。
-3. 先确定 `run.phase` 和同一 `EmbodimentPretrainCfg` 的 calibration/pretrain 语义，再设计 artifact provenance；不创建第二个 root façade。
-4. 再把 `method` 配置收束成 `STATE_MEASURE_CFG`、`REPRESENTATION_CFG`、`MODEL_CFG`、`OBJECTIVES_CFG`、`JOINT_SIGN_REWRITE_CFG`、`CALIBRATION_CFG` 的 IsaacLab 式装配顺序。
-5. 在实现前先写最小科研合同：Jacobian finite difference、column/row sampled edge provenance、joint-first active/zero sampling、20% rewrite target transform、anchor bank rotation、sigma validation grid、per asset-q reduction。
-6. 最后才处理 resident window、active method smoke、logger、dirty provenance 和 evaluation runtime 等 infra 债务。
+1. 确认 8192-asset calibration/pretrain 的 epoch 与每资产 q 预算。
+2. 运行 `calibrate_objectives`，检查五项均值、trace 和已有分层指标，人工确定 `OBJECTIVES_CFG` 权重。
+3. 用 CLI override 启动正式 pretrain；validation 只选 best，冻结后 evaluation 只报告 unseen suites。
+4. 根据预实验暴露的问题再处理 logger、source stability 或模型结构，不在实验前继续泛化框架。
 
 ## 15. 本轮修改边界
 
-本次写入 compact 记录只编辑已存在的 `source/anymani/anymani/distill/doc/spec/record.md`。本次写入操作没有创建新目录、没有修改 Research vault、没有修改 method/model/representation/objectives/trainer 源码、没有 bump VERSION、没有提交 commit，也没有创建、移动或删除 tag。用户当前从 fork 状态继续工作，后续 Git 操作必须尊重现有 dirty worktree，不能擅自创建 tag 或回滚用户改动。
+原始讨论记录只用于恢复合意；2026-08-21 后续实现已修改 method/trainer/checkpoint/tests，并按用户要求执行 patch bump。Research vault 未由本次实现改写；现有无关 dirty worktree 保持不动，未创建或移动 tag。
+
+## 16. 2026-08-23 显式 minibatch 预算决议
+
+此前按 phase epoch 和每资产 q 配额反推训练长度的方案不再是当前合同。训练配置只保留 `num_minibatches`、`assets_per_minibatch`、`q_per_asset_per_minibatch` 与 `mini_epochs`：前三者决定新生成的数据量，`mini_epochs` 决定同一批 q/query/teacher realization 的循环利用次数。预实验与正式实验复用同一配置类型和运行管线，但每次运行允许使用不同 preset；预实验产物用于人工判断五项 objective 权重，不自动改权重，也不要求正式 preset 与预实验 preset 完全相同。
+
+首个 8192-asset preset 为 `128 × 64 × 8 × 5`。它生成 65536 个不同 `(asset,q)` 样本；每 4 个新 minibatch 组成一个梯度累积组，同一组循环使用 5 次，每次重新抽 joint-sign rewrite。由此执行 640 次 minibatch forward 和 160 次 optimizer update。checkpoint 只在一组完成全部五次复用后保存，恢复点不需要持久化临时 teacher batch。

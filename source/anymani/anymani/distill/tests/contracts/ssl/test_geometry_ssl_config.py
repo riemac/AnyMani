@@ -1,4 +1,4 @@
-"""Schema 4 Hydra composition、五项 objective 与 physical realization fingerprint 合同。"""
+"""Schema 5 Hydra composition、显式 minibatch 预算与 physical realization fingerprint 合同。"""
 
 from __future__ import annotations
 
@@ -6,41 +6,34 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.provenance import (
+    anchor_realization_record,
+    home_surface_realization_record,
+    validate_asset_manifest_isolation,
+)
 from anymani.distill.models.geometry_ssl import GeometrySSLModel
 from anymani.distill.representations.sources.collision_geometry import (
     AnchorSamples,
     HomeSurfaceSamples,
     OwnerGeometryCache,
 )
+from anymani.distill.ssl.config_store import compose_pretrain_cfg
 from anymani.distill.ssl.data import HandAssetCatalogCfg
 from anymani.distill.ssl.experiment import EmbodimentPretrain, EmbodimentPretrainCfg, resolved_config_dict
-from anymani.distill.ssl.runtime.assets import (
-    anchor_realization_record,
-    home_surface_realization_record,
-    validate_asset_manifest_isolation,
-)
+from anymani.distill.ssl.pretrain import _build_parser, _config_overrides
 from anymani.distill.ssl.runtime.pretrainer import EmbodimentPretrainTrainerCfg
-from anymani.distill.ssl.runtime.sampling import OnlineMinibatchSchedule, OnlineSamplingCfg
-from hydra import compose, initialize_config_module
-from omegaconf import OmegaConf
 
 pytestmark = pytest.mark.contract
 
 
 def _compose() -> EmbodimentPretrainCfg:
-    """恢复正式 canonical YAML，不调用训练副作用。"""
+    """从 ConfigStore 恢复正式 Python 实验，不调用训练副作用。"""
 
-    import anymani.distill.ssl.pretrain  # noqa: F401  # import only registers Hydra schemas
-
-    with initialize_config_module(config_module="anymani.distill.presets.ssl", version_base="1.3"):
-        composed = compose(config_name="canonical_multi_anchor_gaussian")
-    resolved = OmegaConf.to_object(composed)
-    assert isinstance(resolved, EmbodimentPretrainCfg)
-    return resolved
+    return compose_pretrain_cfg()
 
 
 def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
-    """根五 role 与五项 objective term 必须保持 concrete dataclass 类型。"""
+    """根四 role、Trainer 阶段协议与五项 objective 必须保持 concrete dataclass 类型。"""
 
     config = _compose()
     config.validate_composed()
@@ -51,6 +44,12 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
     assert config.data.expected_sha256 == "f1398417888e7c237cbb2583dcf8e9cd10bef7fee792b307c67dfa74fb6e0698"
     assert type(config.method).__name__ == "MultiAnchorGaussianMethodCfg"
     assert type(config.trainer).__name__ == "EmbodimentPretrainTrainerCfg"
+    assert not hasattr(config, "evaluation")
+    assert config.trainer.num_minibatches == 128
+    assert config.trainer.mini_epochs == 5
+    assert config.trainer.sampling.assets_per_minibatch == 64
+    assert config.trainer.sampling.q_per_asset_per_minibatch == 8
+    assert config.trainer.validation.selection_metrics == ("density", "kappa", "derived_field")
     assert type(config.method.representation).__name__ == "GeometryRepresentationCfg"
     assert type(config.method.model).__name__ == "GeometrySSLModelCfg"
     assert set(config.method.objectives.enabled()) == {
@@ -70,17 +69,41 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
 def test_hydra_cli_override_changes_local_cfg_without_central_parser() -> None:
     """Hydra override 应直接改变局部 optimizer cfg，并保留 concrete root。"""
 
-    import anymani.distill.ssl.pretrain  # noqa: F401
-
-    with initialize_config_module(config_module="anymani.distill.presets.ssl", version_base="1.3"):
-        composed = compose(
-            config_name="canonical_multi_anchor_gaussian",
-            overrides=["trainer.optimizer.learning_rate=0.0007"],
-        )
-    config = OmegaConf.to_object(composed)
-    assert isinstance(config, EmbodimentPretrainCfg)
+    config = compose_pretrain_cfg(["trainer.optimizer.learning_rate=0.0007"])
     assert config.trainer.optimizer.learning_rate == pytest.approx(7.0e-4)
-    assert resolved_config_dict(config)["schema_version"] == "4.0.0"
+    assert resolved_config_dict(config)["schema_version"] == "5.0.0"
+
+
+def test_flat_cli_flags_compose_one_run_without_exposing_config_paths() -> None:
+    r"""普通 ``--flag value`` 入口应完整装配预实验预算，并让统一 seed 覆盖两个随机域。"""
+
+    args = _build_parser().parse_args(
+        (
+            "--phase",
+            "calibrate_objectives",
+            "--num_minibatches",
+            "16",
+            "--assets_per_minibatch",
+            "64",
+            "--q_per_asset_per_minibatch",
+            "8",
+            "--mini_epochs",
+            "5",
+            "--seed",
+            "42",
+            "--experiment_name",
+            "objective_probe_seed42",
+        )
+    )
+    config = compose_pretrain_cfg(_config_overrides(args))
+
+    assert config.run.phase == "calibrate_objectives"
+    assert config.run.experiment_name == "objective_probe_seed42"
+    assert config.run.seed == config.trainer.sampling.seed == 42
+    assert config.trainer.num_minibatches == 16
+    assert config.trainer.sampling.assets_per_minibatch == 64
+    assert config.trainer.sampling.q_per_asset_per_minibatch == 8
+    assert config.trainer.mini_epochs == 5
 
 
 def test_experiment_constructor_has_no_filesystem_or_cuda_side_effect(tmp_path) -> None:
@@ -89,17 +112,17 @@ def test_experiment_constructor_has_no_filesystem_or_cuda_side_effect(tmp_path) 
     output_dir = tmp_path / "not-created-until-run"
     experiment = EmbodimentPretrain(_compose(), output_dir=output_dir)
 
-    assert experiment.config.schema_version == "4.0.0"
+    assert experiment.config.schema_version == "5.0.0"
     assert experiment.output_dir == output_dir
     assert not output_dir.exists()
 
 
 def test_schema_one_and_two_are_fail_closed() -> None:
-    """旧配置不通过 alias 或 parser 猜测进入 schema 4。"""
+    """旧配置不通过 alias 或 parser 猜测进入 schema 5。"""
 
     config = _compose()
     for version in ("1.0.0", "2.0.0"):
-        with pytest.raises(ValueError, match="schema must be exactly 4.0.0"):
+        with pytest.raises(ValueError, match="schema must be exactly 5.0.0"):
             replace(config, schema_version=version).validate_composed()
 
 
@@ -120,26 +143,15 @@ def test_model_does_not_freeze_target_sigma_sample_count() -> None:
     assert model.density_decoder.output.out_features == 1
 
 
-def test_canonical_45_asset_budget_reports_actual_tail_group_and_updates() -> None:
-    """45 项 train partition 的尾组保留真实长度，并给出 proposal 中的预算锚点。"""
+def test_trainer_has_one_shared_minibatch_budget_interface() -> None:
+    """预实验与正式实验复用同一配置类型，不出现 phase-specific 预算字段。"""
 
-    sampling = OnlineSamplingCfg(
-        epochs=20,
-        q_per_asset_per_epoch=256,
-        assets_per_minibatch=2,
-        q_per_asset_per_minibatch=2,
-        seed=20260813,
-    )
-    schedule = OnlineMinibatchSchedule(45, sampling)
-    assert schedule.minibatches_per_epoch == 2944
-    assert schedule.minibatches_per_epoch * sampling.epochs == 58880
-    assert 45 * sampling.q_per_asset_per_epoch * sampling.epochs == 230400
-    assert 2944 // 4 == 736
-    assert pytest.approx(15.652173913043478) == 230400 / 14720
-    for _ in range(schedule.minibatches_per_epoch - 1):
-        schedule.next()
-    tail = schedule.next()
-    assert len(tail.asset_indices) == 1
+    trainer = _compose().trainer
+    assert trainer.num_minibatches == 128
+    assert trainer.mini_epochs == 5
+    assert not hasattr(trainer, "calibration_epochs")
+    assert not hasattr(trainer, "pretrain_epochs")
+    assert not hasattr(trainer.sampling, "q_per_asset_per_epoch")
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda:not-an-index"])
@@ -172,14 +184,14 @@ def test_validation_selection_weights_named_suites_equally() -> None:
     """
 
     config = _compose()
-    evaluation = config.evaluation.runtime_type(config.evaluation)
-    baseline = evaluation.selection_baseline(
+    trainer = config.trainer.runtime_type(config.trainer)
+    baseline = trainer.selection_baseline(
         {
             "unseen_variant_set": {"density": 1.0, "kappa": 1.0, "derived_field": 1.0},
             "unseen_mother": {"density": 2.0, "kappa": 2.0, "derived_field": 2.0},
         }
     )
-    score = evaluation.normalized_score(
+    score = trainer.normalized_validation_score(
         {
             "unseen_variant_set": {"density": 0.5, "kappa": 0.5, "derived_field": 0.5},
             "unseen_mother": {"density": 2.0, "kappa": 2.0, "derived_field": 2.0},
