@@ -230,10 +230,11 @@ class FixedAssetQSchedule:
         return self.minibatch_cursor >= self.num_minibatches
 
     def next(self) -> ScheduledMinibatch:
-        r"""按 resident-window → q-block → asset-group 顺序返回下一评估批。
+        r"""按 resident-window → asset-group → q-block 顺序返回下一评估批。
 
-        一个 window 内先完成全部固定 q-bank，再切换设备资产，从而让 validation/final evaluation
-        保持真实尾块的同时复用已物化的 Warp BVH。
+        同一资产组先连续完成全部固定 q-bank，再切换设备资产。该顺序不改变每资产 Sobol cursor、
+        q 数或统计测度，却让真实 8-asset device subwindow 可复用 CPU source 与 Warp BVH，避免每个
+        q-block 都重新物化同一 owner geometry。
         """
 
         if self.complete:
@@ -253,7 +254,7 @@ class FixedAssetQSchedule:
             remaining -= minibatches_in_window
             window_index += 1
             window_group_start += groups_in_window
-        q_block_index, group_in_window = divmod(remaining, groups_in_window)
+        group_in_window, q_block_index = divmod(remaining, self.q_blocks)
         asset_group = window_group_start + group_in_window
         group_start = asset_group * self.assets_per_minibatch
         group_stop = min(group_start + self.assets_per_minibatch, self.asset_count)

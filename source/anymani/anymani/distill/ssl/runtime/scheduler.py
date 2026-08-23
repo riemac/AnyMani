@@ -24,13 +24,15 @@ class ResidentGeometryAssetWindow:
 
     def __init__(
         self,
-        runtimes: tuple[GeometrySource, ...] | list[GeometrySource],
+        runtimes: tuple[GeometrySource, ...] | list[GeometrySource] | object,
         *,
         device: str,
         dtype,
         max_resident_assets: int,
         loader: Callable[..., GeometryRepresentationState],
         releaser: Callable[[GeometryRepresentationState], bool] | None = None,
+        catalog_ids: tuple[str, ...] | None = None,
+        source_provider: object | None = None,
     ) -> None:
         if not runtimes:
             raise ValueError("resident window requires a non-empty CPU catalog")
@@ -38,7 +40,15 @@ class ResidentGeometryAssetWindow:
             raise ValueError("max_resident_assets must be positive")
         if max_resident_assets > len(runtimes):
             max_resident_assets = len(runtimes)
-        self.catalog = {runtime.asset_id: runtime for runtime in runtimes}
+        self.source_provider = source_provider
+        if catalog_ids is not None:
+            if len(set(catalog_ids)) != len(catalog_ids):
+                raise ValueError("CPU catalog asset IDs must be unique")
+            if len(catalog_ids) != len(runtimes):
+                raise ValueError("lazy source catalog IDs must match the source provider length")
+            self.catalog = {asset_id: None for asset_id in catalog_ids}
+        else:
+            self.catalog = {runtime.asset_id: runtime for runtime in runtimes}
         if len(self.catalog) != len(runtimes):
             raise ValueError("CPU catalog asset IDs must be unique")
         self.device = device
@@ -77,10 +87,21 @@ class ResidentGeometryAssetWindow:
                 released_asset_ids.append(asset_id)
         release_seconds = perf_counter() - release_started  # lease 释放和 registry eviction 时间
         load_started = perf_counter()  # load 子阶段起点
-        for asset_id in requested:
+        if self.source_provider is not None:
+            prefetch = getattr(self.source_provider, "prefetch", None)
+            if prefetch is not None:
+                prefetch(requested)
+        print(f"[Source] Device window load start: assets={len(requested)}", flush=True)
+        for index, asset_id in enumerate(requested, start=1):
             if asset_id not in self._resident:
-                self._resident[asset_id] = self.loader(self.catalog[asset_id], device=self.device, dtype=self.dtype)
+                self._resident[asset_id] = self.loader(
+                    self._source_for_asset(asset_id),
+                    device=self.device,
+                    dtype=self.dtype,
+                )
                 loaded_asset_ids.append(asset_id)
+                if index % 8 == 0 or index == len(requested):
+                    print(f"[Source] Device window progress: {index}/{len(requested)}", flush=True)
         if len(self._resident) > self.max_resident_assets:
             raise RuntimeError("resident asset window exceeded configured cap")
         load_seconds = perf_counter() - load_started  # CPU->GPU evidence/Warp BVH 构造时间
@@ -197,6 +218,19 @@ class ResidentGeometryAssetWindow:
 
         state = self._resident.pop(asset_id)
         self.releaser(state)
+
+    def _source_for_asset(self, asset_id: str) -> GeometrySource:
+        r"""按 stable ID 取得 CPU source；lazy provider 只在此处触发资产加载。"""
+
+        if self.source_provider is not None:
+            getter = getattr(self.source_provider, "get", None)
+            if getter is None:
+                raise TypeError("source_provider must expose get(asset_id)")
+            return getter(asset_id)
+        source = self.catalog[asset_id]
+        if source is None:
+            raise RuntimeError(f"CPU source provider is missing for eager asset {asset_id!r}")
+        return source
 
     def _resident_owner_bvh_count(self) -> int:
         """返回当前 window 中真实上传的 owner-local BVH 数。"""

@@ -63,6 +63,19 @@ class _Method:
         return _Step(batch)
 
 
+class _FailAfterOneForward(_Method):
+    r"""在第二个 group 模拟进程内异常，用于验证最近完整 partial 边界。"""
+
+    def __init__(self) -> None:
+        self.forward_count = 0
+
+    def forward_objectives(self, batch, *, step: int, mode: str = "eval"):
+        self.forward_count += 1
+        if self.forward_count > 1:
+            raise RuntimeError("synthetic interruption")
+        return super().forward_objectives(batch, step=step, mode=mode)
+
+
 def _resolved(*, num_minibatches: int = 2, mini_epochs: int = 2) -> dict[str, object]:
     r"""构造只含 artifact 记录所需字段的最小 schema-5 配置。"""
 
@@ -116,6 +129,7 @@ def test_calibration_records_new_data_and_reused_forward_counts(tmp_path: Path) 
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
 
     assert payload["schema_version"] == "5.0.0"
+    assert payload["status"] == "complete"
     assert payload["execution"]["minibatch_count"] == 2
     assert payload["execution"]["forward_count"] == 4
     assert payload["execution"]["new_sample_count"] == 2
@@ -124,6 +138,35 @@ def test_calibration_records_new_data_and_reused_forward_counts(tmp_path: Path) 
     assert payload["term_traces"]["density"] == pytest.approx([0.4, 0.6, 0.4, 0.6])
     assert len(digest) == 64
     assert _require_calibration_identity(path, method=method, manifest_hash="abc") == digest
+    assert not (tmp_path / "loss_calibration.partial.yaml").exists()
+
+
+def test_calibration_interruption_keeps_only_the_last_complete_group(tmp_path: Path) -> None:
+    r"""第二组 forward 失败时，partial 只能包含第一组已完整结束的充分统计。"""
+
+    method = _FailAfterOneForward()
+    batch = {"density": 0.4, "kappa": 0.2, "derived_field": 0.1, "sobolev": 0.3, "chain": 0.5}
+    session = _Session((batch, batch))
+    output = tmp_path / "loss_calibration.yaml"
+
+    with pytest.raises(RuntimeError, match="synthetic interruption"):
+        _write_calibration_artifact(
+            method,
+            session,
+            _schedule(session),
+            output,
+            mini_epochs=1,
+            gradient_accumulation_steps=1,
+            manifest_hash="abc",
+            resolved_config=_resolved(mini_epochs=1),
+        )
+
+    partial = yaml.safe_load((tmp_path / "loss_calibration.partial.yaml").read_text(encoding="utf-8"))
+    assert partial["status"] == "in_progress"
+    assert partial["execution"]["minibatch_count"] == 1
+    assert partial["execution"]["forward_count"] == 1
+    assert partial["term_means"]["density"] == pytest.approx(0.4)
+    assert not output.exists()  # 未完成 run 不得发布可供正式训练引用的最终 artifact
 
 
 def test_calibration_reference_allows_preset_and_weight_changes_but_rejects_formula_drift(tmp_path: Path) -> None:

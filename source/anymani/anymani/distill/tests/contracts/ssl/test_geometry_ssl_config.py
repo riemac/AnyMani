@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -19,6 +21,7 @@ from anymani.distill.representations.sources.collision_geometry import (
 )
 from anymani.distill.ssl.config_store import compose_pretrain_cfg
 from anymani.distill.ssl.data import HandAssetCatalogCfg
+from anymani.distill.ssl.data.hand_assets import _prune_catalog_cache
 from anymani.distill.ssl.experiment import EmbodimentPretrain, EmbodimentPretrainCfg, resolved_config_dict
 from anymani.distill.ssl.pretrain import _build_parser, _config_overrides
 from anymani.distill.ssl.runtime.pretrainer import EmbodimentPretrainTrainerCfg
@@ -174,6 +177,34 @@ def test_hand_catalog_rejects_missing_manifest_without_io() -> None:
 
     with pytest.raises(ValueError, match="requires one dataset manifest"):
         HandAssetCatalogCfg()
+
+
+def test_catalog_cache_prunes_old_indexes_and_only_stale_temporary_files(tmp_path: Path) -> None:
+    r"""slim catalog 可跨进程保留，但完整索引总量和中断临时文件必须有界。"""
+
+    root = tmp_path / "asset_catalog"
+    root.mkdir()
+    oldest = root / "oldest.strict.pkl"
+    middle = root / "middle.strict.pkl"
+    current = root / "current.strict.pkl"
+    for path in (oldest, middle, current):
+        path.write_bytes(b"12345678")  # 每项 8 B，24 B 总量超过测试预算 16 B
+    os.utime(oldest, ns=(1, 1))
+    os.utime(middle, ns=(2, 2))
+    os.utime(current, ns=(3, 3))
+    stale_temporary = root / ".orphan.strict.pkl.stale"
+    fresh_temporary = root / ".active.strict.pkl.fresh"
+    stale_temporary.write_bytes(b"partial")
+    fresh_temporary.write_bytes(b"partial")
+    os.utime(stale_temporary, (1.0, 1.0))
+    os.utime(fresh_temporary, (90_000.0, 90_000.0))
+
+    _prune_catalog_cache(root, keep=current, max_bytes=16, now=100_000.0)
+
+    assert not oldest.exists()  # 最旧完整索引先驱逐，使完整 pickle 总量回到 16 B
+    assert middle.exists() and current.exists()  # 当前项受保护，另一项仍在预算内
+    assert not stale_temporary.exists()  # 超过 24 h 的中断写入可安全回收
+    assert fresh_temporary.exists()  # 仍可能属于并行进程的临时文件不得删除
 
 
 def test_validation_selection_weights_named_suites_equally() -> None:

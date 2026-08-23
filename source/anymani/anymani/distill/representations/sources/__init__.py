@@ -13,6 +13,7 @@ source 的最小输入。它们可能属于下游 policy observation，但不能
 泄漏进 SSL partial input。
 """
 
+from .cache import GeometrySourceArena, geometry_source_array_nbytes
 from .collision_geometry import (
     AnchorSamples,
     GeometryIdentity,
@@ -40,6 +41,7 @@ __all__ = [
     "AnchorSamples",
     "EmbodimentGeometrySpec",
     "DeviceGeometrySource",
+    "GeometrySourceArena",
     "GeometryIdentity",
     "GeometrySource",
     "GeometrySourceCfg",
@@ -49,6 +51,7 @@ __all__ = [
     "WarpOwnerGeometryCache",
     "forward_owner_transforms",
     "geometry_identity",
+    "geometry_source_array_nbytes",
     "lower_hand_geometry_semantics",
     "materialize_owner_geometry_cache",
     "materialize_warp_owner_geometry_cache",

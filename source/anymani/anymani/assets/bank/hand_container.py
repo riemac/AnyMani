@@ -34,11 +34,10 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, TypeAlias
 
-import yaml
-
 from ..asset_schema_geometry import HandGeometrySemanticsCfg
 from .geometry_semantics import HandAssetSourceKind, resolve_hand_geometry_semantics
 from .path_utils import resolve_container_entry_path
+from .yaml_utils import safe_load
 
 UrdfRgba = tuple[float, float, float, float]
 """URDF `<color rgba="r g b a"/>` 的四通道颜色表示，通道通常在 $[0,1]$。"""
@@ -199,10 +198,14 @@ class HandContainer:
         )  # 在解析 mesh/geometry 前 fail-fast，避免无效 left bundle进入下游容器
 
         # 延迟导入，避免 `urdf_utils` 与本模块的类型定义形成 import-time 循环。
-        from .urdf_utils import parse_urdf_mesh_refs, parse_urdf_visual_rgba_by_name
+        from .urdf_utils import parse_urdf_metadata
 
-        mesh_refs = parse_urdf_mesh_refs(urdf_path, require_existing=validate_mesh_relpaths)
-        visual_rgba_by_name = parse_urdf_visual_rgba_by_name(urdf_path) if parse_visual_rgba else {}
+        mesh_refs, parsed_visual_rgba = parse_urdf_metadata(
+            urdf_path,
+            require_existing=validate_mesh_relpaths,
+            parse_visual_rgba=parse_visual_rgba,
+        )
+        visual_rgba_by_name = parsed_visual_rgba if parse_visual_rgba else {}
         asset_id = str(cfg.asset_id or sidecar.get("id") or urdf_path.parent.name)
         geometry_semantics = (
             resolve_hand_geometry_semantics(
@@ -325,7 +328,7 @@ def _load_sidecar(sidecar_path: Path, *, require_sidecar: bool) -> dict[str, Any
         if require_sidecar:
             raise FileNotFoundError(f"hand sidecar does not exist: {sidecar_path}")
         return {}
-    data = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
+    data = safe_load(sidecar_path.read_bytes())
     if data is None:
         return {}
     if not isinstance(data, dict):

@@ -44,6 +44,32 @@ def parse_urdf_mesh_refs(
     if not resolved_urdf_path.is_file():
         raise FileNotFoundError(f"URDF file does not exist: {resolved_urdf_path}")
 
+    mesh_refs, _ = parse_urdf_metadata(
+        resolved_urdf_path,
+        virtual_mesh_dir=virtual_mesh_dir,
+        require_existing=require_existing,
+        parse_visual_rgba=False,
+    )
+    return mesh_refs
+
+
+def parse_urdf_metadata(
+    urdf_path: Path,
+    *,
+    virtual_mesh_dir: PurePosixPath = PurePosixPath("meshes"),
+    require_existing: bool = True,
+    parse_visual_rgba: bool = True,
+) -> tuple[tuple[UrdfMeshRef, ...], dict[str, UrdfRgba]]:
+    r"""一次 XML parse 同时解析 mesh 引用和 named visual RGBA。
+
+    HandContainer 同时需要路径闭包与可视化颜色。两者来自同一份 URDF XML，合并入口
+    避免每项资产重复执行 ``ET.parse``，但不读取 mesh 顶点或面片。
+    """
+
+    resolved_urdf_path = Path(urdf_path).expanduser().resolve(strict=False)
+    if not resolved_urdf_path.is_file():
+        raise FileNotFoundError(f"URDF file does not exist: {resolved_urdf_path}")
+
     root = ET.parse(resolved_urdf_path).getroot()
     mesh_refs: list[UrdfMeshRef] = []
     for mesh_elem in root.findall(".//mesh"):
@@ -60,28 +86,23 @@ def parse_urdf_mesh_refs(
                 real_path=real_path,
             )
         )
-    return tuple(mesh_refs)
+    rgba_by_name = _visual_rgba_from_root(root, urdf_path=resolved_urdf_path) if parse_visual_rgba else {}
+    return tuple(mesh_refs), rgba_by_name
 
 
 def parse_urdf_visual_rgba_by_name(urdf_path: Path) -> dict[str, UrdfRgba]:
-    r"""解析 URDF named visual 对应的 RGBA debug color。
-
-    Args:
-        urdf_path (Path): 已解析到真实磁盘的 `hand.urdf` 路径。
-
-    Returns:
-        dict[str, UrdfRgba]: visual name 到 RGBA 的映射；无 name 或无 color 的 visual 会被跳过。
-
-    Raises:
-        FileNotFoundError: 当 `urdf_path` 不存在时抛出。
-        ValueError: 当 rgba 字段不是 4 个浮点数时抛出。
-    """
+    r"""只解析 URDF named visual 的 RGBA，不要求无关 mesh URI 可解析。"""
 
     resolved_urdf_path = Path(urdf_path).expanduser().resolve(strict=False)
     if not resolved_urdf_path.is_file():
         raise FileNotFoundError(f"URDF file does not exist: {resolved_urdf_path}")
-
     root = ET.parse(resolved_urdf_path).getroot()
+    return _visual_rgba_from_root(root, urdf_path=resolved_urdf_path)
+
+
+def _visual_rgba_from_root(root: ET.Element, *, urdf_path: Path) -> dict[str, UrdfRgba]:
+    r"""从已解析 XML root 读取 named visual color，供组合与独立入口共用。"""
+
     rgba_by_name: dict[str, UrdfRgba] = {}
     for visual_elem in root.findall(".//visual"):
         visual_name = visual_elem.attrib.get("name")
@@ -93,7 +114,7 @@ def parse_urdf_visual_rgba_by_name(urdf_path: Path) -> dict[str, UrdfRgba]:
         raw_rgba = color_elem.attrib.get("rgba")
         if raw_rgba is None:
             continue
-        rgba_by_name[visual_name] = _parse_rgba(raw_rgba, visual_name=visual_name, urdf_path=resolved_urdf_path)
+        rgba_by_name[visual_name] = _parse_rgba(raw_rgba, visual_name=visual_name, urdf_path=urdf_path)
     return rgba_by_name
 
 
@@ -121,6 +142,7 @@ def _parse_rgba(raw_rgba: str, *, visual_name: str, urdf_path: Path) -> UrdfRgba
 
 
 __all__ = [
+    "parse_urdf_metadata",
     "parse_urdf_mesh_refs",
     "parse_urdf_visual_rgba_by_name",
 ]

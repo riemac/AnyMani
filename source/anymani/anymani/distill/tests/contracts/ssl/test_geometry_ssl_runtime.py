@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -15,12 +18,21 @@ from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import (
     OnlineGeometrySample,
     pad_online_geometry_samples,
     split_online_geometry_sample,
+    split_padded_online_geometry_batch,
 )
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import JointSignRewriteCfg
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.evaluation import update_evaluation_digest
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.method import PhysicalAuditHandle
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.state_measure import SobolJointSampler
-from anymani.distill.models.input_adapters.geometry import GeometryPaddingCfg, StaticGeometryEvidence
+from anymani.distill.models.input_adapters.geometry import (
+    GeometryPaddingCfg,
+    SO2AnchorRelationEncoder,
+    StaticGeometryEvidence,
+    pad_static_geometry_evidence,
+)
 from anymani.distill.representations.queries.spatial_sampling import SpatialQueryBatch
+from anymani.distill.representations.sources import cache as source_cache_module
+from anymani.distill.representations.sources.cache import GeometrySourceArena
 from anymani.distill.representations.targets.field_samples import (
     FieldTargetBatch,
     QueryStratum,
@@ -119,6 +131,96 @@ def test_sobol_cursor_resume_reproduces_the_next_q_block() -> None:
     assert resumed.cursor == 8
 
 
+def test_geometry_source_arena_enforces_entry_and_byte_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""CPU source 复用必须由 entry/array bytes 双上限约束，且 clear 后不留进程状态。"""
+
+    monkeypatch.setattr(
+        source_cache_module,
+        "_cache_key",
+        lambda container, _config: container.asset_id,
+    )
+    arena = GeometrySourceArena(
+        max_entries=2,
+        max_bytes=12,
+        size_of=lambda source: source.size_bytes,
+    )
+    config = SimpleNamespace()
+    containers = tuple(SimpleNamespace(asset_id=f"asset-{index}") for index in range(3))
+    sources = tuple(SimpleNamespace(asset_id=item.asset_id, size_bytes=6) for item in containers)
+
+    first = arena.load_or_create(containers[0], config=config, materialize=lambda: sources[0])
+    repeated = arena.load_or_create(containers[0], config=config, materialize=lambda: sources[0])
+    arena.load_or_create(containers[1], config=config, materialize=lambda: sources[1])
+    arena.load_or_create(containers[2], config=config, materialize=lambda: sources[2])
+
+    assert repeated is first  # 命中返回同一 immutable source，不重复 realization
+    assert arena.resident_count == 2  # 三项访问后只保留两个 MRU source
+    assert arena.resident_bytes == 12  # 测试数组预算与 entry cap 同时闭合
+    assert arena.stats()["hits"] == 1
+    assert arena.stats()["misses"] == 3
+    assert arena.stats()["evictions"] == 1
+    arena.clear()
+    assert arena.resident_count == arena.resident_bytes == 0
+    oversize = SimpleNamespace(asset_id="oversize", size_bytes=13)
+    arena.load_or_create(
+        SimpleNamespace(asset_id="oversize"),
+        config=config,
+        materialize=lambda: oversize,
+    )
+    assert arena.resident_count == arena.resident_bytes == 0  # 单项也不得突破 12 B 测试硬界
+
+
+def test_geometry_source_arena_materializes_one_copy_per_key_under_prefetch_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""并行 prefetch 同一资产只能执行一次 mesh/source realization。"""
+
+    monkeypatch.setattr(source_cache_module, "_cache_key", lambda container, _config: container.asset_id)
+    arena = GeometrySourceArena(max_entries=2, max_bytes=16, size_of=lambda source: source.size_bytes)
+    container = SimpleNamespace(asset_id="shared")
+    source = SimpleNamespace(asset_id="shared", size_bytes=4)
+    materialize_count = 0
+
+    def materialize():
+        nonlocal materialize_count
+        materialize_count += 1
+        return source
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(arena.load_or_create, container, config=SimpleNamespace(), materialize=materialize)
+            for _ in range(16)
+        ]
+    assert all(future.result() is source for future in futures)
+    assert materialize_count == 1  # per-key lock 消除并发重复 Boolean/source 构造
+    assert arena.stats()["misses"] == 1
+    assert arena.stats()["hits"] == 15
+
+
+def test_physical_audit_handle_cancel_stops_cooperative_worker() -> None:
+    r"""训练异常 teardown 必须停止后台 audit，而不是继续遍历完整资产 catalog。"""
+
+    cancel_event = Event()
+    started = Event()
+
+    def audit_worker() -> dict[str, object]:
+        started.set()
+        cancel_event.wait(timeout=5.0)  # 正式 worker 在两项 source 之间检查同一 Event
+        if cancel_event.is_set():
+            raise RuntimeError("physical asset audit cancelled before completion")
+        return {"status": "unexpected-completion"}
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(audit_worker)
+    handle = PhysicalAuditHandle(future, executor, cancel_event)
+    assert started.wait(timeout=1.0)
+    handle.cancel()
+    handle.cancel()  # teardown 可由嵌套 finally 重复调用，必须保持幂等
+    assert future.done()
+
+
 def test_joint_sign_rewrite_keeps_density_and_flips_matching_kappa(monkeypatch: pytest.MonkeyPatch) -> None:
     """选中改写后 density/distance 不变，对应 JOINT 的 κ/g 翻号。"""
 
@@ -211,6 +313,64 @@ def test_q_block_split_matches_padding_of_individual_q_samples() -> None:
         block_batch.sensitivity_targets.field_sensitivity,
         individual_batch.sensitivity_targets.field_sensitivity,
     )
+
+
+def test_forward_microbatch_split_preserves_sample_axis_and_nested_targets() -> None:
+    r"""GPU microbatch 只切样本轴，拼回后必须逐元素等于原 logical minibatch。"""
+
+    block = _sample(
+        torch.tensor(
+            [[0.1, -0.2], [0.3, 0.4], [-0.5, 0.2], [0.7, -0.1], [-0.3, -0.4]],
+            dtype=torch.float64,
+        )
+    )
+    batch = pad_online_geometry_samples(
+        list(split_online_geometry_sample(block)),
+        padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
+    )
+    pieces = split_padded_online_geometry_batch(batch, microbatch_size=2)
+
+    assert tuple(piece.q.shape[0] for piece in pieces) == (2, 2, 1)
+    assert tuple(asset_id for piece in pieces for asset_id in piece.asset_ids) == batch.asset_ids
+    torch.testing.assert_close(torch.cat([piece.q for piece in pieces]), batch.q)
+    torch.testing.assert_close(
+        torch.cat([piece.evidence.home_surface_points for piece in pieces]),
+        batch.evidence.home_surface_points,
+    )
+    torch.testing.assert_close(
+        torch.cat([piece.field_targets.density for piece in pieces]),
+        batch.field_targets.density,
+    )
+    torch.testing.assert_close(
+        torch.cat([piece.sensitivity_targets.field_sensitivity for piece in pieces]),
+        batch.sensitivity_targets.field_sensitivity,
+    )
+
+
+def test_ragged_anchor_padding_mask_matches_independent_relation_encoding() -> None:
+    r"""30/40-anchor 资产可共享 batch，零 padding 不得进入 $SO(2)$ anchor attention。"""
+
+    full = _sample(torch.tensor([[0.1, -0.2]], dtype=torch.float64)).evidence
+    short = replace(full, anchors=full.anchors[:1])
+    padded = pad_static_geometry_evidence(
+        (full, short),
+        config=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
+    )
+    assert padded.anchor_valid_mask is not None
+    assert padded.anchor_valid_mask.sum(dim=-1).tolist() == [2, 1]
+
+    torch.manual_seed(47)
+    encoder = SO2AnchorRelationEncoder(relation_width=8, length_scale_m=0.1).to(dtype=torch.float64).eval()
+    points = torch.tensor(
+        [[[0.01, 0.02, 0.03]], [[0.04, -0.01, 0.02]]],
+        dtype=torch.float64,
+    )
+    together = encoder(points, padded.anchors, padded.palm_normal, padded.anchor_valid_mask)
+    full_alone = encoder(points[0], full.anchors, full.palm_normal)
+    short_alone = encoder(points[1], short.anchors, short.palm_normal)
+
+    torch.testing.assert_close(together[0], full_alone, atol=1.0e-12, rtol=1.0e-12)
+    torch.testing.assert_close(together[1], short_alone, atol=1.0e-12, rtol=1.0e-12)
 
 
 def test_validation_digest_covers_sigma_query_routing_and_valid_support() -> None:

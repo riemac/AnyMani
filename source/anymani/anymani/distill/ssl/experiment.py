@@ -27,10 +27,15 @@ class EmbodimentPretrain:
         r"""构造四个 role runtime，并执行一次完整 pretraining 生命周期。"""
 
         self.config.validate_composed()  # 在任何 IO/CUDA 前拒绝缺失或错误的 component group
+        print("[SSL] Building data runtime...")
         data = build_runtime(self.config.data)
+        print("[SSL] Building method runtime...")
         method = build_runtime(self.config.method)
+        print("[SSL] Building trainer runtime...")
         trainer = build_runtime(self.config.trainer)
+        print("[SSL] Building run configuration...")
         run = build_runtime(self.config.run)
+        print("[SSL] Starting training lifecycle...")
         return trainer.fit(
             data=data,
             method=method,

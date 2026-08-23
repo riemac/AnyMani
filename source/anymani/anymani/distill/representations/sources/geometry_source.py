@@ -5,10 +5,10 @@ mount-conditioned palm anchors 以及确定性采样 seed。``GeometrySource`` �
 解析的 ``HandContainer``，组合本目录的纯张量运动学与 owner collision truth；它不知道 Gaussian
 field、query mixture、decoder、loss、epoch 或 optimizer。
 
-CPU source 在一项资产的整个实验生命周期内保持不变。``to_device()`` 只上传 POE/graph 张量并取得
-Warp BVH lease，返回 ``DeviceGeometrySource``；resident asset window 驱逐时必须调用 ``release()``。
-这种边界保证 source cache 可以同时服务 sampled implicit field、固定 BPS 或未来其他读取布局，而不会
-把某一训练 stage 的 batch 语义写进物理真源。
+CPU source 对固定资产/config 是不可变 realization，可由进程内有界 arena 复用或在驱逐后精确重建。
+``to_device()`` 只上传 POE/graph 张量并取得 Warp BVH lease，返回 ``DeviceGeometrySource``；resident
+asset window 驱逐时必须调用 ``release()``。这种边界保证 source arena 可以同时服务 sampled implicit
+field、固定 BPS 或未来其他读取布局，而不会把某一训练 stage 的 batch 语义写进物理真源。
 """
 
 from __future__ import annotations

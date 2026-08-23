@@ -1,4 +1,4 @@
-r"""Schema 4 online procedural supervised pretraining lifecycle.
+r"""Schema 5 online procedural supervised pretraining lifecycle.
 
 该模块是最高级训练内核：Data runtime 解析 catalog，Method session 封闭产生 batch、评估与 artifact，
 Trainer 拥有 phase、window-major schedule、backward、validation promotion 与 final evaluation。
@@ -12,6 +12,7 @@ import json
 import math
 import os
 import shutil
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -186,6 +187,8 @@ def _write_calibration_artifact(
     gradient_accumulation_steps: int,
     manifest_hash: str,
     resolved_config: dict[str, Any] | None = None,
+    after_first_forward: Callable[[], object] | None = None,
+    before_write: Callable[[], object] | None = None,
 ) -> str:
     r"""按正式训练的数据复用顺序运行预实验，不 backward、不更新参数或权重。
 
@@ -200,7 +203,12 @@ def _write_calibration_artifact(
     new_sample_count = 0  # 互不重复 realization 的 $(asset,q)$ 数
     forward_sample_count = 0  # 含复用的累计 $(asset,q)$ 前向次数
     asset_indices_seen: set[int] = set()  # 本次预实验实际接触的互异训练资产
+    audit_started = False  # 首个 forward 完成后才允许后台物理审计争抢 CPU
     method.train_mode()  # 保留正式训练的 dropout/normalization 行为，只取消参数更新
+    total_minibatches = schedule.num_minibatches
+    partial_output = output.with_name(f"{output.stem}.partial{output.suffix}")  # 中断后最近完整 group 证据
+    print(f"[Calibration] Starting: {total_minibatches} minibatches, "
+          f"{mini_epochs} mini-epochs each, {gradient_accumulation_steps}-batch groups")
     with torch.enable_grad():
         while not schedule.complete:
             group_size = min(gradient_accumulation_steps, schedule.minibatches_remaining)
@@ -219,24 +227,67 @@ def _write_calibration_artifact(
                 new_sample_count += schedule_item.sample_count
                 asset_indices_seen.update(schedule_item.asset_indices)
             # 同一 q/query/teacher batch 循环利用；forward_index 使每遍重新抽 joint-sign rewrite。
-            for _mini_epoch_index in range(mini_epochs):
-                for batch in batches:
-                    result = method.forward_objectives(batch, step=forward_count, mode="train")
+            for mini_epoch_index in range(mini_epochs):
+                for batch_idx, batch in enumerate(batches):
+                    result = method.forward_objectives(batch, step=forward_count, mode="calibration")
                     forward_count += 1
                     forward_sample_count += int(result.sample_count)
+                    if forward_count == 1 and after_first_forward is not None and not audit_started:
+                        after_first_forward()
+                        audit_started = True
                     for name, objective in result.objectives.items():
                         for component in objective.components:
                             current = totals.setdefault(component.name, [0.0, 0.0])
                             current[0] += float(component.numerator.detach())
                             current[1] += float(component.denominator.detach())
                         traces.setdefault(name, []).append(float(objective.metrics["loss"].detach()))
+                    # 每完成一个 mini-epoch 组打印一次进度
+                    if batch_idx == len(batches) - 1:
+                        progress_pct = 100.0 * minibatch_count / total_minibatches
+                        print(f"[Calibration] Progress: {minibatch_count}/{total_minibatches} minibatches "
+                              f"({progress_pct:.1f}%), mini-epoch {mini_epoch_index + 1}/{mini_epochs}, "
+                               f"{forward_count} forward passes completed")
+            # 一个 accumulation group 的全部 mini-epoch 均完成后才发布 partial，避免记录半组统计。
+            _write_yaml(
+                partial_output,
+                {
+                    "schema_version": "5.0.0",
+                    "status": "in_progress",
+                    "source": "formal_train_forward_preflight",
+                    "dataset_source_sha256": manifest_hash,
+                    "execution": {
+                        "asset_count": session.asset_count,
+                        "distinct_asset_count": len(asset_indices_seen),
+                        "asset_use_count": minibatch_count * schedule.config.assets_per_minibatch,
+                        "new_sample_count": new_sample_count,
+                        "forward_sample_count": forward_sample_count,
+                        "minibatch_count": minibatch_count,
+                        "forward_count": forward_count,
+                        "mini_epochs": mini_epochs,
+                        "gradient_accumulation_steps": gradient_accumulation_steps,
+                        "sampling": asdict(schedule.config),
+                    },
+                    "formula_identity": dict(method.formula_identity()),
+                    "term_means": {
+                        name: numerator / denominator
+                        for name, (numerator, denominator) in totals.items()
+                    },
+                    "term_traces": traces,
+                },
+            )
     if minibatch_count < 1:
         raise ValueError("objective calibration requires at least one generated train minibatch")
+    print(f"[Calibration] Completed: {minibatch_count} minibatches, {forward_count} forward passes, "
+          f"{len(asset_indices_seen)} unique assets sampled")
+    print("[Calibration] Writing artifact...")
+    if before_write is not None:
+        before_write()  # 完整 physical isolation audit 必须先通过，再发布 calibration artifact
     formula_identity = dict(method.formula_identity())
     recorded_config = dict(resolved_config or {})
     worktree_dirty, worktree_fingerprint = _worktree_fingerprint()
     payload = {
         "schema_version": "5.0.0",
+        "status": "complete",
         "source": "formal_train_forward_preflight",
         "execution": {
             "asset_count": session.asset_count,
@@ -269,7 +320,13 @@ def _write_calibration_artifact(
         "term_traces": traces,
     }
     _write_yaml(output, payload)
-    return hashlib.sha256(output.read_bytes()).hexdigest()
+    partial_output.unlink(missing_ok=True)  # 最终 artifact 已原子发布，中间态不再具有独立语义
+    artifact_hash = hashlib.sha256(output.read_bytes()).hexdigest()
+    print(f"[Calibration] Artifact written: {output}")
+    print("[Calibration] Loss scale summary:")
+    for name, mean_value in sorted(payload["term_means"].items()):
+        print(f"  {name}: {mean_value:.6e}")
+    return artifact_hash
 
 
 def _require_calibration_identity(
@@ -285,6 +342,8 @@ def _require_calibration_identity(
         raise ValueError("calibration artifact must be a mapping")
     if payload.get("schema_version") != "5.0.0":
         raise ValueError("calibration artifact schema must be 5.0.0")
+    if payload.get("status") != "complete":
+        raise ValueError("calibration artifact must have status='complete'")
     if payload.get("dataset_source_sha256") != manifest_hash:
         raise ValueError("calibration artifact dataset hash does not match the formal ssl.yaml")
     expected_formula = dict(method.formula_identity())
@@ -326,22 +385,64 @@ def fit_embodiment_pretrain(
 
     from anymani.distill.ssl.runtime.scheduler import ResidentGeometryAssetWindow
 
+    print(f"[SSL] Phase: {run.config.phase}")
     if run.config.deterministic_algorithms:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-        torch.use_deterministic_algorithms(True)
+    torch.use_deterministic_algorithms(bool(run.config.deterministic_algorithms))
     torch.manual_seed(run.config.seed)
     device = torch.device(trainer.config.device)
     if device.type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError(f"configured CUDA device is unavailable: {device}")
     dtype = _torch_dtype(trainer.config.dtype)
+    print("[SSL] Preparing output directory...")
     output_dir = run.prepare_output_dir(output_dir_override)
+    print(f"[SSL] Output: {output_dir}")
+    print("[SSL] Resolving asset catalog (this may take 1-2 minutes for 8k assets)...")
     catalog = data.resolve()
+    if hasattr(catalog, "train"):
+        train_count = len(catalog.train)
+        validation_count = sum(len(partition) for partition in catalog.validation.values())
+    else:
+        partitions = getattr(catalog.dataset, "partitions", None)
+        if isinstance(partitions, dict):
+            train_count = len(partitions.get("train", ()))
+            validation_count = len(partitions.get("validation", ()))
+        else:
+            train_count = "synthetic"
+            validation_count = "synthetic"
+    print(f"[SSL] Catalog resolved: train={train_count} validation={validation_count} assets")
+    print("[SSL] Preparing method (computing FK/Jacobian templates)...")
     method.prepare(catalog, device=device, dtype=dtype)
+    print(f"[SSL] Initializing model on {device}...")
     method.initialize_model(device=device, dtype=dtype)
-    manifest = method.asset_manifest(catalog)
+    audit_handle: Any | None = None
+    audit_supported = hasattr(method, "start_physical_audit")
+    manifest: dict[str, Any] | None = None
+
+    def start_audit() -> None:
+        r"""在首个 forward/首个训练组之后启动后台完整 physical audit。"""
+
+        nonlocal audit_handle
+        if audit_handle is None and audit_supported:
+            print("[SSL] Starting background physical asset audit...")
+            audit_handle = method.start_physical_audit(catalog)
+
+    def await_manifest() -> dict[str, Any]:
+        r"""等待完整 physical manifest，并在首次通过后写出唯一审计文件。"""
+
+        nonlocal manifest
+        if manifest is None:
+            start_audit()
+            print("[SSL] Awaiting complete physical asset audit...")
+            manifest = audit_handle.wait() if audit_handle is not None else method.asset_manifest(catalog)
+            _write_yaml(output_dir / "asset_manifest.yaml", manifest)
+            print("[SSL] Physical asset audit passed")
+        if manifest is None:
+            raise RuntimeError("physical asset audit completed without a manifest")
+        return manifest
+
     _write_yaml(output_dir / "resolved_config.yaml", resolved_config)
     _write_yaml(output_dir / "asset_dataset.yaml", catalog.dataset.config_dict())
-    _write_yaml(output_dir / "asset_manifest.yaml", manifest)
     dirty, fingerprint = _worktree_fingerprint()
     declared_weights = _declared_objective_weights(method)
 
@@ -357,6 +458,21 @@ def fit_embodiment_pretrain(
             max_resident_assets=trainer.config.max_resident_assets,
             window_factory=ResidentGeometryAssetWindow,
         )
+
+    def write_resource_evidence() -> None:
+        r"""在 arena clear 前记录 Method 暴露的有界资源事实；不要求所有 Method 实现该可选诊断。"""
+
+        evidence = getattr(method, "runtime_resource_evidence", None)
+        if callable(evidence):
+            _write_yaml(output_dir / "runtime_resources.yaml", evidence())
+
+    def cancel_unpublished_audit() -> None:
+        r"""异常或提前返回时停止尚未写入 ``asset_manifest.yaml`` 的后台 audit。"""
+
+        if manifest is None and audit_handle is not None:
+            cancel = getattr(audit_handle, "cancel", None)
+            if callable(cancel):
+                cancel()
 
     def run_suites(role: str, config: Any, *, include_ablations: bool) -> dict[str, Any]:
         r"""在每条具名 suite 上重建固定 bank；空 suite 显式报告，不伪造成功。"""
@@ -405,7 +521,9 @@ def fit_embodiment_pretrain(
         finally:
             session.close()
 
+    print("[SSL] Opening training session (train partition)...")
     train_session = open_session("train", seed=trainer.config.sampling.seed)
+    print(f"[SSL] Training session: {train_session.asset_count} assets")
     if run.config.phase == "calibrate_objectives":
         if run.config.resume_checkpoint:
             raise ValueError("calibrate_objectives does not resume an optimizer checkpoint")
@@ -415,6 +533,9 @@ def fit_embodiment_pretrain(
             num_minibatches=trainer.config.num_minibatches,
             max_resident_assets=trainer.config.max_resident_assets,
         )
+        print(f"[SSL] Starting calibration: {trainer.config.num_minibatches} minibatches × "
+              f"{trainer.config.mini_epochs} mini-epochs = "
+              f"{trainer.config.num_minibatches * trainer.config.mini_epochs} forward passes")
         try:
             _write_calibration_artifact(
                 method,
@@ -429,6 +550,8 @@ def fit_embodiment_pretrain(
             return output_dir
         finally:
             train_session.close()
+            write_resource_evidence()
+            cancel_unpublished_audit()
             method.close()
 
     calibration_hash = ""  # 正式训练可独立运行；提供预实验产物时只记录可审计 lineage
@@ -471,7 +594,7 @@ def fit_embodiment_pretrain(
 
         return run.checkpoint_metadata(
             geometry_semantics_schema=SEMANTICS_SCHEMA_VERSION,
-            asset_manifest=manifest,
+            asset_manifest=await_manifest(),
             resolved_config=resolved_config,
             declared_objective=declared_weights,
             calibration_artifact_hash=calibration_hash,
@@ -511,7 +634,7 @@ def fit_embodiment_pretrain(
         optimizer.load_state_dict(payload["optimizer_state"])
         step = int(payload["step"])
         loaded_metadata = dict(payload["metadata"])
-        if loaded_metadata.get("asset_manifest") != manifest:
+        if loaded_metadata.get("asset_manifest") != await_manifest():
             raise ValueError("resume checkpoint asset manifest does not match resolved dataset roles")
         checkpoint_resolved = loaded_metadata.get("resolved_config")
         if not isinstance(checkpoint_resolved, dict):
@@ -637,6 +760,8 @@ def fit_embodiment_pretrain(
                         "gradient_norm": final_record["gradient_norm"],
                     },
                 )
+            if audit_supported and audit_handle is None:
+                start_audit()  # 首个训练组已完成，后台审计不再阻塞首个 resident window
             validation_cadence = trainer.config.validation.every_optimizer_updates
             validation_due = (
                 group_start_step // validation_cadence < step // validation_cadence or train_schedule.complete
@@ -736,6 +861,8 @@ def fit_embodiment_pretrain(
         return output_dir
     finally:
         train_session.close()
+        write_resource_evidence()
+        cancel_unpublished_audit()
         method.close()
 
 

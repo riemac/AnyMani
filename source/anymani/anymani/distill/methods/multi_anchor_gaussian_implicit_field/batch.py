@@ -11,7 +11,7 @@ realization 编成 encoder 输入，并把异构 $N_J/G/E$ 填进稠密容器。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 
 import torch
 
@@ -351,6 +351,61 @@ def method_batch_views(batch: PaddedOnlineGeometryBatch) -> MethodBatchViews:
     )
 
 
+def split_padded_online_geometry_batch(
+    batch: PaddedOnlineGeometryBatch,
+    *,
+    microbatch_size: int,
+) -> tuple[PaddedOnlineGeometryBatch, ...]:
+    r"""沿 `(asset,q)` 样本轴切分 padded batch，不改变物理值或采样身份。
+
+    外部 schedule 仍生成一个完整 logical minibatch；本函数只控制 GPU activation 的
+    瞬时存活规模。每个切片保留原始 `asset_ids` 与 `q_index`，因此 joint-sign rewrite
+    应在切分前完成，避免同一逻辑 batch 的随机选择依赖切片位置。
+    """
+
+    if microbatch_size < 1:
+        raise ValueError("microbatch_size must be positive")
+    batch_size = int(batch.q.shape[0])
+    if batch_size < 1:
+        raise ValueError("padded geometry batch must contain at least one sample")
+    if microbatch_size >= batch_size:
+        return (batch,)
+    return tuple(
+        _slice_padded_batch(batch, start=start, stop=min(start + microbatch_size, batch_size))
+        for start in range(0, batch_size, microbatch_size)
+    )
+
+
+def _slice_padded_batch(
+    batch: PaddedOnlineGeometryBatch,
+    *,
+    start: int,
+    stop: int,
+) -> PaddedOnlineGeometryBatch:
+    r"""切分一个 batch 及其三类嵌套 typed tensors。"""
+
+    batch_size = int(batch.q.shape[0])
+
+    def slice_dataclass(value):
+        updates = {}
+        for field_info in fields(value):
+            field_value = getattr(value, field_info.name)
+            if isinstance(field_value, torch.Tensor) and field_value.ndim > 0 and field_value.shape[0] == batch_size:
+                field_value = field_value[start:stop]
+            updates[field_info.name] = field_value
+        return replace(value, **updates)
+
+    return PaddedOnlineGeometryBatch(
+        asset_ids=batch.asset_ids[start:stop],
+        q=batch.q[start:stop],
+        evidence=slice_dataclass(batch.evidence),
+        queries=slice_dataclass(batch.queries),
+        field_targets=slice_dataclass(batch.field_targets),
+        sensitivity_targets=slice_dataclass(batch.sensitivity_targets),
+        q_index=batch.q_index[start:stop] if batch.q_index is not None else None,
+    )
+
+
 __all__ = [
     "GeometryPaddingCfg",
     "MethodBatchViews",
@@ -360,6 +415,7 @@ __all__ = [
     "attach_static_evidence",
     "method_batch_views",
     "pad_online_geometry_samples",
+    "split_padded_online_geometry_batch",
     "split_online_geometry_sample",
     "split_physical_online_geometry_sample",
 ]

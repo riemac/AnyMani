@@ -10,6 +10,7 @@ import pytest
 import torch
 import trimesh
 from anymani.assets.bank import HandContainer, HandContainerCfg
+from anymani.distill.representations.sources.cache import GeometrySourceArena
 from anymani.distill.representations.sources.collision_geometry import (
     GeometryIdentity,
     OwnerGeometryCache,
@@ -25,6 +26,7 @@ from anymani.distill.representations.sources.collision_geometry import (
     strict_owner_union,
     warp_owner_geometry_cache_stats,
 )
+from anymani.distill.representations.sources.geometry_source import AnchorBankCfg, GeometrySource, GeometrySourceCfg
 from anymani.distill.representations.sources.kinematics import lower_hand_geometry_semantics
 
 _MOTHER_ROOT = (
@@ -101,6 +103,48 @@ def test_mother_owner_geometry_materializes_closed_union_and_reproducible_surfac
         pairwise += np.eye(len(seed_points))
         assert np.max(radius) <= anchors.radial_support_radius_m + 1.0e-12
         assert np.min(pairwise) > 1.0e-6
+
+
+@_requires_local_mother
+def test_source_arena_release_and_rebuild_preserve_exact_cpu_realization() -> None:
+    r"""同一发布资产在 arena clear 后重建，静态物理真值必须逐元素一致。"""
+
+    container = HandContainer.from_cfg(
+        HandContainerCfg(path=_MOTHER_ROOT),
+        require_geometry_semantics=True,
+    )
+    config = GeometrySourceCfg(
+        home_points_per_owner=8,
+        home_surface_oversample_factor=2,
+        static_sampling_seed=17,
+        anchors=AnchorBankCfg(bank_size=2, anchors_per_finger=2),
+    )
+    arena = GeometrySourceArena(max_entries=1, max_bytes=512 * 1024 * 1024)
+    first = arena.load_or_create(
+        container,
+        config=config,
+        materialize=lambda: GeometrySource.materialize(container, config=config),
+    )
+    arena.clear()  # 模拟 subwindow/run teardown 后只保留发布资产真源
+    second = arena.load_or_create(
+        container,
+        config=config,
+        materialize=lambda: GeometrySource.materialize(container, config=config),
+    )
+
+    assert first.identity == second.identity  # physical/configuration SHA-256 完全一致
+    assert first.geometry_cache.surface_geometry_hash == second.geometry_cache.surface_geometry_hash
+    assert np.array_equal(first.home_surface.points_owner_local_m, second.home_surface.points_owner_local_m)
+    assert np.array_equal(first.home_surface.face_indices, second.home_surface.face_indices)
+    assert all(
+        np.array_equal(first_bank.anchors_hand_m, second_bank.anchors_hand_m)
+        for first_bank, second_bank in zip(first.anchor_bank, second.anchor_bank)
+    )
+    assert all(
+        np.array_equal(first_record.surface_mesh.vertices, second_record.surface_mesh.vertices)
+        and np.array_equal(first_record.surface_mesh.faces, second_record.surface_mesh.faces)
+        for first_record, second_record in zip(first.geometry_cache.records, second.geometry_cache.records)
+    )
 
 
 def test_anchor_radial_rejection_matches_declared_truncated_gaussian() -> None:

@@ -235,6 +235,7 @@ class StaticGeometryEvidence:
     child_direction: torch.Tensor  # `[G,G]`，有向 child 距离桶
     entity_valid_mask: torch.Tensor | None = None  # `[G]` 或 `[B,G]`，padding owner 为 False
     joint_valid_mask: torch.Tensor | None = None  # `[N_J]` 或 `[B,N_J]`，padding JOINT 为 False
+    anchor_valid_mask: torch.Tensor | None = None  # `[K]` 或 `[B,K]`，跨资产 anchor padding 为 False
 
     def __post_init__(self) -> None:
         r"""验证实体、关节、锚点与图轴严格闭合。
@@ -246,6 +247,16 @@ class StaticGeometryEvidence:
         if self.anchors.ndim not in {2, 3} or self.anchors.shape[-1] != 3 or self.anchors.shape[-2] == 0:
             raise ValueError("anchors must have non-empty shape [K,3] or [B,K,3]")
         batched = self.anchors.ndim == 3  # True 表示同结构微批次内每个样本有独立形态证据
+        anchor_mask_shape = self.anchors.shape[:-1]
+        anchor_valid = (
+            self.anchor_valid_mask
+            if self.anchor_valid_mask is not None
+            else torch.ones(anchor_mask_shape, device=self.anchors.device, dtype=torch.bool)
+        )
+        if anchor_valid.shape != anchor_mask_shape or anchor_valid.dtype != torch.bool:
+            raise ValueError("anchor_valid_mask must have bool shape [K] or [B,K]")
+        if torch.any(anchor_valid.sum(dim=-1) == 0):
+            raise ValueError("every asset must retain at least one valid physical anchor")
         if self.home_surface_points.ndim != (4 if batched else 3) or self.home_surface_points.shape[-1] != 3:
             raise ValueError("home_surface_points must have shape [G,M,3] or [B,G,M,3]")
         if batched:
@@ -391,6 +402,7 @@ class SO2AnchorRelationEncoder(nn.Module):
         points: torch.Tensor,
         anchors: torch.Tensor,
         palm_normal: torch.Tensor,
+        anchor_valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""返回每个点—锚点对的六个物理标量。
 
@@ -403,8 +415,17 @@ class SO2AnchorRelationEncoder(nn.Module):
             torch.Tensor: ``[...,K,6]`` 的无量纲 $SO(2)$ 不变标量。
         """
 
+        valid = (
+            anchor_valid_mask
+            if anchor_valid_mask is not None
+            else torch.ones(anchors.shape[:-1], dtype=torch.bool, device=anchors.device)
+        )
+        if valid.shape != anchors.shape[:-1] or valid.dtype != torch.bool:
+            raise ValueError("anchor_valid_mask must align with anchors")
+        valid_float = valid.to(dtype=anchors.dtype)
         if anchors.ndim == 2:
-            anchor_centered = anchors - anchors.mean(dim=0, keepdim=True)  # `[K,3]`
+            center = (anchors * valid_float[:, None]).sum(dim=0, keepdim=True) / valid_float.sum().clamp_min(1.0)
+            anchor_centered = anchors - center  # `[K,3]`
             anchors_for_points = anchors  # 依赖 PyTorch 前导轴广播
             centered_for_points = anchor_centered
             normal_for_points = palm_normal
@@ -412,7 +433,10 @@ class SO2AnchorRelationEncoder(nn.Module):
             if points.shape[0] != anchors.shape[0]:
                 raise ValueError("batched points and anchors must share B")
             singleton_axes = (1,) * (points.ndim - 2)  # owner/query 等点轴均由 1 广播
-            anchor_centered = anchors - anchors.mean(dim=1, keepdim=True)  # `[B,K,3]`
+            center = (anchors * valid_float.unsqueeze(-1)).sum(dim=1, keepdim=True) / valid_float.sum(
+                dim=1, keepdim=True
+            ).clamp_min(1.0).unsqueeze(-1)
+            anchor_centered = anchors - center  # `[B,K,3]`
             anchors_for_points = anchors.view(anchors.shape[0], *singleton_axes, anchors.shape[1], 3)
             centered_for_points = anchor_centered.view(
                 anchors.shape[0], *singleton_axes, anchors.shape[1], 3
@@ -458,24 +482,34 @@ class SO2AnchorRelationEncoder(nn.Module):
         points: torch.Tensor,
         anchors: torch.Tensor,
         palm_normal: torch.Tensor,
+        anchor_valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""对每个点—锚点对使用共享多层感知机，保留实际 $K$ 轴。"""
 
-        return self.relation_mlp(self.relation_scalars(points, anchors, palm_normal))  # `[...,K,D_r]`
+        return self.relation_mlp(
+            self.relation_scalars(points, anchors, palm_normal, anchor_valid_mask)
+        )  # `[...,K,D_r]`
 
     def forward(
         self,
         points: torch.Tensor,
         anchors: torch.Tensor,
         palm_normal: torch.Tensor,
+        anchor_valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         r"""沿完整等地位锚点集合执行可变 $K$ 注意力池化。
 
         权重函数对每个锚点共享，因此锚点重排只会同步重排权重与特征，求和结果保持不变。
         """
 
-        per_anchor = self.encode_per_anchor(points, anchors, palm_normal)  # `[...,K,D_r]`
-        weights = torch.softmax(self.attention_score(per_anchor), dim=-2)  # `[...,K,1]`，对排列等变
+        per_anchor = self.encode_per_anchor(points, anchors, palm_normal, anchor_valid_mask)  # `[...,K,D_r]`
+        logits = self.attention_score(per_anchor)
+        if anchor_valid_mask is not None:
+            mask = anchor_valid_mask
+            while mask.ndim < logits.ndim - 1:
+                mask = mask.unsqueeze(-2)
+            logits = logits.masked_fill(~mask.unsqueeze(-1), torch.finfo(logits.dtype).min)
+        weights = torch.softmax(logits, dim=-2)  # `[...,K,1]`，对排列等变
         return torch.sum(weights * per_anchor, dim=-2)  # `[...,D_r]`，对排列不变
 
 
@@ -549,7 +583,12 @@ class ImplicitGeometryEncoder(nn.Module):
             torch.Tensor: ``[...,D_r]`` 的共享关系特征。
         """
 
-        return self.point_anchor_encoder(points, evidence.anchors, evidence.palm_normal)
+        return self.point_anchor_encoder(
+            points,
+            evidence.anchors,
+            evidence.palm_normal,
+            evidence.anchor_valid_mask,
+        )
 
     def _home_features(self, evidence: StaticGeometryEvidence) -> torch.Tensor:
         r"""先沿锚点、再沿每个归属体的真实表面点聚合。
@@ -586,7 +625,7 @@ class ImplicitGeometryEncoder(nn.Module):
         linear = evidence.space_screws[..., 3:]  # 同轴线分量，单位 m
         axis_point = torch.cross(omega, linear, dim=-1)  # $p_i=\omega_i\times v_i$，关节符号偶，单位 m
         axis_point_relations = self.point_anchor_encoder.relation_scalars(
-            axis_point, evidence.anchors, evidence.palm_normal
+            axis_point, evidence.anchors, evidence.palm_normal, evidence.anchor_valid_mask
         )  # `[...,N_J,K,6]`，轴线位置、绝对尺度与手性关系
 
         if evidence.anchors.ndim == 2:
@@ -622,7 +661,13 @@ class ImplicitGeometryEncoder(nn.Module):
         relation_tokens = self.screw_relation_projection(
             torch.cat((axis_point_relations, directed_relations), dim=-1)
         )  # `[...,N_J,K,D_r]`，唯一 screw relation token
-        weights = torch.softmax(self.screw_attention_score(relation_tokens), dim=-2)  # 沿实际 K 轴
+        screw_logits = self.screw_attention_score(relation_tokens)
+        if evidence.anchor_valid_mask is not None:
+            anchor_mask = evidence.anchor_valid_mask
+            while anchor_mask.ndim < screw_logits.ndim - 1:
+                anchor_mask = anchor_mask.unsqueeze(-2)
+            screw_logits = screw_logits.masked_fill(~anchor_mask.unsqueeze(-1), torch.finfo(screw_logits.dtype).min)
+        weights = torch.softmax(screw_logits, dim=-2)  # 沿有效 K 轴
         summary = torch.sum(weights * relation_tokens, dim=-2)  # `[...,N_J,D_r]`，anchor permutation 不变
         return self.screw_projection(summary)  # `[...,N_J,D_s]`，单一 $f_i^{screw}$
 
@@ -803,6 +848,7 @@ def build_static_geometry_evidence(
         shortest_path=spec.owner_graph_shortest.to(device=target_device),
         parent_direction=spec.owner_graph_parent.to(device=target_device),
         child_direction=spec.owner_graph_child.to(device=target_device),
+        anchor_valid_mask=torch.ones(anchor_points.shape[:-1], device=target_device, dtype=torch.bool),
     )
 
 
@@ -862,6 +908,15 @@ def stack_static_geometry_evidence(
         shortest_path=reference.shortest_path,
         parent_direction=reference.parent_direction,
         child_direction=reference.child_direction,
+        anchor_valid_mask=torch.stack(
+            [
+                evidence.anchor_valid_mask
+                if evidence.anchor_valid_mask is not None
+                else torch.ones(evidence.anchors.shape[0], device=evidence.anchors.device, dtype=torch.bool)
+                for evidence in evidences
+            ],
+            dim=0,
+        ),
     )
 
 
@@ -873,7 +928,7 @@ def pad_static_geometry_evidence(
     r"""把不同 owner/JOINT 长度的资产填充为统一 20-JOINT/26-entity batch。
 
     只有张量容器被填充；有效 owner/JOINT 的原始顺序、图距离和物理证据保持不变。padding 区域
-    anchors 不存在独立槽，home/screw/q 均为零，routing 为 -1，attention/loss 由显式 mask 屏蔽。
+    anchor/home/screw/q 均为零，routing 为 -1，attention/loss 由显式 mask 屏蔽。
     """
 
     if not evidences:
@@ -881,11 +936,9 @@ def pad_static_geometry_evidence(
     if any(evidence.anchors.ndim != 2 for evidence in evidences):
         raise ValueError("padding expects one unbatched StaticGeometryEvidence per asset")
     reference = evidences[0]
-    anchor_shape = reference.anchors.shape
+    max_anchor_count = max(evidence.anchors.shape[0] for evidence in evidences)
     home_budget = reference.home_surface_points.shape[1]
     for evidence in evidences:
-        if evidence.anchors.shape != anchor_shape:
-            raise ValueError("padded batch requires one configured anchor count K")
         if evidence.home_surface_points.shape[1] != home_budget:
             raise ValueError("padded batch requires one configured home point budget M")
 
@@ -894,7 +947,8 @@ def pad_static_geometry_evidence(
     max_joint_count = config.max_joint_count
     device = reference.anchors.device
     dtype = reference.anchors.dtype
-    anchors = torch.stack([evidence.anchors for evidence in evidences], dim=0)
+    anchors = torch.zeros(batch_size, max_anchor_count, 3, device=device, dtype=dtype)
+    anchor_valid = torch.zeros(batch_size, max_anchor_count, device=device, dtype=torch.bool)
     home_points = torch.zeros(batch_size, max_owner_count, home_budget, 3, device=device, dtype=dtype)
     home_mask = torch.zeros(batch_size, max_owner_count, home_budget, device=device, dtype=torch.bool)
     screws = torch.zeros(batch_size, max_joint_count, 6, device=device, dtype=dtype)
@@ -916,6 +970,7 @@ def pad_static_geometry_evidence(
     for batch_index, evidence in enumerate(evidences):
         owner_count = evidence.home_surface_points.shape[0]
         joint_count = evidence.space_screws.shape[0]
+        anchor_count = evidence.anchors.shape[0]
         tip_count = int(torch.count_nonzero(evidence.entity_role == 2))
         if joint_count > max_joint_count:
             raise ValueError(f"asset[{batch_index}] has {joint_count} joints, exceeds {max_joint_count}")
@@ -924,6 +979,13 @@ def pad_static_geometry_evidence(
         if owner_count > max_owner_count:
             raise ValueError(f"asset[{batch_index}] has {owner_count} owners, exceeds {max_owner_count}")
 
+        anchors[batch_index, :anchor_count] = evidence.anchors
+        source_anchor_mask = evidence.anchor_valid_mask
+        anchor_valid[batch_index, :anchor_count] = (
+            source_anchor_mask
+            if source_anchor_mask is not None
+            else torch.ones(anchor_count, device=device, dtype=torch.bool)
+        )
         home_points[batch_index, :owner_count] = evidence.home_surface_points
         home_mask[batch_index, :owner_count] = evidence.home_surface_mask
         screws[batch_index, :joint_count] = evidence.space_screws
@@ -952,6 +1014,7 @@ def pad_static_geometry_evidence(
         child_direction=child_direction,
         entity_valid_mask=entity_valid,
         joint_valid_mask=joint_valid,
+        anchor_valid_mask=anchor_valid,
     )
 
 

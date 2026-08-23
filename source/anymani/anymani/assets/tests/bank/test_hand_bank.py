@@ -160,6 +160,24 @@ def test_hand_container_exposes_virtual_bundle_bijection(tmp_path: Path) -> None
     assert container.visual_rgba_by_name["tip_visual"] == (0.92, 0.88, 0.78, 1.0)
 
 
+def test_hand_container_resolution_does_not_persist_derived_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""通用 assets 解析不得生成逐资产 pickle；SSL 复用由有界 slim catalog 单独负责。"""
+
+    run_root = tmp_path / "post_mutate"  # 发布资产真源；解析过程只能读取这里
+    _write_sample(run_root, "066b6272")
+    cache_root = tmp_path / "cache"  # 若通用解析误写派生物，测试可直接观察该目录
+    monkeypatch.setenv("ANYMANI_CACHE_DIR", str(cache_root))
+
+    first = HandContainer.from_cfg(HandContainerCfg(path="066b6272"), source_root=run_root)
+    second = HandContainer.from_cfg(HandContainerCfg(path="066b6272"), source_root=run_root)
+
+    assert first == second  # 两次纯解析交付相同 bundle，不依赖磁盘对象缓存
+    assert not cache_root.exists()  # 原始资产与调用者显式产物之外不留下派生状态
+
+
 def test_hand_bank_explicit_resolves_sample_id_relative_to_post_mutate_root(tmp_path: Path) -> None:
     r"""explicit mode 下，字符串 sample id 简写应相对 run root 解析。"""
 

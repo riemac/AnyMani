@@ -19,16 +19,17 @@ generated/<generation_run>/
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, TypeAlias, cast
 
-import yaml
-
 from .hand_bank import HandBank, HandBankCfg
 from .hand_container import HandContainer, HandContainerCfg
 from .path_utils import resolve_bank_path
+from .yaml_utils import safe_load
 
 HAND_ASSET_DATASET_SCHEMA_VERSION = "2.0.0"
 """具名 validation/evaluation suites 的严格 run-map dataset YAML schema。"""
@@ -240,7 +241,7 @@ class HandAssetDataset:
         if not resolved_path.is_file():
             raise FileNotFoundError(f"hand asset dataset manifest does not exist: {resolved_path}")
         raw_bytes = resolved_path.read_bytes()  # hash 锚定用户实际提交/生成的 YAML bytes
-        document = yaml.safe_load(raw_bytes) or {}
+        document = safe_load(raw_bytes) or {}
         if not isinstance(document, Mapping):
             raise TypeError("hand asset dataset YAML root must be a mapping")
         config = _dataset_cfg_from_mapping(document)
@@ -340,7 +341,7 @@ class HandAssetDataset:
     ) -> ResolvedHandAssetPartition:
         r"""按 YAML 声明顺序展开 generated run/group/mother/set 层级。"""
 
-        records: list[ResolvedHandAssetRecord] = []
+        jobs: list[dict[str, Any]] = []
         for run_alias, run_config in config.runs.items():
             run_dir = run_config.run_dir or self.config.default_run_dir
             if not run_dir:
@@ -355,20 +356,32 @@ class HandAssetDataset:
                     )
                     for mother_name, lineage in mothers.items():
                         mother_root = (group_root / mother_name).resolve(strict=False)
-                        records.extend(
-                            _resolve_generated_lineage(
-                                mother_root,
-                                lineage,
-                                partition_name=partition_name,
-                                run_alias=str(run_alias),
-                                run_root=run_root,
-                                collection_kind=collection_kind,
-                                group_name=str(group_name),
-                                mother_name=str(mother_name),
-                                require_geometry_semantics=require_geometry_semantics,
-                                allow_legacy_left_handedness=allow_legacy_left_handedness,
-                            )
+                        jobs.append(
+                            {
+                                "mother_root": mother_root,
+                                "lineage": lineage,
+                                "partition_name": partition_name,
+                                "run_alias": str(run_alias),
+                                "run_root": run_root,
+                                "collection_kind": collection_kind,
+                                "group_name": str(group_name),
+                                "mother_name": str(mother_name),
+                                "require_geometry_semantics": require_geometry_semantics,
+                                "allow_legacy_left_handedness": allow_legacy_left_handedness,
+                            }
                         )
+        if len(jobs) < 2:
+            resolved_lineages = [_resolve_generated_lineage_job(jobs[0])] if jobs else []
+        else:
+            worker_count = min(8, max(1, (os.cpu_count() or 2) // 2), len(jobs))
+            print(
+                f"[Assets] Resolving partition={partition_name!r}: "
+                f"{len(jobs)} lineages with {worker_count} CPU workers"
+            )
+            with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="asset-resolve") as executor:
+                futures = [executor.submit(_resolve_generated_lineage_job, job) for job in jobs]
+                resolved_lineages = [future.result() for future in futures]
+        records = [record for lineage_records in resolved_lineages for record in lineage_records]
         return ResolvedHandAssetPartition(name=partition_name, records=tuple(records))
 
     def _resolve_official_partition(
@@ -404,6 +417,23 @@ class HandAssetDataset:
                 )
             )
         return ResolvedHandAssetPartition(name="evaluation.official_zero_shot", records=tuple(records))
+
+
+def _resolve_generated_lineage_job(job: Mapping[str, Any]) -> tuple[ResolvedHandAssetRecord, ...]:
+    r"""在线程 worker 中解析一条 lineage，保持主线程负责结果顺序规约。"""
+
+    return _resolve_generated_lineage(
+        job["mother_root"],
+        job["lineage"],
+        partition_name=job["partition_name"],
+        run_alias=job["run_alias"],
+        run_root=job["run_root"],
+        collection_kind=job["collection_kind"],
+        group_name=job["group_name"],
+        mother_name=job["mother_name"],
+        require_geometry_semantics=job["require_geometry_semantics"],
+        allow_legacy_left_handedness=job["allow_legacy_left_handedness"],
+    )
 
 
 def _resolve_generated_lineage(
@@ -860,7 +890,7 @@ def _load_yaml_mapping(path: Path, *, label: str) -> Mapping[str, Any]:
 
     if not path.is_file():
         raise FileNotFoundError(f"{label} does not exist: {path}")
-    document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    document = safe_load(path.read_bytes()) or {}
     if not isinstance(document, Mapping):
         raise TypeError(f"{label} must be a mapping: {path}")
     return document

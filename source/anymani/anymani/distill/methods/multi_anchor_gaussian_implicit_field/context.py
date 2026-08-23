@@ -24,6 +24,7 @@ class MultiAnchorObjectiveContext:
         q: torch.Tensor,
         prediction: GeometrySSLForward,
         batch: PaddedOnlineGeometryBatch,
+        create_graph: bool = True,
     ) -> None:
         r"""保存基础 forward；复杂派生节点只在首次访问时计算。"""
 
@@ -31,6 +32,7 @@ class MultiAnchorObjectiveContext:
         self.q = q  # 物理 rad，保留对 $q$ 的 JVP 图
         self.prediction = prediction
         self.batch = batch
+        self.create_graph = bool(create_graph)
         self._derived_field: torch.Tensor | None = None
         self._auto_field: torch.Tensor | None = None
 
@@ -138,7 +140,7 @@ class MultiAnchorObjectiveContext:
                 targets.owner_index,
                 targets.query_index,
                 targets.joint_index,
-                create_graph=True,
+                create_graph=self.create_graph,
             )
         return self._auto_field
 

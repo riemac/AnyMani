@@ -117,11 +117,24 @@ def test_fixed_evaluation_keeps_real_asset_and_q_tails() -> None:
     )
     q_count_by_asset: Counter[int] = Counter()
     final_asset_group_sizes: list[int] = []
+    identity_order: list[tuple[tuple[int, ...], int]] = []
     while not schedule.complete:
         item = schedule.next()
         final_asset_group_sizes.append(len(item.asset_indices))
+        identity_order.append((item.asset_indices, item.q_block_index))
         for asset_index in item.asset_indices:
             q_count_by_asset[asset_index] += item.q_per_asset
 
     assert q_count_by_asset == Counter({index: 5 for index in range(5)})
     assert final_asset_group_sizes == [2, 2, 2, 2, 2, 2, 1, 1, 1]
+    assert identity_order == [
+        ((0, 1), 0),
+        ((0, 1), 1),
+        ((0, 1), 2),
+        ((2, 3), 0),
+        ((2, 3), 1),
+        ((2, 3), 2),
+        ((4,), 0),
+        ((4,), 1),
+        ((4,), 2),
+    ]  # 同组 q-block 连续，固定评估无需反复重建同一 source/device state

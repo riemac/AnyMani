@@ -1,3 +1,12 @@
+0.6.8 - 2026-08-23
+==================
+
+- Geometry SSL 资产启动链路切换到 libyaml C loader、单次 URDF mesh/RGBA XML 解析和有序多 lineage CPU resolve；slim catalog 跨进程复用并限制在 512 MiB。
+- 完整 `GeometrySource` 改为进程内 `16 assets / 512 MiB` 双上限 LRU arena，`HandContainer` 恢复为纯解析对象；训练、异常退出与进程终止均不再留下逐资产 source/container pickle。
+- lazy source/Sobol、ragged-anchor mask、8-asset device subwindow、16-sample forward microbatch 和 calibration 无高阶梯度图共同限制 CPU/GPU 峰值；`runtime_resources.yaml` 记录命中、驱逐与驻留字节证据。
+- 固定 validation/q-bank 改为同资产组连续遍历全部 q-block，保持每资产 Sobol 测度与尾块不变，同时复用当前 device source；calibration 每个完整 accumulation group 原子更新 `loss_calibration.partial.yaml`，成功后只保留最终 artifact。
+- 修正 schema 5 catalog 访问、后台 physical audit 异常取消和 source 重建生命周期；同 seed、同软件/硬件栈的独立进程 probe 对五项 objective 均值与 trace 取得逐值一致结果。
+
 0.6.7 - 2026-08-23
 ==================
 
