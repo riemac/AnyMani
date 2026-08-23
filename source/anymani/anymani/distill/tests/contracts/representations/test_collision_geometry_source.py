@@ -26,7 +26,12 @@ from anymani.distill.representations.sources.collision_geometry import (
     strict_owner_union,
     warp_owner_geometry_cache_stats,
 )
-from anymani.distill.representations.sources.geometry_source import AnchorBankCfg, GeometrySource, GeometrySourceCfg
+from anymani.distill.representations.sources.geometry_source import (
+    AnchorBankCfg,
+    GeometrySource,
+    GeometrySourceCfg,
+    GeometrySourceCore,
+)
 from anymani.distill.representations.sources.kinematics import lower_hand_geometry_semantics
 
 _MOTHER_ROOT = (
@@ -145,6 +150,48 @@ def test_source_arena_release_and_rebuild_preserve_exact_cpu_realization() -> No
         and np.array_equal(first_record.surface_mesh.faces, second_record.surface_mesh.faces)
         for first_record, second_record in zip(first.geometry_cache.records, second.geometry_cache.records)
     )
+
+
+@_requires_local_mother
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Warp anchor contract requires an NVIDIA GPU")
+def test_gpu_anchor_finalization_matches_cpu_reference_and_releases_teacher_bvh() -> None:
+    r"""GPU-hybrid anchor bank 必须逐元素复现 CPU reference，并复用/释放同一 teacher BVH。"""
+
+    container = HandContainer.from_cfg(
+        HandContainerCfg(path=_MOTHER_ROOT),
+        require_geometry_semantics=True,
+    )
+    config = GeometrySourceCfg(
+        home_points_per_owner=8,
+        home_surface_oversample_factor=2,
+        static_sampling_seed=17,
+        anchors=AnchorBankCfg(bank_size=2, anchors_per_finger=2),
+    )
+    baseline = warp_owner_geometry_cache_stats()  # 其他合同可能已持有独立 surface hash 的 lease
+    core = GeometrySourceCore.materialize(container, config=config)
+    gpu_source, device_source, stats = core.finalize_on_device(
+        config=config,
+        device="cuda:0",
+        dtype=torch.float32,
+    )
+    try:
+        audit_source = GeometrySource.materialize(container, config=config, anchor_device="cpu")
+        assert len(gpu_source.anchor_bank) == len(audit_source.anchor_bank) == 2
+        assert all(
+            np.array_equal(gpu_bank.anchors_hand_m, audit_bank.anchors_hand_m)
+            and np.array_equal(gpu_bank.surface_mask, audit_bank.surface_mask)
+            and gpu_bank.sampling_seed == audit_bank.sampling_seed
+            for gpu_bank, audit_bank in zip(gpu_source.anchor_bank, audit_source.anchor_bank)
+        )
+        assert gpu_source.anchors.algorithm_version.endswith("fast-winding-v2:cuda:0")
+        assert audit_source.anchors.algorithm_version.endswith("fast-winding-v2:cpu")
+        assert stats.query_point_count > 0
+        assert stats.kernel_launch_count > 0
+        assert stats.boundary_disagreement_count <= stats.boundary_recheck_count
+        assert warp_owner_geometry_cache_stats()["lease_count"] == baseline["lease_count"] + 1
+    finally:
+        assert device_source.release()  # 最后一项 lease 归零并驱逐全局 cache
+    assert warp_owner_geometry_cache_stats() == baseline
 
 
 def test_anchor_radial_rejection_matches_declared_truncated_gaussian() -> None:

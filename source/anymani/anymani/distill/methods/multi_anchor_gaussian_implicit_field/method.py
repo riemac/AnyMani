@@ -1,16 +1,17 @@
 r"""多锚点 Gaussian 隐式场的科学聚合根。
 
 本类对内显式耦合 representation、model 与 objectives，对外只给 SSL trainer 封闭接口：
-prepare、realize_minibatch、forward_objectives、reduce_update、evaluate、retained export。
+prepare、realize_minibatch、forward/backward update、reduce、evaluate、retained export。
 Trainer 不得读取 `representation.config.field` 或 padding layout。
 """
 
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from threading import Event
 from time import perf_counter
@@ -25,7 +26,7 @@ from anymani.distill.models.input_adapters.geometry import GeometryPaddingCfg
 from anymani.distill.objectives.contracts import AdditiveStatistic, ObjectiveTermResult
 from anymani.distill.representations.geometry import GeometryRepresentation
 from anymani.distill.representations.sources.cache import GeometrySourceArena
-from anymani.distill.representations.sources.geometry_source import GeometrySource
+from anymani.distill.representations.sources.geometry_source import GeometrySource, GeometrySourceCore
 from anymani.distill.representations.sources.kinematics import lower_hand_geometry_semantics
 from anymani.distill.representations.targets.geometry_field import fixed_validation_gaussian_field_config
 
@@ -42,11 +43,33 @@ from .context import MultiAnchorObjectiveContext
 from .objectives import evaluate_objectives, reduce_method_steps
 from .state_measure import SobolJointSampler
 
-_FORWARD_MICROBATCH_SAMPLES = 16
-"""一次保留在 GPU activation graph 中的 `(asset,q)` 样本上限。"""
+_TRAIN_FORWARD_MICROBATCH_SAMPLES = 2
+"""训练需保留高阶参数图并立即流式 backward 时的 `(asset,q)` 样本上限。"""
+
+_EVALUATION_FORWARD_MICROBATCH_SAMPLES = 32
+"""固定评估不更新参数，与 calibration 一样无需保留二阶参数训练图。"""
+
+_CALIBRATION_FORWARD_MICROBATCH_SAMPLES = 32
+"""预实验不保留参数 backward 图；RTX 5070 Ti 实测峰值 10.10 GiB 的吞吐最优点。"""
 
 _DEVICE_SUBWINDOW_ASSETS = 8
 """单次 device source/Warp lease 的资产上限；不改变 logical resident window 顺序。"""
+
+
+def _forward_microbatch_samples(mode: str) -> int:
+    r"""按 autograd 生命周期返回 phase-specific forward sample 上限。
+
+    calibration/eval 的 density-coordinate derivative 使用 ``create_graph=False``，32 samples
+    实测比 16 samples 快 1.41 倍且峰值 10.10 GiB。train 还需对 Sobolev/chain 导数图执行
+    optimizer backward；真实 4-sample probe 在 density q-导数 forward 内 OOM，而 2 samples
+    完成二阶 backward 的峰值为 6.98 GiB，因此正式训练使用 2-sample 流式反传。
+    """
+
+    if mode == "train":
+        return _TRAIN_FORWARD_MICROBATCH_SAMPLES
+    if mode == "calibration":
+        return _CALIBRATION_FORWARD_MICROBATCH_SAMPLES
+    return _EVALUATION_FORWARD_MICROBATCH_SAMPLES
 
 
 def _merge_microbatch_steps(steps: tuple[MethodStep, ...]) -> MethodStep:
@@ -116,11 +139,24 @@ def _detach_method_step(step: MethodStep) -> MethodStep:
 
 
 def _derive_padding(assets: Sequence[HandContainer], *, max_graph_distance: int) -> GeometryPaddingCfg:
-    r"""由 typed semantics 推导 padding，不物化 owner collision geometry。
+    r"""由 typed semantics 的离散轴长度直接推导 padding。
 
-    padding 只依赖 JOINT/TIP 数量和 graph distance，不依赖 surface、anchor 或 query。
-    因而这里直接 lower 轻量运动学规格，避免小规模探针为了得到全局 shape 上限而提前
-    生成全部静态 geometry source。
+    padding 只依赖活动 JOINT 数、TIP owner 数和 backbone graph-distance 上限；空间旋量、
+    owner home pose、collision component 与 joint limits 都不改变这些离散轴长度。资产层的
+    ``HandGeometrySemanticsCfg`` 已经验证 ``active_joint_names`` 与 revolute joint 轴一一对应，
+    owner ``role`` 也已经闭合于 PALM/JOINT/TIP，因此无需为完整 catalog 重复执行
+    ``lower_hand_geometry_semantics``。对当前 8192-train preset，这使准备阶段从逐资产构造
+    float64 POE/graph 张量退化为纯整数扫描，同时保持 $N_J^{max}=16, N_{tip}^{max}=4$。
+
+    Args:
+        assets (Sequence[HandContainer]): train/validation/evaluation 的完整 typed asset 轴。
+        max_graph_distance (int): backbone 离散图距离截断，直接进入 ``GeometryPaddingCfg``。
+
+    Returns:
+        GeometryPaddingCfg: 全部资产都可容纳的 JOINT/TIP/graph padding 上限。
+
+    Raises:
+        ValueError: 资产轴为空、任一资产缺少 typed semantics，或 catalog 没有 JOINT/TIP。
     """
 
     if not assets:
@@ -131,9 +167,8 @@ def _derive_padding(assets: Sequence[HandContainer], *, max_graph_distance: int)
         semantics = asset.geometry_semantics
         if semantics is None:
             raise ValueError(f"asset {asset.asset_id!r} is missing geometry semantics")
-        spec = lower_hand_geometry_semantics(semantics, dtype=torch.float64)
-        max_joint = max(max_joint, int(spec.space_screws.shape[0]))
-        max_tip = max(max_tip, sum(role == "tip" for role in spec.owner_roles))
+        max_joint = max(max_joint, len(semantics.active_joint_names))  # $N_J$：规范活动关节轴长度
+        max_tip = max(max_tip, sum(owner.role == "tip" for owner in semantics.owners))  # $N_{tip}$：TIP owner 数
     if max_joint < 1 or max_tip < 1:
         raise ValueError("resolved dataset must contain at least one JOINT and one TIP owner")
     return GeometryPaddingCfg(
@@ -143,8 +178,17 @@ def _derive_padding(assets: Sequence[HandContainer], *, max_graph_distance: int)
     )
 
 
-class LazyGeometrySources(Sequence[GeometrySource]):
-    r"""把 resolved HandContainer 轴映射为按资产 demand-load 的 CPU source 轴。
+@dataclass(frozen=True)
+class SourcePrefetchHandle:
+    r"""下一 8-asset CPU core buffer 的 futures 与提交时刻。"""
+
+    asset_ids: tuple[str, ...]  # 与 logical asset chunk 同序的稳定 ID
+    futures: tuple[Future[GeometrySourceCore], ...]  # 两个 worker 共享 arena 的逐资产结果
+    started: float  # ``perf_counter`` 提交时刻，用于可消费延迟证据
+
+
+class LazyGeometrySources(Sequence[GeometrySourceCore]):
+    r"""把 resolved HandContainer 轴映射为按资产 demand-load 的 CPU source-core 轴。
 
     资产顺序和 ID 在 catalog resolve 后已经固定；只有索引、稳定 ID 或完整迭代会触发
     source arena 读取/物化。provider 自身不持有 source dict，因而完整训练轴的历史访问量
@@ -157,7 +201,7 @@ class LazyGeometrySources(Sequence[GeometrySource]):
         *,
         cache: GeometrySourceArena,
         config: Any,
-        materialize: Callable[[HandContainer], GeometrySource],
+        materialize: Callable[[HandContainer], GeometrySourceCore],
     ) -> None:
         r"""保存轻量资产轴和 source 构造函数，不执行资产几何 IO。"""
 
@@ -169,6 +213,15 @@ class LazyGeometrySources(Sequence[GeometrySource]):
         self.config = config
         self.materialize = materialize
         self._index_by_id = {asset_id: index for index, asset_id in enumerate(self.asset_ids)}
+        self._prefetch_executor: ThreadPoolExecutor | None = None  # 首次请求时才创建两个 CPU workers
+        self._prefetch_stats: dict[str, int | float] = {
+            "subwindow_count": 0,
+            "asset_count": 0,
+            "ready_latency_seconds": 0.0,
+            "blocked_wait_seconds": 0.0,
+        }  # current/next pipeline 的累计可消费延迟与主线程实际阻塞时间
+        self._ready_latencies: list[float] = []  # 每个 8-asset subwindow 从 submit 到可消费的 wall latency，s
+        self._blocked_waits: list[float] = []  # 主线程 await 的未重叠尾延迟，s
 
     def __len__(self) -> int:
         r"""返回不触发 source 物化的资产数量。"""
@@ -176,13 +229,13 @@ class LazyGeometrySources(Sequence[GeometrySource]):
         return len(self.assets)
 
     @overload
-    def __getitem__(self, index: int) -> GeometrySource: ...
+    def __getitem__(self, index: int) -> GeometrySourceCore: ...
 
     @overload
-    def __getitem__(self, index: slice) -> tuple[GeometrySource, ...]: ...
+    def __getitem__(self, index: slice) -> tuple[GeometrySourceCore, ...]: ...
 
-    def __getitem__(self, index: int | slice) -> GeometrySource | tuple[GeometrySource, ...]:
-        r"""按索引读取 source；slice 只在显式请求时展开对应范围。"""
+    def __getitem__(self, index: int | slice) -> GeometrySourceCore | tuple[GeometrySourceCore, ...]:
+        r"""按索引读取 source core；slice 只在显式请求时展开对应范围。"""
 
         if isinstance(index, slice):
             return tuple(self[position] for position in range(*index.indices(len(self))))
@@ -191,41 +244,82 @@ class LazyGeometrySources(Sequence[GeometrySource]):
         if index < 0 or index >= len(self):
             raise IndexError(index)
         asset = self.assets[index]
-        return self.cache.load_or_create(
+        core = self.cache.load_or_create(
             asset,
             config=self.config,
             materialize=lambda asset=asset: self.materialize(asset),
         )
+        if not isinstance(core, GeometrySourceCore):
+            raise TypeError("training source arena returned a finalized source instead of GeometrySourceCore")
+        return core
 
-    def get(self, asset_id: str) -> GeometrySource:
-        r"""按稳定 asset ID 读取 source，供 resident window demand-load。"""
+    def get(self, asset_id: str) -> GeometrySourceCore:
+        r"""按稳定 asset ID 读取 source core，供 resident window demand-load。"""
 
         try:
             return self[self._index_by_id[asset_id]]
         except KeyError as exc:
             raise KeyError(f"unknown geometry asset ID={asset_id!r}") from exc
 
-    def prefetch(self, asset_ids: Sequence[str]) -> None:
-        r"""并行准备 resident window 的 CPU source，GPU 上传仍由主线程完成。
+    def prefetch_async(self, asset_ids: Sequence[str]) -> SourcePrefetchHandle:
+        r"""异步准备下一 device subwindow 的 CPU core，不等待 GPU 当前组完成。
 
-        每项资产继续通过 arena 的 per-key 锁保证幂等；线程数固定为 2 的上限。
-        owner union 与 mesh 文件访问同时运行时会争用 CPU 内存带宽，过度并行反而延长
-        总 wall time，因此这里使用保守的双 worker，而不是按逻辑核数扩张。
+        每项资产继续通过 arena 的 per-key 锁保证幂等。executor 跨 subwindow 复用，避免每 8 项
+        重建线程；两个 worker 与 16-entry arena 对应 current/next 双缓冲，不扩大历史驻留量。
         """
 
         requested = tuple(asset_ids)
-        if not requested:
-            return
-        worker_count = min(2, len(requested))
         started = perf_counter()
-        print(f"[Source] CPU prefetch start: assets={len(requested)} workers={worker_count}", flush=True)
-        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="source-prefetch") as executor:
-            futures = [executor.submit(self.get, asset_id) for asset_id in requested]
-            for index, future in enumerate(futures, start=1):
-                future.result()
-                if index % 8 == 0 or index == len(futures):
-                    print(f"[Source] CPU prefetch progress: {index}/{len(futures)}", flush=True)
-        print(f"[Source] CPU prefetch done: seconds={perf_counter() - started:.3f}", flush=True)
+        if not requested:
+            return SourcePrefetchHandle(requested, (), started)
+        if self._prefetch_executor is None:
+            self._prefetch_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="source-prefetch")
+        futures = tuple(self._prefetch_executor.submit(self.get, asset_id) for asset_id in requested)
+        return SourcePrefetchHandle(requested, futures, started)
+
+    def await_prefetch(self, handle: SourcePrefetchHandle) -> tuple[GeometrySourceCore, ...]:
+        r"""等待并直接返回 current core buffer，避免 next-buffer LRU 插入使其重复物化。"""
+
+        wait_started = perf_counter()  # next-buffer 若已与 GPU 重叠完成，此处应接近零阻塞
+        cores: list[GeometrySourceCore] = []
+        for future in handle.futures:
+            cores.append(future.result())
+        completed = perf_counter()
+        ready_latency = completed - handle.started  # CPU current/next pipeline 对该 subwindow 的完整服务时间，s
+        blocked_wait = completed - wait_started  # GPU 当前组未覆盖掉的 CPU 尾部等待，s
+        self._prefetch_stats["subwindow_count"] = int(self._prefetch_stats["subwindow_count"]) + 1
+        self._prefetch_stats["asset_count"] = int(self._prefetch_stats["asset_count"]) + len(handle.asset_ids)
+        self._prefetch_stats["ready_latency_seconds"] = float(
+            self._prefetch_stats["ready_latency_seconds"]
+        ) + ready_latency
+        self._prefetch_stats["blocked_wait_seconds"] = float(
+            self._prefetch_stats["blocked_wait_seconds"]
+        ) + blocked_wait
+        self._ready_latencies.append(ready_latency)
+        self._blocked_waits.append(blocked_wait)
+        return tuple(cores)  # futures 的 submission order 与 asset_ids 严格一致
+
+    def prefetch_stats(self) -> dict[str, int | float]:
+        r"""返回 current/next core pipeline 的累计 timing 与预算证据。"""
+
+        evidence = dict(self._prefetch_stats)
+        if self._ready_latencies:
+            rank = math.ceil(0.95 * len(self._ready_latencies)) - 1  # nearest-rank $P_{95}$，保留实测 subwindow 值
+            evidence["ready_latency_p95_seconds"] = sorted(self._ready_latencies)[rank]
+            evidence["blocked_wait_p95_seconds"] = sorted(self._blocked_waits)[rank]
+        return evidence
+
+    def prefetch(self, asset_ids: Sequence[str]) -> None:
+        r"""同步兼容入口；scheduler 未提供外层流水时提交并等待同一 core buffer。"""
+
+        self.await_prefetch(self.prefetch_async(asset_ids))
+
+    def close(self) -> None:
+        r"""等待已提交 core 工作并释放持久 executor；arena 生命周期由 Method 统一管理。"""
+
+        if self._prefetch_executor is not None:
+            self._prefetch_executor.shutdown(wait=True, cancel_futures=True)
+            self._prefetch_executor = None
 
 
 class LazySobolSamplers(Sequence[SobolJointSampler]):
@@ -449,11 +543,21 @@ class MultiAnchorGaussianMethod:
         self.validation_sources: dict[str, LazyGeometrySources] = {}
         self.evaluation_sources: dict[str, LazyGeometrySources] = {}
         self.padding: GeometryPaddingCfg | None = None
+        self.runtime_device: torch.device | None = None  # physical audit 与 resident source 共用 classifier device
+        self._anchor_classification: dict[str, int | float] = {
+            "asset_count": 0,
+            "query_point_count": 0,
+            "kernel_launch_count": 0,
+            "boundary_recheck_count": 0,
+            "boundary_disagreement_count": 0,
+            "elapsed_seconds": 0.0,
+        }  # 所有 split 共用的 append-only GPU/CPU anchor 分类证据
 
     def prepare(self, catalog: Any, *, device: torch.device, dtype: torch.dtype) -> None:
         r"""建立 train/validation/evaluation source provider，并推导全局 padding。"""
 
-        del device, dtype
+        del dtype
+        self.runtime_device = torch.device(device)  # audit manifest 必须重建训练实际使用的 CUDA anchors
         print(f"[Method] Indexing lazy train sources: {len(catalog.train)} assets")
         self.train_sources = self._lazy_sources(catalog.train, self.representation)
 
@@ -488,7 +592,7 @@ class MultiAnchorGaussianMethod:
             assets,
             cache=self.source_cache,
             config=self.config.representation.source,
-            materialize=representation.materialize_source,
+            materialize=representation.materialize_core,
         )
 
     def split_names(self, role: str) -> tuple[str, ...]:
@@ -568,7 +672,10 @@ class MultiAnchorGaussianMethod:
                 raise RuntimeError("physical asset audit cancelled before completion")
             return record(
                 item.container,
-                representation.materialize_source(item.container),
+                representation.materialize_source(
+                    item.container,
+                    anchor_device=str(self.runtime_device) if self.runtime_device is not None else "cpu",
+                ),
                 partition=partition,
                 provenance=item.provenance,
             )
@@ -701,17 +808,39 @@ class MultiAnchorGaussianMethod:
             raise RuntimeError("multi-anchor method padding has not been derived")
         return self.padding
 
-    def load_device_state(self, source: GeometrySource, *, device: torch.device | str, dtype: torch.dtype):
-        r"""把一项 CPU source 上传为训练期 device state；trainer 不直接读 representation。"""
+    def load_device_state(self, source: GeometrySourceCore, *, device: torch.device | str, dtype: torch.dtype):
+        r"""把一项 CPU core 完成 anchors 并上传为训练期 device state。"""
 
-        return self.representation.to_device(source, device=device, dtype=dtype)
+        state = self.representation.to_device(source, device=device, dtype=dtype)
+        self._record_anchor_classification(state)
+        return state
 
     def load_validation_device_state(
-        self, source: GeometrySource, *, device: torch.device | str, dtype: torch.dtype
+        self, source: GeometrySourceCore, *, device: torch.device | str, dtype: torch.dtype
     ):
-        r"""把一项 CPU source 上传为固定 validation sigma 的 device state。"""
+        r"""把一项 CPU core 完成 anchors 并上传为固定 validation sigma 的 device state。"""
 
-        return self.validation_representation.to_device(source, device=device, dtype=dtype)
+        state = self.validation_representation.to_device(source, device=device, dtype=dtype)
+        self._record_anchor_classification(state)
+        return state
+
+    def _record_anchor_classification(self, state: Any) -> None:
+        r"""把一项 resident source 的 anchor backend 证据规约到 run 累计量。"""
+
+        stats = getattr(state, "anchor_classification", None)
+        if stats is None:
+            return
+        self._anchor_classification["asset_count"] = int(self._anchor_classification["asset_count"]) + 1
+        for name in (
+            "query_point_count",
+            "kernel_launch_count",
+            "boundary_recheck_count",
+            "boundary_disagreement_count",
+        ):
+            self._anchor_classification[name] = int(self._anchor_classification[name]) + int(getattr(stats, name))
+        self._anchor_classification["elapsed_seconds"] = float(
+            self._anchor_classification["elapsed_seconds"]
+        ) + float(stats.elapsed_seconds)
 
     def declared_objective_weights(self) -> dict[str, float]:
         r"""返回 OBJECTIVES_CFG 中显式写出的五项权重。"""
@@ -723,10 +852,25 @@ class MultiAnchorGaussianMethod:
 
         return {name: term.qualified_func_name() for name, term in self.config.objectives.enabled().items()}
 
-    def runtime_resource_evidence(self) -> dict[str, dict[str, int]]:
-        r"""返回 CPU source arena 的命中、驱逐与硬容量证据。"""
+    def runtime_resource_evidence(self) -> dict[str, object]:
+        r"""返回 CPU core arena 与 GPU/CPU anchor classifier 的有界资源证据。"""
 
-        return {"geometry_source_arena": self.source_cache.stats()}
+        evidence: dict[str, object] = {
+            "geometry_source_core_arena": self.source_cache.stats(),
+            "anchor_classifier": dict(self._anchor_classification),
+        }
+        if self.train_sources is not None:
+            evidence["geometry_core_prefetch"] = self.train_sources.prefetch_stats()
+        if self.model is not None:
+            parameter = next(self.model.parameters(), None)
+            if parameter is not None and parameter.device.type == "cuda":
+                evidence["cuda_memory"] = {
+                    "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(parameter.device)),
+                    "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(parameter.device)),
+                    "current_allocated_bytes": int(torch.cuda.memory_allocated(parameter.device)),
+                    "current_reserved_bytes": int(torch.cuda.memory_reserved(parameter.device)),
+                }  # PyTorch allocator 口径；Warp BVH 由 scheduler 的 driver free/total 另行记录
+        return evidence
 
     def realize_minibatch(
         self,
@@ -754,13 +898,28 @@ class MultiAnchorGaussianMethod:
         logical_indices = tuple(schedule_item.asset_indices)
         if any(asset_index not in resident_set for asset_index in logical_indices):
             raise ValueError("logical minibatch assets must belong to its declared resident window")
-        for chunk_start in range(0, len(logical_indices), _DEVICE_SUBWINDOW_ASSETS):
-            asset_chunk = logical_indices[chunk_start : chunk_start + _DEVICE_SUBWINDOW_ASSETS]
-            states = window.ensure(tuple(catalog_ids[index] for index in asset_chunk))
+        asset_chunks = tuple(
+            logical_indices[chunk_start : chunk_start + _DEVICE_SUBWINDOW_ASSETS]
+            for chunk_start in range(0, len(logical_indices), _DEVICE_SUBWINDOW_ASSETS)
+        )  # logical 64-asset batch 的有序 8-asset device subwindows
+        first_ids = tuple(catalog_ids[index] for index in asset_chunks[0])
+        prefetch_handle = sources.prefetch_async(first_ids)  # 首组无可重叠 GPU 工作，立即异步提交
+        for chunk_index, asset_chunk in enumerate(asset_chunks):
+            current_cores = sources.await_prefetch(prefetch_handle)  # 强引用 pin current，不依赖 arena LRU
+            next_handle = None
+            if chunk_index + 1 < len(asset_chunks):
+                next_ids = tuple(catalog_ids[index] for index in asset_chunks[chunk_index + 1])
+                next_handle = sources.prefetch_async(next_ids)  # CPU next 与当前 GPU finalization/teacher 重叠
+            states = window.ensure(
+                tuple(catalog_ids[index] for index in asset_chunk),
+                prefetch_sources=False,
+                prepared_sources={core.asset_id: core for core in current_cores},
+            )
             states_by_id = {state.source.asset_id: state for state in states}
             for asset_index in asset_chunk:
-                source = sources[asset_index]
-                state = states_by_id[source.asset_id]
+                asset_id = catalog_ids[asset_index]  # logical catalog index 对应的稳定 source identity
+                state = states_by_id[asset_id]
+                source = state.source  # 当前 device state 持有已经完成 GPU anchor bank 的最终 source
                 q_count = schedule_item.q_per_asset
                 q = samplers[asset_index].draw(
                     q_count, device=state.spec.space_screws.device, dtype=state.spec.space_screws.dtype
@@ -793,16 +952,19 @@ class MultiAnchorGaussianMethod:
                         dtype=q.dtype,
                     )
                 )
+            if next_handle is not None:
+                prefetch_handle = next_handle
         return pad_online_geometry_samples(samples, padding=padding)
 
     def forward_objectives(self, batch: PaddedOnlineGeometryBatch, *, step: int, mode: str = "train") -> MethodStep:
-        r"""完成一次 logical minibatch 前向，并在 GPU 上按 64 samples 做 microbatch。
+        r"""完成一次 logical minibatch 前向，并按 phase-specific sample budget 做 microbatch。
 
         logical minibatch 的 sampling budget、joint-sign rewrite 随机身份和 additive
         objective 统计不变；microbatch 只限制单次 encoder activation 的峰值显存。
         """
 
-        if batch.q.shape[0] <= _FORWARD_MICROBATCH_SAMPLES:
+        microbatch_samples = _forward_microbatch_samples(mode)  # phase 对应的显存/吞吐 Pareto 点
+        if batch.q.shape[0] <= microbatch_samples:
             result, _prediction = self._forward_with_prediction(batch, step=step, mode=mode)
             return result
         rewritten = (
@@ -818,7 +980,7 @@ class MultiAnchorGaussianMethod:
         steps = []
         for microbatch in split_padded_online_geometry_batch(
             rewritten,
-            microbatch_size=_FORWARD_MICROBATCH_SAMPLES,
+            microbatch_size=microbatch_samples,
         ):
             micro_step = self._forward_with_prediction(
                 microbatch,
@@ -865,7 +1027,7 @@ class MultiAnchorGaussianMethod:
             q=q,
             prediction=prediction,
             batch=batch,
-            create_graph=mode != "calibration",
+            create_graph=mode == "train",  # 只有 optimizer backward 需要保留密度 q-导数的二阶参数图
         )
         results = evaluate_objectives(context, self.config.objectives)
         return MethodStep(objectives=results, sample_count=int(batch.q.shape[0])), prediction
@@ -874,6 +1036,116 @@ class MultiAnchorGaussianMethod:
         r"""按 $(asset,q)$ 等权合并一个 optimizer update。"""
 
         return reduce_method_steps(steps, self.config.objectives)
+
+    @staticmethod
+    def _training_group_denominators(
+        batches: Sequence[PaddedOnlineGeometryBatch],
+    ) -> dict[str, torch.Tensor]:
+        r"""在模型 forward 前由监督 mask 计算完整 accumulation group 的样本 denominator。
+
+        五项 objective 都先在每个 $(asset,q)$ 行内归约，再对有效行等权。density 行有效当且仅当
+        任一 owner/query 有效；四项 edge loss 行有效当且仅当任一 sampled edge 有效。joint-sign
+        rewrite 不改变 mask，因此 denominator 可在 augmentation/forward 前精确得到。
+        """
+
+        if not batches:
+            raise ValueError("streaming backward requires at least one realized batch")
+        device = batches[0].q.device
+        dtype = batches[0].q.dtype
+        density = torch.zeros((), device=device, dtype=dtype)  # 有效 zero-order $(asset,q)$ 行数
+        edge = torch.zeros((), device=device, dtype=dtype)  # 有效 first-order $(asset,q)$ 行数
+        for batch in batches:
+            density += batch.field_targets.valid_mask.reshape(batch.q.shape[0], -1).any(dim=-1).sum().to(dtype)
+            edge += batch.sensitivity_targets.valid_mask.reshape(batch.q.shape[0], -1).any(dim=-1).sum().to(dtype)
+        if float(density) <= 0.0 or float(edge) <= 0.0:
+            raise ValueError("streaming backward group has no valid density or edge samples")
+        return {
+            "density": density,
+            "kappa": edge,
+            "derived_field": edge,
+            "sobolev": edge,
+            "chain": edge,
+        }
+
+    def backward_update(
+        self,
+        batches: Sequence[PaddedOnlineGeometryBatch],
+        *,
+        forward_steps: Sequence[int],
+    ) -> MethodUpdate:
+        r"""按完整 group denominator 对 2-sample microbatches 流式反传。
+
+        对 objective $j$、microbatch $m$ 的充分统计 numerator $N_{j,m}$ 与完整 group
+        denominator $D_j$，利用微分线性性执行：
+        $$
+        \nabla_\theta\mathcal L
+        =\sum_m\sum_j w_j\nabla_\theta\frac{N_{j,m}}{D_j}.
+        $$
+        每个 microbatch 调用 ``backward`` 后即可释放 Sobolev/chain 二阶图；这与先构造
+        $\sum_mN_{j,m}/D_j$ 再统一 backward 数学等价，但峰值不随 logical batch/group 增长。
+
+        Args:
+            batches (Sequence[PaddedOnlineGeometryBatch]): 一次 accumulation group 已 realization 的 batches。
+            forward_steps (Sequence[int]): 每个 logical batch 的 augmentation/forward 随机身份。
+
+        Returns:
+            MethodUpdate: detached group loss、五项均值与总 $(asset,q)$ 样本数；参数 ``.grad`` 已累积。
+        """
+
+        if len(batches) != len(forward_steps):
+            raise ValueError("streaming backward batches and forward_steps must align")
+        denominators = self._training_group_denominators(batches)  # 完整 group 的固定 $D_j$
+        numerators = {
+            name: torch.zeros_like(denominator) for name, denominator in denominators.items()
+        }  # detached $\sum_mN_{j,m}$，只服务日志/等价性检查
+        observed_denominators = {
+            name: torch.zeros_like(denominator) for name, denominator in denominators.items()
+        }
+        enabled = self.config.objectives.enabled()
+        sample_count = 0
+
+        for batch, forward_step in zip(batches, forward_steps):
+            rewritten = maybe_rewrite_batch(
+                batch,
+                config=self.config.joint_sign_rewrite,
+                step=int(forward_step),
+                seed=int(forward_step),
+            )
+            for microbatch in split_padded_online_geometry_batch(
+                rewritten,
+                microbatch_size=_TRAIN_FORWARD_MICROBATCH_SAMPLES,
+            ):
+                micro_step = self._forward_with_prediction(
+                    microbatch,
+                    step=int(forward_step),
+                    mode="train",
+                    apply_augmentation=False,
+                )[0]
+                micro_loss: torch.Tensor | None = None
+                for term_name, result in micro_step.objectives.items():
+                    if len(result.components) != 1 or result.components[0].name != term_name:
+                        raise ValueError("streaming backward requires one same-name additive component per term")
+                    component = result.components[0]
+                    weighted = float(enabled[term_name].weight) * component.numerator / denominators[term_name]
+                    micro_loss = weighted if micro_loss is None else micro_loss + weighted
+                    numerators[term_name] += component.numerator.detach()
+                    observed_denominators[term_name] += component.denominator.detach()
+                if micro_loss is None:
+                    raise ValueError("streaming backward microbatch contains no enabled objective")
+                micro_loss.backward()  # 当前二阶图立即释放；梯度累积到同一 optimizer group
+                sample_count += micro_step.sample_count
+
+        for name, expected in denominators.items():
+            if not torch.equal(observed_denominators[name], expected):
+                raise RuntimeError(
+                    f"streaming backward denominator mismatch for {name}: "
+                    f"observed={float(observed_denominators[name])}, expected={float(expected)}"
+                )
+        terms = {name: float(numerators[name] / denominators[name]) for name in denominators}
+        detached_loss = torch.zeros_like(next(iter(denominators.values())))
+        for name in denominators:
+            detached_loss += float(enabled[name].weight) * numerators[name] / denominators[name]
+        return MethodUpdate(loss=detached_loss.detach(), terms=terms, sample_count=sample_count)
 
     def evaluate_session(
         self,
@@ -1027,12 +1299,27 @@ class MultiAnchorGaussianMethod:
         }
 
     def close(self) -> None:
-        r"""释放共享 CPU source arena；GPU lease 已由各 session window 先行 teardown。"""
+        r"""关闭全部 core prefetch executors 并释放共享 arena；GPU lease 已由 session teardown。"""
 
+        providers = [
+            *(tuple([self.train_sources]) if self.train_sources is not None else ()),
+            *self.validation_sources.values(),
+            *self.evaluation_sources.values(),
+        ]
+        seen: set[int] = set()
+        for provider in providers:
+            if id(provider) not in seen:
+                provider.close()
+                seen.add(id(provider))
         self.source_cache.clear()
 
 
 MultiAnchorGaussianMethodCfg.runtime_type = MultiAnchorGaussianMethod  # type: ignore[misc, assignment]
 
 
-__all__ = ["MultiAnchorGaussianMethod", "MultiAnchorGaussianSession", "_derive_padding"]
+__all__ = [
+    "MultiAnchorGaussianMethod",
+    "MultiAnchorGaussianSession",
+    "_derive_padding",
+    "_forward_microbatch_samples",
+]

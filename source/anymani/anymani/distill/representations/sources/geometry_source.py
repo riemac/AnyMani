@@ -20,6 +20,7 @@ import torch
 from anymani.assets.bank import HandContainer
 
 from .collision_geometry import (
+    AnchorClassificationStats,
     AnchorSamples,
     GeometryIdentity,
     HomeSurfaceSamples,
@@ -30,7 +31,7 @@ from .collision_geometry import (
     materialize_warp_owner_geometry_cache,
     release_warp_owner_geometry_cache,
     sample_owner_home_surfaces,
-    sample_palm_anchor_supports,
+    sample_palm_anchor_bank_warp,
 )
 from .kinematics import EmbodimentGeometrySpec, lower_hand_geometry_semantics
 
@@ -106,6 +107,104 @@ class GeometrySourceCfg:
 
 
 @dataclass(frozen=True)
+class GeometrySourceCore:
+    r"""一项资产可在线完成 anchors 的 CPU 静态几何核心。
+
+    core 保存生成 anchor 与 teacher 共同需要的 float64 POE、strict owner union、home surface 和
+    physical identity，但不执行昂贵的 point-in-solid 分类。正式 SSL 先用双 worker 准备 core，
+    再在主 CUDA 线程上传同一 owner BVH、批量生成完整 anchor bank；该 BVH 随后直接服务 online
+    teacher，避免为 anchor 单独建立临时 GPU 几何。
+    """
+
+    container: HandContainer  # bank bundle 与 typed semantics 真源
+    spec_cpu: EmbodimentGeometrySpec  # CPU float64 POE/graph/component transforms
+    geometry_cache: OwnerGeometryCache  # owner-local strict surface/solid union
+    home_surface: HomeSurfaceSamples  # `[G,M,3]` owner-local boundary realization
+    identity: GeometryIdentity  # physical mapping 与 configuration-domain 双重身份
+
+    @property
+    def asset_id(self) -> str:
+        r"""返回与 catalog、resident window 共用的稳定资产 ID。"""
+
+        return self.container.asset_id
+
+    @classmethod
+    def materialize(
+        cls,
+        container: HandContainer,
+        *,
+        config: GeometrySourceCfg = GeometrySourceCfg(),
+    ) -> GeometrySourceCore:
+        r"""构造不含 anchor inside-classification 的 CPU core。
+
+        Args:
+            container (HandContainer): 已解析 typed geometry semantics 的资产 bundle。
+            config (GeometrySourceCfg): home-surface realization 数值预算。
+
+        Returns:
+            GeometrySourceCore: 可由 CPU reference 或 CUDA resident finalizer 完成的静态核心。
+        """
+
+        semantics = container.geometry_semantics  # assets 层交付的唯一静态 owner/frame 真源
+        if semantics is None:
+            raise ValueError("container must be resolved with require_geometry_semantics=True")
+        spec = lower_hand_geometry_semantics(semantics, dtype=torch.float64)  # `[N_J,6]` 等静态张量
+        geometry_cache = materialize_owner_geometry_cache(container, spec)  # 真实逐 owner union surface
+        identity = geometry_identity(semantics, spec, geometry_cache)  # physical/configuration identity 分离
+        home_surface = sample_owner_home_surfaces(
+            geometry_cache,
+            points_per_owner=config.home_points_per_owner,
+            sampling_seed=config.static_sampling_seed,
+            oversample_factor=config.home_surface_oversample_factor,
+        )
+        return cls(container, spec, geometry_cache, home_surface, identity)
+
+    def finalize_on_device(
+        self,
+        *,
+        config: GeometrySourceCfg,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> tuple[GeometrySource, DeviceGeometrySource, AnchorClassificationStats]:
+        r"""复用正式 teacher BVH 生成 anchors，并返回完整 CPU/device source。
+
+        Args:
+            config (GeometrySourceCfg): 8-bank、每指 10 anchor 与支持域参数。
+            device (torch.device | str): Warp/PyTorch 共同 CUDA device。
+            dtype (torch.dtype): 在线训练张量 dtype，当前固定 float32。
+
+        Returns:
+            tuple[GeometrySource, DeviceGeometrySource, AnchorClassificationStats]: 完整 source、
+                已取得 lease 的 device view 与 GPU/CPU 边界分类证据。
+        """
+
+        target_device = torch.device(device)  # 规范化 `cuda`/`cuda:0` 身份
+        spec_device = self.spec_cpu.to(device=target_device, dtype=dtype)  # POE/graph 一次上传
+        warp_cache = materialize_warp_owner_geometry_cache(self.geometry_cache, device=str(target_device))
+        try:
+            semantics = self.container.geometry_semantics
+            if semantics is None:
+                raise ValueError("geometry source core lost typed semantics before CUDA finalization")
+            anchor_bank, stats = sample_palm_anchor_bank_warp(
+                self.geometry_cache,
+                semantics,
+                self.spec_cpu,
+                warp_cache,
+                bank_size=config.anchors.bank_size,
+                anchors_per_finger=config.anchors.anchors_per_finger,
+                static_sampling_seed=config.static_sampling_seed,
+                radial_support_radius_m=config.anchors.radius_m,
+                radial_decay_scale_m=config.anchors.radial_decay_scale_m,
+                surface_fraction=config.anchors.surface_fraction,
+            )
+            source = GeometrySource.from_core(self, anchor_bank=anchor_bank)  # canonical $A^{(0)}$ 为 bank[0]
+            return source, DeviceGeometrySource(source, spec_device, warp_cache), stats
+        except Exception:
+            release_warp_owner_geometry_cache(warp_cache)  # finalization 失败不得泄漏 owner BVH lease
+            raise
+
+
+@dataclass(frozen=True)
 class GeometrySource:
     r"""一项资产在 CPU 上可跨 representation/stage 复用的静态物理真源。
 
@@ -134,6 +233,7 @@ class GeometrySource:
         container: HandContainer,
         *,
         config: GeometrySourceCfg = GeometrySourceCfg(),
+        anchor_device: str = "cpu",
     ) -> GeometrySource:
         r"""从一项 bank container 构造全部 CPU physical-source evidence。
 
@@ -143,43 +243,56 @@ class GeometrySource:
         Args:
             container (HandContainer): 以 ``require_geometry_semantics=True`` 解析的资产 bundle。
             config (GeometrySourceCfg): q-independent source realization 参数。
+            anchor_device (str): v2 fast-winding classifier device；CPU reference 显式为 ``cpu``，
+                正式 SSL audit 使用 trainer 的同一 CUDA device。
 
         Returns:
             GeometrySource: 与 q/step 无关、可跨 representation 复用的 CPU source。
         """
 
-        semantics = container.geometry_semantics  # assets 层交付的唯一静态 owner/frame 真源
-        if semantics is None:  # source 不自行重读 hand.yaml 或 URDF
-            raise ValueError("container must be resolved with require_geometry_semantics=True")
-
-        # 先以 CPU float64 lower 运动学与 collision carrier，确保 hash/audit 不受训练 dtype 影响。
-        spec = lower_hand_geometry_semantics(semantics, dtype=torch.float64)  # `[N_J,6]` 等静态张量
-        geometry_cache = materialize_owner_geometry_cache(container, spec)  # 真实逐 owner union surface
-        identity = geometry_identity(semantics, spec, geometry_cache)  # physical/configuration identity 分离
-
-        # retained home points 只来自真实 owner boundary；oversample factor 是 realization provenance。
-        home_surface = sample_owner_home_surfaces(
-            geometry_cache,
-            points_per_owner=config.home_points_per_owner,
-            sampling_seed=config.static_sampling_seed,
-            oversample_factor=config.home_surface_oversample_factor,
-        )
-
-        # 每套 anchors 独立采样；bank 是 retained-input realization，不改变 teacher 几何。
-        anchor_bank = tuple(
-            sample_palm_anchor_supports(
-                geometry_cache,
+        core = GeometrySourceCore.materialize(container, config=config)  # CPU reference 与正式 core 共用几何真源
+        semantics = core.container.geometry_semantics
+        if semantics is None:
+            raise ValueError("geometry source core is missing typed semantics")
+        # CPU reference/audit 与 CUDA runtime 共用 fast-winding inside 定义；仅执行设备不同。
+        warp_cache = materialize_warp_owner_geometry_cache(core.geometry_cache, device=anchor_device)
+        try:
+            anchor_bank, _stats = sample_palm_anchor_bank_warp(
+                core.geometry_cache,
                 semantics,
-                spec,
+                core.spec_cpu,
+                warp_cache,
+                bank_size=config.anchors.bank_size,
                 anchors_per_finger=config.anchors.anchors_per_finger,
-                sampling_seed=config.static_sampling_seed + bank_index * 1_000_003,
+                static_sampling_seed=config.static_sampling_seed,
                 radial_support_radius_m=config.anchors.radius_m,
                 radial_decay_scale_m=config.anchors.radial_decay_scale_m,
                 surface_fraction=config.anchors.surface_fraction,
             )
-            for bank_index in range(config.anchors.bank_size)
+        finally:
+            release_warp_owner_geometry_cache(warp_cache)  # reference source 不持有在线 teacher lease
+        return cls.from_core(core, anchor_bank=anchor_bank)
+
+    @classmethod
+    def from_core(
+        cls,
+        core: GeometrySourceCore,
+        *,
+        anchor_bank: tuple[AnchorSamples, ...],
+    ) -> GeometrySource:
+        r"""把已经分类完成的非空 anchor bank 附着到同一 CPU physical core。"""
+
+        if not anchor_bank:
+            raise ValueError("geometry source finalization requires a non-empty anchor bank")
+        return cls(
+            core.container,
+            core.spec_cpu,
+            core.geometry_cache,
+            core.home_surface,
+            anchor_bank[0],
+            anchor_bank,
+            core.identity,
         )
-        return cls(container, spec, geometry_cache, home_surface, anchor_bank[0], anchor_bank, identity)
 
     def to_device(
         self,
@@ -220,4 +333,4 @@ class DeviceGeometrySource:
         return release_warp_owner_geometry_cache(self.warp_cache)  # lease 归零后移除全局强引用
 
 
-__all__ = ["AnchorBankCfg", "DeviceGeometrySource", "GeometrySource", "GeometrySourceCfg"]
+__all__ = ["AnchorBankCfg", "DeviceGeometrySource", "GeometrySource", "GeometrySourceCfg", "GeometrySourceCore"]

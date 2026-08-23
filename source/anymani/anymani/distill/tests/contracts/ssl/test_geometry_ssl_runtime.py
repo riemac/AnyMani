@@ -12,7 +12,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from anymani.distill.methods.contracts import AdditiveStatistic, MethodStep, ObjectiveTermResult
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field import evaluation as method_evaluation
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field import method as method_module
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.augmentation import maybe_rewrite_batch
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import (
     OnlineGeometrySample,
@@ -22,7 +24,12 @@ from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import (
 )
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import JointSignRewriteCfg
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.evaluation import update_evaluation_digest
-from anymani.distill.methods.multi_anchor_gaussian_implicit_field.method import PhysicalAuditHandle
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.method import (
+    MultiAnchorGaussianMethod,
+    PhysicalAuditHandle,
+    _derive_padding,
+    _forward_microbatch_samples,
+)
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.state_measure import SobolJointSampler
 from anymani.distill.models.input_adapters.geometry import (
     GeometryPaddingCfg,
@@ -113,6 +120,39 @@ def _sample(q: torch.Tensor) -> OnlineGeometrySample:
         sensitivity_targets=sensitivity,
         q_index=torch.arange(batch_size),
     )
+
+
+def test_padding_derivation_reads_only_typed_semantic_axis_lengths() -> None:
+    r"""全 catalog padding 不得为离散 shape 上限构造 POE/FK/graph 浮点张量。"""
+
+    def asset(asset_id: str, *, joint_count: int, tip_count: int) -> SimpleNamespace:
+        r"""构造只暴露 padding 所需 typed 轴的最小资产。"""
+
+        owners = (SimpleNamespace(role="palm"),) + tuple(
+            SimpleNamespace(role="joint") for _ in range(joint_count)
+        ) + tuple(SimpleNamespace(role="tip") for _ in range(tip_count))
+        semantics = SimpleNamespace(
+            active_joint_names=tuple(f"joint_{index}" for index in range(joint_count)),
+            owners=owners,
+        )
+        return SimpleNamespace(asset_id=asset_id, geometry_semantics=semantics)
+
+    padding = _derive_padding(
+        (asset("small", joint_count=7, tip_count=3), asset("large", joint_count=16, tip_count=4)),
+        max_graph_distance=8,
+    )
+
+    assert padding.max_joint_count == 16  # 当前正式 catalog 的 $N_J^{max}$ 数值锚点
+    assert padding.max_tip_count == 4  # 当前正式 catalog 的 $N_{tip}^{max}$ 数值锚点
+    assert padding.max_graph_distance == 8  # backbone graph-distance 截断不由资产重写
+
+
+def test_calibration_and_evaluation_use_larger_microbatch_than_second_order_training() -> None:
+    r"""无参数 backward 的预实验/评估可用 32 samples；train 收紧为 2-sample 流式高阶图。"""
+
+    assert _forward_microbatch_samples("calibration") == 32
+    assert _forward_microbatch_samples("train") == 2
+    assert _forward_microbatch_samples("eval") == 32
 
 
 def test_sobol_cursor_resume_reproduces_the_next_q_block() -> None:
@@ -347,6 +387,47 @@ def test_forward_microbatch_split_preserves_sample_axis_and_nested_targets() -> 
     )
 
 
+def test_streaming_backward_matches_full_group_additive_gradient(monkeypatch: pytest.MonkeyPatch) -> None:
+    r"""逐 2-sample backward 必须等价于完整 group 的五项加权充分统计梯度。"""
+
+    block = _sample(torch.tensor([[0.1, -0.2], [0.3, 0.4], [-0.5, 0.2], [0.7, -0.1]]))
+    batch = pad_online_geometry_samples(
+        list(split_online_geometry_sample(block)),
+        padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
+    )
+    parameter = torch.nn.Parameter(torch.tensor(2.0))  # 解析目标：五项均为 $p^2$，总梯度 $10p=20$
+    names = ("density", "kappa", "derived_field", "sobolev", "chain")
+    enabled = {name: SimpleNamespace(weight=1.0) for name in names}
+
+    def synthetic_forward(microbatch, **_kwargs):
+        r"""为每个样本贡献 $p^2$，使 microbatch numerator 可加且 denominator 为样本数。"""
+
+        count = parameter.new_tensor(float(microbatch.q.shape[0]))
+        objectives = {}
+        for name in names:
+            numerator = parameter.square() * count  # $N_{j,m}=B_mp^2$
+            statistic = AdditiveStatistic(name, numerator, count)
+            objectives[name] = ObjectiveTermResult(name, (statistic,), {"loss": statistic.mean})
+        return MethodStep(objectives=objectives, sample_count=microbatch.q.shape[0]), None
+
+    fake_method = SimpleNamespace(
+        config=SimpleNamespace(
+            objectives=SimpleNamespace(enabled=lambda: enabled),
+            joint_sign_rewrite=SimpleNamespace(),
+        ),
+        _training_group_denominators=MultiAnchorGaussianMethod._training_group_denominators,
+        _forward_with_prediction=synthetic_forward,
+    )
+    monkeypatch.setattr(method_module, "maybe_rewrite_batch", lambda value, **_kwargs: value)
+
+    update = MultiAnchorGaussianMethod.backward_update(fake_method, (batch,), forward_steps=(0,))
+
+    assert update.sample_count == 4
+    assert update.terms == {name: pytest.approx(4.0) for name in names}
+    assert float(update.loss) == pytest.approx(20.0)
+    assert float(parameter.grad) == pytest.approx(20.0)  # $\partial(5p^2)/\partial p=10p=20$
+
+
 def test_ragged_anchor_padding_mask_matches_independent_relation_encoding() -> None:
     r"""30/40-anchor 资产可共享 batch，零 padding 不得进入 $SO(2)$ anchor attention。"""
 
@@ -436,6 +517,39 @@ def test_resident_window_evicts_old_asset_and_enforces_cap() -> None:
     assert released == ["asset-0", "asset-1", "asset-2"]
     final_events = window.drain_telemetry_events()
     assert [event["event"] for event in final_events] == ["resident_window", "resident_window_release_all"]
+
+
+def test_resident_window_consumes_pinned_prefetch_buffer_without_second_provider_lookup() -> None:
+    r"""next-buffer LRU 插入后，current core 必须由 handle 强引用直接交给 loader，不能 cache miss 重建。"""
+
+    prepared = tuple(SimpleNamespace(asset_id=f"asset-{index}") for index in range(2))
+
+    def unexpected_get(_asset_id: str):
+        raise AssertionError("prepared current buffer must bypass source_provider.get")
+
+    provider = SimpleNamespace(get=unexpected_get)
+    window = ResidentGeometryAssetWindow(
+        prepared,
+        device="cpu",
+        dtype=torch.float32,
+        max_resident_assets=2,
+        loader=lambda source, **_kwargs: SimpleNamespace(
+            source=source,
+            device_source=SimpleNamespace(release=lambda: True),
+            warp_cache=SimpleNamespace(handles=()),
+        ),
+        catalog_ids=tuple(source.asset_id for source in prepared),
+        source_provider=provider,
+    )
+
+    states = window.ensure(
+        tuple(source.asset_id for source in prepared),
+        prefetch_sources=False,
+        prepared_sources={source.asset_id: source for source in prepared},
+    )
+
+    assert tuple(state.source.asset_id for state in states) == ("asset-0", "asset-1")
+    window.release_all()
 
 
 def test_validation_ablation_marks_single_q_same_asset_shuffle_as_missing(

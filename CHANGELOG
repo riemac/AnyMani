@@ -1,3 +1,13 @@
+0.6.9 - 2026-08-24
+==================
+
+- Geometry SSL padding 直接读取 typed semantics 的 JOINT/TIP 轴长度，不再对完整 11,272-asset catalog 重复构造运动学与图临时量；当前数据合同仍为 `max_joint_count=16 / max_tip_count=4`。
+- source 生命周期拆为 CPU `GeometrySourceCore` 与仅由当前 8-asset device subwindow 持有的完整 `GeometrySource`；16-entry/512 MiB arena、双 worker current/next 预取和 pinned handoff 保持有界并消除重复物化。
+- palm anchor inside 判定改为 Warp fast-winding 批处理，`|signed_distance| <= 1 µm` 候选仍由 CPU float64 fixed-ray 复核；sampling version 升至 v2，并记录 query、kernel、复核、分歧与耗时证据。
+- calibration/evaluation 使用 32-sample 无参数二阶图 microbatch；训练保持五项 objective 公式不变，以 2-sample、完整 accumulation-group denominator 的流式 backward 限制 Sobolev/chain 高阶图峰值。
+- `mini_epochs=1` calibration 逐 logical batch 消费 additive statistics，并在批间回收 trimesh/NumPy host allocator 空闲页；`runtime_resources.yaml` 将 `geometry_source_arena` 更名为 `geometry_source_core_arena`，并新增 subwindow p95、进程 RSS/swap、CUDA peak 与 lifecycle 分阶段计时。
+- RTX 5070 Ti 上 `8 assets × 8 q × 1 forward` 从 60.1 s 降至 10.58 s；最终 4-minibatch smoke 的 term means/traces 与未流式版本逐值一致，CUDA allocated peak 10.19 GiB、RSS peak 3.955 GiB、swap 0。
+
 0.6.8 - 2026-08-23
 ==================
 

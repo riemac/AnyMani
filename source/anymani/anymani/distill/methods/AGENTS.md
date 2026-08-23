@@ -28,7 +28,7 @@ methods/
 
 ### 封装
 
-Trainer 只调用 `prepare`、`open_session`、`forward_objectives`、`reduce_update`、`evaluate_session`、完整 state 保存/恢复、retained artifact 与 `close`。sources、Sobol cursor、resident loader、具体 batch/model、固定 sigma 和 ablation 均封在 concrete method/session 内。
+Trainer 只调用 `prepare`、`open_session`、`forward_objectives`/可选流式 `backward_update`、`reduce_update`、`evaluate_session`、完整 state 保存/恢复、retained artifact 与 `close`。流式入口必须保持完整 accumulation group 的 additive-statistic denominator，只允许改变 autograd 图生命周期；sources、Sobol cursor、resident loader、具体 batch/model、固定 sigma 和 ablation 均封在 concrete method/session 内。
 
 ### 配置
 

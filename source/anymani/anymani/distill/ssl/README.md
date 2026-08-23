@@ -59,7 +59,7 @@ python -m anymani.distill.ssl.pretrain \
   --num_minibatches 128 \
   --assets_per_minibatch 64 \
   --q_per_asset_per_minibatch 8 \
-  --mini_epochs 5 \
+  --mini_epochs 1 \
   --gradient_accumulation_steps 4 \
   --max_resident_assets 64 \
   --seed 20260813 \
@@ -67,4 +67,4 @@ python -m anymani.distill.ssl.pretrain \
   --experiment_name canonical_multi_anchor_gaussian_preexperiment
 ```
 
-CLI flags 描述一次运行，Python preset 定义方法、representation、objective 和未覆盖的默认值。SSL 是 task-free PyTorch/Warp 进程，本身没有 Isaac Sim 窗口或 `--headless` 状态。产物位于 `logs/ssl/<experiment>/<UTC timestamp>/`，包括 resolved config、dataset/expanded manifest、calibration、JSONL metrics、fixed validation、independent-q replay、ablation、selection history、full checkpoints 和 standalone retained artifact。实验统计语义见 [`../diagnostics/README.md`](../diagnostics/README.md)。
+预实验完整覆盖 `128 × 64 × 8 = 65536` 个新 `(asset,q)`，但不执行 optimizer update，因此只做 `mini_epochs=1`；正式 pretrain 仍使用 preset 的 `mini_epochs=5` 复用同一 teacher realization。CLI flags 描述一次运行，Python preset 定义方法、representation、objective 和未覆盖的默认值。SSL 是 task-free PyTorch/Warp 进程，本身没有 Isaac Sim 窗口或 `--headless` 状态。产物位于 `logs/ssl/<experiment>/<UTC timestamp>/`，包括 resolved config、dataset/expanded manifest、calibration、JSONL metrics、fixed validation、independent-q replay、ablation、selection history、full checkpoints 和 standalone retained artifact。实验统计语义见 [`../diagnostics/README.md`](../diagnostics/README.md)。

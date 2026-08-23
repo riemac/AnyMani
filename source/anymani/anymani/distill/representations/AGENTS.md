@@ -10,7 +10,7 @@ representations/
 ├── sources/
 │   ├── kinematics.py                POE / FK / Jacobian / owner graph
 │   ├── collision_geometry.py        owner union、home/anchor、Warp lease
-│   └── geometry_source.py           GeometrySourceCfg / AnchorBankCfg / CPU-GPU 生命周期
+│   └── geometry_source.py           GeometrySourceCore / anchor finalize / CPU-GPU 生命周期
 ├── fields/
 │   ├── density.py                   ρ = exp(-d² / 2σ²)
 │   └── distance.py                  unsigned distance
@@ -22,7 +22,7 @@ representations/
     └── warp_surface.py              closest-surface backend
 ```
 
-`GeometryRepresentation` 只物化 CPU source、上传 device source/surface cache，并按当前 `q` 生成物理 teacher。不构造 encoder evidence，不做跨结构 padding。
+`GeometryRepresentation` 只物化 CPU core、为当前 device subwindow finalize anchor/source、上传 surface cache，并按当前 `q` 生成物理 teacher。不构造 encoder evidence，不做跨结构 padding。
 
 ## Development Style And Conventions
 

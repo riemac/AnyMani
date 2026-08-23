@@ -15,6 +15,7 @@ source 的最小输入。它们可能属于下游 policy observation，但不能
 
 from .cache import GeometrySourceArena, geometry_source_array_nbytes
 from .collision_geometry import (
+    AnchorClassificationStats,
     AnchorSamples,
     GeometryIdentity,
     HomeSurfaceSamples,
@@ -26,9 +27,10 @@ from .collision_geometry import (
     materialize_warp_owner_geometry_cache,
     release_warp_owner_geometry_cache,
     sample_owner_home_surfaces,
+    sample_palm_anchor_bank_warp,
     sample_palm_anchor_supports,
 )
-from .geometry_source import DeviceGeometrySource, GeometrySource, GeometrySourceCfg
+from .geometry_source import DeviceGeometrySource, GeometrySource, GeometrySourceCfg, GeometrySourceCore
 from .kinematics import (
     EmbodimentGeometrySpec,
     forward_owner_transforms,
@@ -38,6 +40,7 @@ from .kinematics import (
 )
 
 __all__ = [
+    "AnchorClassificationStats",
     "AnchorSamples",
     "EmbodimentGeometrySpec",
     "DeviceGeometrySource",
@@ -45,6 +48,7 @@ __all__ = [
     "GeometryIdentity",
     "GeometrySource",
     "GeometrySourceCfg",
+    "GeometrySourceCore",
     "HomeSurfaceSamples",
     "OwnerGeometryCache",
     "OwnerSurfaceRecord",
@@ -57,6 +61,7 @@ __all__ = [
     "materialize_warp_owner_geometry_cache",
     "release_warp_owner_geometry_cache",
     "sample_owner_home_surfaces",
+    "sample_palm_anchor_bank_warp",
     "sample_palm_anchor_supports",
     "selected_point_jacobian",
     "transform_owner_points",

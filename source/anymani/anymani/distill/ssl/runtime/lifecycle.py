@@ -12,9 +12,10 @@ import json
 import math
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import torch
@@ -177,6 +178,55 @@ def _worktree_fingerprint() -> tuple[bool, str]:
     return True, digest.hexdigest()
 
 
+def _process_memory_evidence() -> dict[str, int]:
+    r"""读取当前进程的 Linux RSS 高水位、当前 RSS 与 swap，统一换算为 bytes。
+
+    ``ru_maxrss`` 与 ``/proc/self/status`` 的 Linux 单位均为 KiB。当前值和高水位同时记录，
+    用于区分 batch 处理中可释放的临时几何数组与 lifecycle 结束时仍被持有的引用。
+    """
+
+    import resource
+
+    fields: dict[str, int] = {}  # Linux status 名称到 KiB 数值；缺失字段按零处理
+    status_path = Path("/proc/self/status")
+    if status_path.is_file():
+        for line in status_path.read_text(encoding="utf-8").splitlines():
+            name, separator, remainder = line.partition(":")
+            if separator and name in {"VmRSS", "VmHWM", "VmSwap"}:
+                fields[name] = int(remainder.strip().split()[0])
+    resource_peak_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)  # 当前进程历史 RSS 峰值，KiB
+    return {
+        "current_rss_bytes": fields.get("VmRSS", 0) * 1024,
+        "peak_rss_bytes": max(fields.get("VmHWM", 0), resource_peak_kib) * 1024,
+        "current_swap_bytes": fields.get("VmSwap", 0) * 1024,
+    }
+
+
+def _release_host_allocator_slack() -> bool:
+    r"""回收已失去科学对象引用、但仍滞留在 CPython/glibc arena 的临时几何页面。
+
+    trimesh/NumPy 的候选点和 Boolean 临时数组可在一个 64-asset batch 内达到 GiB 量级。对象生命
+    周期已经结束时，CPython cycles 与 glibc free blocks 仍会抬高后续 batch 的 RSS 高水位；先做
+    generation-2 collection，再调用 GNU ``malloc_trim(0)``，只改变 host allocator residency。
+
+    Returns:
+        bool: 当前 libc 暴露并成功调用 ``malloc_trim`` 时为真；非 glibc 平台无该符号时为假。
+    """
+
+    import ctypes
+    import gc
+
+    gc.collect()  # trimesh 缓存图可能构成 cycle；引用仍存活的 source/core 不会被回收
+    try:
+        libc = ctypes.CDLL(None)
+        malloc_trim = libc.malloc_trim
+    except (AttributeError, OSError):
+        return False
+    malloc_trim.argtypes = [ctypes.c_size_t]
+    malloc_trim.restype = ctypes.c_int
+    return bool(malloc_trim(0))  # pad=0：把所有可归还 top chunks 交还 OS
+
+
 def _write_calibration_artifact(
     method: Any,
     session: Any,
@@ -189,6 +239,7 @@ def _write_calibration_artifact(
     resolved_config: dict[str, Any] | None = None,
     after_first_forward: Callable[[], object] | None = None,
     before_write: Callable[[], object] | None = None,
+    runtime_timing: dict[str, float] | None = None,
 ) -> str:
     r"""按正式训练的数据复用顺序运行预实验，不 backward、不更新参数或权重。
 
@@ -207,46 +258,111 @@ def _write_calibration_artifact(
     method.train_mode()  # 保留正式训练的 dropout/normalization 行为，只取消参数更新
     total_minibatches = schedule.num_minibatches
     partial_output = output.with_name(f"{output.stem}.partial{output.suffix}")  # 中断后最近完整 group 证据
+    calibration_started = perf_counter()  # ETA 只覆盖 calibration 主循环，不混入 catalog/model startup
+    realized_seconds = 0.0  # q/query/teacher/source 完整 realization 累计时间
+    objective_seconds = 0.0  # model/JVP/五项 objective 前向累计时间
+    host_trim_seconds = 0.0  # calibration-only CPython/glibc host-page 回收时间
+
+    def consume_forward(batch: Any) -> None:
+        r"""累计一个 logical batch 的充分统计，不跨 batch 保留 autograd 图。"""
+
+        nonlocal audit_started, forward_count, forward_sample_count
+        result = method.forward_objectives(batch, step=forward_count, mode="calibration")
+        forward_count += 1  # joint-sign rewrite 的独立 forward identity
+        forward_sample_count += int(result.sample_count)  # 含 mini-epoch 复用的 $(asset,q)$ 数
+        if forward_count == 1 and after_first_forward is not None and not audit_started:
+            after_first_forward()  # 首个 GPU forward 后才允许后台 audit 争抢 CPU
+            audit_started = True
+        for name, objective in result.objectives.items():
+            for component in objective.components:
+                current = totals.setdefault(component.name, [0.0, 0.0])
+                current[0] += float(component.numerator.detach())  # additive $N_j$
+                current[1] += float(component.denominator.detach())  # additive $D_j$
+            traces.setdefault(name, []).append(float(objective.metrics["loss"].detach()))
+
     print(f"[Calibration] Starting: {total_minibatches} minibatches, "
           f"{mini_epochs} mini-epochs each, {gradient_accumulation_steps}-batch groups")
     with torch.enable_grad():
         while not schedule.complete:
+            group_started = perf_counter()  # 当前 accumulation group 的 wall-time 起点
             group_size = min(gradient_accumulation_steps, schedule.minibatches_remaining)
-            batches: list[Any] = []  # 当前组的物理 teacher realization，只构造一次
-            for _ in range(group_size):
-                schedule_item = schedule.next()
-                batches.append(
-                    _build_batch(
+            group_realized_seconds = 0.0  # 仅累计 teacher/source realization，不混入 objective
+            group_forward_seconds = 0.0  # 仅累计 model/JVP/五项 objective
+
+            if mini_epochs == 1:
+                # calibration 不 backward 且不复用数据时，逐批消费可把 RSS 从 4-batch 持有量降为 1-batch。
+                for _ in range(group_size):
+                    schedule_item = schedule.next()
+                    realization_started = perf_counter()
+                    batch = _build_batch(
                         session=session,
                         schedule=schedule,
                         schedule_item=schedule_item,
                         step=minibatch_count,
                     )
+                    group_realized_seconds += perf_counter() - realization_started
+                    minibatch_count += 1
+                    new_sample_count += schedule_item.sample_count
+                    asset_indices_seen.update(schedule_item.asset_indices)
+                    forward_started = perf_counter()
+                    consume_forward(batch)
+                    group_forward_seconds += perf_counter() - forward_started
+                    del batch  # 当前 logical batch 不复用；先解除 GPU/host evidence 的局部强引用
+                    trim_started = perf_counter()
+                    _release_host_allocator_slack()
+                    host_trim_seconds += perf_counter() - trim_started
+            else:
+                # 显式 mini-epoch 复用必须保留 group 内 teacher realization，保证每遍只重抽 joint-sign rewrite。
+                batches: list[Any] = []
+                realization_started = perf_counter()
+                for _ in range(group_size):
+                    schedule_item = schedule.next()
+                    batches.append(
+                        _build_batch(
+                            session=session,
+                            schedule=schedule,
+                            schedule_item=schedule_item,
+                            step=minibatch_count,
+                        )
+                    )
+                    minibatch_count += 1
+                    new_sample_count += schedule_item.sample_count
+                    asset_indices_seen.update(schedule_item.asset_indices)
+                group_realized_seconds = perf_counter() - realization_started
+                forward_started = perf_counter()
+                for _mini_epoch_index in range(mini_epochs):
+                    for batch in batches:
+                        consume_forward(batch)
+                group_forward_seconds = perf_counter() - forward_started
+
+            realized_seconds += group_realized_seconds
+            objective_seconds += group_forward_seconds
+            progress_pct = 100.0 * minibatch_count / total_minibatches
+            print(
+                f"[Calibration] Progress: {minibatch_count}/{total_minibatches} minibatches "
+                f"({progress_pct:.1f}%), mini-epoch {mini_epochs}/{mini_epochs}, "
+                f"{forward_count} forward passes completed"
+            )
+            elapsed_seconds = perf_counter() - calibration_started
+            forward_rate = forward_count / max(elapsed_seconds, 1.0e-12)  # logical minibatch forward/s
+            total_forwards = total_minibatches * mini_epochs
+            remaining_seconds = (total_forwards - forward_count) / max(forward_rate, 1.0e-12)
+            print(
+                f"[Calibration] Group timing: realize={group_realized_seconds:.2f}s "
+                f"forward={group_forward_seconds:.2f}s total={perf_counter() - group_started:.2f}s "
+                f"rate={forward_rate:.3f} forward/s ETA={remaining_seconds / 60.0:.1f}min",
+                flush=True,
+            )
+            if runtime_timing is not None:
+                runtime_timing.update(
+                    {
+                        "calibration_elapsed_seconds": elapsed_seconds,
+                        "calibration_realization_seconds": realized_seconds,
+                        "calibration_objective_seconds": objective_seconds,
+                        "calibration_host_trim_seconds": host_trim_seconds,
+                        "calibration_forward_per_second": forward_rate,
+                    }
                 )
-                minibatch_count += 1
-                new_sample_count += schedule_item.sample_count
-                asset_indices_seen.update(schedule_item.asset_indices)
-            # 同一 q/query/teacher batch 循环利用；forward_index 使每遍重新抽 joint-sign rewrite。
-            for mini_epoch_index in range(mini_epochs):
-                for batch_idx, batch in enumerate(batches):
-                    result = method.forward_objectives(batch, step=forward_count, mode="calibration")
-                    forward_count += 1
-                    forward_sample_count += int(result.sample_count)
-                    if forward_count == 1 and after_first_forward is not None and not audit_started:
-                        after_first_forward()
-                        audit_started = True
-                    for name, objective in result.objectives.items():
-                        for component in objective.components:
-                            current = totals.setdefault(component.name, [0.0, 0.0])
-                            current[0] += float(component.numerator.detach())
-                            current[1] += float(component.denominator.detach())
-                        traces.setdefault(name, []).append(float(objective.metrics["loss"].detach()))
-                    # 每完成一个 mini-epoch 组打印一次进度
-                    if batch_idx == len(batches) - 1:
-                        progress_pct = 100.0 * minibatch_count / total_minibatches
-                        print(f"[Calibration] Progress: {minibatch_count}/{total_minibatches} minibatches "
-                              f"({progress_pct:.1f}%), mini-epoch {mini_epoch_index + 1}/{mini_epochs}, "
-                               f"{forward_count} forward passes completed")
             # 一个 accumulation group 的全部 mini-epoch 均完成后才发布 partial，避免记录半组统计。
             _write_yaml(
                 partial_output,
@@ -385,6 +501,8 @@ def fit_embodiment_pretrain(
 
     from anymani.distill.ssl.runtime.scheduler import ResidentGeometryAssetWindow
 
+    lifecycle_started = perf_counter()  # catalog/method/model/session/calibration 的统一 wall-time 原点
+    runtime_timing: dict[str, float] = {}  # 只写 runtime_resources，不进入科学 artifact identity
     print(f"[SSL] Phase: {run.config.phase}")
     if run.config.deterministic_algorithms:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -398,7 +516,9 @@ def fit_embodiment_pretrain(
     output_dir = run.prepare_output_dir(output_dir_override)
     print(f"[SSL] Output: {output_dir}")
     print("[SSL] Resolving asset catalog (this may take 1-2 minutes for 8k assets)...")
+    stage_started = perf_counter()
     catalog = data.resolve()
+    runtime_timing["catalog_resolve_seconds"] = perf_counter() - stage_started
     if hasattr(catalog, "train"):
         train_count = len(catalog.train)
         validation_count = sum(len(partition) for partition in catalog.validation.values())
@@ -410,11 +530,20 @@ def fit_embodiment_pretrain(
         else:
             train_count = "synthetic"
             validation_count = "synthetic"
-    print(f"[SSL] Catalog resolved: train={train_count} validation={validation_count} assets")
+    print(
+        f"[SSL] Catalog resolved: train={train_count} validation={validation_count} assets "
+        f"in {runtime_timing['catalog_resolve_seconds']:.2f}s"
+    )
     print("[SSL] Preparing method (computing FK/Jacobian templates)...")
+    stage_started = perf_counter()
     method.prepare(catalog, device=device, dtype=dtype)
+    runtime_timing["method_prepare_seconds"] = perf_counter() - stage_started
+    print(f"[SSL] Method prepared in {runtime_timing['method_prepare_seconds']:.2f}s")
     print(f"[SSL] Initializing model on {device}...")
+    stage_started = perf_counter()
     method.initialize_model(device=device, dtype=dtype)
+    runtime_timing["model_initialize_seconds"] = perf_counter() - stage_started
+    print(f"[SSL] Model initialized in {runtime_timing['model_initialize_seconds']:.2f}s")
     audit_handle: Any | None = None
     audit_supported = hasattr(method, "start_physical_audit")
     manifest: dict[str, Any] | None = None
@@ -464,7 +593,14 @@ def fit_embodiment_pretrain(
 
         evidence = getattr(method, "runtime_resource_evidence", None)
         if callable(evidence):
-            _write_yaml(output_dir / "runtime_resources.yaml", evidence())
+            raw_evidence = evidence()
+            if not isinstance(raw_evidence, Mapping):
+                raise TypeError("runtime_resource_evidence must return a mapping")
+            payload: dict[str, object] = {str(name): value for name, value in raw_evidence.items()}
+            payload["process_memory"] = _process_memory_evidence()
+            runtime_timing["lifecycle_elapsed_seconds"] = perf_counter() - lifecycle_started
+            payload["lifecycle_timing"] = dict(runtime_timing)
+            _write_yaml(output_dir / "runtime_resources.yaml", payload)
 
     def cancel_unpublished_audit() -> None:
         r"""异常或提前返回时停止尚未写入 ``asset_manifest.yaml`` 的后台 audit。"""
@@ -546,6 +682,7 @@ def fit_embodiment_pretrain(
                 gradient_accumulation_steps=trainer.config.gradient_accumulation_steps,
                 manifest_hash=str(catalog.dataset.source_sha256),
                 resolved_config=resolved_config,
+                runtime_timing=runtime_timing,
             )
             return output_dir
         finally:
@@ -713,12 +850,19 @@ def fit_embodiment_pretrain(
             mini_epoch_records: list[dict[str, Any]] = []  # 当前数据组五次参数更新的审计记录
             for mini_epoch_index in range(trainer.config.mini_epochs):
                 optimizer.zero_grad(set_to_none=True)
-                update_steps: list[Any] = []
-                for batch in batches:
-                    update_steps.append(method.forward_objectives(batch, step=forward_index, mode="train"))
-                    forward_index += 1
-                update = method.reduce_update(tuple(update_steps))
-                update.loss.backward()
+                update: Any
+                backward_update = getattr(method, "backward_update", None)
+                if callable(backward_update):
+                    forward_steps = tuple(range(forward_index, forward_index + len(batches)))
+                    update = backward_update(tuple(batches), forward_steps=forward_steps)
+                    forward_index += len(batches)
+                else:
+                    update_steps: list[Any] = []
+                    for batch in batches:
+                        update_steps.append(method.forward_objectives(batch, step=forward_index, mode="train"))
+                        forward_index += 1
+                    update = method.reduce_update(tuple(update_steps))
+                    update.loss.backward()
                 gradient_norm = torch.nn.utils.clip_grad_norm_(method.parameters(), trainer.config.max_gradient_norm)
                 if not torch.isfinite(gradient_norm):
                     raise FloatingPointError(f"non-finite gradient norm at optimizer step {step + 1}")
@@ -739,7 +883,7 @@ def fit_embodiment_pretrain(
                             "step": step,
                             "split": "train",
                             "new_minibatches_consumed": train_schedule.minibatch_cursor,
-                            "minibatches_reused": len(update_steps),
+                            "minibatches_reused": len(batches),
                             "mini_epoch": mini_epoch_index,
                             "terms": update.terms,
                             "gradient_norm": float(gradient_norm.detach()),

@@ -22,7 +22,7 @@ import torch
 
 from anymani.assets.bank.hand_container import HandContainer
 
-from .geometry_source import GeometrySource, GeometrySourceCfg
+from .geometry_source import GeometrySource, GeometrySourceCfg, GeometrySourceCore
 
 _SOURCE_ARENA_ALGORITHM = "geometry-source-materialization-v1"
 _DEFAULT_MAX_ENTRIES = 16  # 两个 8-asset device subwindow，允许当前窗与下一窗交叠
@@ -51,8 +51,8 @@ def _cache_key(container: HandContainer, config: GeometrySourceCfg) -> str:
     return hashlib.sha256(identity).hexdigest()  # arena key 不进入模型输入或采样 seed
 
 
-def geometry_source_array_nbytes(source: GeometrySource) -> int:
-    r"""估计一项 source 的主要 tensor/mesh/NumPy payload 字节数。
+def geometry_source_array_nbytes(source: GeometrySource | GeometrySourceCore) -> int:
+    r"""估计一项 source/core 的主要 tensor/mesh/NumPy payload 字节数。
 
     该值覆盖决定内存量级的连续数组，不声称包含 Python object header、字符串 intern 或第三方库
     私有索引。16 项 hard cap 与 512 MiB 数组 cap 共同限制实际 RSS；运行基准另行记录进程 RSS。
@@ -95,9 +95,10 @@ def geometry_source_array_nbytes(source: GeometrySource) -> int:
     # retained home realization 与所有 $A^{(k)}$ bank 数组必须计入同一 source 生命周期。
     for field_info in fields(source.home_surface):
         add_array(getattr(source.home_surface, field_info.name))
-    for anchors in source.anchor_bank:
-        for field_info in fields(anchors):
-            add_array(getattr(anchors, field_info.name))
+    if isinstance(source, GeometrySource):
+        for anchors in source.anchor_bank:
+            for field_info in fields(anchors):
+                add_array(getattr(anchors, field_info.name))
     return total
 
 
@@ -114,7 +115,7 @@ class GeometrySourceArena:
         *,
         max_entries: int = _DEFAULT_MAX_ENTRIES,
         max_bytes: int = _DEFAULT_MAX_BYTES,
-        size_of: Callable[[GeometrySource], int] = geometry_source_array_nbytes,
+        size_of: Callable[[GeometrySource | GeometrySourceCore], int] = geometry_source_array_nbytes,
     ) -> None:
         r"""构造空 arena；任何资产 IO 均延迟到第一次 ``load_or_create``。
 
@@ -133,7 +134,7 @@ class GeometrySourceArena:
         self.misses = 0  # 实际执行 source materialization 的次数
         self.evictions = 0  # 因容量约束丢弃的 CPU 强引用次数
         self._resident_bytes = 0  # 与 ``_entries`` 严格同步的数组估算值
-        self._entries: OrderedDict[str, tuple[GeometrySource, int]] = OrderedDict()
+        self._entries: OrderedDict[str, tuple[GeometrySource | GeometrySourceCore, int]] = OrderedDict()
         self._key_locks = tuple(Lock() for _ in range(_KEY_LOCK_STRIPES))  # 固定容量的同 key 去重锁带
         self._lock = RLock()  # 只保护 LRU/统计元数据，不包围昂贵物化
 
@@ -156,8 +157,8 @@ class GeometrySourceArena:
         container: HandContainer,
         *,
         config: GeometrySourceCfg,
-        materialize: Callable[[], GeometrySource],
-    ) -> GeometrySource:
+        materialize: Callable[[], GeometrySource | GeometrySourceCore],
+    ) -> GeometrySource | GeometrySourceCore:
         r"""返回一项进程内 source，cache miss 时只物化一次。
 
         Args:

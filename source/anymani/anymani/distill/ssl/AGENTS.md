@@ -42,7 +42,7 @@ checkpoint 在完整 mini-epoch 组结束后的 optimizer boundary 保存，payl
 
 ### 训练合同
 
-Trainer 面向 Method/session 窄接口编排数据和更新，owner/query/edge 轴留在 Method 内。预实验与正式实验复用唯一 `num_minibatches / mini_epochs / sampling` 接口，每次运行可覆盖不同 preset。每组新数据 realization 一次并循环使用 `mini_epochs` 次；预实验执行 forward/JVP 并累计五项，正式实验每遍 backward/update。当前首个 8192-asset preset 为 `128 minibatches × 64 assets × 8 q × 5 mini-epochs`。validation 用三项重建指标选 best；final evaluation 读取冻结 best。
+Trainer 面向 Method/session 窄接口编排数据和更新，owner/query/edge 轴留在 Method 内。预实验与正式实验复用唯一 `num_minibatches / mini_epochs / sampling` 接口，每次运行可覆盖不同 preset。每组新数据 realization 一次并循环使用 `mini_epochs` 次；objective calibration 完整覆盖 `128 minibatches × 64 assets × 8 q` 后只做一遍 forward/JVP，正式训练再用 `mini_epochs=5` 复用同一 teacher realization。validation 用三项重建指标选 best；final evaluation 读取冻结 best。
 
 official assets 当前仅保留为独立评估角色。train、预实验和 checkpoint selection 使用 dataset 声明的 train/validation partitions，split 按 `content_hash` 与 `physical_geometry_hash` 隔离。
 
@@ -51,7 +51,7 @@ official assets 当前仅保留为独立评估角色。train、预实验和 chec
 ```bash
 source /home/hac/isaac/env_isaaclab/bin/activate
 python -m anymani.distill.ssl.pretrain
-python -m anymani.distill.ssl.pretrain --phase calibrate_objectives --num_minibatches 128 --assets_per_minibatch 64 --q_per_asset_per_minibatch 8 --mini_epochs 5 --seed 20260813
+python -m anymani.distill.ssl.pretrain --phase calibrate_objectives --num_minibatches 128 --assets_per_minibatch 64 --q_per_asset_per_minibatch 8 --mini_epochs 1 --seed 20260813
 pytest source/anymani/anymani/distill/tests/contracts/ssl -q
 pytest source/anymani/anymani/distill/tests/integration -q
 ruff check source/anymani/anymani/distill/ssl

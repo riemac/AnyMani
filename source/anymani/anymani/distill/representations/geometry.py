@@ -22,10 +22,12 @@ from anymani.distill.representations.queries.spatial_sampling import (
     materialize_owner_surface_sampling_cache,
     sample_spatial_queries,
 )
+from anymani.distill.representations.sources.collision_geometry import AnchorClassificationStats
 from anymani.distill.representations.sources.geometry_source import (
     DeviceGeometrySource,
     GeometrySource,
     GeometrySourceCfg,
+    GeometrySourceCore,
 )
 from anymani.distill.representations.sources.kinematics import EmbodimentGeometrySpec
 from anymani.distill.representations.targets.field_samples import (  # 类型化 $d/\\rho/\\kappa/g$ targets
@@ -59,6 +61,7 @@ class GeometryRepresentationState:
     source: GeometrySource  # CPU physical truth 与 provenance
     device_source: DeviceGeometrySource  # GPU POE 与 Warp BVH lease
     surface_sampling: OwnerSurfaceSamplingCache  # owner triangle/normal/area proposal tables
+    anchor_classification: AnchorClassificationStats | None = None  # CUDA finalization 证据；CPU source 为 None
 
     @property
     def spec(self) -> EmbodimentGeometrySpec:
@@ -85,29 +88,43 @@ class GeometryRepresentation:
 
         self.config = config  # 完整 source/query/field/target 科研合同
 
-    def materialize_source(self, container) -> GeometrySource:
-        r"""按 source config 物化一项 q-independent CPU physical oracle。"""
+    def materialize_source(self, container, *, anchor_device: str = "cpu") -> GeometrySource:
+        r"""按 source config 物化 q-independent physical oracle，并显式选择 anchor classifier device。"""
 
-        return GeometrySource.materialize(container, config=self.config.source)
+        return GeometrySource.materialize(container, config=self.config.source, anchor_device=anchor_device)
+
+    def materialize_core(self, container) -> GeometrySourceCore:
+        r"""只物化 CPU geometry/home/identity，为主线程 CUDA anchor finalization 做准备。"""
+
+        return GeometrySourceCore.materialize(container, config=self.config.source)
 
     def to_device(
         self,
-        source: GeometrySource,
+        source: GeometrySource | GeometrySourceCore,
         *,
         device: torch.device | str,
         dtype: torch.dtype,
     ) -> GeometryRepresentationState:
-        r"""构造一项资产的 device source 与 surface proposal；不构造 encoder evidence。"""
+        r"""构造一项资产的 device source 与 surface proposal；core 输入同时完成 GPU anchors。"""
 
-        device_source = source.to_device(device=device, dtype=dtype)
+        if isinstance(source, GeometrySourceCore):
+            finalized, device_source, anchor_stats = source.finalize_on_device(
+                config=self.config.source,
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            finalized = source
+            device_source = source.to_device(device=device, dtype=dtype)
+            anchor_stats = None
         try:
             target_device = torch.device(device)
             surface_sampling = materialize_owner_surface_sampling_cache(
-                source.geometry_cache,
+                finalized.geometry_cache,
                 device=target_device,
                 dtype=dtype,
             )
-            return GeometryRepresentationState(source, device_source, surface_sampling)
+            return GeometryRepresentationState(finalized, device_source, surface_sampling, anchor_stats)
         except Exception:
             device_source.release()
             raise

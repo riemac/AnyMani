@@ -6,13 +6,13 @@ catalog 的指定资产 window 映射到 GPU，并在驱逐时释放 owner BVH l
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from time import perf_counter
 
 import torch
 
 from anymani.distill.representations.geometry import GeometryRepresentationState
-from anymani.distill.representations.sources.geometry_source import GeometrySource
+from anymani.distill.representations.sources.geometry_source import GeometrySource, GeometrySourceCore
 
 
 class ResidentGeometryAssetWindow:
@@ -24,7 +24,7 @@ class ResidentGeometryAssetWindow:
 
     def __init__(
         self,
-        runtimes: tuple[GeometrySource, ...] | list[GeometrySource] | object,
+        runtimes: Sequence[GeometrySource | GeometrySourceCore],
         *,
         device: str,
         dtype,
@@ -63,8 +63,19 @@ class ResidentGeometryAssetWindow:
     def resident_asset_ids(self) -> tuple[str, ...]:
         return tuple(self._resident)
 
-    def ensure(self, asset_ids: tuple[str, ...] | list[str]) -> tuple[GeometryRepresentationState, ...]:
-        r"""确保一个完整 resident window 已驻留，并记录 lease/BVH/memory 生命周期证据。"""
+    def ensure(
+        self,
+        asset_ids: tuple[str, ...] | list[str],
+        *,
+        prefetch_sources: bool = True,
+        prepared_sources: Mapping[str, GeometrySource | GeometrySourceCore] | None = None,
+    ) -> tuple[GeometryRepresentationState, ...]:
+        r"""确保一个完整 resident window 已驻留，并记录 lease/BVH/memory 生命周期证据。
+
+        ``prefetch_sources=False`` 表示 Method 已通过 current/next 双缓冲等待对应 CPU core；
+        ``prepared_sources`` 直接 pin 该 current buffer，使 next-buffer LRU 插入不能触发重复物化。
+        普通调用保持同步 prefetch 默认行为。
+        """
 
         requested = tuple(asset_ids)
         if len(set(requested)) != len(requested):
@@ -74,6 +85,8 @@ class ResidentGeometryAssetWindow:
         for asset_id in requested:
             if asset_id not in self.catalog:
                 raise KeyError(f"unknown geometry asset ID={asset_id!r}")
+        if prepared_sources is not None and set(prepared_sources) != set(requested):
+            raise ValueError("prepared source IDs must exactly match the requested device subwindow")
         if tuple(self._resident) == requested:
             return tuple(self._resident[asset_id] for asset_id in requested)  # 稳态 minibatch 不同步 CUDA
         before_memory = self._memory_snapshot()  # 切窗前设备 free/allocator 状态
@@ -87,21 +100,18 @@ class ResidentGeometryAssetWindow:
                 released_asset_ids.append(asset_id)
         release_seconds = perf_counter() - release_started  # lease 释放和 registry eviction 时间
         load_started = perf_counter()  # load 子阶段起点
-        if self.source_provider is not None:
-            prefetch = getattr(self.source_provider, "prefetch", None)
-            if prefetch is not None:
-                prefetch(requested)
-        print(f"[Source] Device window load start: assets={len(requested)}", flush=True)
-        for index, asset_id in enumerate(requested, start=1):
+        if prefetch_sources and self.source_provider is not None:
+            prefetch_fn = getattr(self.source_provider, "prefetch", None)
+            if prefetch_fn is not None:
+                prefetch_fn(requested)
+        for asset_id in requested:
             if asset_id not in self._resident:
                 self._resident[asset_id] = self.loader(
-                    self._source_for_asset(asset_id),
+                    prepared_sources[asset_id] if prepared_sources is not None else self._source_for_asset(asset_id),
                     device=self.device,
                     dtype=self.dtype,
                 )
                 loaded_asset_ids.append(asset_id)
-                if index % 8 == 0 or index == len(requested):
-                    print(f"[Source] Device window progress: {index}/{len(requested)}", flush=True)
         if len(self._resident) > self.max_resident_assets:
             raise RuntimeError("resident asset window exceeded configured cap")
         load_seconds = perf_counter() - load_started  # CPU->GPU evidence/Warp BVH 构造时间
@@ -219,8 +229,8 @@ class ResidentGeometryAssetWindow:
         state = self._resident.pop(asset_id)
         self.releaser(state)
 
-    def _source_for_asset(self, asset_id: str) -> GeometrySource:
-        r"""按 stable ID 取得 CPU source；lazy provider 只在此处触发资产加载。"""
+    def _source_for_asset(self, asset_id: str) -> GeometrySource | GeometrySourceCore:
+        r"""按 stable ID 取得 CPU source/core；lazy provider 只在此处触发资产加载。"""
 
         if self.source_provider is not None:
             getter = getattr(self.source_provider, "get", None)
