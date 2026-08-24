@@ -24,7 +24,7 @@ class AdamWCfg:
 
 
 class EmbodimentPretrainTrainer:
-    r"""拥有资产/q 在线日程、梯度累计、optimizer update 和 phase 调度。"""
+    r"""拥有资产/q 在线日程、显存分块、optimizer update 和训练 checkpoint。"""
 
     def __init__(self, config: EmbodimentPretrainTrainerCfg) -> None:
         r"""保存训练与资源配置；构造阶段不创建模型、optimizer 或 CUDA state。"""
@@ -53,110 +53,6 @@ class EmbodimentPretrainTrainer:
             resolved_config=resolved_config,
         )
 
-    def selection_baseline(self, metrics: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
-        r"""按 validation suite 独立冻结三项重建指标的初始化尺度。"""
-
-        if not metrics:
-            raise ValueError("validation selection requires at least one named suite")
-        baseline: dict[str, dict[str, float]] = {}
-        for suite_name, suite_metrics in metrics.items():
-            missing = set(self.config.validation.selection_metrics) - suite_metrics.keys()
-            if missing:
-                raise ValueError(f"validation suite {suite_name!r} lacks selection terms: {sorted(missing)}")
-            baseline[suite_name] = {
-                name: float(suite_metrics[name]) for name in self.config.validation.selection_metrics
-            }
-        if any(value <= 0.0 for suite in baseline.values() for value in suite.values()):
-            raise FloatingPointError("initial validation selection metrics must be positive")
-        return baseline
-
-    def normalized_validation_score(
-        self,
-        metrics: dict[str, dict[str, float]],
-        baseline: dict[str, dict[str, float]],
-    ) -> float:
-        r"""先对三项重建指标等权，再对 validation suites 等权形成 promotion score。"""
-
-        if set(metrics) != set(baseline):
-            raise ValueError("validation metrics and initialization baseline suites do not match")
-        suite_scores = [
-            sum(
-                metrics[suite_name][name] / suite_baseline[name]
-                for name in self.config.validation.selection_metrics
-            )
-            / len(self.config.validation.selection_metrics)
-            for suite_name, suite_baseline in baseline.items()
-        ]
-        return sum(suite_scores) / len(suite_scores)
-
-
-@dataclass(frozen=True)
-class ValidationCfg:
-    r"""训练中固定 validation bank、执行 cadence 与 best-checkpoint 选择协议。"""
-
-    q_per_asset: int = 64
-    assets_per_minibatch: int = 2
-    q_per_asset_per_minibatch: int = 2
-    every_epochs: int = 8
-    selection_metrics: tuple[str, ...] = ("density", "kappa", "derived_field")
-    seed_offset: int = 1_000_003
-
-    def __post_init__(self) -> None:
-        r"""验证固定 bank 的显式 q/batch 轴和三项 selection 指标。"""
-
-        object.__setattr__(self, "selection_metrics", tuple(self.selection_metrics))
-        counts = (
-            self.q_per_asset,
-            self.assets_per_minibatch,
-            self.q_per_asset_per_minibatch,
-            self.every_epochs,
-            self.seed_offset,
-        )
-        if min(counts) < 1 or not self.selection_metrics:
-            raise ValueError("validation q/batch/cadence/seed values and selection metrics must be non-empty")
-
-
-@dataclass(frozen=True)
-class FinalEvaluationCfg:
-    r"""冻结 best checkpoint 后的 unseen-suite、独立 q-bank 与消融报告协议。"""
-
-    q_per_asset: int = 64
-    assets_per_minibatch: int = 2
-    q_per_asset_per_minibatch: int = 2
-    final_ablations: tuple[str, ...] = (
-        "query_only",
-        "same_asset_q_shuffle",
-        "cross_asset_shuffle",
-        "first_order_zero",
-        "first_order_joint_shuffle",
-        "first_order_sign_flip",
-    )
-    bootstrap_replicates: int = 2_000
-    evaluation_seed_offset: int = 2_000_003
-    training_q_bank_seed_offset: int = 3_000_003
-    bootstrap_seed_offset: int = 4_000_003
-
-    def __post_init__(self) -> None:
-        r"""验证冻结评估预算、消融集合与互不重叠的随机域。"""
-
-        object.__setattr__(self, "final_ablations", tuple(self.final_ablations))
-        counts = (
-            self.q_per_asset,
-            self.assets_per_minibatch,
-            self.q_per_asset_per_minibatch,
-            self.bootstrap_replicates,
-        )
-        offsets = (
-            self.evaluation_seed_offset,
-            self.training_q_bank_seed_offset,
-            self.bootstrap_seed_offset,
-        )
-        if min(counts) < 1 or not self.final_ablations:
-            raise ValueError("final evaluation q/batch/bootstrap budgets and ablations must be non-empty")
-        if min(offsets) < 1 or len(set(offsets)) != len(offsets):
-            raise ValueError("final evaluation seed offsets must be positive and distinct")
-
-
 @dataclass(frozen=True)
 class EmbodimentPretrainTrainerCfg:
     r"""在线 epoch、新 minibatch、全局复用遍数、显存切片与记录 cadence。
@@ -172,14 +68,12 @@ class EmbodimentPretrainTrainerCfg:
     num_minibatches: int = 4  # 每个 epoch 新生成的 minibatch 数
     mini_epochs: int = 1  # 对本 epoch 全部 minibatches 的完整遍历次数
     microbatch_size: int = 64  # 一次模型 forward/backward 的 $(asset,q)$ pair 数
-    validation: ValidationCfg = field(default_factory=ValidationCfg)
-    final_evaluation: FinalEvaluationCfg = field(default_factory=FinalEvaluationCfg)
     optimizer: AdamWCfg = field(default_factory=AdamWCfg)
     max_gradient_norm: float = 10.0
     max_resident_assets: int = 64  # 首个 preset 恰好驻留一个 64-asset 训练 minibatch
     device: str = "cuda:0"
     dtype: str = "float32"
-    checkpoint_every_epochs: int = 8
+    checkpoint_every_epochs: int = 1  # 每个 epoch 保留完整状态，支持事后曲线与 checkpoint 分析
 
     def __post_init__(self) -> None:
         r"""验证新数据预算、复用次数、设备资源与记录轴严格为正。"""
@@ -213,6 +107,4 @@ __all__ = [
     "AdamWCfg",
     "EmbodimentPretrainTrainer",
     "EmbodimentPretrainTrainerCfg",
-    "FinalEvaluationCfg",
-    "ValidationCfg",
 ]

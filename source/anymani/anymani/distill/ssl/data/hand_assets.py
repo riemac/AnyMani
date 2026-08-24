@@ -325,6 +325,34 @@ class EmbodimentCatalog:
 
         return {name: partition.assets for name, partition in self.dataset.evaluation.items()}
 
+    def training_dataset_identity(self) -> dict[str, object]:
+        r"""冻结无需物化 collision source 的训练数据身份。
+
+        完整 ``physical_geometry_hash`` 依赖 Method 对 collision union、运动学与静态采样的物化，
+        属于显式 physical audit。纯训练 checkpoint 只冻结原始 dataset bytes 与有序
+        ``(asset_id, content_hash)`` 轴；任何资产替换、重排或 typed semantics 内容变化都会改变摘要。
+
+        Returns:
+            dict[str, object]: schema、dataset SHA、训练资产数和有序资产轴 SHA-256。
+        """
+
+        digest = hashlib.sha256(b"anymani-training-dataset-axis-v1\0")
+        for record in self.dataset.train.records:
+            asset_id = str(record.container.asset_id)  # dataset 轴上的稳定资产身份
+            content_hash = str(record.content_hash)  # typed geometry semantics 的内容身份
+            if not asset_id or not content_hash:
+                raise ValueError("training dataset identity requires non-empty asset_id and content_hash")
+            for value in (asset_id, content_hash):
+                encoded = value.encode("utf-8")
+                digest.update(len(encoded).to_bytes(8, "little"))
+                digest.update(encoded)
+        return {
+            "schema_version": "1.0.0",
+            "source_sha256": self.dataset.source_sha256,
+            "train_asset_count": len(self.dataset.train.records),
+            "train_asset_axis_sha256": digest.hexdigest(),
+        }
+
 
 class HandAssetCatalog:
     r"""解析一份 hand asset dataset；构造阶段不读取文件系统。"""

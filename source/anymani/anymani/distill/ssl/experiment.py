@@ -1,4 +1,4 @@
-r"""Schema 6 embodiment pretraining 的最高声明配置与唯一副作用入口。"""
+r"""Schema 7 pure embodiment pretraining 的最高声明配置与唯一副作用入口。"""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from omegaconf import MISSING, OmegaConf
 
 from .contracts import build_runtime
 
-EMBODIMENT_PRETRAIN_SCHEMA_VERSION = "6.0.0"
-"""显式 epoch/minibatch/microbatch 边界与 epoch-boundary resume。"""
+EMBODIMENT_PRETRAIN_SCHEMA_VERSION = "7.0.0"
+"""训练与事后 validation/evaluation 生命周期相互独立的实验合同。"""
 
 
 class EmbodimentPretrain:

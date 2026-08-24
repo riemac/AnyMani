@@ -1,4 +1,4 @@
-r"""Geometry SSL resume 的科学配置与 checkpoint-selection lineage 合同。"""
+r"""Geometry SSL pure-pretrain resume 的科学配置与数据 lineage 合同。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from anymani.distill.ssl.experiment import EmbodimentPretrainCfg, resolved_confi
 from anymani.distill.ssl.runtime.checkpointing import (
     require_resume_calibration_hash,
     require_resume_scientific_config,
-    restore_validation_selection_state,
 )
 
 pytestmark = pytest.mark.contract
@@ -85,43 +84,7 @@ def test_resume_rejects_calibration_artifact_content_drift() -> None:
         require_resume_calibration_hash("new-hash", {"calibration_artifact_hash": "checkpoint-hash"})
 
 
-def test_resume_restores_initial_baseline_best_score_and_history() -> None:
-    r"""中断后 checkpoint selection 必须沿用初始化分母与 historical best。"""
-
-    initial = {
-        "unseen_variant_set": {"density": 0.2, "kappa": 0.01, "derived_field": 2.0},
-        "unseen_mother": {"density": 0.3, "kappa": 0.02, "derived_field": 2.5},
-    }
-    history = [{"epoch": 8, "score": 0.8, "metrics": {"unseen_variant_set": {"density": 0.1}}}]
-
-    restored = restore_validation_selection_state(
-        {
-            "initial_validation_metrics": initial,
-            "best_validation_score": 0.8,
-            "selection_history": history,
-        }
-    )
-
-    assert restored == (initial, None, 0.8, history)
-
-
-def test_resume_rejects_best_score_without_selection_history() -> None:
-    r"""历史 best 没有对应评估轨迹时，不得静默继承。"""
-
-    with pytest.raises(ValueError, match="inconsistent"):
-        restore_validation_selection_state(
-            {
-                "initial_validation_metrics": {
-                    "unseen_variant_set": {"density": 0.2, "kappa": 0.01, "derived_field": 2.0},
-                    "unseen_mother": {"density": 0.3, "kappa": 0.02, "derived_field": 2.5},
-                },
-                "best_validation_score": 0.8,
-                "selection_history": [],
-            }
-        )
-
-
 def _config() -> EmbodimentPretrainCfg:
-    """从 ConfigStore 恢复 schema 6 实验，避免测试自己复制 concrete defaults。"""
+    """从 ConfigStore 恢复 schema 7 实验，避免测试自己复制 concrete defaults。"""
 
     return compose_pretrain_cfg()

@@ -36,11 +36,15 @@ from anymani.distill.representations.targets.geometry_field import (
 )
 from anymani.distill.ssl.data import HandAssetCatalogCfg
 from anymani.distill.ssl.experiment import EmbodimentPretrainCfg
-from anymani.distill.ssl.runtime.pretrainer import (
-    EmbodimentPretrainTrainerCfg,
-    FinalEvaluationCfg,
+from anymani.distill.ssl.post_training import (
+    EmbodimentEvaluationCfg,
+    EmbodimentValidationCfg,
+    EvaluationCfg,
+    EvaluationRunCfg,
     ValidationCfg,
+    ValidationRunCfg,
 )
+from anymani.distill.ssl.runtime.pretrainer import EmbodimentPretrainTrainerCfg
 from anymani.distill.ssl.runtime.run import PretrainRunCfg
 from anymani.distill.ssl.runtime.sampling import OnlineSamplingCfg
 
@@ -140,8 +144,8 @@ MODEL_CFG = GeometrySSLModelCfg(
 ## 目标配置
 OBJECTIVES_CFG = MultiAnchorGaussianObjectivesCfg(
     density=DensityObjectiveCfg(weight=1.0),
-    kappa=KappaObjectiveCfg(weight=1.0),
-    derived_field=DerivedFieldObjectiveCfg(weight=1.0),
+    kappa=KappaObjectiveCfg(weight=20.0),
+    derived_field=DerivedFieldObjectiveCfg(weight=0.01),
 )
 
 ## 数据增强配置
@@ -159,18 +163,36 @@ METHOD_CFG = MultiAnchorGaussianMethodCfg(
 ###
 #  训练器配置层：预实验与正式实验复用同一套显式 epoch/minibatch/microbatch 接口。
 ###
-## 验证器配置
+## 训练器聚合
+## preset：32 个 epoch，每轮生成 4 个 minibatch；每个 512-pair minibatch 独立更新一次。
+## 当前总预算恰好走完一个 catalog cycle，因此每项资产只 realization $A^{(0)}$；后续 bank 只在新 cycle 轮换。
+TRAINER_CFG = EmbodimentPretrainTrainerCfg(
+    sampling=OnlineSamplingCfg(
+        assets_per_minibatch=64,
+        q_per_asset_per_minibatch=8,
+        shuffle_assets=True,
+        seed=20260813,
+    ),
+    max_epochs=32,
+    num_minibatches=4,
+    mini_epochs=1,
+    microbatch_size=64,
+    max_resident_assets=64,
+    checkpoint_every_epochs=1,
+)
+
+## 独立 validation 使用相同固定测度，但不声明训练 cadence。
 VALIDATION_CFG = ValidationCfg(
     q_per_asset=64,
     assets_per_minibatch=2,
     q_per_asset_per_minibatch=2,
-    every_epochs=8,
     selection_metrics=("density", "kappa", "derived_field"),
     seed_offset=1_000_003,
+    max_resident_assets=64,
 )
 
-## 评估器配置
-FINAL_EVALUATION_CFG = FinalEvaluationCfg(
+## 独立 evaluation 保留当前 unseen suites、训练 q-bank 与六项消融语义。
+EVALUATION_CFG = EvaluationCfg(
     q_per_asset=64,
     assets_per_minibatch=2,
     q_per_asset_per_minibatch=2,
@@ -186,26 +208,7 @@ FINAL_EVALUATION_CFG = FinalEvaluationCfg(
     evaluation_seed_offset=2_000_003,
     training_q_bank_seed_offset=3_000_003,
     bootstrap_seed_offset=4_000_003,
-)
-
-## 训练器聚合
-## preset：32 个 epoch，每轮生成 4 个 minibatch；每个 512-pair minibatch 独立更新一次。
-## 当前总预算恰好走完一个 catalog cycle，因此每项资产只 realization $A^{(0)}$；后续 bank 只在新 cycle 轮换。
-TRAINER_CFG = EmbodimentPretrainTrainerCfg(
-    sampling=OnlineSamplingCfg(
-        assets_per_minibatch=64,
-        q_per_asset_per_minibatch=8,
-        shuffle_assets=True,
-        seed=20260813,
-    ),
-    max_epochs=32,
-    num_minibatches=4,
-    mini_epochs=1,
-    microbatch_size=64,
-    validation=VALIDATION_CFG,
-    final_evaluation=FINAL_EVALUATION_CFG,
     max_resident_assets=64,
-    checkpoint_every_epochs=8,
 )
 
 ###
@@ -228,10 +231,25 @@ EXPERIMENT = EmbodimentPretrainCfg(
     run=RUN_CFG,
 )
 
+VALIDATION_EXPERIMENT = EmbodimentValidationCfg(
+    data=DATA_CFG,
+    method=METHOD_CFG,
+    validation=VALIDATION_CFG,
+    run=ValidationRunCfg(),
+)
+
+EVALUATION_EXPERIMENT = EmbodimentEvaluationCfg(
+    data=DATA_CFG,
+    method=METHOD_CFG,
+    evaluation=EVALUATION_CFG,
+    run=EvaluationRunCfg(),
+)
+
 __all__ = [
     "DATA_CFG",
+    "EVALUATION_CFG",
+    "EVALUATION_EXPERIMENT",
     "EXPERIMENT",
-    "FINAL_EVALUATION_CFG",
     "JOINT_SIGN_REWRITE_CFG",
     "METHOD_CFG",
     "MODEL_CFG",
@@ -241,4 +259,5 @@ __all__ = [
     "STATE_MEASURE_CFG",
     "TRAINER_CFG",
     "VALIDATION_CFG",
+    "VALIDATION_EXPERIMENT",
 ]

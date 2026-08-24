@@ -314,7 +314,7 @@ def test_trainer_and_checkpoint_only_use_method_contract() -> None:
     """Trainer/checkpoint 不得读取 concrete geometry model、batch、source、sampler 或 config。"""
 
     from anymani.distill.ssl import checkpoint
-    from anymani.distill.ssl.runtime import lifecycle
+    from anymani.distill.ssl.runtime import lifecycle, post_training
 
     forbidden = (
         "GeometrySSLModel",
@@ -324,13 +324,15 @@ def test_trainer_and_checkpoint_only_use_method_contract() -> None:
         "method.train_sources",
         "method.require_model",
     )
-    for module in (lifecycle, checkpoint):
+    for module in (lifecycle, post_training, checkpoint):
         source = Path(inspect.getsourcefile(module) or "").read_text(encoding="utf-8")
         for token in forbidden:
             assert token not in source, f"{module.__name__} still contains {token}"
     lifecycle_source = Path(inspect.getsourcefile(lifecycle) or "").read_text(encoding="utf-8")
+    post_training_source = Path(inspect.getsourcefile(post_training) or "").read_text(encoding="utf-8")
     assert "method.open_session" in lifecycle_source
-    assert "method.evaluate_session" in lifecycle_source
+    assert "method.evaluate_session" not in lifecycle_source
+    assert "method.evaluate_session" in post_training_source
 
 
 def test_q_block_split_matches_padding_of_individual_q_samples() -> None:

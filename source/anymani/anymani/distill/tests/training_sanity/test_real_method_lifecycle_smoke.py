@@ -30,13 +30,23 @@ from anymani.distill.representations.sources.geometry_source import AnchorBankCf
 from anymani.distill.representations.targets.geometry_field import GeometryFieldTargetCfg
 from anymani.distill.ssl.data import HandAssetCatalogCfg
 from anymani.distill.ssl.experiment import EmbodimentPretrainCfg, resolved_config_dict
+from anymani.distill.ssl.post_training import (
+    EmbodimentEvaluationCfg,
+    EmbodimentValidationCfg,
+    EvaluationCfg,
+    EvaluationRun,
+    EvaluationRunCfg,
+    ValidationCfg,
+    ValidationRun,
+    ValidationRunCfg,
+    resolved_post_training_config_dict,
+)
 from anymani.distill.ssl.runtime.lifecycle import fit_embodiment_pretrain
+from anymani.distill.ssl.runtime.post_training import evaluate_checkpoint, validate_checkpoints
 from anymani.distill.ssl.runtime.pretrainer import (
     AdamWCfg,
     EmbodimentPretrainTrainer,
     EmbodimentPretrainTrainerCfg,
-    FinalEvaluationCfg,
-    ValidationCfg,
 )
 from anymani.distill.ssl.runtime.run import PretrainRun, PretrainRunCfg
 from anymani.distill.ssl.runtime.sampling import OnlineSamplingCfg
@@ -111,6 +121,12 @@ def _catalog():
         train=train,
         validation=validation,
         evaluation=evaluation,
+        training_dataset_identity=lambda: {
+            "schema_version": "1.0.0",
+            "source_sha256": "real-method-lifecycle-smoke",
+            "train_asset_count": 2,
+            "train_asset_axis_sha256": "real-method-lifecycle-smoke-axis",
+        },
     )
 
 
@@ -162,18 +178,6 @@ def _trainer_cfg() -> EmbodimentPretrainTrainerCfg:
         num_minibatches=1,
         mini_epochs=1,
         microbatch_size=2,
-        validation=ValidationCfg(
-            q_per_asset=1,
-            assets_per_minibatch=1,
-            q_per_asset_per_minibatch=1,
-            every_epochs=1,
-        ),
-        final_evaluation=FinalEvaluationCfg(
-            q_per_asset=1,
-            assets_per_minibatch=1,
-            q_per_asset_per_minibatch=1,
-            bootstrap_replicates=2,
-        ),
         optimizer=AdamWCfg(learning_rate=1.0e-3, weight_decay=0.0),
         max_resident_assets=2,
         checkpoint_every_epochs=1,
@@ -182,11 +186,11 @@ def _trainer_cfg() -> EmbodimentPretrainTrainerCfg:
 
 @_requires_assets
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="real Method lifecycle requires CUDA/Warp")
-def test_real_method_calibration_pretrain_checkpoint_and_final_evaluation(
+def test_real_method_calibration_pretrain_validation_and_evaluation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """真实 teacher 完成 calibration、一次 update、best reload、retained export 与 unseen evaluation。"""
+    """真实 teacher 分别完成 calibration、pure update、事后 selection 与 unseen evaluation。"""
 
     from anymani.distill.ssl.runtime import lifecycle
 
@@ -236,6 +240,68 @@ def test_real_method_calibration_pretrain_checkpoint_and_final_evaluation(
     )
 
     assert artifact.is_file()
-    assert (pretrain_dir / "checkpoints" / "best.pt").is_file()
-    assert (pretrain_dir / "retained_artifact.pt").is_file()
-    assert (pretrain_dir / "final_evaluation.yaml").is_file()
+    assert (pretrain_dir / "checkpoints" / "epoch_000000.pt").is_file()
+    assert (pretrain_dir / "checkpoints" / "epoch_000001.pt").is_file()
+    assert (pretrain_dir / "checkpoints" / "last.pt").is_file()
+    assert not (pretrain_dir / "checkpoints" / "best.pt").exists()
+    assert not (pretrain_dir / "retained_artifact.pt").exists()
+
+    validation_cfg = ValidationCfg(
+        q_per_asset=1,
+        assets_per_minibatch=1,
+        q_per_asset_per_minibatch=1,
+        max_resident_assets=2,
+    )
+    validation_run_cfg = ValidationRunCfg(
+        baseline_checkpoint=str(pretrain_dir / "checkpoints" / "epoch_000000.pt"),
+        checkpoints=(str(pretrain_dir / "checkpoints" / "epoch_000001.pt"),),
+        seed=71,
+        deterministic_algorithms=False,
+    )
+    validation_root = EmbodimentValidationCfg(
+        data=data_cfg,
+        method=method_cfg,
+        validation=validation_cfg,
+        run=validation_run_cfg,
+    )
+    validation_dir = tmp_path / "validation"
+    validate_checkpoints(
+        data=_Data(catalog),
+        method=MultiAnchorGaussianMethod(method_cfg),
+        config=validation_cfg,
+        run=ValidationRun(validation_run_cfg),
+        output_dir_override=validation_dir,
+        resolved_config=resolved_post_training_config_dict(validation_root),
+    )
+    assert (validation_dir / "checkpoints" / "best.pt").is_file()
+
+    evaluation_cfg = EvaluationCfg(
+        q_per_asset=1,
+        assets_per_minibatch=1,
+        q_per_asset_per_minibatch=1,
+        bootstrap_replicates=2,
+        max_resident_assets=2,
+    )
+    evaluation_run_cfg = EvaluationRunCfg(
+        checkpoint=str(validation_dir / "checkpoints" / "best.pt"),
+        seed=71,
+        deterministic_algorithms=False,
+    )
+    evaluation_root = EmbodimentEvaluationCfg(
+        data=data_cfg,
+        method=method_cfg,
+        evaluation=evaluation_cfg,
+        run=evaluation_run_cfg,
+    )
+    evaluation_dir = tmp_path / "evaluation"
+    evaluate_checkpoint(
+        data=_Data(catalog),
+        method=MultiAnchorGaussianMethod(method_cfg),
+        config=evaluation_cfg,
+        run=EvaluationRun(evaluation_run_cfg),
+        output_dir_override=evaluation_dir,
+        resolved_config=resolved_post_training_config_dict(evaluation_root),
+    )
+    assert (evaluation_dir / "evaluation.yaml").is_file()
+    assert not (evaluation_dir / "training_morphology_q_bank.yaml").exists()
+    assert not (evaluation_dir / "retained_artifact.pt").exists()

@@ -1329,6 +1329,7 @@ class MultiAnchorGaussianMethod:
                 "package_version": metadata.get("package_version", "unknown"),
                 "geometry_semantics_schema": metadata.get("geometry_semantics_schema", "unknown"),
                 "asset_manifest": dict(metadata.get("asset_manifest", {})),
+                "dataset_identity": dict(metadata.get("dataset_identity", {})),
             },
         }
 

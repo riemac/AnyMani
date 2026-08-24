@@ -1,4 +1,4 @@
-r"""Schema 6 embodiment pretraining 的普通命令行入口。
+r"""Schema 7 embodiment calibration 与 pure-pretraining 的普通命令行入口。
 
 Python preset 定义方法、表示、损失和默认训练数值；shell 使用 ``--flag value`` 声明本次运行。
 入口把显式 flags 转成内部 Hydra overrides，再恢复完整冻结配置。Hydra 字段路径不暴露给日常运行命令。
@@ -42,7 +42,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning_rate", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=None)
     parser.add_argument("--max_gradient_norm", type=float, default=None)
-    parser.add_argument("--validation_every_epochs", type=int, default=None)
     parser.add_argument("--checkpoint_every_epochs", type=int, default=None)
     # ``--seed`` 是用户看到的统一根 seed；sampling_seed 只服务显式消融。
     parser.add_argument("--seed", type=int, default=None)
@@ -77,7 +76,6 @@ def _config_overrides(args: argparse.Namespace) -> tuple[str, ...]:
         ("learning_rate", "trainer.optimizer.learning_rate"),
         ("weight_decay", "trainer.optimizer.weight_decay"),
         ("max_gradient_norm", "trainer.max_gradient_norm"),
-        ("validation_every_epochs", "trainer.validation.every_epochs"),
         ("checkpoint_every_epochs", "trainer.checkpoint_every_epochs"),
         ("device", "trainer.device"),
         ("shuffle_assets", "trainer.sampling.shuffle_assets"),

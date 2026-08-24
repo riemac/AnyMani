@@ -1,7 +1,8 @@
-r"""Schema 6 online procedural supervised pretraining lifecycle.
+r"""Schema 7 online procedural supervised calibration and pure-pretraining lifecycle.
 
-该模块是最高级训练内核：Data runtime 解析 catalog，Method session 封闭产生 batch、评估与 artifact，
-Trainer 拥有 phase、window-major schedule、backward、validation promotion 与 final evaluation。
+该模块是最高级训练内核：Data runtime 解析 catalog，Method session 封闭产生 batch，Trainer 拥有
+phase、epoch/minibatch schedule、backward 与 full checkpoint。Validation/evaluation 使用独立入口，
+不会从本模块被隐式启动。
 生命周期不读取 representation 内部字段，也不解释 owner/query/edge 轴。
 """
 
@@ -9,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from pathlib import Path
@@ -23,13 +23,12 @@ from anymani.assets.asset_schema_geometry import SEMANTICS_SCHEMA_VERSION
 from anymani.distill.diagnostics.recording.geometry_ssl import GeometrySSLRunLogger
 from anymani.distill.ssl.checkpoint import load_pretrain_checkpoint
 from anymani.distill.ssl.runtime.checkpointing import (
-    publish_best_checkpoint,
+    publish_checkpoint_alias,
     require_resume_calibration_hash,
     require_resume_scientific_config,
-    restore_validation_selection_state,
 )
 from anymani.distill.ssl.runtime.run import PretrainRun
-from anymani.distill.ssl.runtime.sampling import FixedAssetQSchedule, OnlineMinibatchSchedule
+from anymani.distill.ssl.runtime.sampling import OnlineMinibatchSchedule
 
 
 def _torch_dtype(name: str) -> torch.dtype:
@@ -97,7 +96,7 @@ def _restore_sampling_state(
 
     raw_schedule = payload.get("schedule")
     if not isinstance(raw_schedule, dict):
-        raise ValueError("checkpoint lacks schema 6 epoch/minibatch state")
+        raise ValueError("checkpoint lacks schema 7 epoch/minibatch state")
     schedule.load_state_dict(raw_schedule)
     raw_session = payload.get("method_session")
     if not isinstance(raw_session, dict):
@@ -495,7 +494,11 @@ def fit_embodiment_pretrain(
     output_dir_override: Path | None,
     resolved_config: dict[str, Any],
 ) -> Path:
-    r"""执行显式 calibration/pretrain phase，并由 Trainer 统筹 validation 与冻结后 evaluation。"""
+    r"""执行显式 calibration 或 pure-pretrain phase。
+
+    ``pretrain`` 只产生在线监督、执行参数更新、记录训练曲线并保存 full checkpoint。固定 q-bank、
+    validation、held-out evaluation、best selection、physical audit 与 retained export 均不属于该进程。
+    """
 
     from anymani.distill.ssl.runtime.scheduler import ResidentGeometryAssetWindow
 
@@ -543,36 +546,18 @@ def fit_embodiment_pretrain(
     method.initialize_model(device=device, dtype=dtype)
     runtime_timing["model_initialize_seconds"] = perf_counter() - stage_started
     print(f"[SSL] Model initialized in {runtime_timing['model_initialize_seconds']:.2f}s")
-    audit_handle: Any | None = None
-    audit_supported = hasattr(method, "start_physical_audit")
-    manifest: dict[str, Any] | None = None
-
-    def start_audit() -> None:
-        r"""在首个 forward/首个训练组之后启动后台完整 physical audit。"""
-
-        nonlocal audit_handle
-        if audit_handle is None and audit_supported:
-            print("[SSL] Starting background physical asset audit...")
-            audit_handle = method.start_physical_audit(catalog)
-
-    def await_manifest() -> dict[str, Any]:
-        r"""等待完整 physical manifest，并在首次通过后写出唯一审计文件。"""
-
-        nonlocal manifest
-        if manifest is None:
-            start_audit()
-            print("[SSL] Awaiting complete physical asset audit...")
-            manifest = audit_handle.wait() if audit_handle is not None else method.asset_manifest(catalog)
-            _write_yaml(output_dir / "asset_manifest.yaml", manifest)
-            print("[SSL] Physical asset audit passed")
-        if manifest is None:
-            raise RuntimeError("physical asset audit completed without a manifest")
-        return manifest
-
     _write_yaml(output_dir / "resolved_config.yaml", resolved_config)
     _write_yaml(output_dir / "asset_dataset.yaml", catalog.dataset.config_dict())
     dirty, fingerprint = _worktree_fingerprint()
     declared_weights = _declared_objective_weights(method)
+    identity_builder = getattr(catalog, "training_dataset_identity", None)
+    if not callable(identity_builder):
+        raise TypeError("resolved catalog must expose training_dataset_identity() for schema 7 checkpoints")
+    dataset_identity = identity_builder()
+    if not isinstance(dataset_identity, Mapping):
+        raise TypeError("training_dataset_identity() must return a mapping")
+    dataset_identity = {str(name): value for name, value in dataset_identity.items()}
+    _write_yaml(output_dir / "training_dataset_identity.yaml", dataset_identity)
 
     def open_session(role: str, *, suite: str = "", seed: int) -> Any:
         r"""以统一资源上限打开 opaque Method split session。"""
@@ -600,61 +585,6 @@ def fit_embodiment_pretrain(
             runtime_timing["lifecycle_elapsed_seconds"] = perf_counter() - lifecycle_started
             payload["lifecycle_timing"] = dict(runtime_timing)
             _write_yaml(output_dir / "runtime_resources.yaml", payload)
-
-    def cancel_unpublished_audit() -> None:
-        r"""异常或提前返回时停止尚未写入 ``asset_manifest.yaml`` 的后台 audit。"""
-
-        if manifest is None and audit_handle is not None:
-            cancel = getattr(audit_handle, "cancel", None)
-            if callable(cancel):
-                cancel()
-
-    def run_suites(role: str, config: Any, *, include_ablations: bool) -> dict[str, Any]:
-        r"""在每条具名 suite 上重建固定 bank；空 suite 显式报告，不伪造成功。"""
-
-        reports: dict[str, Any] = {}
-        base_offset = config.seed_offset if role == "validation" else config.evaluation_seed_offset
-        for suite_index, suite_name in enumerate(method.split_names(role)):
-            asset_count = method.split_asset_count(role, suite=suite_name)
-            if asset_count == 0:
-                reports[suite_name] = {"status": "empty", "asset_count": 0}
-                continue
-            seed = run.config.seed + base_offset + suite_index * 1_000_003
-            session = open_session(role, suite=suite_name, seed=seed)
-            schedule = FixedAssetQSchedule(
-                session.asset_count,
-                q_per_asset=config.q_per_asset,
-                assets_per_minibatch=config.assets_per_minibatch,
-                q_per_asset_per_minibatch=config.q_per_asset_per_minibatch,
-                max_resident_assets=trainer.config.max_resident_assets,
-            )
-            try:
-                reports[suite_name] = method.evaluate_session(
-                    session,
-                    schedule,
-                    include_ablations=include_ablations,
-                )
-            finally:
-                session.close()
-        return reports
-
-    def run_training_q_bank() -> Any:
-        r"""在训练 morphology 上从独立 cursor 0 重放同一固定 Method 测度。"""
-
-        config = trainer.config.final_evaluation
-        seed = run.config.seed + config.training_q_bank_seed_offset
-        session = open_session("training_evaluation", seed=seed)
-        schedule = FixedAssetQSchedule(
-            session.asset_count,
-            q_per_asset=config.q_per_asset,
-            assets_per_minibatch=config.assets_per_minibatch,
-            q_per_asset_per_minibatch=config.q_per_asset_per_minibatch,
-            max_resident_assets=trainer.config.max_resident_assets,
-        )
-        try:
-            return method.evaluate_session(session, schedule, include_ablations=False)
-        finally:
-            session.close()
 
     print("[SSL] Opening training session (train partition)...")
     train_session = open_session("train", seed=trainer.config.sampling.seed)
@@ -692,7 +622,6 @@ def fit_embodiment_pretrain(
         finally:
             train_session.close()
             write_resource_evidence()
-            cancel_unpublished_audit()
             method.close()
             logger.close()
 
@@ -718,9 +647,6 @@ def fit_embodiment_pretrain(
         lr=trainer.config.optimizer.learning_rate,
         weight_decay=trainer.config.optimizer.weight_decay,
     )
-    initial_validation: dict[str, dict[str, float]] | None = None
-    best_score = float("inf")
-    selection_history: list[dict[str, Any]] = []
     completed_epochs = 0
     optimizer_update = 0
     new_pairs_seen = 0
@@ -732,11 +658,11 @@ def fit_embodiment_pretrain(
         raise ValueError("resume checkpoint must remain under its source run's checkpoints directory")
 
     def metadata() -> Any:
-        r"""构造本次 run 共用的通用 checkpoint lineage。"""
+        r"""构造不触发 physical audit 的 pure-pretrain checkpoint lineage。"""
 
         return run.checkpoint_metadata(
             geometry_semantics_schema=SEMANTICS_SCHEMA_VERSION,
-            asset_manifest=await_manifest(),
+            dataset_identity=dataset_identity,
             resolved_config=resolved_config,
             declared_objective=declared_weights,
             calibration_artifact_hash=calibration_hash,
@@ -745,7 +671,7 @@ def fit_embodiment_pretrain(
         )
 
     def trainer_state() -> dict[str, Any]:
-        r"""返回完整 epoch 边界的 schedule/session/RNG/selection 与预算状态。"""
+        r"""返回完整 epoch 边界的 schedule/session/RNG 与训练预算状态。"""
 
         return {
             "sampling": _sampling_state(train_schedule, train_session),
@@ -757,15 +683,13 @@ def fit_embodiment_pretrain(
             "forward_index": forward_index,
             "torch_rng_state": torch.get_rng_state(),
             "cuda_rng_state_all": torch.cuda.get_rng_state_all(),
-            "selection_history": selection_history,
-            "initial_validation_metrics": initial_validation,
-            "initial_validation_strata": None,
-            "best_validation_score": None if best_score == float("inf") else best_score,
         }
 
     def save_checkpoint(path: Path) -> None:
-        r"""保存通用容器；Method 与 Trainer 分别提供自己的 state。"""
+        r"""保存 immutable 通用容器；Method 与 Trainer 分别提供自己的 state。"""
 
+        if path.exists():
+            raise FileExistsError(f"immutable epoch checkpoint already exists: {path}")
         run.save_full_checkpoint(
             path,
             method_state=method.training_state_dict(),
@@ -784,8 +708,8 @@ def fit_embodiment_pretrain(
         optimizer_update = int(payload["optimizer_update"])
         loaded_metadata = dict(payload["metadata"])
         require_resume_calibration_hash(calibration_hash, loaded_metadata)
-        if loaded_metadata.get("asset_manifest") != await_manifest():
-            raise ValueError("resume checkpoint asset manifest does not match resolved dataset roles")
+        if loaded_metadata.get("dataset_identity") != dataset_identity:
+            raise ValueError("resume checkpoint dataset identity does not match resolved training asset axis")
         checkpoint_resolved = loaded_metadata.get("resolved_config")
         if not isinstance(checkpoint_resolved, dict):
             raise ValueError("resume checkpoint lacks resolved config")
@@ -808,7 +732,6 @@ def fit_embodiment_pretrain(
         if not isinstance(sampling_state, dict):
             raise ValueError("resume checkpoint lacks Trainer sampling state")
         _restore_sampling_state(sampling_state, train_schedule, train_session)
-        initial_validation, _initial_strata, best_score, selection_history = restore_validation_selection_state(state)
         torch_rng_state = state.get("torch_rng_state")
         cuda_rng_state = state.get("cuda_rng_state_all")
         if not isinstance(torch_rng_state, torch.Tensor):
@@ -817,40 +740,10 @@ def fit_embodiment_pretrain(
             raise ValueError("resume checkpoint lacks CUDA RNG states")
         torch.set_rng_state(torch_rng_state.cpu())
         torch.cuda.set_rng_state_all(cuda_rng_state)
-        if selection_history:
-            historical_epoch = int(min(selection_history, key=lambda item: float(item["score"]))["epoch"])
-            source_best = resume_path.parent / f"best_epoch_{historical_epoch:06d}.pt"
-            if not source_best.is_file():
-                raise ValueError("resume source run lacks immutable historical best checkpoint")
-            inherited_best = output_dir / "checkpoints" / source_best.name
-            inherited_best.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_best, inherited_best)
-            publish_best_checkpoint(output_dir / "checkpoints" / "best.pt", inherited_best)
 
     try:
-        q_bank_path = output_dir / "training_morphology_q_bank.yaml"
         if resume_path is None:
-            initial_q_bank = run_training_q_bank()
-        else:
-            source_q_bank = resume_path.parent.parent / "training_morphology_q_bank.yaml"
-            if not source_q_bank.is_file():
-                raise ValueError("resume source run lacks training_morphology_q_bank.yaml")
-            source_payload = yaml.safe_load(source_q_bank.read_text(encoding="utf-8"))
-            if not isinstance(source_payload, dict) or not isinstance(source_payload.get("initial"), dict):
-                raise ValueError("resume source q-bank artifact lacks initial evidence")
-            initial_q_bank = source_payload["initial"]
-        _write_yaml(q_bank_path, {"initial": initial_q_bank, "final": None, "comparison": None})
-
-        if initial_validation is None:
-            initial_reports = run_suites("validation", trainer.config.validation, include_ablations=False)
-            initial_metrics = {
-                suite: report.metrics
-                for suite, report in initial_reports.items()
-                if hasattr(report, "metrics")
-            }
-            initial_validation = trainer.selection_baseline(initial_metrics)
-            _write_yaml(output_dir / "validation_initial.yaml", initial_reports)
-            logger.log_validation_metrics(epoch=0, new_pairs_seen=0, metrics=initial_metrics)
+            save_checkpoint(output_dir / "checkpoints" / "epoch_000000.pt")
 
         while not train_schedule.complete:
             method.train_mode()
@@ -959,118 +852,18 @@ def fit_embodiment_pretrain(
                 terms=epoch_terms,
             )
             del batches
-            if audit_supported and audit_handle is None:
-                start_audit()  # 首个 epoch 已完成，后台审计不再阻塞首个 teacher buffer
-            validation_due = (
-                completed_epochs % trainer.config.validation.every_epochs == 0 or train_schedule.complete
-            )
-            if validation_due:
-                reports = run_suites("validation", trainer.config.validation, include_ablations=False)
-                metrics = {suite: report.metrics for suite, report in reports.items() if hasattr(report, "metrics")}
-                if initial_validation is None:
-                    raise RuntimeError("validation baseline was not initialized")
-                score = trainer.normalized_validation_score(metrics, initial_validation)
-                selection_history.append(
-                    {
-                        "epoch": completed_epochs,
-                        "optimizer_update": optimizer_update,
-                        "new_pairs_seen": new_pairs_seen,
-                        "score": score,
-                        "metrics": metrics,
-                    }
-                )
-                _write_yaml(output_dir / f"validation_epoch_{completed_epochs:06d}.yaml", reports)
-                logger.log_validation_metrics(
-                    epoch=completed_epochs,
-                    new_pairs_seen=new_pairs_seen,
-                    metrics=metrics,
-                )
-                if score < best_score:
-                    best_score = score
-                    immutable = output_dir / "checkpoints" / f"best_epoch_{completed_epochs:06d}.pt"
-                    save_checkpoint(immutable)
-                    publish_best_checkpoint(output_dir / "checkpoints" / "best.pt", immutable)
             checkpoint_due = completed_epochs % trainer.config.checkpoint_every_epochs == 0 or train_schedule.complete
             if checkpoint_due:
                 save_checkpoint(output_dir / "checkpoints" / f"epoch_{completed_epochs:06d}.pt")
 
-        save_checkpoint(output_dir / "checkpoints" / "last.pt")
-        best_source = output_dir / "checkpoints" / (
-            f"best_epoch_{min(selection_history, key=lambda item: item['score'])['epoch']:06d}.pt"
-            if selection_history
-            else "last.pt"
-        )
-        best_payload = load_pretrain_checkpoint(best_source, map_location=device)
-        method.load_training_state_dict(best_payload["method_state"])
-
-        final_q_bank = run_training_q_bank()
-        initial_q_bank_payload = _plain(initial_q_bank)
-        final_q_bank_payload = _plain(final_q_bank)
-        initial_strata = initial_q_bank_payload.get("strata", {})
-        final_strata = final_q_bank_payload.get("strata", {})
-        if initial_strata.get("bank_digest_sha256") != final_strata.get("bank_digest_sha256"):
-            raise RuntimeError("training morphology q-bank identity changed between initial and final evaluation")
-        q_bank_comparison = {
-            name: {
-                "initial": float(initial_q_bank_payload["metrics"][name]),
-                "final": float(final_q_bank_payload["metrics"][name]),
-                "improvement_initial_minus_final": (
-                    float(initial_q_bank_payload["metrics"][name])
-                    - float(final_q_bank_payload["metrics"][name])
-                ),
-            }
-            for name in trainer.config.validation.selection_metrics
-        }
-        _write_yaml(
-            q_bank_path,
-            {"initial": initial_q_bank_payload, "final": final_q_bank_payload, "comparison": q_bank_comparison},
-        )
-
-        final_reports = run_suites("evaluation", trainer.config.final_evaluation, include_ablations=True)
-        final_summary: dict[str, Any] = {}
-        for suite_index, (suite_name, report) in enumerate(final_reports.items()):
-            if not hasattr(report, "metrics"):
-                final_summary[suite_name] = report
-                continue
-            suite_payload = {"metrics": report.metrics, "strata": report.strata, "ablations": report.ablations}
-            if report.ablations is not None:
-                actual = tuple(str(name) for name in report.ablations.get("ablations", ()))[1:]
-                if actual != trainer.config.final_evaluation.final_ablations:
-                    raise ValueError("Method final ablations do not match Trainer final_evaluation config")
-                suite_payload["ablation_analysis"] = method.analyze_ablations(
-                    report.ablations,
-                    bootstrap_replicates=trainer.config.final_evaluation.bootstrap_replicates,
-                    seed=(
-                        run.config.seed
-                        + trainer.config.final_evaluation.bootstrap_seed_offset
-                        + suite_index * 1_000_003
-                    ),
-                )
-            final_summary[suite_name] = suite_payload
-        _write_yaml(output_dir / "final_evaluation.yaml", final_summary)
-
-        current_metadata = metadata()
-        retained_payload = method.retained_artifact_payload(
-            metadata=asdict(current_metadata),
-            source_checkpoint=best_source,
-        )
-        run.save_retained_artifact(output_dir / "retained_artifact.pt", retained_payload)
-        _write_yaml(
-            output_dir / "checkpoint_selection.yaml",
-            {
-                "selection_metrics": trainer.config.validation.selection_metrics,
-                "initial_validation": initial_validation,
-                "history": selection_history,
-                "best_checkpoint": str(best_source.relative_to(output_dir)),
-                "retained_artifact": "retained_artifact.pt",
-                "final_evaluation": "final_evaluation.yaml",
-            },
-        )
+        final_checkpoint = output_dir / "checkpoints" / f"epoch_{completed_epochs:06d}.pt"
+        if not final_checkpoint.is_file():
+            save_checkpoint(final_checkpoint)
+        publish_checkpoint_alias(output_dir / "checkpoints" / "last.pt", final_checkpoint)
         return output_dir
     finally:
         train_session.close()
         write_resource_evidence()
-        cancel_unpublished_audit()
         method.close()
         logger.close()
 

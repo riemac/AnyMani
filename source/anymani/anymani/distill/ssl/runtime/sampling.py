@@ -3,7 +3,7 @@ r"""Trainer-owned 在线 epoch/minibatch 日程与固定评估 q-bank 日程。
 训练预算由 ``max_epochs × num_minibatches`` 给出，其中 ``num_minibatches`` 是每个 epoch
 新生成的批数。每个 minibatch 包含固定数量的资产，每项资产产生固定数量的新 Sobol 构型；
 训练集走完后以新的确定性 permutation 继续，epoch 本身不表示完整 catalog 遍历。
-validation/final evaluation 仍按每资产固定 q-bank 完整遍历，因此使用独立的评估日程。
+独立 validation/evaluation 仍按每资产固定 q-bank 完整遍历，因此使用与训练解耦的评估日程。
 """
 
 from __future__ import annotations
@@ -229,7 +229,7 @@ class OnlineMinibatchSchedule:
 class FixedAssetQSchedule:
     r"""完整遍历每项评估资产的固定 q-bank，保留真实资产尾批与 q 尾块。
 
-    该日程只服务 validation、training-q-bank 和 final evaluation，不参与训练预算或 resume。
+    该日程只服务独立 validation、可选 training-q-bank 和 evaluation，不参与训练预算或 resume。
     """
 
     def __init__(

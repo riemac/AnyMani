@@ -13,7 +13,7 @@ from typing import Any
 
 import torch
 
-CHECKPOINT_SCHEMA_VERSION = "6.0.0"
+CHECKPOINT_SCHEMA_VERSION = "7.0.0"
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,7 @@ class PretrainCheckpointMetadata:
     code_revision: str
     package_version: str
     geometry_semantics_schema: str
-    asset_manifest: Mapping[str, Any]
+    dataset_identity: Mapping[str, Any]
     resolved_config: Mapping[str, Any]
     declared_objective: Mapping[str, float]
     calibration_artifact_hash: str = ""
@@ -50,7 +50,7 @@ def save_pretrain_checkpoint(
         epoch (int): 已完整完成、可恢复的训练 epoch 数。
         optimizer_update (int): 已执行的参数更新总数。
         metadata (PretrainCheckpointMetadata): 实验配置、数据和代码 lineage。
-        trainer_state (Mapping[str, Any]): schedule/session/RNG/selection 状态。
+        trainer_state (Mapping[str, Any]): schedule/session/RNG 与训练预算状态。
     """
 
     if epoch < 0 or optimizer_update < 0:

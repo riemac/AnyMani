@@ -1,10 +1,11 @@
-"""Schema 5 Hydra composition、显式 minibatch 预算与 physical realization fingerprint 合同。"""
+"""Schema 7 Hydra composition、纯训练预算与 physical realization fingerprint 合同。"""
 
 from __future__ import annotations
 
 import os
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -19,12 +20,13 @@ from anymani.distill.representations.sources.collision_geometry import (
     HomeSurfaceSamples,
     OwnerGeometryCache,
 )
-from anymani.distill.ssl.config_store import compose_pretrain_cfg
+from anymani.distill.ssl.config_store import compose_evaluation_cfg, compose_pretrain_cfg, compose_validation_cfg
 from anymani.distill.ssl.data import HandAssetCatalogCfg
 from anymani.distill.ssl.data import hand_assets as hand_assets_module
-from anymani.distill.ssl.data.hand_assets import HandAssetCatalog, _prune_catalog_cache
+from anymani.distill.ssl.data.hand_assets import EmbodimentCatalog, HandAssetCatalog, _prune_catalog_cache
 from anymani.distill.ssl.experiment import EmbodimentPretrain, EmbodimentPretrainCfg, resolved_config_dict
 from anymani.distill.ssl.pretrain import _build_parser, _config_overrides
+from anymani.distill.ssl.runtime.post_training import normalized_validation_score, selection_baseline
 from anymani.distill.ssl.runtime.pretrainer import EmbodimentPretrainTrainerCfg
 
 pytestmark = pytest.mark.contract
@@ -53,12 +55,12 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
     assert config.trainer.num_minibatches == 4
     assert config.trainer.mini_epochs == 1
     assert config.trainer.microbatch_size == 64
-    assert config.trainer.validation.every_epochs == 8
-    assert config.trainer.checkpoint_every_epochs == 8
+    assert not hasattr(config.trainer, "validation")
+    assert not hasattr(config.trainer, "final_evaluation")
+    assert config.trainer.checkpoint_every_epochs == 1
     assert not hasattr(config.trainer, "gradient_accumulation_steps")
     assert config.trainer.sampling.assets_per_minibatch == 64
     assert config.trainer.sampling.q_per_asset_per_minibatch == 8
-    assert config.trainer.validation.selection_metrics == ("density", "kappa", "derived_field")
     assert type(config.method.representation).__name__ == "GeometryRepresentationCfg"
     assert type(config.method.model).__name__ == "GeometrySSLModelCfg"
     assert set(config.method.objectives.enabled()) == {
@@ -66,6 +68,9 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
         "kappa",
         "derived_field",
     }
+    assert config.method.objectives.density.weight == pytest.approx(1.0)
+    assert config.method.objectives.kappa.weight == pytest.approx(20.0)
+    assert config.method.objectives.derived_field.weight == pytest.approx(0.01)
     assert not hasattr(config.method.objectives, "sobolev")
     assert not hasattr(config.method.objectives, "chain")
     assert config.method.representation.source.anchors.bank_size == 8
@@ -80,7 +85,23 @@ def test_hydra_cli_override_changes_local_cfg_without_central_parser() -> None:
 
     config = compose_pretrain_cfg(["trainer.optimizer.learning_rate=0.0007"])
     assert config.trainer.optimizer.learning_rate == pytest.approx(7.0e-4)
-    assert resolved_config_dict(config)["schema_version"] == "6.0.0"
+    assert resolved_config_dict(config)["schema_version"] == "7.0.0"
+
+
+def test_post_training_configs_are_independent_from_trainer() -> None:
+    r"""validation/evaluation 应各自组合 data/method/stage/run，不回填 Trainer 字段。"""
+
+    validation = compose_validation_cfg()
+    evaluation = compose_evaluation_cfg()
+
+    assert validation.schema_version == "1.0.0"
+    assert evaluation.schema_version == "1.0.0"
+    assert not hasattr(validation, "trainer")
+    assert not hasattr(evaluation, "trainer")
+    assert validation.validation.selection_metrics == ("density", "kappa", "derived_field")
+    assert evaluation.evaluation.final_ablations[-1] == "first_order_sign_flip"
+    assert validation.data == evaluation.data == _compose().data
+    assert validation.method == evaluation.method == _compose().method
 
 
 def test_flat_cli_flags_compose_one_run_without_exposing_config_paths() -> None:
@@ -127,17 +148,17 @@ def test_experiment_constructor_has_no_filesystem_or_cuda_side_effect(tmp_path) 
     output_dir = tmp_path / "not-created-until-run"
     experiment = EmbodimentPretrain(_compose(), output_dir=output_dir)
 
-    assert experiment.config.schema_version == "6.0.0"
+    assert experiment.config.schema_version == "7.0.0"
     assert experiment.output_dir == output_dir
     assert not output_dir.exists()
 
 
 def test_old_schemas_are_fail_closed() -> None:
-    """旧配置不通过 alias 或 parser 猜测进入 schema 6。"""
+    """旧配置不通过 alias 或 parser 猜测进入 schema 7。"""
 
     config = _compose()
-    for version in ("1.0.0", "2.0.0", "5.0.0"):
-        with pytest.raises(ValueError, match="schema must be exactly 6.0.0"):
+    for version in ("1.0.0", "2.0.0", "6.0.0"):
+        with pytest.raises(ValueError, match="schema must be exactly 7.0.0"):
             replace(config, schema_version=version).validate_composed()
 
 
@@ -205,6 +226,27 @@ def test_hand_catalog_rejects_missing_manifest_without_io() -> None:
         HandAssetCatalogCfg()
 
 
+def test_training_dataset_identity_freezes_ordered_asset_and_content_axis() -> None:
+    r"""轻量 checkpoint identity 必须检测资产替换和重排，但不触发 physical source 物化。"""
+
+    records = (
+        SimpleNamespace(container=SimpleNamespace(asset_id="asset-a"), content_hash="content-a"),
+        SimpleNamespace(container=SimpleNamespace(asset_id="asset-b"), content_hash="content-b"),
+    )
+    dataset = SimpleNamespace(source_sha256="dataset-sha", train=SimpleNamespace(records=records))
+    baseline = EmbodimentCatalog(dataset).training_dataset_identity()
+    reordered_dataset = SimpleNamespace(
+        source_sha256="dataset-sha",
+        train=SimpleNamespace(records=tuple(reversed(records))),
+    )
+
+    assert baseline["schema_version"] == "1.0.0"
+    assert baseline["source_sha256"] == "dataset-sha"
+    assert baseline["train_asset_count"] == 2
+    assert len(str(baseline["train_asset_axis_sha256"])) == 64
+    assert EmbodimentCatalog(reordered_dataset).training_dataset_identity() != baseline
+
+
 def test_catalog_cache_prunes_old_indexes_and_only_stale_temporary_files(tmp_path: Path) -> None:
     r"""slim catalog 可跨进程保留，但完整索引总量和中断临时文件必须有界。"""
 
@@ -270,20 +312,21 @@ def test_validation_selection_weights_named_suites_equally() -> None:
     隐式改变 checkpoint objective，而不是只提高同一指标的统计精度。
     """
 
-    config = _compose()
-    trainer = config.trainer.runtime_type(config.trainer)
-    baseline = trainer.selection_baseline(
+    metrics = ("density", "kappa", "derived_field")
+    baseline = selection_baseline(
         {
             "unseen_variant_set": {"density": 1.0, "kappa": 1.0, "derived_field": 1.0},
             "unseen_mother": {"density": 2.0, "kappa": 2.0, "derived_field": 2.0},
-        }
+        },
+        metrics,
     )
-    score = trainer.normalized_validation_score(
+    score = normalized_validation_score(
         {
             "unseen_variant_set": {"density": 0.5, "kappa": 0.5, "derived_field": 0.5},
             "unseen_mother": {"density": 2.0, "kappa": 2.0, "derived_field": 2.0},
         },
         baseline,
+        metrics,
     )
 
     assert score == pytest.approx(0.75)

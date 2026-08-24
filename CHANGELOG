@@ -1,3 +1,11 @@
+0.7.1 - 2026-08-24
+==================
+
+- Geometry SSL 生命周期升级为 experiment/full-checkpoint schema 7：`pretrain` 只执行在线监督、反向更新、训练日志和 epoch-boundary full checkpoint，不再隐式运行 validation、training-morphology q-bank、final evaluation、physical audit 或 retained export。
+- 新增独立 `python -m anymani.distill.ssl.validate` 与 `python -m anymani.distill.ssl.evaluate` 入口；validation 只比较显式 epoch-0 baseline 与候选 checkpoints，并在独立目录发布 `best.pt`；evaluation 只消费显式 checkpoint，只有提供 baseline 时才运行训练形态 q-bank。
+- canonical 三项目标权重冻结为 density/κ/derived-field = `1 / 20 / 0.01`；训练默认每 epoch 保存完整状态，并额外发布未更新的 `epoch_000000.pt` 与指向最终 immutable epoch checkpoint 的 `last.pt` 硬链接。
+- full checkpoint 以 dataset SHA 和有序 `(asset_id, content_hash)` 训练轴摘要完成轻量 resume 身份核对；完整 `physical_geometry_hash` 与 split-isolation gate 移至显式事后阶段，避免 8192-asset audit 与纯训练争用资源。schema-6 calibration artifact 与 retained artifact schema 4 保持兼容。
+
 0.7.0 - 2026-08-24
 ==================
 

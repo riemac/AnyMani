@@ -58,14 +58,14 @@ class PretrainRun:
         self,
         *,
         geometry_semantics_schema: str,
-        asset_manifest: Mapping[str, Any],
+        dataset_identity: Mapping[str, Any],
         resolved_config: Mapping[str, Any],
         declared_objective: Mapping[str, float],
         calibration_artifact_hash: str = "",
         worktree_dirty: bool = False,
         worktree_fingerprint: str = "",
     ) -> Any:
-        r"""构造一次 run 共用的 schema 6 checkpoint lineage。"""
+        r"""构造一次 pure-pretrain run 共用的 schema 7 checkpoint lineage。"""
 
         from anymani.distill.ssl.checkpoint import PretrainCheckpointMetadata
 
@@ -73,7 +73,7 @@ class PretrainRun:
             code_revision=self.code_revision(),
             package_version=self.package_version(),
             geometry_semantics_schema=geometry_semantics_schema,
-            asset_manifest=asset_manifest,
+            dataset_identity=dataset_identity,
             resolved_config=resolved_config,
             declared_objective=declared_objective,
             calibration_artifact_hash=calibration_artifact_hash,
