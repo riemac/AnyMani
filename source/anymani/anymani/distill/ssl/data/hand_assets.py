@@ -27,6 +27,27 @@ _CATALOG_CACHE_MAX_BYTES = 512 * 1024 * 1024  # 最多保留 512 MiB 本机解�
 _STALE_TEMPORARY_AGE_SECONDS = 24 * 60 * 60  # 只回收确认不属于活跃写入的临时文件
 
 
+def _release_catalog_allocator_slack() -> bool:
+    r"""在 cold resolve 转为 slim catalog 后归还完整 sidecar 的 CPython/glibc 空闲页。
+
+    该回收发生在 CUDA/Warp 初始化之前，只处理已经没有对象引用的 host allocation；不改变
+    ``ResolvedHandAssetDataset`` 的资产顺序、typed semantics、路径、identity 或 provenance。
+    """
+
+    import ctypes
+    import gc
+
+    gc.collect()  # 清理 worker/result 与完整 HandContainer 字典可能形成的 generation-2 cycles
+    try:
+        libc = ctypes.CDLL(None)
+        malloc_trim = libc.malloc_trim
+    except (AttributeError, OSError):
+        return False
+    malloc_trim.argtypes = [ctypes.c_size_t]
+    malloc_trim.restype = ctypes.c_int
+    return bool(malloc_trim(0))  # GNU libc 以 pad=0 归还全部可释放 top chunks
+
+
 def _cache_root() -> Path:
     r"""返回跨进程共享的本地 catalog cache 根目录。
 
@@ -217,7 +238,12 @@ def _write_cached_dataset(
     *,
     allow_legacy_left_handedness: bool,
 ) -> None:
-    r"""以临时文件加 replace 原子写入 resolved catalog，避免并行进程读到半文件。"""
+    r"""原子写入 slim catalog；首次解析进程会在释放 full heap 后重新加载。
+
+    cache miss 的完整 ``parsed.resolve()`` 含原始 sidecar/visual debug 字典。若在 full 对象仍存活
+    时构造并保留 slim 对象，两类小对象会交错占据 glibc heap 页面，full 释放后仍无法 trim。
+    因此本函数只负责原子写盘，让 caller 先释放整批解析 heap，再从同一 pickle 构造常驻 catalog。
+    """
 
     slim_dataset = _slim_dataset(dataset)
     files, directories = _catalog_paths(slim_dataset)
@@ -312,6 +338,7 @@ class HandAssetCatalog:
         r"""读取 manifest、展开固定 roles 并验证可选的预期 SHA-256。"""
 
         parsed = HandAssetDataset.from_yaml(self.config.manifest)
+        parsed_source_sha256 = parsed.source_sha256  # cache identity 来自本次实际读取的 manifest bytes
         cache_path = _cache_file(
             str(parsed.source_path),
             allow_legacy_left_handedness=self.config.allow_legacy_left_handedness,
@@ -325,15 +352,25 @@ class HandAssetCatalog:
             print(f"[SSL] Catalog cache hit: {cache_path}")
         else:
             print(f"[SSL] Catalog cache miss: resolving assets from {parsed.source_path}")
-            dataset = parsed.resolve(
+            resolved_dataset = parsed.resolve(
                 require_geometry_semantics=True,
                 allow_legacy_left_handedness=self.config.allow_legacy_left_handedness,
             )
             _write_cached_dataset(
                 cache_path,
-                dataset,
+                resolved_dataset,
                 allow_legacy_left_handedness=self.config.allow_legacy_left_handedness,
             )
+            del resolved_dataset  # pickle 已原子发布；解除完整 sidecar/visual catalog 强引用
+            del parsed  # 原始 manifest façade 在 resolve 后不再参与 scientific identity 或训练
+            _release_catalog_allocator_slack()
+            dataset = _load_cached_dataset(
+                cache_path,
+                source_sha256=parsed_source_sha256,
+                allow_legacy_left_handedness=self.config.allow_legacy_left_handedness,
+            )
+            if dataset is None:
+                raise RuntimeError("catalog cache could not reload the slim dataset written by this process")
         if self.config.expected_sha256 and dataset.source_sha256 != self.config.expected_sha256:
             raise ValueError(
                 "hand asset dataset SHA-256 mismatch: "

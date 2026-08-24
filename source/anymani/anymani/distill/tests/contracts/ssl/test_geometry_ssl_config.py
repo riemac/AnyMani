@@ -21,7 +21,8 @@ from anymani.distill.representations.sources.collision_geometry import (
 )
 from anymani.distill.ssl.config_store import compose_pretrain_cfg
 from anymani.distill.ssl.data import HandAssetCatalogCfg
-from anymani.distill.ssl.data.hand_assets import _prune_catalog_cache
+from anymani.distill.ssl.data import hand_assets as hand_assets_module
+from anymani.distill.ssl.data.hand_assets import HandAssetCatalog, _prune_catalog_cache
 from anymani.distill.ssl.experiment import EmbodimentPretrain, EmbodimentPretrainCfg, resolved_config_dict
 from anymani.distill.ssl.pretrain import _build_parser, _config_overrides
 from anymani.distill.ssl.runtime.pretrainer import EmbodimentPretrainTrainerCfg
@@ -205,6 +206,36 @@ def test_catalog_cache_prunes_old_indexes_and_only_stale_temporary_files(tmp_pat
     assert middle.exists() and current.exists()  # 当前项受保护，另一项仍在预算内
     assert not stale_temporary.exists()  # 超过 24 h 的中断写入可安全回收
     assert fresh_temporary.exists()  # 仍可能属于并行进程的临时文件不得删除
+
+
+def test_catalog_cache_miss_reloads_slim_dataset_after_releasing_full_heap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    r"""首次解析与 cache hit 必须返回同一 slim 对象语义，不能让 cold run 常驻完整 sidecar。"""
+
+    full_dataset = type("FullDataset", (), {"source_sha256": "dataset-sha"})()
+    slim_dataset = type("SlimDataset", (), {"source_sha256": "dataset-sha"})()
+    parsed = type(
+        "ParsedDataset",
+        (),
+        {
+            "source_path": tmp_path / "ssl.yaml",
+            "source_sha256": "dataset-sha",
+            "resolve": lambda _self, **_kwargs: full_dataset,
+        },
+    )()
+    monkeypatch.setattr(hand_assets_module.HandAssetDataset, "from_yaml", lambda _manifest: parsed)
+    monkeypatch.setattr(hand_assets_module, "_cache_file", lambda *_args, **_kwargs: tmp_path / "catalog.pkl")
+    load_results = iter((None, slim_dataset))  # 首次 miss；写盘并 trim full heap 后必须再次加载 slim
+    monkeypatch.setattr(hand_assets_module, "_load_cached_dataset", lambda *_args, **_kwargs: next(load_results))
+    written: list[object] = []
+    monkeypatch.setattr(hand_assets_module, "_write_cached_dataset", lambda _path, dataset, **_kwargs: written.append(dataset))
+
+    catalog = HandAssetCatalog(HandAssetCatalogCfg(manifest=str(tmp_path / "ssl.yaml"))).resolve()
+
+    assert written == [full_dataset]  # writer 只短暂消费完整解析结果，不把它交给训练
+    assert catalog.dataset is slim_dataset  # cold miss 与下一进程 pickle hit 使用同一精简数据轴
 
 
 def test_validation_selection_weights_named_suites_equally() -> None:

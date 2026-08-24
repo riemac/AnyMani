@@ -1,3 +1,9 @@
+0.6.10 - 2026-08-24
+===================
+
+- 修正 Geometry SSL 首次 catalog cache miss 的常驻内存不对称：slim pickle 发布后先释放完整 sidecar/visual 解析 heap，再重载同一 slim catalog；cold 与 warm 运行由此使用相同的数据对象语义和分配布局。
+- 8192-asset cold probe 在 catalog resolve 后将当前 RSS 从 7.10 GiB 降至 3.14 GiB、swap 保持 0；首个 `64 assets × 8 q` 的五项 trace 与 `v0.6.9` 正式 calibration 逐值一致。
+
 0.6.9 - 2026-08-24
 ==================
 
