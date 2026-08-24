@@ -24,7 +24,7 @@ from anymani.distill.ssl.runtime.sampling import OnlineSamplingCfg
 
 pytestmark = [pytest.mark.contract, pytest.mark.skipif(not torch.cuda.is_available(), reason="fit requires CUDA")]
 
-_TERMS = ("density", "kappa", "derived_field", "sobolev", "chain")
+_TERMS = ("density", "kappa", "derived_field")
 
 
 class _Dataset:
@@ -115,8 +115,15 @@ class _Method:
     def formula_identity(self) -> dict[str, str]:
         return {name: f"synthetic.{name}" for name in _TERMS}
 
-    def forward_objectives(self, batch, *, step: int, mode: str = "train") -> MethodStep:
-        del mode
+    def forward_objectives(
+        self,
+        batch,
+        *,
+        step: int,
+        mode: str = "train",
+        microbatch_size: int | None = None,
+    ) -> MethodStep:
+        del mode, microbatch_size
         self.forward_steps.append(step)
         error = self._parameter().square()
         denominator = torch.tensor(float(batch.sample_count), device=error.device)
@@ -181,7 +188,7 @@ class _Method:
         return None
 
 
-def _trainer() -> EmbodimentPretrainTrainer:
+def _trainer(*, mini_epochs: int) -> EmbodimentPretrainTrainer:
     config = EmbodimentPretrainTrainerCfg(
         sampling=OnlineSamplingCfg(
             assets_per_minibatch=2,
@@ -189,13 +196,15 @@ def _trainer() -> EmbodimentPretrainTrainer:
             shuffle_assets=False,
             seed=17,
         ),
+        max_epochs=2,
         num_minibatches=2,
-        mini_epochs=2,
+        mini_epochs=mini_epochs,
+        microbatch_size=2,
         validation=ValidationCfg(
             q_per_asset=1,
             assets_per_minibatch=1,
             q_per_asset_per_minibatch=1,
-            every_optimizer_updates=1,
+            every_epochs=1,
         ),
         final_evaluation=FinalEvaluationCfg(
             q_per_asset=1,
@@ -204,9 +213,7 @@ def _trainer() -> EmbodimentPretrainTrainer:
             bootstrap_replicates=2,
         ),
         optimizer=AdamWCfg(learning_rate=0.1, weight_decay=0.0),
-        gradient_accumulation_steps=2,
-        checkpoint_every_updates=1,
-        run_safety_step_limit=4,
+        checkpoint_every_epochs=1,
         max_resident_assets=2,
     )
     return EmbodimentPretrainTrainer(config)
@@ -214,7 +221,7 @@ def _trainer() -> EmbodimentPretrainTrainer:
 
 def _resolved(trainer: EmbodimentPretrainTrainer, phase: str) -> dict[str, object]:
     return {
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "data": {"manifest": "synthetic-ssl.yaml"},
         "method": {
             "state_measure": {"kind": "synthetic"},
@@ -237,19 +244,19 @@ def test_formal_fit_runs_calibration_then_best_checkpoint_final_evaluation(
     from anymani.distill.ssl.runtime import lifecycle
 
     monkeypatch.setattr(lifecycle, "_worktree_fingerprint", lambda: (False, ""))
-    trainer = _trainer()
+    calibration_trainer = _trainer(mini_epochs=1)
     calibration_dir = tmp_path / "calibration"
     calibration_run = PretrainRun(
         PretrainRunCfg(seed=17, phase="calibrate_objectives", deterministic_algorithms=False)
     )
     calibration_method = _Method()
     fit_embodiment_pretrain(
-        trainer=trainer,
+        trainer=calibration_trainer,
         data=_Data(),
         method=calibration_method,
         run=calibration_run,
         output_dir_override=calibration_dir,
-        resolved_config=_resolved(trainer, "calibrate_objectives"),
+        resolved_config=_resolved(calibration_trainer, "calibrate_objectives"),
     )
     artifact = calibration_dir / "loss_calibration.yaml"
     assert artifact.is_file()
@@ -257,6 +264,7 @@ def test_formal_fit_runs_calibration_then_best_checkpoint_final_evaluation(
     assert not (calibration_dir / "checkpoints").exists()
 
     pretrain_dir = tmp_path / "pretrain"
+    pretrain_trainer = _trainer(mini_epochs=2)
     pretrain_run = PretrainRun(
         PretrainRunCfg(
             seed=17,
@@ -267,20 +275,23 @@ def test_formal_fit_runs_calibration_then_best_checkpoint_final_evaluation(
     )
     pretrain_method = _Method()
     fit_embodiment_pretrain(
-        trainer=trainer,
+        trainer=pretrain_trainer,
         data=_Data(),
         method=pretrain_method,
         run=pretrain_run,
         output_dir_override=pretrain_dir,
-        resolved_config=_resolved(trainer, "pretrain"),
+        resolved_config=_resolved(pretrain_trainer, "pretrain"),
     )
 
     assert (pretrain_dir / "checkpoints" / "best.pt").is_file()
+    assert (pretrain_dir / "checkpoints" / "epoch_000001.pt").is_file()
+    assert (pretrain_dir / "checkpoints" / "epoch_000002.pt").is_file()
     assert (pretrain_dir / "retained_artifact.pt").is_file()
     final = yaml.safe_load((pretrain_dir / "final_evaluation.yaml").read_text(encoding="utf-8"))
     assert final["unseen"]["metrics"]
     assert final["unseen"]["ablation_analysis"]["bootstrap_replicates"] == 2
     assert final["official_zero_shot"] == {"status": "empty", "asset_count": 0}
     assert calibration_method.training_trace == pretrain_method.training_trace
-    assert calibration_method.forward_steps == pretrain_method.forward_steps == [0, 1, 2, 3]
+    assert calibration_method.forward_steps == [0, 1, 2, 3]
+    assert pretrain_method.forward_steps == list(range(8))
     assert calibration_method._parameter().grad is None

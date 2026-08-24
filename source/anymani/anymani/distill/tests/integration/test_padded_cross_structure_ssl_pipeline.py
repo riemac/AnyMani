@@ -120,7 +120,7 @@ def test_padded_cross_structure_model_objective_and_backward() -> None:
     torch.manual_seed(41)
     padding = GeometryPaddingCfg(max_joint_count=20, max_tip_count=5, max_graph_distance=4)
     batch = pad_online_geometry_samples([_sample(1, "one"), _sample(2, "two")], padding=padding)
-    q = batch.q.detach().requires_grad_(True)
+    q = batch.q.detach()
     model = GeometrySSLModel(
         GeometrySSLModelCfg(
             encoder=GeometryEncoderCfg(
@@ -155,7 +155,7 @@ def test_padded_cross_structure_model_objective_and_backward() -> None:
         query_index=batch.sensitivity_targets.query_index,
         joint_index=batch.sensitivity_targets.joint_index,
     )
-    context = MultiAnchorObjectiveContext(model=model, q=q, prediction=prediction, batch=batch)
+    context = MultiAnchorObjectiveContext(prediction=prediction, batch=batch)
     objectives_cfg = MultiAnchorGaussianObjectivesCfg()
     update = reduce_method_steps(
         (MethodStep(objectives=evaluate_objectives(context, objectives_cfg), sample_count=2),),

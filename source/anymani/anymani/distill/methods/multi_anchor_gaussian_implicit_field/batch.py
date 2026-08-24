@@ -12,6 +12,7 @@ realization 编成 encoder 输入，并把异构 $N_J/G/E$ 填进稠密容器。
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
+from typing import Any, TypeVar, cast
 
 import torch
 
@@ -27,6 +28,8 @@ from anymani.distill.representations.sources.collision_geometry import AnchorSam
 from anymani.distill.representations.sources.geometry_source import GeometrySource
 from anymani.distill.representations.sources.kinematics import EmbodimentGeometrySpec
 from anymani.distill.representations.targets.field_samples import FieldTargetBatch, SensitivityTargetBatch
+
+_DataclassT = TypeVar("_DataclassT")
 
 
 @dataclass(frozen=True)
@@ -386,14 +389,16 @@ def _slice_padded_batch(
 
     batch_size = int(batch.q.shape[0])
 
-    def slice_dataclass(value):
-        updates = {}
-        for field_info in fields(value):
+    def slice_dataclass(value: _DataclassT) -> _DataclassT:
+        r"""沿样本轴切片任意 typed batch，同时保留调用点的具体 dataclass 类型。"""
+
+        updates: dict[str, Any] = {}
+        for field_info in fields(cast(Any, value)):
             field_value = getattr(value, field_info.name)
             if isinstance(field_value, torch.Tensor) and field_value.ndim > 0 and field_value.shape[0] == batch_size:
                 field_value = field_value[start:stop]
             updates[field_info.name] = field_value
-        return replace(value, **updates)
+        return cast(_DataclassT, replace(cast(Any, value), **updates))
 
     return PaddedOnlineGeometryBatch(
         asset_ids=batch.asset_ids[start:stop],

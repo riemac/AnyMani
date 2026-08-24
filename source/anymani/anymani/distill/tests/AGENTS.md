@@ -9,7 +9,7 @@ tests/
 ├── contracts/
 │   ├── representations/     frame/unit、PoE、gauge、field/query、cache/provenance
 │   ├── models/              entity/joint/anchor shape、奇偶性、routing、retained keys
-│   ├── objectives/          JVP/selector、stop-gradient；五项公式在 method 测试中验收
+│   ├── objectives/          gauge、selector 与候选重建公式
 │   ├── ssl/                 façade、split、预实验、minibatch/复用、checkpoint
 │   └── rl/                  alias、YAML、adapter、observer、masked PPO
 ├── integration/             synthetic / padded / real mother：encoder → loss → backward
@@ -46,7 +46,7 @@ tests/
 
 ### 当前 SSL 合同
 
-配置测试锁定四角色根配置、唯一 `num_minibatches / mini_epochs` 预算接口、五项主损失、validation sigma `4/16/64 mm`、`anchor bank=8` 和当前 representation schema。预实验 artifact 核对 dataset/formula/method identity，并保存 code/worktree lineage 供对照；正式 preset 与预实验 preset 可以不同。Trainer/checkpoint 通过 Method 窄接口工作；integration 直接运行 method objective。
+配置测试锁定四角色根配置、`max_epochs / num_minibatches / mini_epochs / microbatch_size` 预算接口、三项主损失、validation sigma `4/16/64 mm`、`anchor bank=8` 和当前 representation schema。预实验 artifact 核对 dataset/formula/method identity，并保存 code/worktree lineage 供对照；正式 preset 与预实验 preset 可以不同。Trainer/checkpoint 通过 Method 窄接口工作；integration 直接运行 method objective。
 
 ### Retained encoder 性能门槛
 

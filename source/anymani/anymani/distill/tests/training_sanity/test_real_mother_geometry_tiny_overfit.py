@@ -54,9 +54,9 @@ _requires_local_mother = pytest.mark.skipif(
 
 
 def _loss(model: GeometrySSLModel, batch) -> torch.Tensor:
-    """对固定 teacher batch 用五项 method objective 重新建立物理 q Sobolev 图。"""
+    """对固定 teacher batch 重新计算三项普通监督目标。"""
 
-    q = batch.q.detach().requires_grad_(True)
+    q = batch.q.detach()
     prediction = model(
         q,
         batch.evidence,
@@ -66,14 +66,14 @@ def _loss(model: GeometrySSLModel, batch) -> torch.Tensor:
         query_index=batch.sensitivity_targets.query_index,
         joint_index=batch.sensitivity_targets.joint_index,
     )
-    context = MultiAnchorObjectiveContext(model=model, q=q, prediction=prediction, batch=batch)
+    context = MultiAnchorObjectiveContext(prediction=prediction, batch=batch)
     step = MethodStep(objectives=evaluate_objectives(context, MultiAnchorGaussianObjectivesCfg()), sample_count=1)
     return reduce_method_steps((step,), MultiAnchorGaussianObjectivesCfg()).loss
 
 
 @_requires_local_mother
 def test_real_mother_fixed_batch_loss_decreases() -> None:
-    """验证五项 method objective 能在一份真实几何 batch 上被优化，而非只完成 backward。"""
+    """验证三项 method objective 能在一份真实几何 batch 上被优化，而非只完成 backward。"""
 
     if not torch.cuda.is_available():
         pytest.skip("real mother online teacher requires CUDA Warp")

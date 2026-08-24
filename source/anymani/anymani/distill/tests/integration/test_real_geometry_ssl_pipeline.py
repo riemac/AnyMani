@@ -1,4 +1,4 @@
-"""真实 mother cache -> Warp teacher -> SSL model -> 五项目标 -> backward 集成合同。"""
+"""真实 mother cache -> Warp teacher -> SSL model -> 三项目标 -> backward 集成合同。"""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ _requires_local_mother = pytest.mark.skipif(
 @_requires_local_mother
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="real geometry SSL integration requires CUDA/Warp")
 def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
-    """首个真实资产闭环必须保持 retained/disposable 生命周期和 q JVP 梯度。"""
+    """首个真实资产闭环必须保持 retained/disposable 生命周期和普通参数梯度。"""
 
     torch.manual_seed(47)
     container = HandContainer.from_cfg(
@@ -94,7 +94,7 @@ def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
         device="cuda:0",
         dtype=torch.float32,
     )
-    q = spec.q_home.unsqueeze(0).clone().requires_grad_(True)
+    q = spec.q_home.unsqueeze(0).clone()
     queries = sample_spatial_queries(
         q.detach(),
         spec,
@@ -143,7 +143,7 @@ def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
         sensitivity_targets.joint_index,
     )
     batch = SimpleNamespace(field_targets=field_targets, sensitivity_targets=sensitivity_targets)
-    context = MultiAnchorObjectiveContext(model=model, q=q, prediction=prediction, batch=batch)
+    context = MultiAnchorObjectiveContext(prediction=prediction, batch=batch)
     objectives_cfg = MultiAnchorGaussianObjectivesCfg()
     update = reduce_method_steps(
         (MethodStep(objectives=evaluate_objectives(context, objectives_cfg), sample_count=1),),
@@ -157,7 +157,7 @@ def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
     assert prediction.density.shape == (1, 21, 64, 3)
     assert prediction.kappa.shape == (1, 32)
     assert torch.isfinite(update.loss)
-    assert q.grad is not None and torch.isfinite(q.grad).all()
+    assert q.grad is None
     assert any(parameter.grad is not None for parameter in model.encoder.parameters())
     retained_keys = model.retained_state_dict()
     assert retained_keys and all(key.startswith("encoder.") for key in retained_keys)

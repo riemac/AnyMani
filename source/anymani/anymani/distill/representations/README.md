@@ -92,7 +92,7 @@ flowchart LR
 
 ## Field catalog 与当前优先级
 
-首版默认实验协同训练逐归属体多带宽 $\rho$、显式距离灵敏度 $\kappa$、由 $\kappa$ 派生的 $g$、同一密度预测器的 Sobolev/JVP 自导数以及链式一致性。组件目录中已有 SDF、TSDF、surface KDE、explicit Gaussian components 等属于 prior scaffold 或后续消融边界；目录存在不表示它们与主线同优先级，也不得让 trainer 自动选择其中任意一个。
+当前实验协同训练逐归属体多带宽 $\rho$、显式距离灵敏度 $\kappa$ 与由 $\hat\rho$、$\hat\kappa$ 派生的 $\hat g^{(\kappa)}$。组件目录中已有 SDF、TSDF、surface KDE、explicit Gaussian components 等属于 prior scaffold 或后续消融边界；目录存在不表示它们与主线同优先级，也不得让 trainer 自动选择其中任意一个。
 
 每个 field 必须声明：
 
@@ -129,6 +129,6 @@ link-local URDF gauge、joint-axis sign/zero rewrite、`{h}` origin rewrite 与 
 
 - 不 import `torch.nn` 或 `distill.models`，不持有 checkpoint；
 - learnable adapter/backbone/decoder 位于 [`../models/`](../models/README.md)；
-- 五项比较公式与跨结构 padding 位于 [`../methods/`](../methods/AGENTS.md)；可复用的预测/真值合同位于 `../objectives/`；stage orchestration 位于 `../ssl/`、`../rl/`、`../il/`；
+- 三项比较公式与跨结构 padding 位于 [`../methods/`](../methods/AGENTS.md)；可复用的预测/真值合同位于 `../objectives/`；stage orchestration 位于 `../ssl/`、`../rl/`、`../il/`；
 - 纯公式、gauge pair、semantic coverage、query/target shape 与 cache key 使用 deterministic contract test；
 - heavy target generator 可以只用于预训练；retained encoder 的性能边界与实测证据由 [`../models/README.md`](../models/README.md) 解释。未来若激活解析直接候选，同一门槛必须包含其批量 FK/刚体支撑点变换。

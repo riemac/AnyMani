@@ -1,4 +1,4 @@
-r"""Schema 5 online procedural supervised pretraining lifecycle.
+r"""Schema 6 online procedural supervised pretraining lifecycle.
 
 该模块是最高级训练内核：Data runtime 解析 catalog，Method session 封闭产生 batch、评估与 artifact，
 Trainer 拥有 phase、window-major schedule、backward、validation promotion 与 final evaluation。
@@ -8,8 +8,6 @@ Trainer 拥有 phase、window-major schedule、backward、validation promotion �
 from __future__ import annotations
 
 import hashlib
-import json
-import math
 import os
 import shutil
 from collections.abc import Callable, Mapping
@@ -22,9 +20,11 @@ import torch
 import yaml
 
 from anymani.assets.asset_schema_geometry import SEMANTICS_SCHEMA_VERSION
+from anymani.distill.diagnostics.recording.geometry_ssl import GeometrySSLRunLogger
 from anymani.distill.ssl.checkpoint import load_pretrain_checkpoint
 from anymani.distill.ssl.runtime.checkpointing import (
     publish_best_checkpoint,
+    require_resume_calibration_hash,
     require_resume_scientific_config,
     restore_validation_selection_state,
 )
@@ -97,7 +97,7 @@ def _restore_sampling_state(
 
     raw_schedule = payload.get("schedule")
     if not isinstance(raw_schedule, dict):
-        raise ValueError("checkpoint lacks schema 5 online minibatch state")
+        raise ValueError("checkpoint lacks schema 6 epoch/minibatch state")
     schedule.load_state_dict(raw_schedule)
     raw_session = payload.get("method_session")
     if not isinstance(raw_session, dict):
@@ -106,9 +106,25 @@ def _restore_sampling_state(
 
 
 def _declared_objective_weights(method: Any) -> dict[str, float]:
-    r"""读取 method 显式声明的五项权重，不经过自动梯度标定。"""
+    r"""读取 method 显式声明的三项权重，不经过自动标定。"""
 
     return dict(method.declared_objective_weights())
+
+
+def _mini_epoch_order(
+    num_minibatches: int,
+    *,
+    seed: int,
+    epoch_index: int,
+    mini_epoch_index: int,
+) -> tuple[int, ...]:
+    r"""由训练身份确定性重排当前 epoch buffer 的 minibatch 访问顺序。"""
+
+    if min(num_minibatches, seed + 1, epoch_index + 1, mini_epoch_index + 1) < 1:
+        raise ValueError("mini-epoch ordering inputs must be non-negative and num_minibatches positive")
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed + epoch_index * 1_000_003 + mini_epoch_index * 10_007)
+    return tuple(int(index) for index in torch.randperm(num_minibatches, generator=generator).tolist())
 
 
 def _scientific_pretrain_identity(resolved_config: dict[str, Any], *, formula_identity: dict[str, str]) -> dict[str, Any]:
@@ -127,9 +143,10 @@ def _scientific_pretrain_identity(resolved_config: dict[str, Any], *, formula_id
         "model": method.get("model"),
         "joint_sign_rewrite": method.get("joint_sign_rewrite"),
         "sampling": trainer.get("sampling"),
+        "max_epochs": trainer.get("max_epochs"),
         "num_minibatches": trainer.get("num_minibatches"),
         "mini_epochs": trainer.get("mini_epochs"),
-        "gradient_accumulation_steps": trainer.get("gradient_accumulation_steps"),
+        "microbatch_size": trainer.get("microbatch_size"),
     }
 
 
@@ -233,43 +250,43 @@ def _write_calibration_artifact(
     schedule: OnlineMinibatchSchedule,
     output: Path,
     *,
-    mini_epochs: int,
-    gradient_accumulation_steps: int,
+    max_epochs: int,
+    num_minibatches: int,
+    microbatch_size: int,
     manifest_hash: str,
     resolved_config: dict[str, Any] | None = None,
     after_first_forward: Callable[[], object] | None = None,
     before_write: Callable[[], object] | None = None,
     runtime_timing: dict[str, float] | None = None,
 ) -> str:
-    r"""按正式训练的数据复用顺序运行预实验，不 backward、不更新参数或权重。
-
-    每组只 realization 一次新 minibatch 数据，再循环 ``mini_epochs`` 次 forward。由此产物同时区分
-    新生成样本数与循环利用后的样本前向次数，避免把数据规模和训练计算量混为一谈。
-    """
+    r"""按 schema-6 epoch/minibatch 顺序运行单遍预实验，不 backward 或更新参数。"""
 
     traces: dict[str, list[float]] = {name: [] for name in _declared_objective_weights(method)}
     totals: dict[str, list[float]] = {}
     minibatch_count = 0  # 已生成的新 minibatch 数
-    forward_count = 0  # 含 mini-epoch 复用的模型前向次数
-    new_sample_count = 0  # 互不重复 realization 的 $(asset,q)$ 数
-    forward_sample_count = 0  # 含复用的累计 $(asset,q)$ 前向次数
+    forward_count = 0  # calibration 中等于新 minibatch 数
+    new_pair_count = 0  # 新 realization 的 $(asset,q)$ pair 数
     asset_indices_seen: set[int] = set()  # 本次预实验实际接触的互异训练资产
     audit_started = False  # 首个 forward 完成后才允许后台物理审计争抢 CPU
     method.train_mode()  # 保留正式训练的 dropout/normalization 行为，只取消参数更新
-    total_minibatches = schedule.num_minibatches
-    partial_output = output.with_name(f"{output.stem}.partial{output.suffix}")  # 中断后最近完整 group 证据
+    total_minibatches = schedule.total_minibatches
+    partial_output = output.with_name(f"{output.stem}.partial{output.suffix}")  # 中断后最近完整 epoch 证据
     calibration_started = perf_counter()  # ETA 只覆盖 calibration 主循环，不混入 catalog/model startup
     realized_seconds = 0.0  # q/query/teacher/source 完整 realization 累计时间
-    objective_seconds = 0.0  # model/JVP/五项 objective 前向累计时间
+    objective_seconds = 0.0  # model 与三项 objective 前向累计时间
     host_trim_seconds = 0.0  # calibration-only CPython/glibc host-page 回收时间
 
     def consume_forward(batch: Any) -> None:
         r"""累计一个 logical batch 的充分统计，不跨 batch 保留 autograd 图。"""
 
-        nonlocal audit_started, forward_count, forward_sample_count
-        result = method.forward_objectives(batch, step=forward_count, mode="calibration")
+        nonlocal audit_started, forward_count
+        result = method.forward_objectives(
+            batch,
+            step=forward_count,
+            mode="calibration",
+            microbatch_size=microbatch_size,
+        )
         forward_count += 1  # joint-sign rewrite 的独立 forward identity
-        forward_sample_count += int(result.sample_count)  # 含 mini-epoch 复用的 $(asset,q)$ 数
         if forward_count == 1 and after_first_forward is not None and not audit_started:
             after_first_forward()  # 首个 GPU forward 后才允许后台 audit 争抢 CPU
             audit_started = True
@@ -280,76 +297,54 @@ def _write_calibration_artifact(
                 current[1] += float(component.denominator.detach())  # additive $D_j$
             traces.setdefault(name, []).append(float(objective.metrics["loss"].detach()))
 
-    print(f"[Calibration] Starting: {total_minibatches} minibatches, "
-          f"{mini_epochs} mini-epochs each, {gradient_accumulation_steps}-batch groups")
-    with torch.enable_grad():
-        while not schedule.complete:
-            group_started = perf_counter()  # 当前 accumulation group 的 wall-time 起点
-            group_size = min(gradient_accumulation_steps, schedule.minibatches_remaining)
-            group_realized_seconds = 0.0  # 仅累计 teacher/source realization，不混入 objective
-            group_forward_seconds = 0.0  # 仅累计 model/JVP/五项 objective
-
-            if mini_epochs == 1:
-                # calibration 不 backward 且不复用数据时，逐批消费可把 RSS 从 4-batch 持有量降为 1-batch。
-                for _ in range(group_size):
-                    schedule_item = schedule.next()
-                    realization_started = perf_counter()
-                    batch = _build_batch(
-                        session=session,
-                        schedule=schedule,
-                        schedule_item=schedule_item,
-                        step=minibatch_count,
-                    )
-                    group_realized_seconds += perf_counter() - realization_started
-                    minibatch_count += 1
-                    new_sample_count += schedule_item.sample_count
-                    asset_indices_seen.update(schedule_item.asset_indices)
-                    forward_started = perf_counter()
-                    consume_forward(batch)
-                    group_forward_seconds += perf_counter() - forward_started
-                    del batch  # 当前 logical batch 不复用；先解除 GPU/host evidence 的局部强引用
-                    trim_started = perf_counter()
-                    _release_host_allocator_slack()
-                    host_trim_seconds += perf_counter() - trim_started
-            else:
-                # 显式 mini-epoch 复用必须保留 group 内 teacher realization，保证每遍只重抽 joint-sign rewrite。
-                batches: list[Any] = []
+    print(
+        f"[Calibration] Starting: {max_epochs} epochs × {num_minibatches} minibatches, "
+        f"microbatch_size={microbatch_size}"
+    )
+    with torch.no_grad():
+        for epoch_index in range(schedule.completed_epochs, max_epochs):
+            epoch_started = perf_counter()
+            epoch_realized_seconds = 0.0
+            epoch_forward_seconds = 0.0
+            for minibatch_index_in_epoch in range(num_minibatches):
+                schedule_item = schedule.next()
+                if (
+                    schedule_item.epoch_index != epoch_index
+                    or schedule_item.minibatch_index_in_epoch != minibatch_index_in_epoch
+                ):
+                    raise RuntimeError("calibration schedule epoch/minibatch identity drifted")
                 realization_started = perf_counter()
-                for _ in range(group_size):
-                    schedule_item = schedule.next()
-                    batches.append(
-                        _build_batch(
-                            session=session,
-                            schedule=schedule,
-                            schedule_item=schedule_item,
-                            step=minibatch_count,
-                        )
-                    )
-                    minibatch_count += 1
-                    new_sample_count += schedule_item.sample_count
-                    asset_indices_seen.update(schedule_item.asset_indices)
-                group_realized_seconds = perf_counter() - realization_started
+                batch = _build_batch(
+                    session=session,
+                    schedule=schedule,
+                    schedule_item=schedule_item,
+                    step=minibatch_count,
+                )
+                epoch_realized_seconds += perf_counter() - realization_started
+                minibatch_count += 1
+                new_pair_count += schedule_item.sample_count
+                asset_indices_seen.update(schedule_item.asset_indices)
                 forward_started = perf_counter()
-                for _mini_epoch_index in range(mini_epochs):
-                    for batch in batches:
-                        consume_forward(batch)
-                group_forward_seconds = perf_counter() - forward_started
+                consume_forward(batch)
+                epoch_forward_seconds += perf_counter() - forward_started
+                del batch
+                trim_started = perf_counter()
+                _release_host_allocator_slack()
+                host_trim_seconds += perf_counter() - trim_started
 
-            realized_seconds += group_realized_seconds
-            objective_seconds += group_forward_seconds
+            realized_seconds += epoch_realized_seconds
+            objective_seconds += epoch_forward_seconds
             progress_pct = 100.0 * minibatch_count / total_minibatches
             print(
-                f"[Calibration] Progress: {minibatch_count}/{total_minibatches} minibatches "
-                f"({progress_pct:.1f}%), mini-epoch {mini_epochs}/{mini_epochs}, "
-                f"{forward_count} forward passes completed"
+                f"[Calibration] Epoch {epoch_index + 1}/{max_epochs}: "
+                f"{minibatch_count}/{total_minibatches} minibatches ({progress_pct:.1f}%)"
             )
             elapsed_seconds = perf_counter() - calibration_started
             forward_rate = forward_count / max(elapsed_seconds, 1.0e-12)  # logical minibatch forward/s
-            total_forwards = total_minibatches * mini_epochs
-            remaining_seconds = (total_forwards - forward_count) / max(forward_rate, 1.0e-12)
+            remaining_seconds = (total_minibatches - forward_count) / max(forward_rate, 1.0e-12)
             print(
-                f"[Calibration] Group timing: realize={group_realized_seconds:.2f}s "
-                f"forward={group_forward_seconds:.2f}s total={perf_counter() - group_started:.2f}s "
+                f"[Calibration] Epoch timing: realize={epoch_realized_seconds:.2f}s "
+                f"forward={epoch_forward_seconds:.2f}s total={perf_counter() - epoch_started:.2f}s "
                 f"rate={forward_rate:.3f} forward/s ETA={remaining_seconds / 60.0:.1f}min",
                 flush=True,
             )
@@ -363,11 +358,11 @@ def _write_calibration_artifact(
                         "calibration_forward_per_second": forward_rate,
                     }
                 )
-            # 一个 accumulation group 的全部 mini-epoch 均完成后才发布 partial，避免记录半组统计。
+            # 只在完整 epoch 结束后发布 partial；中断恢复会重放整个未完成 epoch。
             _write_yaml(
                 partial_output,
                 {
-                    "schema_version": "5.0.0",
+                    "schema_version": "6.0.0",
                     "status": "in_progress",
                     "source": "formal_train_forward_preflight",
                     "dataset_source_sha256": manifest_hash,
@@ -375,12 +370,17 @@ def _write_calibration_artifact(
                         "asset_count": session.asset_count,
                         "distinct_asset_count": len(asset_indices_seen),
                         "asset_use_count": minibatch_count * schedule.config.assets_per_minibatch,
-                        "new_sample_count": new_sample_count,
-                        "forward_sample_count": forward_sample_count,
-                        "minibatch_count": minibatch_count,
+                        "max_epochs": max_epochs,
+                        "completed_epochs": epoch_index + 1,
+                        "num_minibatches": num_minibatches,
+                        "mini_epochs": 1,
+                        "microbatch_size": microbatch_size,
+                        "new_pairs_realized": new_pair_count,
+                        "pair_uses": new_pair_count,
+                        "teacher_pairs_realized": new_pair_count,
+                        "optimizer_updates": 0,
+                        "global_minibatches": minibatch_count,
                         "forward_count": forward_count,
-                        "mini_epochs": mini_epochs,
-                        "gradient_accumulation_steps": gradient_accumulation_steps,
                         "sampling": asdict(schedule.config),
                     },
                     "formula_identity": dict(method.formula_identity()),
@@ -402,19 +402,24 @@ def _write_calibration_artifact(
     recorded_config = dict(resolved_config or {})
     worktree_dirty, worktree_fingerprint = _worktree_fingerprint()
     payload = {
-        "schema_version": "5.0.0",
+        "schema_version": "6.0.0",
         "status": "complete",
         "source": "formal_train_forward_preflight",
         "execution": {
             "asset_count": session.asset_count,
             "distinct_asset_count": len(asset_indices_seen),
             "asset_use_count": minibatch_count * schedule.config.assets_per_minibatch,
-            "new_sample_count": new_sample_count,
-            "forward_sample_count": forward_sample_count,
-            "minibatch_count": minibatch_count,
+            "max_epochs": max_epochs,
+            "completed_epochs": max_epochs,
+            "num_minibatches": num_minibatches,
+            "mini_epochs": 1,
+            "microbatch_size": microbatch_size,
+            "new_pairs_realized": new_pair_count,
+            "pair_uses": new_pair_count,
+            "teacher_pairs_realized": new_pair_count,
+            "optimizer_updates": 0,
+            "global_minibatches": minibatch_count,
             "forward_count": forward_count,
-            "mini_epochs": mini_epochs,
-            "gradient_accumulation_steps": gradient_accumulation_steps,
             "sampling": asdict(schedule.config),
         },
         "dataset_source_sha256": manifest_hash,
@@ -456,8 +461,8 @@ def _require_calibration_identity(
     payload = yaml.safe_load(artifact.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("calibration artifact must be a mapping")
-    if payload.get("schema_version") != "5.0.0":
-        raise ValueError("calibration artifact schema must be 5.0.0")
+    if payload.get("schema_version") != "6.0.0":
+        raise ValueError("calibration artifact schema must be 6.0.0")
     if payload.get("status") != "complete":
         raise ValueError("calibration artifact must have status='complete'")
     if payload.get("dataset_source_sha256") != manifest_hash:
@@ -479,13 +484,6 @@ def _require_calibration_identity(
     if not isinstance(recorded_dirty, bool) or not isinstance(recorded_fingerprint, str):
         raise ValueError("calibration artifact lacks worktree provenance")
     return hashlib.sha256(artifact.read_bytes()).hexdigest()
-
-
-def _write_metrics(path: Path, record: dict[str, Any]) -> None:
-    r"""追加 JSONL 训练事实，不把日志写入训练状态。"""
-
-    with path.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(_plain(record), sort_keys=True) + "\n")
 
 
 def fit_embodiment_pretrain(
@@ -515,6 +513,7 @@ def fit_embodiment_pretrain(
     print("[SSL] Preparing output directory...")
     output_dir = run.prepare_output_dir(output_dir_override)
     print(f"[SSL] Output: {output_dir}")
+    logger = GeometrySSLRunLogger(output_dir)
     print("[SSL] Resolving asset catalog (this may take 1-2 minutes for 8k assets)...")
     stage_started = perf_counter()
     catalog = data.resolve()
@@ -666,20 +665,25 @@ def fit_embodiment_pretrain(
         schedule = OnlineMinibatchSchedule(
             train_session.asset_count,
             trainer.config.sampling,
+            max_epochs=trainer.config.max_epochs,
             num_minibatches=trainer.config.num_minibatches,
             max_resident_assets=trainer.config.max_resident_assets,
         )
-        print(f"[SSL] Starting calibration: {trainer.config.num_minibatches} minibatches × "
-              f"{trainer.config.mini_epochs} mini-epochs = "
-              f"{trainer.config.num_minibatches * trainer.config.mini_epochs} forward passes")
+        if trainer.config.mini_epochs != 1:
+            raise ValueError("calibrate_objectives requires trainer.mini_epochs=1")
+        print(
+            f"[SSL] Starting calibration: {trainer.config.max_epochs} epochs × "
+            f"{trainer.config.num_minibatches} minibatches"
+        )
         try:
             _write_calibration_artifact(
                 method,
                 train_session,
                 schedule,
                 output_dir / "loss_calibration.yaml",
-                mini_epochs=trainer.config.mini_epochs,
-                gradient_accumulation_steps=trainer.config.gradient_accumulation_steps,
+                max_epochs=trainer.config.max_epochs,
+                num_minibatches=trainer.config.num_minibatches,
+                microbatch_size=trainer.config.microbatch_size,
                 manifest_hash=str(catalog.dataset.source_sha256),
                 resolved_config=resolved_config,
                 runtime_timing=runtime_timing,
@@ -690,6 +694,7 @@ def fit_embodiment_pretrain(
             write_resource_evidence()
             cancel_unpublished_audit()
             method.close()
+            logger.close()
 
     calibration_hash = ""  # 正式训练可独立运行；提供预实验产物时只记录可审计 lineage
     if run.config.calibration_artifact:
@@ -704,16 +709,10 @@ def fit_embodiment_pretrain(
     train_schedule = OnlineMinibatchSchedule(
         train_session.asset_count,
         trainer.config.sampling,
+        max_epochs=trainer.config.max_epochs,
         num_minibatches=trainer.config.num_minibatches,
         max_resident_assets=trainer.config.max_resident_assets,
     )
-    update_groups = math.ceil(trainer.config.num_minibatches / trainer.config.gradient_accumulation_steps)
-    required_updates = update_groups * trainer.config.mini_epochs
-    if trainer.config.run_safety_step_limit < required_updates:
-        raise ValueError(
-            f"run_safety_step_limit={trainer.config.run_safety_step_limit} cannot cover "
-            f"required optimizer updates={required_updates}"
-        )
     optimizer = torch.optim.AdamW(
         method.parameters(),
         lr=trainer.config.optimizer.learning_rate,
@@ -722,9 +721,15 @@ def fit_embodiment_pretrain(
     initial_validation: dict[str, dict[str, float]] | None = None
     best_score = float("inf")
     selection_history: list[dict[str, Any]] = []
-    step = 0
+    completed_epochs = 0
+    optimizer_update = 0
+    new_pairs_seen = 0
+    pair_uses = 0
+    teacher_pairs_realized = 0
     forward_index = 0  # 含 mini-epoch 复用的全局前向序号，决定 augmentation seed
     resume_path = Path(run.config.resume_checkpoint).expanduser().resolve() if run.config.resume_checkpoint else None
+    if resume_path is not None and resume_path.parent.name != "checkpoints":
+        raise ValueError("resume checkpoint must remain under its source run's checkpoints directory")
 
     def metadata() -> Any:
         r"""构造本次 run 共用的通用 checkpoint lineage。"""
@@ -740,10 +745,15 @@ def fit_embodiment_pretrain(
         )
 
     def trainer_state() -> dict[str, Any]:
-        r"""返回 schedule/session/RNG/selection 的完整 optimizer-boundary 状态。"""
+        r"""返回完整 epoch 边界的 schedule/session/RNG/selection 与预算状态。"""
 
         return {
             "sampling": _sampling_state(train_schedule, train_session),
+            "completed_epochs": completed_epochs,
+            "optimizer_update": optimizer_update,
+            "new_pairs_seen": new_pairs_seen,
+            "pair_uses": pair_uses,
+            "teacher_pairs_realized": teacher_pairs_realized,
             "forward_index": forward_index,
             "torch_rng_state": torch.get_rng_state(),
             "cuda_rng_state_all": torch.cuda.get_rng_state_all(),
@@ -760,7 +770,8 @@ def fit_embodiment_pretrain(
             path,
             method_state=method.training_state_dict(),
             optimizer_state=optimizer.state_dict(),
-            step=step,
+            epoch=completed_epochs,
+            optimizer_update=optimizer_update,
             metadata=metadata(),
             trainer_state=trainer_state(),
         )
@@ -769,8 +780,10 @@ def fit_embodiment_pretrain(
         payload = load_pretrain_checkpoint(resume_path, map_location=device)
         method.load_training_state_dict(payload["method_state"])
         optimizer.load_state_dict(payload["optimizer_state"])
-        step = int(payload["step"])
+        completed_epochs = int(payload["epoch"])
+        optimizer_update = int(payload["optimizer_update"])
         loaded_metadata = dict(payload["metadata"])
+        require_resume_calibration_hash(calibration_hash, loaded_metadata)
         if loaded_metadata.get("asset_manifest") != await_manifest():
             raise ValueError("resume checkpoint asset manifest does not match resolved dataset roles")
         checkpoint_resolved = loaded_metadata.get("resolved_config")
@@ -778,6 +791,15 @@ def fit_embodiment_pretrain(
             raise ValueError("resume checkpoint lacks resolved config")
         require_resume_scientific_config(resolved_config, checkpoint_resolved)
         state = dict(payload["trainer_state"])
+        for name in ("completed_epochs", "optimizer_update", "new_pairs_seen", "pair_uses", "teacher_pairs_realized"):
+            value = state.get(name)
+            if not isinstance(value, int) or value < 0:
+                raise ValueError(f"resume checkpoint lacks valid progress counter {name}")
+        if int(state["completed_epochs"]) != completed_epochs or int(state["optimizer_update"]) != optimizer_update:
+            raise ValueError("checkpoint top-level epoch/update disagree with trainer progress state")
+        new_pairs_seen = int(state["new_pairs_seen"])
+        pair_uses = int(state["pair_uses"])
+        teacher_pairs_realized = int(state["teacher_pairs_realized"])
         raw_forward_index = state.get("forward_index")
         if not isinstance(raw_forward_index, int) or raw_forward_index < 0:
             raise ValueError("resume checkpoint lacks a valid global forward_index")
@@ -796,8 +818,8 @@ def fit_embodiment_pretrain(
         torch.set_rng_state(torch_rng_state.cpu())
         torch.cuda.set_rng_state_all(cuda_rng_state)
         if selection_history:
-            historical_step = int(min(selection_history, key=lambda item: float(item["score"]))["step"])
-            source_best = resume_path.parent / f"best_step_{historical_step:08d}.pt"
+            historical_epoch = int(min(selection_history, key=lambda item: float(item["score"]))["epoch"])
+            source_best = resume_path.parent / f"best_epoch_{historical_epoch:06d}.pt"
             if not source_best.is_file():
                 raise ValueError("resume source run lacks immutable historical best checkpoint")
             inherited_best = output_dir / "checkpoints" / source_best.name
@@ -828,16 +850,24 @@ def fit_embodiment_pretrain(
             }
             initial_validation = trainer.selection_baseline(initial_metrics)
             _write_yaml(output_dir / "validation_initial.yaml", initial_reports)
+            logger.log_validation_metrics(epoch=0, new_pairs_seen=0, metrics=initial_metrics)
 
         while not train_schedule.complete:
-            if step + trainer.config.mini_epochs > trainer.config.run_safety_step_limit:
-                raise RuntimeError("run_safety_step_limit exhausted before configured minibatches completed")
             method.train_mode()
-            # 一组新 minibatch 只 realization 一次；五次 mini-epoch 均复用这些 q/query/teacher tensors。
-            group_size = min(trainer.config.gradient_accumulation_steps, train_schedule.minibatches_remaining)
+            epoch_index = train_schedule.completed_epochs
+            if epoch_index != completed_epochs:
+                raise RuntimeError("trainer epoch counter disagrees with sampling schedule")
+            # 本 epoch 的全部新 teacher minibatches 先完成 realization，mini-epoch 只重排并复用该 buffer。
             batches: list[Any] = []
-            for _ in range(group_size):
+            schedule_items: list[Any] = []
+            for minibatch_index_in_epoch in range(trainer.config.num_minibatches):
                 schedule_item = train_schedule.next()
+                if (
+                    schedule_item.epoch_index != epoch_index
+                    or schedule_item.minibatch_index_in_epoch != minibatch_index_in_epoch
+                ):
+                    raise RuntimeError("training schedule epoch/minibatch identity drifted")
+                schedule_items.append(schedule_item)
                 batches.append(
                     _build_batch(
                         schedule_item,
@@ -846,69 +876,93 @@ def fit_embodiment_pretrain(
                         step=schedule_item.minibatch_index,
                     )
                 )
-            group_start_step = step  # 用于检测本组是否跨过 validation/checkpoint cadence
-            mini_epoch_records: list[dict[str, Any]] = []  # 当前数据组五次参数更新的审计记录
+                teacher_pairs_realized += schedule_item.sample_count
+            epoch_records: list[dict[str, Any]] = []
             for mini_epoch_index in range(trainer.config.mini_epochs):
-                optimizer.zero_grad(set_to_none=True)
-                update: Any
-                backward_update = getattr(method, "backward_update", None)
-                if callable(backward_update):
-                    forward_steps = tuple(range(forward_index, forward_index + len(batches)))
-                    update = backward_update(tuple(batches), forward_steps=forward_steps)
-                    forward_index += len(batches)
-                else:
-                    update_steps: list[Any] = []
-                    for batch in batches:
-                        update_steps.append(method.forward_objectives(batch, step=forward_index, mode="train"))
+                order = _mini_epoch_order(
+                    len(batches),
+                    seed=run.config.seed,
+                    epoch_index=epoch_index,
+                    mini_epoch_index=mini_epoch_index,
+                )
+                for buffer_index in order:
+                    batch = batches[buffer_index]
+                    schedule_item = schedule_items[buffer_index]
+                    optimizer.zero_grad(set_to_none=True)
+                    update: Any
+                    backward_update = getattr(method, "backward_update", None)
+                    if callable(backward_update):
+                        update = backward_update(
+                            batch,
+                            forward_step=forward_index,
+                            microbatch_size=trainer.config.microbatch_size,
+                        )
                         forward_index += 1
-                    update = method.reduce_update(tuple(update_steps))
-                    update.loss.backward()
-                gradient_norm = torch.nn.utils.clip_grad_norm_(method.parameters(), trainer.config.max_gradient_norm)
-                if not torch.isfinite(gradient_norm):
-                    raise FloatingPointError(f"non-finite gradient norm at optimizer step {step + 1}")
-                optimizer.step()
-                step += 1
-                mini_epoch_records.append(
-                    {
-                        "step": step,
-                        "mini_epoch": mini_epoch_index,
+                    else:
+                        update_step = method.forward_objectives(
+                            batch,
+                            step=forward_index,
+                            mode="train",
+                            microbatch_size=trainer.config.microbatch_size,
+                        )
+                        forward_index += 1
+                        update = method.reduce_update((update_step,))
+                        update.loss.backward()
+                    gradient_norm = torch.nn.utils.clip_grad_norm_(
+                        method.parameters(), trainer.config.max_gradient_norm
+                    )
+                    if not torch.isfinite(gradient_norm):
+                        raise FloatingPointError(
+                            f"non-finite gradient norm at optimizer update {optimizer_update + 1}"
+                        )
+                    optimizer.step()
+                    optimizer_update += 1
+                    if mini_epoch_index == 0:
+                        new_pairs_seen += int(update.sample_count)
+                    pair_uses += int(update.sample_count)
+                    microbatches_consumed = int(update.sample_count) // trainer.config.microbatch_size
+                    record = {
                         "terms": update.terms,
                         "gradient_norm": float(gradient_norm.detach()),
                     }
-                )
-                if step % trainer.config.log_every_updates == 0:
-                    _write_metrics(
-                        output_dir / "metrics.jsonl",
-                        {
-                            "step": step,
-                            "split": "train",
-                            "new_minibatches_consumed": train_schedule.minibatch_cursor,
-                            "minibatches_reused": len(batches),
-                            "mini_epoch": mini_epoch_index,
-                            "terms": update.terms,
-                            "gradient_norm": float(gradient_norm.detach()),
-                        },
+                    epoch_records.append(record)
+                    logger.log_terms(
+                        optimizer_update=optimizer_update,
+                        epoch=epoch_index + 1,
+                        mini_epoch=mini_epoch_index,
+                        minibatch_in_epoch=schedule_item.minibatch_index_in_epoch,
+                        global_minibatch=schedule_item.minibatch_index,
+                        new_pairs_seen=new_pairs_seen,
+                        pair_uses=pair_uses,
+                        teacher_pairs_realized=teacher_pairs_realized,
+                        microbatches_consumed=microbatches_consumed,
+                        wall_time_seconds=perf_counter() - lifecycle_started,
+                        split="train",
+                        terms=update.terms,
+                        denominators=update.denominators,
+                        asset_ids=tuple(getattr(batch, "asset_ids", ())),
+                        gradient_norm=float(gradient_norm.detach()),
+                        batch=batch if hasattr(batch, "q_index") else None,
+                        total=float(update.loss.detach()),
                     )
-            # 完成整组复用后临时 batch 才可丢弃；checkpoint 因而无需保存巨大的 teacher realization。
-            if train_schedule.complete and step % trainer.config.log_every_updates != 0:
-                final_record = mini_epoch_records[-1]
-                _write_metrics(
-                    output_dir / "metrics.jsonl",
-                    {
-                        "step": step,
-                        "split": "train",
-                        "new_minibatches_consumed": train_schedule.minibatch_cursor,
-                        "minibatches_reused": group_size,
-                        "mini_epoch": final_record["mini_epoch"],
-                        "terms": final_record["terms"],
-                        "gradient_norm": final_record["gradient_norm"],
-                    },
-                )
+
+            completed_epochs = epoch_index + 1
+            epoch_terms = {
+                name: sum(float(record["terms"][name]) for record in epoch_records) / len(epoch_records)
+                for name in declared_weights
+            }
+            logger.log_epoch_terms(
+                epoch=completed_epochs,
+                new_pairs_seen=new_pairs_seen,
+                pair_uses=pair_uses,
+                optimizer_updates=optimizer_update,
+                terms=epoch_terms,
+            )
+            del batches
             if audit_supported and audit_handle is None:
-                start_audit()  # 首个训练组已完成，后台审计不再阻塞首个 resident window
-            validation_cadence = trainer.config.validation.every_optimizer_updates
+                start_audit()  # 首个 epoch 已完成，后台审计不再阻塞首个 teacher buffer
             validation_due = (
-                group_start_step // validation_cadence < step // validation_cadence or train_schedule.complete
+                completed_epochs % trainer.config.validation.every_epochs == 0 or train_schedule.complete
             )
             if validation_due:
                 reports = run_suites("validation", trainer.config.validation, include_ablations=False)
@@ -916,23 +970,33 @@ def fit_embodiment_pretrain(
                 if initial_validation is None:
                     raise RuntimeError("validation baseline was not initialized")
                 score = trainer.normalized_validation_score(metrics, initial_validation)
-                selection_history.append({"step": step, "score": score, "metrics": metrics})
-                _write_yaml(output_dir / f"validation_step_{step:08d}.yaml", reports)
+                selection_history.append(
+                    {
+                        "epoch": completed_epochs,
+                        "optimizer_update": optimizer_update,
+                        "new_pairs_seen": new_pairs_seen,
+                        "score": score,
+                        "metrics": metrics,
+                    }
+                )
+                _write_yaml(output_dir / f"validation_epoch_{completed_epochs:06d}.yaml", reports)
+                logger.log_validation_metrics(
+                    epoch=completed_epochs,
+                    new_pairs_seen=new_pairs_seen,
+                    metrics=metrics,
+                )
                 if score < best_score:
                     best_score = score
-                    immutable = output_dir / "checkpoints" / f"best_step_{step:08d}.pt"
+                    immutable = output_dir / "checkpoints" / f"best_epoch_{completed_epochs:06d}.pt"
                     save_checkpoint(immutable)
                     publish_best_checkpoint(output_dir / "checkpoints" / "best.pt", immutable)
-            checkpoint_cadence = trainer.config.checkpoint_every_updates
-            checkpoint_due = (
-                group_start_step // checkpoint_cadence < step // checkpoint_cadence or train_schedule.complete
-            )
+            checkpoint_due = completed_epochs % trainer.config.checkpoint_every_epochs == 0 or train_schedule.complete
             if checkpoint_due:
-                save_checkpoint(output_dir / "checkpoints" / f"step_{step:08d}.pt")
+                save_checkpoint(output_dir / "checkpoints" / f"epoch_{completed_epochs:06d}.pt")
 
         save_checkpoint(output_dir / "checkpoints" / "last.pt")
         best_source = output_dir / "checkpoints" / (
-            f"best_step_{min(selection_history, key=lambda item: item['score'])['step']:08d}.pt"
+            f"best_epoch_{min(selection_history, key=lambda item: item['score'])['epoch']:06d}.pt"
             if selection_history
             else "last.pt"
         )
@@ -1008,6 +1072,7 @@ def fit_embodiment_pretrain(
         write_resource_evidence()
         cancel_unpublished_audit()
         method.close()
+        logger.close()
 
 
 __all__ = ["fit_embodiment_pretrain"]

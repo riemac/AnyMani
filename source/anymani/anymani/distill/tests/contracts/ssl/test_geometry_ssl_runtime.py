@@ -147,12 +147,12 @@ def test_padding_derivation_reads_only_typed_semantic_axis_lengths() -> None:
     assert padding.max_graph_distance == 8  # backbone graph-distance 截断不由资产重写
 
 
-def test_calibration_and_evaluation_use_larger_microbatch_than_second_order_training() -> None:
-    r"""无参数 backward 的预实验/评估可用 32 samples；train 收紧为 2-sample 流式高阶图。"""
+def test_all_phases_use_64_sample_three_objective_microbatches() -> None:
+    r"""三项普通参数图在 train/calibration/eval 统一使用 64-sample 形状合同。"""
 
-    assert _forward_microbatch_samples("calibration") == 32
-    assert _forward_microbatch_samples("train") == 2
-    assert _forward_microbatch_samples("eval") == 32
+    assert _forward_microbatch_samples("calibration") == 64
+    assert _forward_microbatch_samples("train") == 64
+    assert _forward_microbatch_samples("eval") == 64
 
 
 def test_sobol_cursor_resume_reproduces_the_next_q_block() -> None:
@@ -388,15 +388,15 @@ def test_forward_microbatch_split_preserves_sample_axis_and_nested_targets() -> 
 
 
 def test_streaming_backward_matches_full_group_additive_gradient(monkeypatch: pytest.MonkeyPatch) -> None:
-    r"""逐 2-sample backward 必须等价于完整 group 的五项加权充分统计梯度。"""
+    r"""逐块普通 backward 必须等价于完整 group 的三项加权充分统计梯度。"""
 
     block = _sample(torch.tensor([[0.1, -0.2], [0.3, 0.4], [-0.5, 0.2], [0.7, -0.1]]))
     batch = pad_online_geometry_samples(
         list(split_online_geometry_sample(block)),
         padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
     )
-    parameter = torch.nn.Parameter(torch.tensor(2.0))  # 解析目标：五项均为 $p^2$，总梯度 $10p=20$
-    names = ("density", "kappa", "derived_field", "sobolev", "chain")
+    parameter = torch.nn.Parameter(torch.tensor(2.0))  # 三项均为 $p^2$：总损失 $3p^2=12$，梯度 $6p=12$
+    names = ("density", "kappa", "derived_field")
     enabled = {name: SimpleNamespace(weight=1.0) for name in names}
 
     def synthetic_forward(microbatch, **_kwargs):
@@ -415,17 +415,20 @@ def test_streaming_backward_matches_full_group_additive_gradient(monkeypatch: py
             objectives=SimpleNamespace(enabled=lambda: enabled),
             joint_sign_rewrite=SimpleNamespace(),
         ),
-        _training_group_denominators=MultiAnchorGaussianMethod._training_group_denominators,
         _forward_with_prediction=synthetic_forward,
+    )
+    fake_method._q_per_asset_block = MultiAnchorGaussianMethod._q_per_asset_block  # type: ignore[attr-defined]
+    fake_method._training_minibatch_denominators = lambda batch: (  # type: ignore[attr-defined]
+        MultiAnchorGaussianMethod._training_minibatch_denominators(fake_method, batch)
     )
     monkeypatch.setattr(method_module, "maybe_rewrite_batch", lambda value, **_kwargs: value)
 
-    update = MultiAnchorGaussianMethod.backward_update(fake_method, (batch,), forward_steps=(0,))
+    update = MultiAnchorGaussianMethod.backward_update(fake_method, batch, forward_step=0, microbatch_size=4)
 
     assert update.sample_count == 4
     assert update.terms == {name: pytest.approx(4.0) for name in names}
-    assert float(update.loss) == pytest.approx(20.0)
-    assert float(parameter.grad) == pytest.approx(20.0)  # $\partial(5p^2)/\partial p=10p=20$
+    assert float(update.loss) == pytest.approx(12.0)
+    assert float(parameter.grad) == pytest.approx(12.0)  # $\partial(3p^2)/\partial p=6p=12$
 
 
 def test_ragged_anchor_padding_mask_matches_independent_relation_encoding() -> None:

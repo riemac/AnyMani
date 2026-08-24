@@ -35,7 +35,7 @@ $$
 
 `models` 定义部署表示。多锚点前端把 home surface、空间旋量和 query 都表达为相对完整 anchor constellation 的关系；graph-biased encoder-only Transformer 在全手 entities 间传播上下文；类型化 heads 输出逐 owner 的 $Z^{(0)}$ 与逐 JOINT 的 $z_i^{(1)}$。训练期 FiLM readers 只负责把 latent 还原成场值，SSL 后整体删除。
 
-`methods` 把 representation、model 与五项 objective 装配成对外封闭的科学方法。当前主损失是 density、显式 κ、由链式法则派生的 field sensitivity、同一 density predictor 的 q-JVP 与两条一阶路径的一致性。joint-sign rewrite 是输入增强，不是第六项主损失。每一项保留自己的单位、mask 和 $(asset,q)$ 等权归约。
+`methods` 把 representation、model 与三项 objective 装配成对外封闭的科学方法。当前主损失是 density、显式 κ，以及由 $\hat\rho$、$\hat\kappa$ 和 teacher distance 组成的 derived-field。joint-sign rewrite 是输入增强，不是附加主损失。每一项保留自己的单位、mask 和 $(asset,q)$ 等权归约。
 
 `ssl`、`rl` 与 `il` 定义生命周期。stage 可以更换 sampling、优化与评估协议，但不能复制或悄悄改写上述物理语义。当前 Geometry SSL 与 rl_games 路线可运行；IL 仍只是边界定义。
 
@@ -59,7 +59,7 @@ retained encoder 只允许读取当前物理 $q$ 与静态手型证据：$q_{hom
 
 ## 已有证据与结论边界
 
-当前 deterministic contracts 覆盖 semantic lowering、FK/Jacobian、owner union、anchor/query/sigma provenance、$SO(2)$ 与 joint-sign rewrite、graph-bias lookup、FiLM 条件、跨结构 padding、schema 5 Python composition、五项 objective 归约、checkpoint resume 和 standalone retained artifact。synthetic geometry integration 已闭合到 objective backward；真实 CUDA/Warp integration 由运行环境条件决定。
+当前 deterministic contracts 覆盖 semantic lowering、FK/Jacobian、owner union、anchor/query/sigma provenance、$SO(2)$ 与 joint-sign rewrite、graph-bias lookup、FiLM 条件、跨结构 padding、schema 6 Python composition、三项 objective 归约、epoch-boundary checkpoint resume 和 standalone retained artifact。synthetic geometry integration 已闭合到 objective backward；真实 CUDA/Warp integration 由运行环境条件决定。
 
 在 NVIDIA GeForce RTX 5070 Ti 上，canonical retained encoder 以 $B=4096$、20 次预热和 50 次 CUDA Event 测得 p95 20.13 ms，满足 40 ms 子预算。该结果只说明从 GPU-resident q/static evidence 到 $Z^{(0)}/z^{(1)}$ 的子路径达标；它排除了 decoder、policy、Isaac Sim 与 `env.step`，不能外推为完整 20 Hz 控制系统已经闭合。完整计时统计由 [`models/README.md`](models/README.md) 解释。
 
@@ -71,7 +71,7 @@ retained encoder 只允许读取当前物理 $q$ 与静态手型证据：$q_{hom
 
 ```bash
 # task-free Geometry SSL 前向预实验
-python -m anymani.distill.ssl.pretrain --phase calibrate_objectives --num_minibatches 128 --assets_per_minibatch 64 --q_per_asset_per_minibatch 8 --mini_epochs 5 --seed 20260813
+python -m anymani.distill.ssl.pretrain --phase calibrate_objectives --max_epochs 32 --num_minibatches 4 --assets_per_minibatch 64 --q_per_asset_per_minibatch 8 --mini_epochs 1 --microbatch_size 64 --seed 20260813
 
 # GM rl_games
 /home/hac/isaac/IsaacLab/isaaclab.sh -p -m anymani.distill.rl.train --task AnyMani-GM-SingleAsset-MLP-v0 --num_envs 4096 --headless

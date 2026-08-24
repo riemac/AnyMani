@@ -158,13 +158,15 @@ def _trainer_cfg() -> EmbodimentPretrainTrainerCfg:
             shuffle_assets=False,
             seed=71,
         ),
+        max_epochs=1,
         num_minibatches=1,
         mini_epochs=1,
+        microbatch_size=2,
         validation=ValidationCfg(
             q_per_asset=1,
             assets_per_minibatch=1,
             q_per_asset_per_minibatch=1,
-            every_optimizer_updates=1,
+            every_epochs=1,
         ),
         final_evaluation=FinalEvaluationCfg(
             q_per_asset=1,
@@ -173,10 +175,8 @@ def _trainer_cfg() -> EmbodimentPretrainTrainerCfg:
             bootstrap_replicates=2,
         ),
         optimizer=AdamWCfg(learning_rate=1.0e-3, weight_decay=0.0),
-        gradient_accumulation_steps=1,
         max_resident_assets=2,
-        checkpoint_every_updates=1,
-        run_safety_step_limit=4,
+        checkpoint_every_epochs=1,
     )
 
 

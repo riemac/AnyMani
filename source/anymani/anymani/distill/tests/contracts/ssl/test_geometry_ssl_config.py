@@ -37,7 +37,7 @@ def _compose() -> EmbodimentPretrainCfg:
 
 
 def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
-    """根四 role、Trainer 阶段协议与五项 objective 必须保持 concrete dataclass 类型。"""
+    """根四 role、Trainer 阶段协议与三项 objective 必须保持 concrete dataclass 类型。"""
 
     config = _compose()
     config.validate_composed()
@@ -49,8 +49,13 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
     assert type(config.method).__name__ == "MultiAnchorGaussianMethodCfg"
     assert type(config.trainer).__name__ == "EmbodimentPretrainTrainerCfg"
     assert not hasattr(config, "evaluation")
-    assert config.trainer.num_minibatches == 128
-    assert config.trainer.mini_epochs == 5
+    assert config.trainer.max_epochs == 32
+    assert config.trainer.num_minibatches == 4
+    assert config.trainer.mini_epochs == 1
+    assert config.trainer.microbatch_size == 64
+    assert config.trainer.validation.every_epochs == 8
+    assert config.trainer.checkpoint_every_epochs == 8
+    assert not hasattr(config.trainer, "gradient_accumulation_steps")
     assert config.trainer.sampling.assets_per_minibatch == 64
     assert config.trainer.sampling.q_per_asset_per_minibatch == 8
     assert config.trainer.validation.selection_metrics == ("density", "kappa", "derived_field")
@@ -60,9 +65,9 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
         "density",
         "kappa",
         "derived_field",
-        "sobolev",
-        "chain",
     }
+    assert not hasattr(config.method.objectives, "sobolev")
+    assert not hasattr(config.method.objectives, "chain")
     assert config.method.representation.source.anchors.bank_size == 8
     assert tuple(config.method.representation.field.validation_bandwidths_m) == (0.004, 0.016, 0.064)
     assert not hasattr(config.method.representation, "layout")
@@ -75,7 +80,7 @@ def test_hydra_cli_override_changes_local_cfg_without_central_parser() -> None:
 
     config = compose_pretrain_cfg(["trainer.optimizer.learning_rate=0.0007"])
     assert config.trainer.optimizer.learning_rate == pytest.approx(7.0e-4)
-    assert resolved_config_dict(config)["schema_version"] == "5.0.0"
+    assert resolved_config_dict(config)["schema_version"] == "6.0.0"
 
 
 def test_flat_cli_flags_compose_one_run_without_exposing_config_paths() -> None:
@@ -85,14 +90,18 @@ def test_flat_cli_flags_compose_one_run_without_exposing_config_paths() -> None:
         (
             "--phase",
             "calibrate_objectives",
+            "--max_epochs",
+            "8",
             "--num_minibatches",
-            "16",
+            "2",
             "--assets_per_minibatch",
             "64",
             "--q_per_asset_per_minibatch",
             "8",
             "--mini_epochs",
-            "5",
+            "1",
+            "--microbatch_size",
+            "64",
             "--seed",
             "42",
             "--experiment_name",
@@ -104,10 +113,12 @@ def test_flat_cli_flags_compose_one_run_without_exposing_config_paths() -> None:
     assert config.run.phase == "calibrate_objectives"
     assert config.run.experiment_name == "objective_probe_seed42"
     assert config.run.seed == config.trainer.sampling.seed == 42
-    assert config.trainer.num_minibatches == 16
+    assert config.trainer.max_epochs == 8
+    assert config.trainer.num_minibatches == 2
     assert config.trainer.sampling.assets_per_minibatch == 64
     assert config.trainer.sampling.q_per_asset_per_minibatch == 8
-    assert config.trainer.mini_epochs == 5
+    assert config.trainer.mini_epochs == 1
+    assert config.trainer.microbatch_size == 64
 
 
 def test_experiment_constructor_has_no_filesystem_or_cuda_side_effect(tmp_path) -> None:
@@ -116,17 +127,17 @@ def test_experiment_constructor_has_no_filesystem_or_cuda_side_effect(tmp_path) 
     output_dir = tmp_path / "not-created-until-run"
     experiment = EmbodimentPretrain(_compose(), output_dir=output_dir)
 
-    assert experiment.config.schema_version == "5.0.0"
+    assert experiment.config.schema_version == "6.0.0"
     assert experiment.output_dir == output_dir
     assert not output_dir.exists()
 
 
-def test_schema_one_and_two_are_fail_closed() -> None:
-    """旧配置不通过 alias 或 parser 猜测进入 schema 5。"""
+def test_old_schemas_are_fail_closed() -> None:
+    """旧配置不通过 alias 或 parser 猜测进入 schema 6。"""
 
     config = _compose()
-    for version in ("1.0.0", "2.0.0"):
-        with pytest.raises(ValueError, match="schema must be exactly 5.0.0"):
+    for version in ("1.0.0", "2.0.0", "5.0.0"):
+        with pytest.raises(ValueError, match="schema must be exactly 6.0.0"):
             replace(config, schema_version=version).validate_composed()
 
 
@@ -147,15 +158,29 @@ def test_model_does_not_freeze_target_sigma_sample_count() -> None:
     assert model.density_decoder.output.out_features == 1
 
 
-def test_trainer_has_one_shared_minibatch_budget_interface() -> None:
-    """预实验与正式实验复用同一配置类型，不出现 phase-specific 预算字段。"""
+def test_trainer_exposes_epoch_minibatch_and_microbatch_contract() -> None:
+    """Trainer 显式声明训练回合、每回合新批数、复用遍数与显存切片。"""
 
     trainer = _compose().trainer
-    assert trainer.num_minibatches == 128
-    assert trainer.mini_epochs == 5
+    assert trainer.max_epochs == 32
+    assert trainer.num_minibatches == 4
+    assert trainer.mini_epochs == 1
+    assert trainer.microbatch_size == 64
+    assert trainer.max_epochs * trainer.num_minibatches * 64 * 8 == 65_536
+    assert trainer.max_epochs * trainer.mini_epochs * trainer.num_minibatches == 128
     assert not hasattr(trainer, "calibration_epochs")
     assert not hasattr(trainer, "pretrain_epochs")
+    assert not hasattr(trainer, "gradient_accumulation_steps")
+    assert not hasattr(trainer, "run_safety_step_limit")
     assert not hasattr(trainer.sampling, "q_per_asset_per_epoch")
+
+
+@pytest.mark.parametrize("microbatch_size", [63, 60, 1024])
+def test_trainer_rejects_microbatch_that_breaks_minibatch_or_asset_q_block(microbatch_size: int) -> None:
+    r"""microbatch 必须整除 512-pair minibatch，并包含整数个完整 8-q 资产块。"""
+
+    with pytest.raises(ValueError, match="microbatch"):
+        EmbodimentPretrainTrainerCfg(microbatch_size=microbatch_size)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda:not-an-index"])

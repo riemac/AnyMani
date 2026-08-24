@@ -65,7 +65,7 @@ class PretrainRun:
         worktree_dirty: bool = False,
         worktree_fingerprint: str = "",
     ) -> Any:
-        r"""构造一次 run 共用的 schema 5 checkpoint lineage。"""
+        r"""构造一次 run 共用的 schema 6 checkpoint lineage。"""
 
         from anymani.distill.ssl.checkpoint import PretrainCheckpointMetadata
 

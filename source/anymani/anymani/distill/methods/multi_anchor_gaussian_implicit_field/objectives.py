@@ -1,6 +1,6 @@
-r"""五项主 objective：比较预测与 representation 真值，并按 $(asset,q)$ 等权归约。
+r"""三项主 objective：比较预测与 representation 真值，并按 $(asset,q)$ 等权归约。
 
-每个 term 只读取 method 组装好的 typed context，不重新采样 query，也不重新运行 encoder/JVP。
+每个 term 只读取 method 组装好的 typed context，不重新采样 query，也不重新运行 encoder。
 一阶 active/zero 在样本内先分别平均，再按 1:1 合并，避免 active 被最近点 mask 后让 zero 主导。
 """
 
@@ -11,12 +11,10 @@ import torch
 from anymani.distill.methods.contracts import AdditiveStatistic, MethodStep, MethodUpdate, ObjectiveTermResult
 
 from .config import (
-    ChainObjectiveCfg,
     DensityObjectiveCfg,
     DerivedFieldObjectiveCfg,
     KappaObjectiveCfg,
     MultiAnchorGaussianObjectivesCfg,
-    SobolevObjectiveCfg,
 )
 from .context import MultiAnchorObjectiveContext
 
@@ -30,7 +28,12 @@ def _per_sample_square_mean(error: torch.Tensor, mask: torch.Tensor) -> tuple[to
     per_sample_denominator = weight.reshape(error.shape[0], -1).sum(dim=-1)
     per_sample_numerator = (weight * error.square()).reshape(error.shape[0], -1).sum(dim=-1)
     valid = per_sample_denominator > 0.0
-    numerator = torch.where(valid, per_sample_numerator, torch.zeros_like(per_sample_numerator)).sum()
+    per_sample_mean = torch.where(
+        valid,
+        per_sample_numerator / per_sample_denominator.clamp_min(1.0),
+        torch.zeros_like(per_sample_numerator),
+    )
+    numerator = per_sample_mean.sum()
     denominator = valid.to(error.dtype).sum()
     if float(denominator.detach()) <= 0.0:
         raise ValueError("objective term received no valid (asset,q) realizations")
@@ -107,35 +110,9 @@ def derived_field_objective(context: MultiAnchorObjectiveContext) -> ObjectiveTe
     return ObjectiveTermResult("derived_field", (statistic,), {"loss": statistic.mean})
 
 
-def sobolev_objective(context: MultiAnchorObjectiveContext) -> ObjectiveTermResult:
-    r"""$\mathcal L_{Sob}$：密度对 $q$ 的自动微分对齐 teacher $g$。"""
-
-    numerator, denominator = _split_active_zero_mean(
-        context.auto_field_sensitivity - context.field_sensitivity_target,
-        context.edge_valid_mask,
-        context.active_mask,
-    )
-    statistic = AdditiveStatistic("sobolev", numerator, denominator)
-    return ObjectiveTermResult("sobolev", (statistic,), {"loss": statistic.mean})
-
-
-def chain_objective(context: MultiAnchorObjectiveContext) -> ObjectiveTermResult:
-    r"""$\mathcal L_{chain}$：两条预测场灵敏度路径彼此对齐。"""
-
-    numerator, denominator = _split_active_zero_mean(
-        context.derived_field_sensitivity - context.auto_field_sensitivity,
-        context.edge_valid_mask,
-        context.active_mask,
-    )
-    statistic = AdditiveStatistic("chain", numerator, denominator)
-    return ObjectiveTermResult("chain", (statistic,), {"loss": statistic.mean})
-
-
 DensityObjectiveCfg.func = density_objective
 KappaObjectiveCfg.func = kappa_objective
 DerivedFieldObjectiveCfg.func = derived_field_objective
-SobolevObjectiveCfg.func = sobolev_objective
-ChainObjectiveCfg.func = chain_objective
 
 
 def evaluate_objectives(
@@ -180,15 +157,18 @@ def reduce_method_steps(
         loss = weighted if loss is None else loss + weighted
     if loss is None:
         raise ValueError("method update contains no enabled objectives")
-    return MethodUpdate(loss=loss, terms=terms, sample_count=sample_count)
+    return MethodUpdate(
+        loss=loss,
+        terms=terms,
+        sample_count=sample_count,
+        denominators={name: float(totals[name][1].detach()) for name in enabled},
+    )
 
 
 __all__ = [
-    "chain_objective",
     "density_objective",
     "derived_field_objective",
     "evaluate_objectives",
     "kappa_objective",
     "reduce_method_steps",
-    "sobolev_objective",
 ]

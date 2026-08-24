@@ -1,3 +1,21 @@
+0.7.0 - 2026-08-24
+==================
+
+- Geometry SSL 训练合同升级为 schema 6：公开层级固定为 `epoch → mini-epoch → minibatch → microbatch`，canonical 预算为 `32 × 4 × 1`，每个 `64 assets × 8 q = 512 pairs` minibatch 独立执行一次 optimizer update。
+- 新增 `max_epochs` 与 `microbatch_size`，`num_minibatches` 改为每 epoch 新批数；删除跨 minibatch 的 `gradient_accumulation_steps`，microbatch 只在完整 minibatch denominator 下累计梯度并强制保留完整资产 q-block。
+- validation 与 checkpoint 改为每 8 个完整 epoch 执行；full checkpoint 记录 epoch、optimizer update、新 pair、pair use 与 teacher realization 计数，只允许从 epoch 边界恢复。schema-5 full checkpoint/calibration 严格拒绝，retained artifact schema 4 保持兼容。
+- JSONL 保存逐 update 的完整预算轴，TensorBoard 分离 optimizer-update 诊断与 `new_pairs_seen` 数据效率曲线；训练、验证和系统成本不再共享含糊的裸 `step` 横轴。
+- 修正 density 归约：每个资产—构型样本先对其有效 owner×query×sigma 元素取均方误差，再跨样本等权；旧实现误将样本内误差求和，使 density 随监督元素数线性放大并污染权重校准。
+- RTX 5070 Ti 上完成修正后的 schema-6 全量校准：8192 项不同资产、65,536 个 pairs、128 条三项 trace 全部有限；density/κ/derived-field 均值分别为 `0.194172 / 2.54571e-4 / 0.683170`，耗时 27.03 分钟，CUDA allocated peak 1.84 GiB、RSS peak 4.06 GiB、swap 为零。
+
+0.6.11 - 2026-08-24
+===================
+
+- Geometry SSL 正式目标收敛为 density、κ 与 derived-field 三项；删除密度构型自导数、对应高阶损失配置、公式、上下文、测试和当前源码文档，paired parity 仍只用于独立评估。
+- 模型输入 $q$ 不再建立梯度图，校准与固定评估在 `no_grad` 下运行；训练使用 64-sample 普通参数图分块反向，并保持完整 2048-sample accumulation group denominator 与 `128 × 64 × 8 × 5 = 160` 次更新预算不变。
+- schema 5 与 retained artifact schema 4 保持不变；三项公式身份使既有五项校准和完整训练检查点 fail-closed，encoder-only retained artifact 接口保持兼容。
+- RTX 5070 Ti 正式数据 smoke 完成 5 次 2048-sample update，训练核心吞吐 331.08 samples/s、CUDA allocated peak 10.28 GiB；8192-asset 三项校准在 27.78 分钟内完成，65,536 项 trace 全部有限、swap 为零、calibration CUDA peak 1.84 GiB。
+
 0.6.10 - 2026-08-24
 ===================
 

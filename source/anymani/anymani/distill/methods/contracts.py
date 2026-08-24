@@ -8,7 +8,7 @@ forward、reduce、evaluate 与 retained export。
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -50,9 +50,10 @@ class MethodStep:
 class MethodUpdate:
     r"""一个 optimizer update 的标量损失与可记录均值。"""
 
-    loss: torch.Tensor  # 加权五项总损失，保留计算图
+    loss: torch.Tensor  # 当前方法全部启用 objective 的加权总损失，保留计算图
     terms: dict[str, float]  # 各 term 的 $(asset,q)$ 等权均值
     sample_count: int
+    denominators: dict[str, float] = field(default_factory=dict)  # 完整 minibatch 的有效 pair 计数
 
 
 @dataclass(frozen=True)
@@ -145,7 +146,14 @@ class EmbodimentMethod(Protocol):
         r"""切换 learned method 为评估模式。"""
         ...
 
-    def forward_objectives(self, batch: Any, *, step: int, mode: str = "train") -> MethodStep:
+    def forward_objectives(
+        self,
+        batch: Any,
+        *,
+        step: int,
+        mode: str = "train",
+        microbatch_size: int | None = None,
+    ) -> MethodStep:
         r"""完成一次前向并计算全部开启的 objective terms。"""
         ...
 

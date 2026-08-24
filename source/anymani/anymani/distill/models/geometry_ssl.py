@@ -69,7 +69,7 @@ class GeometrySSLModel(nn.Module):
     r"""统一 encoder/query/decoder 调用，但保持 checkpoint 生命周期可分离。
 
     模型不读取 distance、closest point、Jacobian、query stratum、joint limits、object 或 task state。
-    对物理 q 的 Sobolev 导数沿 ``encoder -> density_decoder`` 同一图计算；query 采样路径停止梯度。
+    物理 q 与 query 是模型条件；三项训练目标只对 encoder 和两个 decoder 的参数建立梯度图。
     """
 
     def __init__(self, config: GeometrySSLModelCfg = GeometrySSLModelCfg()) -> None:
@@ -110,7 +110,7 @@ class GeometrySSLModel(nn.Module):
         r"""完成 retained 编码和两个 training-only 预测头。
 
         Args:
-            q (torch.Tensor): ``[B,N_J]`` 当前物理关节角，rad，保留模型 JVP 计算图。
+            q (torch.Tensor): ``[B,N_J]`` 当前物理关节角，rad，不要求输入梯度。
             evidence (StaticGeometryEvidence): 当前结构模式的静态可部署证据。
             query_points_h (torch.Tensor): ``[B,G,N_Q,3]`` 固定 `{h}` queries，m，已停止采样梯度。
             bandwidths (torch.Tensor): ``[N_sigma]`` 或 ``[B,N_sigma]`` 实际 sigma，m。

@@ -1,6 +1,6 @@
 r"""几何 SSL 的 TensorBoard、JSONL 与 dense NPZ 同步记录器。
 
-三种产物承担不同证据角色：TensorBoard 服务在线趋势；JSONL 保存逐 step 标量与资产路由；NPZ 保存
+三种产物承担不同证据角色：TensorBoard 服务在线趋势；JSONL 保存逐 update 标量与预算坐标；NPZ 保存
 ``[B,G,N_Q,N_sigma]`` density error、``[B,E]`` κ error、latent 和全部 padding/target masks。任何被 mask
 排除的样本仍留在 NPZ，避免“损失没看见”被误解释为“数据中不存在”。
 """
@@ -41,7 +41,7 @@ class GeometrySSLRunLogger:
         self.runtime_jsonl_path = output_dir / "runtime.jsonl"  # window/memory/throughput 生命周期证据
 
     def log_runtime_event(self, event: dict[str, Any]) -> None:
-        r"""追加一条 resident-window 或 optimizer-step 运行时事件。
+        r"""追加一条 resident-window 或 optimizer-update 运行时事件。
 
         runtime 事实与物理 loss 分文件保存，避免内存、吞吐或 lease 生命周期被误作训练指标。
         ``device_memory_before/after`` 是设备全局 free-memory 口径，``torch_*`` 只覆盖 PyTorch
@@ -54,8 +54,8 @@ class GeometrySSLRunLogger:
         with self.runtime_jsonl_path.open("a", encoding="utf-8") as stream:  # append-only 生命周期序列
             stream.write(json.dumps(event, sort_keys=True) + "\n")  # 每行可独立恢复和审计
 
-        if event.get("event") == "optimizer_step":  # 在线趋势只记录 step-level 连续标量
-            step = int(event["step"])  # optimizer 更新坐标
+        if event.get("event") == "optimizer_update":  # 在线趋势只记录 update-level 连续标量
+            optimizer_update = int(event["optimizer_update"])
             for name in (
                 "step_seconds",
                 "q_samples_per_second",
@@ -64,34 +64,55 @@ class GeometrySSLRunLogger:
             ):
                 value = event.get(name)  # CPU/不可用口径允许显式 None
                 if value is not None:
-                    self.writer.add_scalar(f"runtime/{name}", float(value), step)  # 与 JSONL 同值
+                    self.writer.add_scalar(f"runtime/{name}", float(value), optimizer_update)
 
     def log_terms(
         self,
         *,
-        step: int,  # optimizer step，从 1 开始
+        optimizer_update: int,
+        epoch: int,
+        mini_epoch: int,
+        minibatch_in_epoch: int,
+        global_minibatch: int,  # 新 teacher 数据身份；跨 mini-epoch 复用时保持不变
+        new_pairs_seen: int,
+        pair_uses: int,
+        teacher_pairs_realized: int,
+        microbatches_consumed: int,
+        wall_time_seconds: float,
         split: str,  # `train` 或 `validation`
-        terms: dict[str, float],  # 当前 update 的五项 $(asset,q)$ 等权均值
+        terms: dict[str, float],  # 当前 update 的三项 $(asset,q)$ 等权均值
+        denominators: dict[str, float],
         asset_ids: tuple[str, ...],  # `[B]` 路由身份
         gradient_norm: float | None = None,  # train-only clip 前总范数
         batch: PaddedOnlineGeometryBatch | None = None,  # q cursor provenance
-        total: float | None = None,  # 加权五项总损失；缺省时按声明权重无法重建
+        total: float | None = None,  # 加权三项总损失；缺省时按声明权重无法重建
     ) -> None:
-        r"""记录五项损失、可选总损失、资产路由和可选共享参数梯度范数。
+        r"""记录三项损失、可选总损失、资产路由和可选共享参数梯度范数。
 
-        ``density`` 无量纲；``kappa`` 的误差来自 m/rad；``derived_field``、``sobolev`` 与 ``chain``
-        来自 1/rad 场灵敏度。不记录 paired latent MSE。
+        ``density`` 无量纲；``kappa`` 的误差来自 m/rad；``derived_field`` 来自 1/rad 场灵敏度。
+        paired latent MSE 只属于独立评估，不进入训练记录。
         """
 
         scalars = dict(terms)
         if total is not None:
             scalars = {"total": float(total), **scalars}
         for name, value in scalars.items():  # TensorBoard 命名与 JSONL 字段保持同构
-            self.writer.add_scalar(f"{split}/{name}", value, step)  # 横轴固定 optimizer step
+            self.writer.add_scalar(f"{split}_update/{name}", value, optimizer_update)
         if gradient_norm is not None:  # validation 不反向，因此该字段为空
-            self.writer.add_scalar(f"{split}/gradient_norm", gradient_norm, step)  # clip 前 L2 总范数
+            self.writer.add_scalar(f"{split}_update/gradient_norm", gradient_norm, optimizer_update)
         record: dict[str, Any] = {  # 一行完整保存本次指标与资产路由
-            "step": step,
+            "epoch": epoch,
+            "mini_epoch": mini_epoch,
+            "minibatch_in_epoch": minibatch_in_epoch,
+            "global_minibatch": global_minibatch,
+            "minibatch_reuse_identity": [global_minibatch, mini_epoch],
+            "optimizer_update": optimizer_update,
+            "new_pairs_seen": new_pairs_seen,
+            "pair_uses": pair_uses,
+            "teacher_pairs_realized": teacher_pairs_realized,
+            "microbatches_consumed": microbatches_consumed,
+            "wall_time_seconds": wall_time_seconds,
+            "denominators": dict(denominators),
             "split": split,
             "asset_ids": list(asset_ids),
             "q_index": (
@@ -101,13 +122,44 @@ class GeometrySSLRunLogger:
         }
         if gradient_norm is not None:  # train record 才写入梯度证据
             record["gradient_norm"] = gradient_norm  # 与 TensorBoard 数值相同
-        with self.jsonl_path.open("a", encoding="utf-8") as stream:  # 不覆盖此前 step
+        with self.jsonl_path.open("a", encoding="utf-8") as stream:  # 不覆盖此前 update
             stream.write(json.dumps(record, sort_keys=True) + "\n")  # 每条记录单行、可流式恢复
+
+    def log_epoch_terms(
+        self,
+        *,
+        epoch: int,
+        new_pairs_seen: int,
+        pair_uses: int,
+        optimizer_updates: int,
+        terms: dict[str, float],
+    ) -> None:
+        r"""按新 asset-configuration pair 数记录 epoch 聚合曲线。"""
+
+        for name, value in terms.items():
+            self.writer.add_scalar(f"train_epoch/{name}", value, new_pairs_seen)
+        self.writer.add_scalar("progress/epoch", epoch, new_pairs_seen)
+        self.writer.add_scalar("progress/pair_uses", pair_uses, new_pairs_seen)
+        self.writer.add_scalar("progress/optimizer_updates", optimizer_updates, new_pairs_seen)
+
+    def log_validation_metrics(
+        self,
+        *,
+        epoch: int,
+        new_pairs_seen: int,
+        metrics: dict[str, dict[str, float]],
+    ) -> None:
+        r"""以训练新 pair 数为横轴记录具名 validation suite 指标。"""
+
+        for suite, suite_metrics in metrics.items():
+            for name, value in suite_metrics.items():
+                self.writer.add_scalar(f"validation/{suite}/{name}", value, new_pairs_seen)
+        self.writer.add_scalar("validation/epoch", epoch, new_pairs_seen)
 
     def save_dense_snapshot(
         self,
         *,
-        step: int,  # snapshot 对应 optimizer step
+        optimizer_update: int,  # snapshot 对应参数更新序号
         split: str,  # train/validation 文件名前缀
         prediction: GeometrySSLForward,  # 同一 batch 的模型输出
         batch: PaddedOnlineGeometryBatch,  # target/mask/asset identity
@@ -115,7 +167,7 @@ class GeometrySSLRunLogger:
         r"""保存 latent/mask/error arrays，供 post-hoc owner/JOINT/带宽诊断。
 
         Returns:
-            Path: 写入的 ``<split>_dense_step_<step>.npz`` 路径。
+            Path: 写入的 ``<split>_dense_update_<optimizer_update>.npz`` 路径。
 
         Raises:
             ValueError: batch 不是 padding batch、缺 entity/joint masks 时抛出。
@@ -125,7 +177,7 @@ class GeometrySSLRunLogger:
         joint_valid = batch.evidence.joint_valid_mask  # `[B,20]`，真实 JOINT 槽
         if entity_valid is None or joint_valid is None:  # 本记录 schema 明确要求跨结构 mask
             raise ValueError("dense SSL snapshot requires padded entity/joint validity masks")
-        path = self.output_dir / f"{split}_dense_step_{step:08d}.npz"  # step 稳定、可排序
+        path = self.output_dir / f"{split}_dense_update_{optimizer_update:08d}.npz"
         np.savez_compressed(  # dense arrays 较大，使用无损压缩保留逐元素误差
             path,  # 输出文件
             asset_ids=np.asarray(batch.asset_ids),  # `[B]` Unicode asset IDs

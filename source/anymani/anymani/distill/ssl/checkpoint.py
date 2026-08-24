@@ -13,7 +13,7 @@ from typing import Any
 
 import torch
 
-CHECKPOINT_SCHEMA_VERSION = "5.0.0"
+CHECKPOINT_SCHEMA_VERSION = "6.0.0"
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,8 @@ def save_pretrain_checkpoint(
     *,
     method_state: Mapping[str, Any],
     optimizer_state: Mapping[str, Any],
-    step: int,
+    epoch: int,
+    optimizer_update: int,
     metadata: PretrainCheckpointMetadata,
     trainer_state: Mapping[str, Any],
 ) -> None:
@@ -46,13 +47,14 @@ def save_pretrain_checkpoint(
         path (Path): 正式 ``.pt`` 路径。
         method_state (Mapping[str, Any]): 由 concrete Method 定义的完整训练状态。
         optimizer_state (Mapping[str, Any]): optimizer moments 与 param groups。
-        step (int): 已完成的 optimizer updates。
+        epoch (int): 已完整完成、可恢复的训练 epoch 数。
+        optimizer_update (int): 已执行的参数更新总数。
         metadata (PretrainCheckpointMetadata): 实验配置、数据和代码 lineage。
         trainer_state (Mapping[str, Any]): schedule/session/RNG/selection 状态。
     """
 
-    if step < 0:
-        raise ValueError("checkpoint step must be non-negative")
+    if epoch < 0 or optimizer_update < 0:
+        raise ValueError("checkpoint epoch and optimizer_update must be non-negative")
     if not method_state:
         raise ValueError("checkpoint method_state must be non-empty")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,7 +62,8 @@ def save_pretrain_checkpoint(
     torch.save(
         {
             "schema_version": CHECKPOINT_SCHEMA_VERSION,
-            "step": int(step),
+            "epoch": int(epoch),
+            "optimizer_update": int(optimizer_update),
             "method_state": dict(method_state),
             "optimizer_state": dict(optimizer_state),
             "metadata": asdict(metadata),
@@ -86,7 +89,7 @@ def load_pretrain_checkpoint(
             f"unsupported pretraining checkpoint schema={payload.get('schema_version')!r}; "
             f"expected {CHECKPOINT_SCHEMA_VERSION!r}"
         )
-    required = {"step", "method_state", "optimizer_state", "metadata", "trainer_state"}
+    required = {"epoch", "optimizer_update", "method_state", "optimizer_state", "metadata", "trainer_state"}
     missing = required - payload.keys()
     if missing:
         raise ValueError(f"pretraining checkpoint is missing fields: {sorted(missing)}")

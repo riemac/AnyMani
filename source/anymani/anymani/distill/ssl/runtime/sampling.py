@@ -1,7 +1,8 @@
-r"""Trainer-owned 在线 minibatch 日程与固定评估 q-bank 日程。
+r"""Trainer-owned 在线 epoch/minibatch 日程与固定评估 q-bank 日程。
 
-训练预算由 ``num_minibatches`` 直接给出。每个训练 minibatch 包含固定数量的资产，每项资产产生
-固定数量的新 Sobol 构型；训练集走完后以新的确定性 permutation 继续，不引入 epoch 预算。
+训练预算由 ``max_epochs × num_minibatches`` 给出，其中 ``num_minibatches`` 是每个 epoch
+新生成的批数。每个 minibatch 包含固定数量的资产，每项资产产生固定数量的新 Sobol 构型；
+训练集走完后以新的确定性 permutation 继续，epoch 本身不表示完整 catalog 遍历。
 validation/final evaluation 仍按每资产固定 q-bank 完整遍历，因此使用独立的评估日程。
 """
 
@@ -42,6 +43,8 @@ class ScheduledMinibatch:
     """
 
     minibatch_index: int  # 当前日程中的全局 minibatch 序号，从 0 开始
+    epoch_index: int  # 训练 epoch 序号；固定评估使用 -1
+    minibatch_index_in_epoch: int  # 当前 epoch 内序号；固定评估等于全局评估批序号
     q_block_index: int  # 当前资产组的 q-block 序号，用于 anchor bank 轮换
     asset_group: int  # 当前 catalog permutation 或固定 q-round 内的资产组序号
     asset_indices: tuple[int, ...]  # catalog row indices；训练批固定长度，评估尾批可较短
@@ -64,7 +67,7 @@ class OnlineSamplingState:
 
 
 class OnlineMinibatchSchedule:
-    r"""生成恰好 ``num_minibatches`` 个固定形状训练批。
+    r"""生成恰好 ``max_epochs × num_minibatches`` 个固定形状训练批。
 
     训练资产数必须被 ``assets_per_minibatch`` 整除，以保证显式预算恒等式
     $N_{asset-use}=N_{mb}N_{asset}^{mb}$ 不被隐式尾批改变。``max_resident_assets``
@@ -76,18 +79,21 @@ class OnlineMinibatchSchedule:
         asset_count: int,
         config: OnlineSamplingCfg,
         *,
+        max_epochs: int,
         num_minibatches: int,
         max_resident_assets: int | None = None,
     ) -> None:
         r"""保存训练 catalog、显式批数、设备窗口上限和确定性游标。"""
 
-        if asset_count < 1 or num_minibatches < 1:
-            raise ValueError("online minibatch schedule requires positive asset and minibatch counts")
+        if asset_count < 1 or max_epochs < 1 or num_minibatches < 1:
+            raise ValueError("online minibatch schedule requires positive asset, epoch and minibatch counts")
         if asset_count % config.assets_per_minibatch != 0:
             raise ValueError("training asset count must be divisible by assets_per_minibatch")
         self.asset_count = int(asset_count)  # 当前 train split 的互异资产总数
         self.config = config  # 每个新 minibatch 的固定资产/q 轴
-        self.num_minibatches = int(num_minibatches)  # 本次运行需要生成的新数据批数
+        self.max_epochs = int(max_epochs)  # 训练回合上限，不等于 catalog cycle
+        self.num_minibatches = int(num_minibatches)  # 每个 epoch 需要生成的新数据批数
+        self.total_minibatches = self.max_epochs * self.num_minibatches  # 全运行新批预算
         requested_resident = int(max_resident_assets or asset_count)  # 用户声明的设备资产容量
         if requested_resident < config.assets_per_minibatch:
             raise ValueError("max_resident_assets must cover one complete training minibatch")
@@ -98,15 +104,35 @@ class OnlineMinibatchSchedule:
 
     @property
     def minibatches_remaining(self) -> int:
-        r"""返回尚未生成的新训练 minibatch 数。"""
+        r"""返回整个运行尚未生成的新训练 minibatch 数。"""
 
-        return self.num_minibatches - self.minibatch_cursor
+        return self.total_minibatches - self.minibatch_cursor
+
+    @property
+    def minibatches_remaining_in_epoch(self) -> int:
+        r"""返回当前 epoch 尚未生成的新 minibatch 数。"""
+
+        if self.complete:
+            return 0
+        return self.num_minibatches - self.minibatch_cursor % self.num_minibatches
+
+    @property
+    def epoch_boundary(self) -> bool:
+        r"""返回游标是否位于完整 epoch 边界。"""
+
+        return self.minibatch_cursor % self.num_minibatches == 0
+
+    @property
+    def completed_epochs(self) -> int:
+        r"""返回已经完整生成并可安全 checkpoint 的 epoch 数。"""
+
+        return self.minibatch_cursor // self.num_minibatches
 
     @property
     def complete(self) -> bool:
-        r"""返回显式 ``num_minibatches`` 预算是否已经耗尽。"""
+        r"""返回显式 epoch/minibatch 预算是否已经耗尽。"""
 
-        return self.minibatch_cursor >= self.num_minibatches
+        return self.minibatch_cursor >= self.total_minibatches
 
     @property
     def current_permutation(self) -> tuple[int, ...]:
@@ -143,6 +169,8 @@ class OnlineMinibatchSchedule:
         window_stop = window_group_stop * self.config.assets_per_minibatch
         result = ScheduledMinibatch(
             minibatch_index=minibatch_index,
+            epoch_index=minibatch_index // self.num_minibatches,
+            minibatch_index_in_epoch=minibatch_index % self.num_minibatches,
             q_block_index=cycle_index,
             asset_group=group_index,
             asset_indices=permutation[group_start:group_stop],
@@ -154,10 +182,14 @@ class OnlineMinibatchSchedule:
         return result
 
     def state_dict(self) -> dict[str, object]:
-        r"""返回显式预算、当前游标、下一轮排列与采样 seed。"""
+        r"""在完整 epoch 边界返回预算、游标、下一轮排列与采样 seed。"""
+
+        if not self.epoch_boundary:
+            raise RuntimeError("sampling checkpoint is only valid at an epoch boundary")
 
         return {
             "minibatch_cursor": self.minibatch_cursor,
+            "max_epochs": self.max_epochs,
             "num_minibatches": self.num_minibatches,
             "permutation": self.current_permutation,
             "seed": self.config.seed,
@@ -171,6 +203,8 @@ class OnlineMinibatchSchedule:
             parsed = sampling_state_from_dict(state)
             if state.get("num_minibatches") != self.num_minibatches:
                 raise ValueError("sampling checkpoint num_minibatches does not match trainer config")
+            if state.get("max_epochs") != self.max_epochs:
+                raise ValueError("sampling checkpoint max_epochs does not match trainer config")
             if state.get("seed") != self.config.seed:
                 raise ValueError("sampling checkpoint seed does not match trainer config")
             if state.get("max_resident_assets") != self.max_resident_assets:
@@ -179,14 +213,16 @@ class OnlineMinibatchSchedule:
             if not isinstance(raw_permutation, (tuple, list)):
                 raise ValueError("sampling checkpoint permutation must be an integer sequence")
             expected_permutation = tuple()
-            if parsed.minibatch_cursor < self.num_minibatches:
+            if parsed.minibatch_cursor < self.total_minibatches:
                 cycle_index = parsed.minibatch_cursor // self.minibatches_per_cycle
                 expected_permutation = self._permutation_for_cycle(cycle_index)
             if tuple(raw_permutation) != expected_permutation:
                 raise ValueError("sampling checkpoint permutation does not match deterministic schedule")
             state = parsed
-        if not 0 <= state.minibatch_cursor <= self.num_minibatches:
+        if not 0 <= state.minibatch_cursor <= self.total_minibatches:
             raise ValueError("sampling minibatch cursor lies outside configured budget")
+        if state.minibatch_cursor % self.num_minibatches != 0:
+            raise ValueError("sampling checkpoint cursor must lie on an epoch boundary")
         self.minibatch_cursor = int(state.minibatch_cursor)
 
 
@@ -264,6 +300,8 @@ class FixedAssetQSchedule:
         q_consumed = q_block_index * self.q_per_asset_per_minibatch
         result = ScheduledMinibatch(
             minibatch_index=minibatch_index,
+            epoch_index=-1,
+            minibatch_index_in_epoch=minibatch_index,
             q_block_index=q_block_index,
             asset_group=asset_group,
             asset_indices=tuple(range(group_start, group_stop)),

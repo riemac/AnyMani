@@ -4,7 +4,9 @@
 
 ## 一次观测应保留什么
 
-最小分析单位不是“某个 step 的 total loss”，而是带有 asset、q、owner、query stratum、sigma、distance shell、ancestor relation 与 validity mask 的预测—真值配对。训练记录保存五项 method loss 的 $(asset,q)$ 等权均值，使 tail asset group、跨结构 padding 和非光滑 mask 不会因先做全局标量混合而静默改变统计权重。
+最小分析单位不是“某个 step 的 total loss”，而是带有 asset、q、owner、query stratum、sigma、distance shell、ancestor relation 与 validity mask 的预测—真值配对。训练记录保存 density、κ 与 derived-field 三项 method loss 的 $(asset,q)$ 等权均值，使 tail asset group、跨结构 padding 和非光滑 mask 不会因先做全局标量混合而静默改变统计权重。
+
+论文数据效率曲线以训练优化器首次消费的新 asset–configuration pairs 累计数 `new_pairs_seen` 为主横轴。JSONL 同时保存 `pair_uses`、`optimizer_update`、`teacher_pairs_realized` 与墙钟，避免多 mini-epoch 方法在相同新数据横轴上隐藏额外计算；逐 update TensorBoard 服务优化诊断，epoch/validation TensorBoard 才使用新 pair 横轴。validation/evaluation pairs 单独计数，不进入训练预算。
 
 dense evidence 保留 $Z^{(0)}$、$Z^{(1)}$、density/κ errors、closest-source 与采样 provenance。被 mask 排除的一阶样本仍携带原始数值和排除原因；否则低误差可能只是有效区域不断缩小。runtime evidence 另外记录 resident assets、BVH/triangle 数、load/release 时间、显存变化与吞吐，从而把表示误差与资源退化分开。
 

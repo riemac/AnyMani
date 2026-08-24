@@ -31,8 +31,8 @@ $$
 后端提供最近 face、barycentric 和三角面内物理 margin。该 margin 是局部光滑保守证据，不冒充
 全局第二近点间隔；provenance 明确记录这一能力边界，后续 CPU/Kaolin oracle 可独立加强。
 
-全部 teacher 输出停止梯度。Sobolev/JVP 对 $q$ 的梯度只通过模型密度预测器计算，绝不穿过 query
-采样、Warp 最近面或解析教师。
+全部 teacher 输出停止梯度。训练只对模型参数建立普通一阶梯度图，绝不穿过 query 采样、Warp
+最近面或解析教师。
 
 零阶和一阶张量轴刻意分离：
 

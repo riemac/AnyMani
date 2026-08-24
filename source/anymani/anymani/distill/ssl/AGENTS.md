@@ -6,7 +6,7 @@
 
 ```text
 ssl/
-├── experiment.py                    schema 5 EmbodimentPretrainCfg 与唯一 façade
+├── experiment.py                    schema 6 EmbodimentPretrainCfg 与唯一 façade
 ├── config_store.py                  注册完整 Python 实验，不解析字段
 ├── contracts.py                     runtime_type 装配
 ├── pretrain.py                      python -m CLI
@@ -28,21 +28,21 @@ Hydra 只从 ConfigStore 加载 `experiments/multi_anchor_gaussion_implicit_fiel
 
 ### Role 边界
 
-Data 交付 assets、partitions、provenance。Method/session 拥有 realization、五项 objective、固定评估测度、ablation、完整 state 和 retained export。Trainer 拥有显式新 minibatch 数、mini-epoch 数据复用、accumulation、optimizer、validation promotion 与 final-evaluation 编排。Run 拥有路径、`phase`、resume seed 和 lineage。
+Data 交付 assets、partitions、provenance。Method/session 拥有 realization、合法 microbatch 切分、三项 objective、固定评估测度、ablation、完整 state 和 retained export。Trainer 拥有 epoch、新 minibatch 数、mini-epoch 遍历、optimizer、validation promotion 与 final-evaluation 编排。Run 拥有路径、`phase`、resume seed 和 lineage。
 
 ### Checkpoint
 
-checkpoint 在完整 mini-epoch 组结束后的 optimizer boundary 保存，payload 覆盖 schedule cursor、每资产 Sobol cursor、optimizer、selection 与 CPU/CUDA RNG。full checkpoint 服务 SSL resume；IL/PPO 消费 standalone retained artifact，其中包含 encoder cfg/state、输入合同、`FeatureSpec` 与 lineage。
+checkpoint 只在完整 epoch 结束后的 optimizer boundary 保存，payload 覆盖 schedule cursor、每资产 Sobol cursor、optimizer、selection、预算计数与 CPU/CUDA RNG。full checkpoint 服务 SSL resume；IL/PPO 消费 standalone retained artifact，其中包含 encoder cfg/state、输入合同、`FeatureSpec` 与 lineage。
 
 ## Important Semantics
 
 ### Resident window
 
-训练 catalog 按 seed 确定性打乱并组成完整资产批；走完 catalog 后重新打乱，直到生成 `num_minibatches` 个新批。resident window 打包整数个完整训练批，因此设备容量不改变资产顺序或统计预算。驱逐同时释放 Warp lease 和对应 device state 引用。
+训练 catalog 按 seed 确定性打乱并组成完整资产批；走完 catalog 后重新打乱，直到生成 `max_epochs × num_minibatches` 个新批。epoch 不表示 catalog 遍历。resident window 只控制设备资产状态与 Warp lease，不改变 minibatch、microbatch、资产顺序或统计预算。
 
 ### 训练合同
 
-Trainer 面向 Method/session 窄接口编排数据和更新，owner/query/edge 轴留在 Method 内。预实验与正式实验复用唯一 `num_minibatches / mini_epochs / sampling` 接口，每次运行可覆盖不同 preset。每组新数据 realization 一次并循环使用 `mini_epochs` 次；objective calibration 完整覆盖 `128 minibatches × 64 assets × 8 q` 后只做一遍 forward/JVP，正式训练再用 `mini_epochs=5` 复用同一 teacher realization。validation 用三项重建指标选 best；final evaluation 读取冻结 best。
+Trainer 面向 Method/session 窄接口编排数据和更新，owner/query/edge 轴留在 Method 内。一个 epoch 先生成 `num_minibatches` 份新 teacher 数据，再由 `mini_epochs` 次确定性重排遍历；每个 `assets_per_minibatch × q_per_asset_per_minibatch` minibatch 独立执行 optimizer update，`microbatch_size` 只在该批内部累计梯度。calibration 强制 `mini_epochs=1`。validation 与 checkpoint 只在完整 epoch 边界执行。
 
 official assets 当前仅保留为独立评估角色。train、预实验和 checkpoint selection 使用 dataset 声明的 train/validation partitions，split 按 `content_hash` 与 `physical_geometry_hash` 隔离。
 
@@ -51,7 +51,7 @@ official assets 当前仅保留为独立评估角色。train、预实验和 chec
 ```bash
 source /home/hac/isaac/env_isaaclab/bin/activate
 python -m anymani.distill.ssl.pretrain
-python -m anymani.distill.ssl.pretrain --phase calibrate_objectives --num_minibatches 128 --assets_per_minibatch 64 --q_per_asset_per_minibatch 8 --mini_epochs 1 --seed 20260813
+python -m anymani.distill.ssl.pretrain --phase calibrate_objectives --max_epochs 32 --num_minibatches 4 --assets_per_minibatch 64 --q_per_asset_per_minibatch 8 --mini_epochs 1 --microbatch_size 64 --seed 20260813
 pytest source/anymani/anymani/distill/tests/contracts/ssl -q
 pytest source/anymani/anymani/distill/tests/integration -q
 ruff check source/anymani/anymani/distill/ssl

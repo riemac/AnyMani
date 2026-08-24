@@ -49,7 +49,7 @@ def register_pretraining_configs() -> None:
 
 
 def compose_pretrain_cfg(overrides: Sequence[str] = ()) -> EmbodimentPretrainCfg:
-    r"""从 ConfigStore 恢复 schema 5 根配置，不读取 distill YAML。
+    r"""从 ConfigStore 恢复 schema 6 根配置，不读取 distill YAML。
 
     Args:
         overrides (Sequence[str]): Hydra 点路径覆盖，例如 ``trainer.optimizer.learning_rate=1e-4``。

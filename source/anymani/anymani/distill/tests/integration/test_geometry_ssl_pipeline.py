@@ -31,8 +31,8 @@ from anymani.distill.representations.targets.field_samples import FieldTargetBat
 pytestmark = pytest.mark.contract
 
 
-def test_synthetic_geometry_ssl_forward_joint_jvp_and_backward() -> None:
-    r"""闭合 encoder → query decoder → sampled κ → Sobolev/JVP → total loss → backward。"""
+def test_synthetic_geometry_ssl_forward_three_objectives_and_backward() -> None:
+    r"""闭合 encoder → density/κ readers → 三项损失 → 普通参数反向。"""
 
     torch.manual_seed(23)
     dtype = torch.float64
@@ -92,7 +92,7 @@ def test_synthetic_geometry_ssl_forward_joint_jvp_and_backward() -> None:
     sensitivity_decoder = sensitivity_decoder.to(dtype=dtype)
 
     batch_size, owner_count, query_count = 2, 3, 4
-    q = torch.tensor([[0.17], [-0.29]], dtype=dtype, requires_grad=True)
+    q = torch.tensor([[0.17], [-0.29]], dtype=dtype)
     query_points = torch.tensor(
         [
             [
@@ -103,10 +103,8 @@ def test_synthetic_geometry_ssl_forward_joint_jvp_and_backward() -> None:
         ],
         dtype=dtype,
     ).expand(batch_size, owner_count, query_count, 3).clone()
-    query_points.requires_grad_(True)
-
     latents = encoder(q, evidence)
-    query_features = encoder.encode_points(query_points.detach(), evidence)  # Sobolev 固定 `{h}` query，采样路径 stop-gradient
+    query_features = encoder.encode_points(query_points, evidence)  # 固定 `{h}` query 只作为 readout condition
     bandwidths = torch.tensor([0.012, 0.032], dtype=dtype)
     density_prediction = density_decoder(latents.zero_order, query_features, bandwidths)
     owner_index = torch.tensor([1, 2], dtype=torch.long)
@@ -154,8 +152,6 @@ def test_synthetic_geometry_ssl_forward_joint_jvp_and_backward() -> None:
     )
 
     context = MultiAnchorObjectiveContext(
-        model=encoder,
-        q=q,
         prediction=SimpleNamespace(density=density_prediction, kappa=kappa_prediction),
         batch=SimpleNamespace(field_targets=field_targets, sensitivity_targets=sensitivity_targets),
     )
@@ -168,8 +164,7 @@ def test_synthetic_geometry_ssl_forward_joint_jvp_and_backward() -> None:
 
     assert density_prediction.shape == (batch_size, owner_count, query_count, 2)
     assert kappa_prediction.shape == (batch_size, 2)
-    assert context.auto_field_sensitivity.shape == (batch_size, 2, 2)
     assert torch.isfinite(update.loss)
-    assert q.grad is not None and torch.isfinite(q.grad).all()
+    assert q.grad is None
     trainable_gradients = [parameter.grad for parameter in encoder.parameters() if parameter.requires_grad]
     assert any(gradient is not None and torch.isfinite(gradient).all() for gradient in trainable_gradients)

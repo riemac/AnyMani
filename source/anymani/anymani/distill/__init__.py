@@ -18,7 +18,7 @@ registries/       # 未来独立 component registry
 - ``python -m anymani.distill.train --task <gym-id>``；
 - ``python -m anymani.distill.play --task <gym-id> --checkpoint <ckpt>``。
 
-geometry SSL 的可运行入口为 ``python -m anymani.distill.ssl.pretrain``，普通 CLI flags 描述一次运行，schema 5 Python preset 提供方法与默认配置。IL 尚未建立 trainer。geometry SSL 保持 task-free PyTorch/Warp 依赖边界，RL wrapper 与 Isaac Sim runtime 由对应阶段入口加载。
+geometry SSL 的可运行入口为 ``python -m anymani.distill.ssl.pretrain``，普通 CLI flags 描述一次运行，schema 6 Python preset 提供方法与默认配置。IL 尚未建立 trainer。geometry SSL 保持 task-free PyTorch/Warp 依赖边界，RL wrapper 与 Isaac Sim runtime 由对应阶段入口加载。
 
 运行时 reset/step/PhysX 语义验证位于 ``source/anymani/anymani/smokes/``；distill 不复制
 tasks-owned env cfg，也不 import、解析或要求 Research vault 存在。

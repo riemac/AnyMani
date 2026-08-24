@@ -18,7 +18,7 @@ $$
 μ_q                完整 joint-limit 超矩形上的 scrambled Sobol
 R                  物理 source / field / query / target
 f_θ                GeometrySSLModel
-L                  五项比较公式
+L                  三项比较公式
 A                  单 JOINT 符号改写
 ```
 
@@ -26,13 +26,13 @@ A                  单 JOINT 符号改写
 
 每资产独立生成 8 套 physical anchor bank。同资产 q-block 内共享一套并均衡轮换；validation、independent q-bank 与 PPO 固定 $A^{(0)}$。home-surface 每 owner 64 个 boundary 点。query 保持 workspace/shell/adjacent = 50/25/25；一阶边只从 shell 抽。训练 sigma 中心为 4/16/64 mm，log-space ±10% jitter；validation 关闭 jitter，仍用同一组。每个有效 JOINT：train 1 条 active + 1 条 structure-zero，validation 为 4+4。
 
-## 五项约束
+## 三项约束
 
-主损失是 density、κ、derived-field、Sobolev 与 chain。paired parity 不是主损失。joint-sign rewrite 是输入增强：每个 $(asset,q)$ 以 0.20 概率恰好翻一个有效 JOINT 的 $(q,q_{home},\mathcal S)$；density/distance 不变，对应 $\kappa/g$ 翻号。validation 另做双前向 parity audit。
+主损失是 density、κ 与 derived-field，其中 $\hat g^{(\kappa)}=-(d/\sigma^2)\hat\rho\hat\kappa$ 对齐物理 teacher $g$。paired parity 只属于独立评估。joint-sign rewrite 是输入增强：每个 $(asset,q)$ 以 0.20 概率恰好翻一个有效 JOINT 的 $(q,q_{home},\mathcal S)$；density/distance 不变，对应 $\kappa/g$ 翻号。validation 另做双前向 parity audit。
 
 归约按 $(asset,q)$ 等权。一阶 active/zero 先分别平均，再 1:1 合并，避免最近点 mask 丢掉全部 active 后被 zero 主导。owner、query 和 edge 轴由 Method 解释，Trainer 只接收归约后的充分统计。
 
-`calibrate_objectives` 与 `pretrain` 共用同一 façade、同一套 `num_minibatches / mini_epochs / sampling` 配置接口和同一运行顺序，但各次运行可覆盖不同 preset。预实验对每组新数据执行相同次数的 forward，不执行参数 backward 或 optimizer update，也不自动改权重。正式训练可选引用预实验 artifact；只核对数据集、损失公式、method 类型和代码 lineage，不强制两个 preset 相同，人工选择的权重以当前 `OBJECTIVES_CFG` 或 CLI override 为准。
+`calibrate_objectives` 与 `pretrain` 共用同一 façade 和 `max_epochs / num_minibatches / mini_epochs / microbatch_size / sampling` 配置接口。Method 按完整 minibatch denominator 把显存切片合成为一次精确更新；Trainer 不跨 minibatch 累积梯度。预实验强制单遍、无反向且不自动改权重；正式训练引用 artifact 时核对数据集、损失公式、method 类型和代码 lineage。
 
 Method session 封装 source、Sobol cursor、resident window 和具体 batch。固定 validation/final-evaluation 测度也由 Method 执行：$A^{(0)}$、4/16/64 mm、关闭 jitter/rewrite、每 JOINT 4+4 edges。Trainer 只统筹调用时机、三项 selection score、best checkpoint 和冻结后的 unseen-suite 报告。
 

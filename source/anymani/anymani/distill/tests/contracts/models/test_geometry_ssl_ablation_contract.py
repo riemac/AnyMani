@@ -22,7 +22,6 @@ from anymani.distill.models.input_adapters.geometry import (
     SO2AnchorFrontendCfg,
     StaticGeometryEvidence,
 )
-from anymani.distill.objectives.representations.field_reconstruction import selected_density_coordinate_derivative
 
 
 def _evidence() -> StaticGeometryEvidence:
@@ -231,37 +230,3 @@ def test_every_density_residual_block_reads_owner_latent_through_film() -> None:
     assert {
         name for name in decoder.state_dict() if name.endswith("modulation.weight")
     } == {f"blocks.{index}.modulation.weight" for index in range(3)}
-
-
-def test_density_q_jvp_holds_explicit_sigma_fixed() -> None:
-    """Sobolev 导数只沿 physical q 图传播，外生 sigma 即使标记梯度也必须被截断。"""
-
-    model = _model().eval()
-    q = torch.tensor([[0.2], [-0.3]], dtype=torch.float64, requires_grad=True)
-    sigma = torch.tensor([[0.004, 0.016], [0.004, 0.016]], dtype=torch.float64, requires_grad=True)
-    owner_index = torch.tensor([1], dtype=torch.long)
-    query_index = torch.tensor([0], dtype=torch.long)
-    joint_index = torch.tensor([0], dtype=torch.long)
-    prediction = model(
-        q,
-        _evidence(),
-        torch.randn(2, 3, 4, 3, dtype=torch.float64) * 0.02,
-        sigma,
-        owner_index,
-        query_index,
-        joint_index,
-    )
-    derivative = selected_density_coordinate_derivative(
-        prediction.density,
-        q,
-        owner_index,
-        query_index,
-        joint_index,
-        create_graph=True,
-    )
-    (prediction.density.sum() + derivative.square().sum()).backward()
-
-    assert derivative.shape == (2, 1, 2)
-    assert torch.isfinite(derivative).all()
-    assert q.grad is not None and torch.isfinite(q.grad).all()
-    assert sigma.grad is None

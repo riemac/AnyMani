@@ -1,4 +1,4 @@
-r"""Schema 5 embodiment pretraining 的普通命令行入口。
+r"""Schema 6 embodiment pretraining 的普通命令行入口。
 
 Python preset 定义方法、表示、损失和默认训练数值；shell 使用 ``--flag value`` 声明本次运行。
 入口把显式 flags 转成内部 Hydra overrides，再恢复完整冻结配置。Hydra 字段路径不暴露给日常运行命令。
@@ -31,20 +31,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume_checkpoint", type=str, default=None)
     parser.add_argument("--calibration_artifact", type=str, default=None)
     # 显式数据预算直接决定本次生成多少资产/q 样本以及循环利用几次。
+    parser.add_argument("--max_epochs", type=int, default=None)
     parser.add_argument("--num_minibatches", type=int, default=None)
     parser.add_argument("--assets_per_minibatch", type=int, default=None)
     parser.add_argument("--q_per_asset_per_minibatch", type=int, default=None)
     parser.add_argument("--mini_epochs", type=int, default=None)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=None)
+    parser.add_argument("--microbatch_size", type=int, default=None)
     parser.add_argument("--max_resident_assets", type=int, default=None)
     # optimizer 与运行 cadence 属于一次执行，可从 shell 明确覆盖 preset。
     parser.add_argument("--learning_rate", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=None)
     parser.add_argument("--max_gradient_norm", type=float, default=None)
-    parser.add_argument("--validation_every_updates", type=int, default=None)
-    parser.add_argument("--log_every_updates", type=int, default=None)
-    parser.add_argument("--checkpoint_every_updates", type=int, default=None)
-    parser.add_argument("--run_safety_step_limit", type=int, default=None)
+    parser.add_argument("--validation_every_epochs", type=int, default=None)
+    parser.add_argument("--checkpoint_every_epochs", type=int, default=None)
     # ``--seed`` 是用户看到的统一根 seed；sampling_seed 只服务显式消融。
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--sampling_seed", type=int, default=None)
@@ -68,19 +67,18 @@ def _config_overrides(args: argparse.Namespace) -> tuple[str, ...]:
         ("output_dir", "run.output_dir"),
         ("resume_checkpoint", "run.resume_checkpoint"),
         ("calibration_artifact", "run.calibration_artifact"),
+        ("max_epochs", "trainer.max_epochs"),
         ("num_minibatches", "trainer.num_minibatches"),
         ("assets_per_minibatch", "trainer.sampling.assets_per_minibatch"),
         ("q_per_asset_per_minibatch", "trainer.sampling.q_per_asset_per_minibatch"),
         ("mini_epochs", "trainer.mini_epochs"),
-        ("gradient_accumulation_steps", "trainer.gradient_accumulation_steps"),
+        ("microbatch_size", "trainer.microbatch_size"),
         ("max_resident_assets", "trainer.max_resident_assets"),
         ("learning_rate", "trainer.optimizer.learning_rate"),
         ("weight_decay", "trainer.optimizer.weight_decay"),
         ("max_gradient_norm", "trainer.max_gradient_norm"),
-        ("validation_every_updates", "trainer.validation.every_optimizer_updates"),
-        ("log_every_updates", "trainer.log_every_updates"),
-        ("checkpoint_every_updates", "trainer.checkpoint_every_updates"),
-        ("run_safety_step_limit", "trainer.run_safety_step_limit"),
+        ("validation_every_epochs", "trainer.validation.every_epochs"),
+        ("checkpoint_every_epochs", "trainer.checkpoint_every_epochs"),
         ("device", "trainer.device"),
         ("shuffle_assets", "trainer.sampling.shuffle_assets"),
         ("deterministic_algorithms", "run.deterministic_algorithms"),

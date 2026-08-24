@@ -1,40 +1,32 @@
-r"""一次 method step 的 typed lazy 共享计算图。
+r"""一次 method step 的 typed 三项目标上下文。
 
-derived field 与 density $q$-JVP 在一个 minibatch 内至多计算一次。Objective 只读取这些节点，
-不自行重新运行 encoder、decoder 或自动微分。
+derived field 在一个 minibatch 内至多计算一次。Objective 只读取已组装的预测与真值，
+不自行重新运行 encoder、decoder 或物理监督源。
 """
 
 from __future__ import annotations
 
 import torch
 
-from anymani.distill.models.geometry_ssl import GeometrySSLForward, GeometrySSLModel
-from anymani.distill.objectives.representations.field_reconstruction import selected_density_coordinate_derivative
+from anymani.distill.models.geometry_ssl import GeometrySSLForward
 
 from .batch import PaddedOnlineGeometryBatch
 
 
 class MultiAnchorObjectiveContext:
-    r"""五项 objective 共享的 method-local autograd 上下文。"""
+    r"""三项 objective 共享的 method-local 普通参数梯度上下文。"""
 
     def __init__(
         self,
         *,
-        model: GeometrySSLModel,
-        q: torch.Tensor,
         prediction: GeometrySSLForward,
         batch: PaddedOnlineGeometryBatch,
-        create_graph: bool = True,
     ) -> None:
-        r"""保存基础 forward；复杂派生节点只在首次访问时计算。"""
+        r"""保存基础 forward；解析组合场只在首次访问时计算。"""
 
-        self.model = model
-        self.q = q  # 物理 rad，保留对 $q$ 的 JVP 图
         self.prediction = prediction
         self.batch = batch
-        self.create_graph = bool(create_graph)
         self._derived_field: torch.Tensor | None = None
-        self._auto_field: torch.Tensor | None = None
 
     @property
     def density_prediction(self) -> torch.Tensor:
@@ -127,22 +119,5 @@ class MultiAnchorObjectiveContext:
                 * self.prediction.kappa.unsqueeze(-1)
             )
         return self._derived_field
-
-    @property
-    def auto_field_sensitivity(self) -> torch.Tensor:
-        r"""只计算一次固定 query/sigma 的 density $q$-JVP，并保留二阶训练图。"""
-
-        if self._auto_field is None:
-            targets = self.batch.sensitivity_targets
-            self._auto_field = selected_density_coordinate_derivative(
-                self.prediction.density,
-                self.q,
-                targets.owner_index,
-                targets.query_index,
-                targets.joint_index,
-                create_graph=self.create_graph,
-            )
-        return self._auto_field
-
 
 __all__ = ["MultiAnchorObjectiveContext"]

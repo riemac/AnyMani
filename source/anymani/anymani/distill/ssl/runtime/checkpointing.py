@@ -34,13 +34,23 @@ def require_resume_scientific_config(
     r"""拒绝当前 CLI 与 checkpoint 的任一 scientific config 漂移。"""
 
     schema = checkpoint_resolved.get("schema_version")
-    if schema != "5.0.0":
-        raise ValueError("resume checkpoint must contain schema 5 resolved configuration")
+    if schema != "6.0.0":
+        raise ValueError("resume checkpoint must contain schema 6 resolved configuration")
     expected = resume_scientific_config(checkpoint_resolved)
     actual = resume_scientific_config(current)
     if actual != expected:
         changed_sections = tuple(key for key in expected.keys() | actual.keys() if expected.get(key) != actual.get(key))
         raise ValueError(f"resume scientific config mismatch in sections={changed_sections}")
+
+
+def require_resume_calibration_hash(current_hash: str, checkpoint_metadata: dict[str, object]) -> None:
+    r"""拒绝同一路径内容变化或 CLI calibration artifact 漂移。"""
+
+    recorded_hash = checkpoint_metadata.get("calibration_artifact_hash")
+    if not isinstance(recorded_hash, str):
+        raise ValueError("resume checkpoint lacks calibration artifact hash lineage")
+    if current_hash != recorded_hash:
+        raise ValueError("resume calibration artifact hash does not match checkpoint lineage")
 
 
 def restore_validation_selection_state(
@@ -91,23 +101,23 @@ def restore_validation_selection_state(
     return initial, initial_strata, best_score, history
 
 
-def best_step_from_selection_history(history: list[dict[str, object]]) -> int | None:
-    r"""返回 historical score 最小的 immutable best checkpoint step。"""
+def best_epoch_from_selection_history(history: list[dict[str, object]]) -> int | None:
+    r"""返回 historical score 最小的 immutable best checkpoint epoch。"""
 
     if not history:
         return None
     candidates: list[tuple[float, int]] = []
     for item in history:
         score = item.get("score")
-        step = item.get("step")
-        if not isinstance(score, (int, float)) or not isinstance(step, int):
-            raise ValueError("selection history entries require numeric score and integer step")
-        candidates.append((float(score), step))
+        epoch = item.get("epoch")
+        if not isinstance(score, (int, float)) or not isinstance(epoch, int):
+            raise ValueError("selection history entries require numeric score and integer epoch")
+        candidates.append((float(score), epoch))
     return min(candidates)[1]
 
 
 def publish_best_checkpoint(best_path: Path, immutable_path: Path) -> None:
-    r"""把 immutable `best_step_*.pt` 以原子 hard-link 名 `best.pt` 发布。"""
+    r"""把 immutable `best_epoch_*.pt` 以原子 hard-link 名 `best.pt` 发布。"""
 
     temporary = best_path.with_suffix(best_path.suffix + ".link.tmp")
     temporary.unlink(missing_ok=True)
@@ -116,8 +126,9 @@ def publish_best_checkpoint(best_path: Path, immutable_path: Path) -> None:
 
 
 __all__ = [
-    "best_step_from_selection_history",
+    "best_epoch_from_selection_history",
     "publish_best_checkpoint",
+    "require_resume_calibration_hash",
     "require_resume_scientific_config",
     "restore_validation_selection_state",
 ]

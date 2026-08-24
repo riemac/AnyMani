@@ -38,7 +38,7 @@ def test_update_reduction_weights_asset_q_equally() -> None:
     )
     update = reduce_method_steps(
         (first, second),
-        MultiAnchorGaussianObjectivesCfg(density=DensityObjectiveCfg(weight=1.0), kappa=None, derived_field=None, sobolev=None, chain=None),
+        MultiAnchorGaussianObjectivesCfg(density=DensityObjectiveCfg(weight=1.0), kappa=None, derived_field=None),
     )
     # $(8+1)/(4+1)=1.8$，不是两个 minibatch 均值 $(2+1)/2=1.5$。
     torch.testing.assert_close(update.loss, torch.tensor(1.8, dtype=dtype), atol=0.0, rtol=0.0)

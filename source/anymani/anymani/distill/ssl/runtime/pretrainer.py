@@ -97,7 +97,7 @@ class ValidationCfg:
     q_per_asset: int = 64
     assets_per_minibatch: int = 2
     q_per_asset_per_minibatch: int = 2
-    every_optimizer_updates: int = 250
+    every_epochs: int = 8
     selection_metrics: tuple[str, ...] = ("density", "kappa", "derived_field")
     seed_offset: int = 1_000_003
 
@@ -109,7 +109,7 @@ class ValidationCfg:
             self.q_per_asset,
             self.assets_per_minibatch,
             self.q_per_asset_per_minibatch,
-            self.every_optimizer_updates,
+            self.every_epochs,
             self.seed_offset,
         )
         if min(counts) < 1 or not self.selection_metrics:
@@ -159,45 +159,50 @@ class FinalEvaluationCfg:
 
 @dataclass(frozen=True)
 class EmbodimentPretrainTrainerCfg:
-    r"""在线新数据预算、数据复用次数、optimizer、设备资源和记录 cadence。
+    r"""在线 epoch、新 minibatch、全局复用遍数、显存切片与记录 cadence。
 
-    首个 8192-asset 数值锚点为 ``128 minibatches × 64 assets × 8 q``，即生成
-    65536 个不同 ``(asset,q)`` 样本；``mini_epochs=5`` 只增加同一批数据的训练次数，
-    不推进资产或 Sobol q 游标。
+    canonical 数值锚点为 ``32 epochs × 4 minibatches × 64 assets × 8 q``，即生成
+    65536 个不同 ``(asset,q)`` pairs。每个 512-pair minibatch 独立更新一次；
+    ``microbatch_size=64`` 只切 forward/backward，不改变完整 minibatch 统计目标。
     """
 
     runtime_type: ClassVar[type[EmbodimentPretrainTrainer]] = EmbodimentPretrainTrainer
     sampling: OnlineSamplingCfg = field(default_factory=OnlineSamplingCfg)
-    num_minibatches: int = 128  # 新生成数据批数；直接决定资产使用次数与 q 样本总数
-    mini_epochs: int = 5  # 每组新数据的循环利用次数；每次执行独立 forward
+    max_epochs: int = 32  # 外层训练回合上限；不表示完整资产 catalog 遍历
+    num_minibatches: int = 4  # 每个 epoch 新生成的 minibatch 数
+    mini_epochs: int = 1  # 对本 epoch 全部 minibatches 的完整遍历次数
+    microbatch_size: int = 64  # 一次模型 forward/backward 的 $(asset,q)$ pair 数
     validation: ValidationCfg = field(default_factory=ValidationCfg)
     final_evaluation: FinalEvaluationCfg = field(default_factory=FinalEvaluationCfg)
     optimizer: AdamWCfg = field(default_factory=AdamWCfg)
-    gradient_accumulation_steps: int = 4  # 最后一个 update group 可以少于该值
     max_gradient_norm: float = 10.0
     max_resident_assets: int = 64  # 首个 preset 恰好驻留一个 64-asset 训练 minibatch
     device: str = "cuda:0"
     dtype: str = "float32"
-    log_every_updates: int = 10
-    checkpoint_every_updates: int = 1_000
-    run_safety_step_limit: int = 30_000
+    checkpoint_every_epochs: int = 8
 
     def __post_init__(self) -> None:
         r"""验证新数据预算、复用次数、设备资源与记录轴严格为正。"""
 
         counts = (
+            self.max_epochs,
             self.num_minibatches,
             self.mini_epochs,
-            self.gradient_accumulation_steps,
+            self.microbatch_size,
             self.max_resident_assets,
-            self.log_every_updates,
-            self.checkpoint_every_updates,
-            self.run_safety_step_limit,
+            self.checkpoint_every_epochs,
         )
         if min(counts) < 1 or self.max_gradient_norm <= 0.0:
             raise ValueError("trainer update/resource/cadence values must be positive")
         if self.max_resident_assets < self.sampling.assets_per_minibatch:
             raise ValueError("max_resident_assets must cover one training asset minibatch")
+        minibatch_size = (
+            self.sampling.assets_per_minibatch * self.sampling.q_per_asset_per_minibatch
+        )  # $B_{mb}=N_{asset}^{mb}N_q^{mb}$
+        if minibatch_size % self.microbatch_size != 0:
+            raise ValueError("microbatch_size must exactly divide the full training minibatch")
+        if self.microbatch_size % self.sampling.q_per_asset_per_minibatch != 0:
+            raise ValueError("microbatch_size must contain complete per-asset q blocks")
         if not (self.device == "cuda" or (self.device.startswith("cuda:") and self.device[5:].isdigit())):
             raise ValueError("embodiment pretraining device must be 'cuda' or 'cuda:<index>'")
         if self.dtype != "float32":

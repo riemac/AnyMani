@@ -66,20 +66,21 @@ def test_checkpoint_resumes_full_state_and_transfers_only_encoder(tmp_path: Path
     synthetic_loss = sum(parameter.square().mean() for parameter in method.parameters())
     synthetic_loss.backward()
     optimizer.step()
-    path = tmp_path / "step_000003.pt"
+    path = tmp_path / "epoch_000003.pt"
     metadata = PretrainCheckpointMetadata(
         code_revision="test-revision",
         package_version="test-version",
         geometry_semantics_schema="1.0.0",
         asset_manifest={"train": [{"asset_id": "synthetic", "content_hash": "abc"}]},
         resolved_config={"method": {"name": "multi_anchor"}},
-        declared_objective={"density": 1.0, "kappa": 1.0, "derived_field": 1.0, "sobolev": 1.0, "chain": 1.0},
+        declared_objective={"density": 1.0, "kappa": 1.0, "derived_field": 1.0},
     )
     save_pretrain_checkpoint(
         path,
         method_state=method.training_state_dict(),
         optimizer_state=optimizer.state_dict(),
-        step=3,
+        epoch=3,
+        optimizer_update=12,
         metadata=metadata,
         trainer_state={"minibatch_cursor": 5, "forward_index": 25},
     )
@@ -92,7 +93,9 @@ def test_checkpoint_resumes_full_state_and_transfers_only_encoder(tmp_path: Path
     resumed_optimizer.load_state_dict(payload["optimizer_state"])
     for key, value in method.training_state_dict().items():
         torch.testing.assert_close(resumed.training_state_dict()[key], value)
-    assert payload["step"] == 3
+    assert payload["epoch"] == 3
+    assert payload["optimizer_update"] == 12
+    assert "step" not in payload
     assert payload["metadata"]["code_revision"] == "test-revision"
     assert payload["trainer_state"]["minibatch_cursor"] == 5
     assert resumed_optimizer.state_dict()["state"]
@@ -116,7 +119,7 @@ def test_checkpoint_resumes_full_state_and_transfers_only_encoder(tmp_path: Path
     assert "objective" not in str(artifact_payload)
 
 
-@pytest.mark.parametrize("schema_version", ["1.0.0", "2.0.0", "4.0.0"])
+@pytest.mark.parametrize("schema_version", ["1.0.0", "2.0.0", "4.0.0", "5.0.0"])
 def test_legacy_checkpoint_is_rejected_without_compatibility_guessing(tmp_path: Path, schema_version: str) -> None:
     """旧 payload 不得被猜测迁移为当前 Method/Trainer state 容器。"""
 

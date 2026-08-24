@@ -43,26 +43,25 @@ from .context import MultiAnchorObjectiveContext
 from .objectives import evaluate_objectives, reduce_method_steps
 from .state_measure import SobolJointSampler
 
-_TRAIN_FORWARD_MICROBATCH_SAMPLES = 2
-"""训练需保留高阶参数图并立即流式 backward 时的 `(asset,q)` 样本上限。"""
+_TRAIN_FORWARD_MICROBATCH_SAMPLES = 64
+"""三项普通参数反向的 `(asset,q)` 样本上限；RTX 5070 Ti 实测峰值 10.06 GiB。"""
 
-_EVALUATION_FORWARD_MICROBATCH_SAMPLES = 32
-"""固定评估不更新参数，与 calibration 一样无需保留二阶参数训练图。"""
+_EVALUATION_FORWARD_MICROBATCH_SAMPLES = 64
+"""固定评估的单次样本上限，与训练使用同一张量形状合同。"""
 
-_CALIBRATION_FORWARD_MICROBATCH_SAMPLES = 32
-"""预实验不保留参数 backward 图；RTX 5070 Ti 实测峰值 10.10 GiB 的吞吐最优点。"""
+_CALIBRATION_FORWARD_MICROBATCH_SAMPLES = 64
+"""预实验在 `no_grad` 下使用的单次样本上限。"""
 
 _DEVICE_SUBWINDOW_ASSETS = 8
 """单次 device source/Warp lease 的资产上限；不改变 logical resident window 顺序。"""
 
 
 def _forward_microbatch_samples(mode: str) -> int:
-    r"""按 autograd 生命周期返回 phase-specific forward sample 上限。
+    r"""按运行阶段返回三项普通前向的 sample 上限。
 
-    calibration/eval 的 density-coordinate derivative 使用 ``create_graph=False``，32 samples
-    实测比 16 samples 快 1.41 倍且峰值 10.10 GiB。train 还需对 Sobolev/chain 导数图执行
-    optimizer backward；真实 4-sample probe 在 density q-导数 forward 内 OOM，而 2 samples
-    完成二阶 backward 的峰值为 6.98 GiB，因此正式训练使用 2-sample 流式反传。
+    RTX 5070 Ti 上，64 samples 的三项目标普通前向与反向达到 261.04 samples/s，峰值
+    10.06 GiB。训练仍逐块立即反向，以保持完整 minibatch 的精确充分统计，
+    calibration/evaluation 则在 ``no_grad`` 下复用同一块大小。
     """
 
     if mode == "train":
@@ -524,7 +523,7 @@ class MultiAnchorGaussianSession:
 
 
 class MultiAnchorGaussianMethod:
-    r"""显式装配 GeometryRepresentation、GeometrySSLModel 与五项 objective。"""
+    r"""显式装配 GeometryRepresentation、GeometrySSLModel 与三项 objective。"""
 
     def __init__(self, config: MultiAnchorGaussianMethodCfg) -> None:
         r"""保存配置并构造无 IO 的 representation runtime。"""
@@ -797,7 +796,7 @@ class MultiAnchorGaussianMethod:
         self.require_model().train()
 
     def eval_mode(self) -> None:
-        r"""启用固定评估行为，但保留 Sobolev/JVP 所需的局部 autograd。"""
+        r"""启用固定评估行为；评估生命周期在 ``no_grad`` 下运行。"""
 
         self.require_model().eval()
 
@@ -843,12 +842,12 @@ class MultiAnchorGaussianMethod:
         ) + float(stats.elapsed_seconds)
 
     def declared_objective_weights(self) -> dict[str, float]:
-        r"""返回 OBJECTIVES_CFG 中显式写出的五项权重。"""
+        r"""返回 OBJECTIVES_CFG 中显式写出的三项权重。"""
 
         return {name: float(term.weight) for name, term in self.config.objectives.enabled().items()}
 
     def formula_identity(self) -> dict[str, str]:
-        r"""返回五项 objective 公式身份：模块级函数的完整限定名。"""
+        r"""返回三项 objective 公式身份：模块级函数的完整限定名。"""
 
         return {name: term.qualified_func_name() for name, term in self.config.objectives.enabled().items()}
 
@@ -956,14 +955,26 @@ class MultiAnchorGaussianMethod:
                 prefetch_handle = next_handle
         return pad_online_geometry_samples(samples, padding=padding)
 
-    def forward_objectives(self, batch: PaddedOnlineGeometryBatch, *, step: int, mode: str = "train") -> MethodStep:
+    def forward_objectives(
+        self,
+        batch: PaddedOnlineGeometryBatch,
+        *,
+        step: int,
+        mode: str = "train",
+        microbatch_size: int | None = None,
+    ) -> MethodStep:
         r"""完成一次 logical minibatch 前向，并按 phase-specific sample budget 做 microbatch。
 
         logical minibatch 的 sampling budget、joint-sign rewrite 随机身份和 additive
         objective 统计不变；microbatch 只限制单次 encoder activation 的峰值显存。
         """
 
-        microbatch_samples = _forward_microbatch_samples(mode)  # phase 对应的显存/吞吐 Pareto 点
+        microbatch_samples = int(microbatch_size or _forward_microbatch_samples(mode))
+        q_per_asset = self._q_per_asset_block(batch)
+        if batch.q.shape[0] % microbatch_samples != 0:
+            raise ValueError("microbatch_size must exactly divide the realized minibatch")
+        if microbatch_samples % q_per_asset != 0:
+            raise ValueError("microbatch_size must preserve complete per-asset q blocks")
         if batch.q.shape[0] <= microbatch_samples:
             result, _prediction = self._forward_with_prediction(batch, step=step, mode=mode)
             return result
@@ -1012,7 +1023,7 @@ class MultiAnchorGaussianMethod:
         views = method_batch_views(batch)
         q, evidence = views.model_input
         query_points, bandwidths, owner_index, query_index, joint_index = views.readout_condition
-        q = q.detach().requires_grad_(True)
+        q = q.detach()  # 物理构型是模型条件；本方法只对模型参数建立普通一阶梯度图
         prediction = model(
             q,
             evidence,
@@ -1023,11 +1034,8 @@ class MultiAnchorGaussianMethod:
             joint_index=joint_index,
         )
         context = MultiAnchorObjectiveContext(
-            model=model,
-            q=q,
             prediction=prediction,
             batch=batch,
-            create_graph=mode == "train",  # 只有 optimizer backward 需要保留密度 q-导数的二阶参数图
         )
         results = evaluate_objectives(context, self.config.objectives)
         return MethodStep(objectives=results, sample_count=int(batch.q.shape[0])), prediction
@@ -1038,63 +1046,85 @@ class MultiAnchorGaussianMethod:
         return reduce_method_steps(steps, self.config.objectives)
 
     @staticmethod
-    def _training_group_denominators(
-        batches: Sequence[PaddedOnlineGeometryBatch],
-    ) -> dict[str, torch.Tensor]:
-        r"""在模型 forward 前由监督 mask 计算完整 accumulation group 的样本 denominator。
+    def _q_per_asset_block(batch: PaddedOnlineGeometryBatch) -> int:
+        r"""由连续 asset-major 样本轴恢复每资产完整 q-block 长度。"""
 
-        五项 objective 都先在每个 $(asset,q)$ 行内归约，再对有效行等权。density 行有效当且仅当
-        任一 owner/query 有效；四项 edge loss 行有效当且仅当任一 sampled edge 有效。joint-sign
+        if not batch.asset_ids:
+            raise ValueError("training minibatch must contain at least one asset/q pair")
+        first_asset = batch.asset_ids[0]
+        q_per_asset = 0
+        for asset_id in batch.asset_ids:
+            if asset_id != first_asset:
+                break
+            q_per_asset += 1
+        if q_per_asset < 1 or len(batch.asset_ids) % q_per_asset != 0:
+            raise ValueError("training minibatch asset axis does not contain uniform q blocks")
+        for start in range(0, len(batch.asset_ids), q_per_asset):
+            if len(set(batch.asset_ids[start : start + q_per_asset])) != 1:
+                raise ValueError("training minibatch must remain asset-major with contiguous q blocks")
+        return q_per_asset
+
+    def _training_minibatch_denominators(
+        self,
+        batch: PaddedOnlineGeometryBatch,
+    ) -> dict[str, torch.Tensor]:
+        r"""在模型 forward 前由监督 mask 计算完整 minibatch 的样本 denominator。
+
+        三项 objective 都先在每个 $(asset,q)$ 行内归约，再对有效行等权。density 行有效当且仅当
+        任一 owner/query 有效；两个 edge loss 行有效当且仅当任一 sampled edge 有效。joint-sign
         rewrite 不改变 mask，因此 denominator 可在 augmentation/forward 前精确得到。
         """
 
-        if not batches:
-            raise ValueError("streaming backward requires at least one realized batch")
-        device = batches[0].q.device
-        dtype = batches[0].q.dtype
+        device = batch.q.device
+        dtype = batch.q.dtype
         density = torch.zeros((), device=device, dtype=dtype)  # 有效 zero-order $(asset,q)$ 行数
         edge = torch.zeros((), device=device, dtype=dtype)  # 有效 first-order $(asset,q)$ 行数
-        for batch in batches:
-            density += batch.field_targets.valid_mask.reshape(batch.q.shape[0], -1).any(dim=-1).sum().to(dtype)
-            edge += batch.sensitivity_targets.valid_mask.reshape(batch.q.shape[0], -1).any(dim=-1).sum().to(dtype)
-        if float(density) <= 0.0 or float(edge) <= 0.0:
-            raise ValueError("streaming backward group has no valid density or edge samples")
-        return {
+        density += batch.field_targets.valid_mask.reshape(batch.q.shape[0], -1).any(dim=-1).sum().to(dtype)
+        edge += batch.sensitivity_targets.valid_mask.reshape(batch.q.shape[0], -1).any(dim=-1).sum().to(dtype)
+        available = {
             "density": density,
             "kappa": edge,
             "derived_field": edge,
-            "sobolev": edge,
-            "chain": edge,
         }
+        denominators = {name: available[name] for name in self.config.objectives.enabled()}
+        invalid = [name for name, denominator in denominators.items() if float(denominator) <= 0.0]
+        if invalid:
+            raise ValueError(f"streaming backward minibatch has no valid samples for objectives={invalid}")
+        return denominators
 
     def backward_update(
         self,
-        batches: Sequence[PaddedOnlineGeometryBatch],
+        batch: PaddedOnlineGeometryBatch,
         *,
-        forward_steps: Sequence[int],
+        forward_step: int,
+        microbatch_size: int,
     ) -> MethodUpdate:
-        r"""按完整 group denominator 对 2-sample microbatches 流式反传。
+        r"""按完整 minibatch denominator 对显式 microbatches 流式反传。
 
-        对 objective $j$、microbatch $m$ 的充分统计 numerator $N_{j,m}$ 与完整 group
+        对 objective $j$、microbatch $m$ 的充分统计 numerator $N_{j,m}$ 与完整 minibatch
         denominator $D_j$，利用微分线性性执行：
         $$
         \nabla_\theta\mathcal L
         =\sum_m\sum_j w_j\nabla_\theta\frac{N_{j,m}}{D_j}.
         $$
-        每个 microbatch 调用 ``backward`` 后即可释放 Sobolev/chain 二阶图；这与先构造
-        $\sum_mN_{j,m}/D_j$ 再统一 backward 数学等价，但峰值不随 logical batch/group 增长。
+        每个 microbatch 调用 ``backward`` 后即可释放普通参数图；这与先构造
+        $\sum_mN_{j,m}/D_j$ 再统一 backward 数学等价，但峰值不随 minibatch 增长。
 
         Args:
-            batches (Sequence[PaddedOnlineGeometryBatch]): 一次 accumulation group 已 realization 的 batches。
-            forward_steps (Sequence[int]): 每个 logical batch 的 augmentation/forward 随机身份。
+            batch (PaddedOnlineGeometryBatch): 一次 optimizer update 的完整统计 minibatch。
+            forward_step (int): 当前 update 的 augmentation/forward 随机身份。
+            microbatch_size (int): 一次 forward/backward 的 $(asset,q)$ pair 数。
 
         Returns:
-            MethodUpdate: detached group loss、五项均值与总 $(asset,q)$ 样本数；参数 ``.grad`` 已累积。
+            MethodUpdate: detached minibatch loss、三项均值与总 $(asset,q)$ 样本数；参数 ``.grad`` 已累积。
         """
 
-        if len(batches) != len(forward_steps):
-            raise ValueError("streaming backward batches and forward_steps must align")
-        denominators = self._training_group_denominators(batches)  # 完整 group 的固定 $D_j$
+        q_per_asset = self._q_per_asset_block(batch)
+        if batch.q.shape[0] % microbatch_size != 0:
+            raise ValueError("microbatch_size must exactly divide the realized minibatch")
+        if microbatch_size % q_per_asset != 0:
+            raise ValueError("microbatch_size must preserve complete per-asset q blocks")
+        denominators = self._training_minibatch_denominators(batch)  # 完整 minibatch 的固定 $D_j$
         numerators = {
             name: torch.zeros_like(denominator) for name, denominator in denominators.items()
         }  # detached $\sum_mN_{j,m}$，只服务日志/等价性检查
@@ -1104,36 +1134,35 @@ class MultiAnchorGaussianMethod:
         enabled = self.config.objectives.enabled()
         sample_count = 0
 
-        for batch, forward_step in zip(batches, forward_steps):
-            rewritten = maybe_rewrite_batch(
-                batch,
-                config=self.config.joint_sign_rewrite,
+        rewritten = maybe_rewrite_batch(
+            batch,
+            config=self.config.joint_sign_rewrite,
+            step=int(forward_step),
+            seed=int(forward_step),
+        )
+        for microbatch in split_padded_online_geometry_batch(
+            rewritten,
+            microbatch_size=microbatch_size,
+        ):
+            micro_step = self._forward_with_prediction(
+                microbatch,
                 step=int(forward_step),
-                seed=int(forward_step),
-            )
-            for microbatch in split_padded_online_geometry_batch(
-                rewritten,
-                microbatch_size=_TRAIN_FORWARD_MICROBATCH_SAMPLES,
-            ):
-                micro_step = self._forward_with_prediction(
-                    microbatch,
-                    step=int(forward_step),
-                    mode="train",
-                    apply_augmentation=False,
-                )[0]
-                micro_loss: torch.Tensor | None = None
-                for term_name, result in micro_step.objectives.items():
-                    if len(result.components) != 1 or result.components[0].name != term_name:
-                        raise ValueError("streaming backward requires one same-name additive component per term")
-                    component = result.components[0]
-                    weighted = float(enabled[term_name].weight) * component.numerator / denominators[term_name]
-                    micro_loss = weighted if micro_loss is None else micro_loss + weighted
-                    numerators[term_name] += component.numerator.detach()
-                    observed_denominators[term_name] += component.denominator.detach()
-                if micro_loss is None:
-                    raise ValueError("streaming backward microbatch contains no enabled objective")
-                micro_loss.backward()  # 当前二阶图立即释放；梯度累积到同一 optimizer group
-                sample_count += micro_step.sample_count
+                mode="train",
+                apply_augmentation=False,
+            )[0]
+            micro_loss: torch.Tensor | None = None
+            for term_name, result in micro_step.objectives.items():
+                if len(result.components) != 1 or result.components[0].name != term_name:
+                    raise ValueError("streaming backward requires one same-name additive component per term")
+                component = result.components[0]
+                weighted = float(enabled[term_name].weight) * component.numerator / denominators[term_name]
+                micro_loss = weighted if micro_loss is None else micro_loss + weighted
+                numerators[term_name] += component.numerator.detach()
+                observed_denominators[term_name] += component.denominator.detach()
+            if micro_loss is None:
+                raise ValueError("streaming backward microbatch contains no enabled objective")
+            micro_loss.backward()  # 当前普通参数图立即释放；梯度只累计到当前完整 minibatch
+            sample_count += micro_step.sample_count
 
         for name, expected in denominators.items():
             if not torch.equal(observed_denominators[name], expected):
@@ -1145,7 +1174,12 @@ class MultiAnchorGaussianMethod:
         detached_loss = torch.zeros_like(next(iter(denominators.values())))
         for name in denominators:
             detached_loss += float(enabled[name].weight) * numerators[name] / denominators[name]
-        return MethodUpdate(loss=detached_loss.detach(), terms=terms, sample_count=sample_count)
+        return MethodUpdate(
+            loss=detached_loss.detach(),
+            terms=terms,
+            sample_count=sample_count,
+            denominators={name: float(value) for name, value in denominators.items()},
+        )
 
     def evaluate_session(
         self,
@@ -1174,7 +1208,7 @@ class MultiAnchorGaussianMethod:
         ablation_names: tuple[str, ...] | None = None
         digest = hashlib.sha256(b"multi-anchor-fixed-evaluation-v1\0")
         block_index = 0
-        with torch.enable_grad():
+        with torch.no_grad():
             while not schedule.complete:
                 batch = session.realize(schedule.next(), schedule=schedule, step=block_index)
                 step_result, prediction = self._forward_with_prediction(batch, step=block_index, mode="eval")

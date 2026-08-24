@@ -7,7 +7,6 @@ r"""多锚点 Gaussian 隐式场实验的完整 Python 装配。
 """
 
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field import (
-    ChainObjectiveCfg,
     DensityObjectiveCfg,
     DerivedFieldObjectiveCfg,
     JointConfigurationMeasureCfg,
@@ -15,7 +14,6 @@ from anymani.distill.methods.multi_anchor_gaussian_implicit_field import (
     KappaObjectiveCfg,
     MultiAnchorGaussianMethodCfg,
     MultiAnchorGaussianObjectivesCfg,
-    SobolevObjectiveCfg,
 )
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.decoders.representations.implicit_field import (
@@ -48,13 +46,17 @@ from anymani.distill.ssl.runtime.sampling import OnlineSamplingCfg
 
 # Dataset manifest 已完整冻结 train/validation/evaluation；实验层不再重复声明 partition。
 
-# 资产数据集配置层
+###
+#  资产数据集配置层
+###
 DATA_CFG = HandAssetCatalogCfg(
     manifest="source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ssl.yaml",
     expected_sha256="f1398417888e7c237cbb2583dcf8e9cd10bef7fee792b307c67dfa74fb6e0698",
 )
 
-# 方法配置层-多锚点隐式高斯密度场
+###
+#  方法配置层-多锚点隐式高斯密度场
+###
 ## 状态度量配置
 STATE_MEASURE_CFG = JointConfigurationMeasureCfg()
 
@@ -140,8 +142,6 @@ OBJECTIVES_CFG = MultiAnchorGaussianObjectivesCfg(
     density=DensityObjectiveCfg(weight=1.0),
     kappa=KappaObjectiveCfg(weight=1.0),
     derived_field=DerivedFieldObjectiveCfg(weight=1.0),
-    sobolev=SobolevObjectiveCfg(weight=1.0),
-    chain=ChainObjectiveCfg(weight=1.0),
 )
 
 ## 数据增强配置
@@ -156,13 +156,15 @@ METHOD_CFG = MultiAnchorGaussianMethodCfg(
     joint_sign_rewrite=JOINT_SIGN_REWRITE_CFG,
 )
 
-# 训练器配置层：预实验与正式实验复用同一套显式 minibatch/mini-epoch 接口。
+###
+#  训练器配置层：预实验与正式实验复用同一套显式 epoch/minibatch/microbatch 接口。
+###
 ## 验证器配置
 VALIDATION_CFG = ValidationCfg(
     q_per_asset=64,
     assets_per_minibatch=2,
     q_per_asset_per_minibatch=2,
-    every_optimizer_updates=250,
+    every_epochs=8,
     selection_metrics=("density", "kappa", "derived_field"),
     seed_offset=1_000_003,
 )
@@ -187,7 +189,8 @@ FINAL_EVALUATION_CFG = FinalEvaluationCfg(
 )
 
 ## 训练器聚合
-## preset：128 个 minibatch 覆盖 8192 项资产，每项生成 8 个 q，并循环训练 5 遍。
+## preset：32 个 epoch，每轮生成 4 个 minibatch；每个 512-pair minibatch 独立更新一次。
+## 当前总预算恰好走完一个 catalog cycle，因此每项资产只 realization $A^{(0)}$；后续 bank 只在新 cycle 轮换。
 TRAINER_CFG = EmbodimentPretrainTrainerCfg(
     sampling=OnlineSamplingCfg(
         assets_per_minibatch=64,
@@ -195,14 +198,19 @@ TRAINER_CFG = EmbodimentPretrainTrainerCfg(
         shuffle_assets=True,
         seed=20260813,
     ),
-    num_minibatches=128,
-    mini_epochs=5,
+    max_epochs=32,
+    num_minibatches=4,
+    mini_epochs=1,
+    microbatch_size=64,
     validation=VALIDATION_CFG,
     final_evaluation=FINAL_EVALUATION_CFG,
     max_resident_assets=64,
+    checkpoint_every_epochs=8,
 )
 
-# 运行配置层：输出目录、实验名、随机种子、阶段
+###
+#  运行配置层：输出目录、实验名、随机种子、阶段
+###
 RUN_CFG = PretrainRunCfg(
     output_dir="logs/ssl",
     experiment_name="canonical_multi_anchor_gaussian",
@@ -210,7 +218,9 @@ RUN_CFG = PretrainRunCfg(
     phase="pretrain",
 )
 
-# 完整实验语义配置
+###
+#  完整实验语义配置
+###
 EXPERIMENT = EmbodimentPretrainCfg(
     data=DATA_CFG,
     method=METHOD_CFG,

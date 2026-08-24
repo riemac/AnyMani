@@ -5,7 +5,7 @@ $$
 \mathcal M=\left(\mu_q,\mathcal R,f_\theta,\mathcal L,\mathcal A\right):
 $$
 `state_measure` 定义 $q$ 的测度，`representation` 定义物理真值体系，`model` 是可学习映射，
-`objectives` 定义五项训练约束，`joint_sign_rewrite` 是方法专属坐标增强。Trainer 预算、
+`objectives` 定义三项训练约束，`joint_sign_rewrite` 是方法专属坐标增强。Trainer 预算、
 resident window 和 `calibrate_objectives` 阶段不属于本配置。
 """
 
@@ -102,28 +102,12 @@ class DerivedFieldObjectiveCfg(ObjectiveTermCfg):
 
 
 @dataclass(frozen=True)
-class SobolevObjectiveCfg(ObjectiveTermCfg):
-    r"""同一密度预测器对固定 query/sigma 的 $q$ 导数对齐 teacher $g$。"""
-
-    name: ClassVar[str] = "sobolev"
-
-
-@dataclass(frozen=True)
-class ChainObjectiveCfg(ObjectiveTermCfg):
-    r"""$\hat g^{(\kappa)}$ 与密度自导数彼此对齐。"""
-
-    name: ClassVar[str] = "chain"
-
-
-@dataclass(frozen=True)
 class MultiAnchorGaussianObjectivesCfg:
-    r"""五项主 objective 的 typed aggregate；字段为 None 表示显式关闭。"""
+    r"""三项主 objective 的 typed aggregate；字段为 None 表示显式关闭。"""
 
     density: DensityObjectiveCfg | None = field(default_factory=DensityObjectiveCfg)
     kappa: KappaObjectiveCfg | None = field(default_factory=KappaObjectiveCfg)
     derived_field: DerivedFieldObjectiveCfg | None = field(default_factory=DerivedFieldObjectiveCfg)
-    sobolev: SobolevObjectiveCfg | None = field(default_factory=SobolevObjectiveCfg)
-    chain: ChainObjectiveCfg | None = field(default_factory=ChainObjectiveCfg)
 
     def enabled(self) -> dict[str, ObjectiveTermCfg]:
         r"""返回开启的 term 名称到配置。"""
@@ -132,8 +116,6 @@ class MultiAnchorGaussianObjectivesCfg:
             "density": self.density,
             "kappa": self.kappa,
             "derived_field": self.derived_field,
-            "sobolev": self.sobolev,
-            "chain": self.chain,
         }
         return {name: config for name, config in terms.items() if config is not None}
 
@@ -171,7 +153,6 @@ class MultiAnchorGaussianMethodCfg:
 
 
 __all__ = [
-    "ChainObjectiveCfg",
     "DensityObjectiveCfg",
     "DerivedFieldObjectiveCfg",
     "JointConfigurationMeasureCfg",
@@ -180,5 +161,4 @@ __all__ = [
     "MultiAnchorGaussianMethodCfg",
     "MultiAnchorGaussianObjectivesCfg",
     "ObjectiveTermCfg",
-    "SobolevObjectiveCfg",
 ]
