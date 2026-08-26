@@ -1,7 +1,7 @@
 r"""几何 SSL 的 TensorBoard、JSONL 与 dense NPZ 同步记录器。
 
 三种产物承担不同证据角色：TensorBoard 服务在线趋势；JSONL 保存逐 update 标量与预算坐标；NPZ 保存
-``[B,G,N_Q,N_sigma]`` density error、``[B,E]`` κ error、latent 和全部 padding/target masks。任何被 mask
+``[B,G,N_Q,N_sigma]`` density、``[B,E]`` κ 的 prediction/target、统一 $Z$ 和全部 masks/selectors。任何被 mask
 排除的样本仍留在 NPZ，避免“损失没看见”被误解释为“数据中不存在”。
 """
 
@@ -80,26 +80,40 @@ class GeometrySSLRunLogger:
         microbatches_consumed: int,
         wall_time_seconds: float,
         split: str,  # `train` 或 `validation`
-        terms: dict[str, float],  # 当前 update 的三项 $(asset,q)$ 等权均值
+        terms: dict[str, float],  # 当前 update 的 rho/kappa raw $(asset,q)$ 等权 MSE
         denominators: dict[str, float],
         asset_ids: tuple[str, ...],  # `[B]` 路由身份
         gradient_norm: float | None = None,  # train-only clip 前总范数
         batch: PaddedOnlineGeometryBatch | None = None,  # q cursor provenance
-        total: float | None = None,  # 加权三项总损失；缺省时按声明权重无法重建
+        total: float | None = None,  # baseline-normalized vanilla 总损失
+        normalized_terms: dict[str, float] | None = None,  # $L_j/B_j$
+        skills: dict[str, float] | None = None,  # $1-L_j/B_j$
+        baselines: dict[str, float] | None = None,  # 固定 $B_\rho,B_\kappa$
+        gradient_evidence: dict[str, float] | None = None,  # 每 4 epochs 的 unified-Z proxy
+        diagnostic_seconds: float = 0.0,  # 当前 update 的 proxy wall time；非 cadence 为 0
+        diagnostics: dict[str, float] | None = None,  # active/zero、RMS 与 valid ratio
     ) -> None:
-        r"""记录三项损失、可选总损失、资产路由和可选共享参数梯度范数。
+        r"""记录 raw/normalized 双项损失、skill、资产路由和可选共享参数梯度范数。
 
-        ``density`` 无量纲；``kappa`` 的误差来自 m/rad；``derived_field`` 来自 1/rad 场灵敏度。
-        paired latent MSE 只属于独立评估，不进入训练记录。
+        ``density`` raw MSE 无量纲；``kappa`` raw MSE 单位为 $(m/rad)^2$。normalized loss 与 skill
+        无量纲，分母来自 run 固定的 teacher-only naive baseline，不是 epoch-0 网络。
         """
 
-        scalars = dict(terms)
+        scalars = {f"raw/{name}": value for name, value in terms.items()}
+        scalars.update({f"normalized/{name}": value for name, value in (normalized_terms or {}).items()})
+        scalars.update({f"skill/{name}": value for name, value in (skills or {}).items()})
         if total is not None:
-            scalars = {"total": float(total), **scalars}
+            scalars = {"normalized/total": float(total), **scalars}
         for name, value in scalars.items():  # TensorBoard 命名与 JSONL 字段保持同构
             self.writer.add_scalar(f"{split}_update/{name}", value, optimizer_update)
         if gradient_norm is not None:  # validation 不反向，因此该字段为空
             self.writer.add_scalar(f"{split}_update/gradient_norm", gradient_norm, optimizer_update)
+        for name, value in (gradient_evidence or {}).items():
+            self.writer.add_scalar(f"{split}_z_gradient/{name}", value, optimizer_update)
+        for name, value in (diagnostics or {}).items():
+            self.writer.add_scalar(f"{split}_diagnostic/{name}", value, optimizer_update)
+        if diagnostic_seconds > 0.0:
+            self.writer.add_scalar(f"{split}_z_gradient/diagnostic_seconds", diagnostic_seconds, optimizer_update)
         record: dict[str, Any] = {  # 一行完整保存本次指标与资产路由
             "epoch": epoch,
             "mini_epoch": mini_epoch,
@@ -113,6 +127,7 @@ class GeometrySSLRunLogger:
             "microbatches_consumed": microbatches_consumed,
             "wall_time_seconds": wall_time_seconds,
             "denominators": dict(denominators),
+            "baselines": dict(baselines or {}),
             "split": split,
             "asset_ids": list(asset_ids),
             "q_index": (
@@ -122,6 +137,11 @@ class GeometrySSLRunLogger:
         }
         if gradient_norm is not None:  # train record 才写入梯度证据
             record["gradient_norm"] = gradient_norm  # 与 TensorBoard 数值相同
+        if gradient_evidence:
+            record["z_gradient_evidence"] = dict(gradient_evidence)  # JSONL 保存与 TensorBoard 同源值
+            record["z_gradient_diagnostic_seconds"] = diagnostic_seconds
+        if diagnostics:
+            record["diagnostics"] = dict(diagnostics)
         with self.jsonl_path.open("a", encoding="utf-8") as stream:  # 不覆盖此前 update
             stream.write(json.dumps(record, sort_keys=True) + "\n")  # 每条记录单行、可流式恢复
 
@@ -193,17 +213,25 @@ class GeometrySSLRunLogger:
             workspace_anchor_index=batch.queries.workspace_anchor_index.detach().cpu().numpy(),  # anchor routing
             owner_role=batch.field_targets.owner_role.detach().cpu().numpy(),  # PALM/JOINT/TIP 分层轴
             bandwidths_m=batch.field_targets.bandwidths.detach().cpu().numpy(),  # `[B,N_σ]` actual sigma
-            zero_order=prediction.latents.zero_order.detach().cpu().numpy(),  # `[B,26,D_0]`
-            first_order=prediction.latents.first_order.detach().cpu().numpy(),  # `[B,20,D_1]`
+            entities=prediction.latents.entities.detach().cpu().numpy(),  # `[B,26,D]` unified $Z$
             entity_valid_mask=entity_valid.detach().cpu().numpy(),  # `[B,26]` bool
             joint_valid_mask=joint_valid.detach().cpu().numpy(),  # `[B,20]` bool
             field_valid_mask=batch.field_targets.valid_mask.detach().cpu().numpy(),  # `[B,26,N_Q]`
             edge_valid_mask=batch.sensitivity_targets.valid_mask.detach().cpu().numpy(),  # `[B,E]`
             ancestor_mask=batch.sensitivity_targets.ancestor_mask.detach().cpu().numpy(),  # 祖先/非祖先
+            active_mask=batch.sensitivity_targets.active_mask.detach().cpu().numpy(),  # active/structural-zero
             edge_owner_index=batch.sensitivity_targets.owner_index.detach().cpu().numpy(),  # sampled owner
             edge_query_index=batch.sensitivity_targets.query_index.detach().cpu().numpy(),  # sampled query
             edge_joint_index=batch.sensitivity_targets.joint_index.detach().cpu().numpy(),  # sampled JOINT
+            joint_entity_index=batch.evidence.joint_entity_index.detach().cpu().numpy(),  # JOINT view routing
+            closest_point_h_m=batch.sensitivity_targets.closest_point.detach().cpu().numpy(),  # `[B,E,3]`
+            closest_source=batch.sensitivity_targets.closest_source.detach().cpu().numpy(),  # owner/face provenance
+            uniqueness_margin_m=batch.sensitivity_targets.uniqueness_margin.detach().cpu().numpy(),  # smooth mask 证据
             distance_m=batch.field_targets.distance.detach().cpu().numpy(),  # distance shell 分层真值
+            density_prediction=prediction.density.detach().cpu().numpy(),  # `[B,G,N_Q,N_sigma]`
+            density_target=batch.field_targets.density.detach().cpu().numpy(),  # teacher density
+            kappa_prediction=prediction.kappa.detach().cpu().numpy(),  # `[B,E]`，m/rad
+            kappa_target=batch.sensitivity_targets.kappa.detach().cpu().numpy(),  # teacher κ，m/rad
             density_error=(prediction.density - batch.field_targets.density).detach().cpu().numpy(),  # 无量纲
             kappa_error=(prediction.kappa - batch.sensitivity_targets.kappa).detach().cpu().numpy(),  # m/rad
         )

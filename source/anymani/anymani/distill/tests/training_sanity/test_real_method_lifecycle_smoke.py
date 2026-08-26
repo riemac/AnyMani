@@ -21,7 +21,6 @@ from anymani.distill.models.decoders.representations.implicit_field import (
 from anymani.distill.models.geometry_ssl import GeometrySSLModelCfg
 from anymani.distill.models.input_adapters.geometry import (
     GeometryEncoderCfg,
-    GeometryLatentHeadsCfg,
     SO2AnchorFrontendCfg,
 )
 from anymani.distill.representations.geometry import GeometryRepresentationCfg
@@ -156,11 +155,10 @@ def _method_cfg() -> MultiAnchorGaussianMethodCfg:
                     feedforward_width=64,
                     dropout=0.0,
                 ),
-                heads=GeometryLatentHeadsCfg(zero_order_width=24, first_order_width=12),
             ),
             ssl_decoders=GeometrySSLDecoderCfg(
                 density=ScalarSigmaFiLMDensityDecoderCfg(hidden_width=32, residual_blocks=1),
-                sensitivity=DistanceSensitivityDecoderCfg(coefficient_hidden_width=32),
+                sensitivity=DistanceSensitivityDecoderCfg(hidden_width=32, residual_blocks=2),
             ),
         ),
     )
@@ -216,7 +214,7 @@ def test_real_method_calibration_pretrain_validation_and_evaluation(
         resolved_config=resolved_config_dict(calibration_root),
     )
 
-    artifact = calibration_dir / "loss_calibration.yaml"
+    artifact = calibration_dir / "teacher_baselines.yaml"
     pretrain_run_cfg = PretrainRunCfg(
         seed=71,
         phase="pretrain",

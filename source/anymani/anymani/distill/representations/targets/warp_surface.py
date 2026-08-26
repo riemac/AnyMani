@@ -57,7 +57,7 @@ sign 由 Warp winding query 返回，当前 Gaussian distance shell 只消费 un
 signed field。任何 field 语义变更都必须在 representations/fields 与 objective 中显式完成。
 
 该 backend 是 training-only privileged teacher。它不要求 autograd，也不应注册成模型模块；PPO
-部署不构建 Warp BVH、不调用 kernel，也不保存 closest point/face/barycentric。三项训练目标只对
+部署不构建 Warp BVH、不调用 kernel，也不保存 closest point/face/barycentric。density/κ 双训练目标只对
 模型参数执行普通反向，Warp 的离散最近面与解析标签始终停止梯度。
 """
 

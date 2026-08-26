@@ -46,13 +46,11 @@ metadata、评估分组或可视化标签，不默认喂给策略网络。
 
 - $B$         : batch size
 - $D$         : 统一 token 隐空间维度（投影后）
-- $N_p$       : palm token 数，通常 $N_p = 1$
-- $N_j$       : revolute joint token 数（可变，teacher 内固定）
-- $N_t$       : tip token 数 = 手指数（可变，teacher 内固定）
-- $T = N_p + N_j + N_t$ : 聚合后总 token 数
-- mask 约定   : `True` 表示有效 token，`False` 表示 padding（与 attention 实现对齐时
-                需注意 PyTorch `key_padding_mask` 的 `True=屏蔽` 语义相反，
-                转换在 tokenizer / backbone 边界显式处理，避免散落各处）
+- $N_E$       : 当前结构模式的 PALM/JOINT/TIP physical entity 数
+- $N_J$       : 当前结构模式的 actuated JOINT 数
+- $N_T$       : 当前结构模式的 TIP 数
+- $T=N_E$     : 当前实体表征序列长度
+- 同一次前向固定结构模式，不使用 entity padding；不同结构模式分别前向
 
 TOAGENT:
     本文件为设计契约。TokenType 枚举可先落为稳定结构（类型集合已较明确），
@@ -90,11 +88,9 @@ class TokenType(enum.IntEnum):
     TIP = 2
 
 
-# Question: 是否需要一个独立的全局 `[HAND]` / `[CMD]` token 来承载命令、任务上下文、
-#           以及不自然属于单个 palm/joint/tip 的全局信息？
-#           当前倾向：若 palm token 已能承载 hand-level context，则不另设；
-#           若 palm 长期退化或移除（见 网络架构.md §10 待定项 2），
-#           则可能需要 `[HAND]` 顶替。此问题留待 tokenizer 设计与消融裁定。
+# NOTE: 当前 geometry encoder 的实体角色固定为 PALM/JOINT/TIP，不增加 `[HAND]` 或
+#       `[CMD]` token。command 不属于自身几何输入；若未来策略侧比较全局 token，必须作为
+#       下游独立消融，不能改写 retained geometry package 的角色轴。
 # NOTE: 不在这里把 `left/right` 作为候选输入。chirality 应优先从 palm-frame mount
 #       layout / edge geometry 中学习出来，而非用离散标签直接注入。
 
@@ -102,7 +98,7 @@ class TokenType(enum.IntEnum):
 def action_bearing_types() -> tuple[TokenType, ...]:
     r"""返回**输出关节动作**的 token 类型集合。
 
-    供 `heads.py` 的 action head 与输出路由使用：只有这些类型的 token
+    供 `models/heads/action.py` 的 action head 与输出路由使用：只有这些类型的 token
     会被送入 actor head 产生关节增量动作分布参数。
 
     当前仅 `JOINT` 出动作（见模块 docstring）。封装为函数而非散落常量，

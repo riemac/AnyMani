@@ -6,12 +6,12 @@ r"""多锚点条件隐式几何 SSL 的 retained/disposable 模型组装。
 retained after SSL
   StaticGeometryEvidence + physical q
     -> ImplicitGeometryEncoder
-    -> Z^(0) [B,G,D0] + Z^(1) [B,N_J,D1]
+    -> unified Z [B,G,128]
 
 training-only disposable
   shared point-anchor query features
-    + Z^(0) + explicit sigma -> ConditionalDensityDecoder -> rho [B,G,N_Q,N_sigma]
-    + Z^(1) -> DistanceSensitivityDecoder -> kappa [B,E]
+    + owner Z + explicit sigma -> ConditionalDensityDecoder -> rho [B,G,N_Q,N_sigma]
+    + owner/JOINT Z -> DistanceSensitivityDecoder -> kappa [B,E]
 ```
 
 query encoder 与 home-surface encoder 复用 ``ImplicitGeometryEncoder.point_anchor_encoder``，避免 decoder
@@ -32,8 +32,8 @@ from .decoders.representations.implicit_field import (  # SSL-only readers
     GeometrySSLDecoderCfg,  # 两个训练期 readers 的公开容量配置
 )
 from .input_adapters.geometry import (  # 部署期 retained 路径
-    GeometryEncoderCfg,  # frontend/backbone/latent heads
-    GeometryLatents,  # $Z^{(0)},Z^{(1)}$
+    GeometryEncoderCfg,  # frontend 与 unified graph-biased backbone
+    GeometryLatents,  # 单一 PALM/JOINT/TIP typed $Z$
     ImplicitGeometryEncoder,  # task-free hand conditioning encoder
     StaticGeometryEvidence,  # anchors/home/screws/graph/masks
 )
@@ -43,7 +43,7 @@ from .input_adapters.geometry import (  # 部署期 retained 路径
 class GeometrySSLModelCfg:
     r"""retained encoder 与 disposable decoder 的显式组装配置。
 
-    decoder 输入宽度只从 encoder 输出类型派生，禁止训练配置单独复制 $D_0/D_1/D_q$ 后发生漂移。
+    decoder 输入宽度只从 encoder backbone 派生，禁止训练配置单独复制 $D/D_q$ 后发生漂移。
     sigma 数量属于 target 的动态采样轴；model 只保存对数比例的参考长度，不保存固定输出通道数。
     """
 
@@ -59,7 +59,7 @@ class GeometrySSLForward:
     生命周期。结果对象同时供 objective、NPZ logger 和受控 ablation 使用。
     """
 
-    latents: GeometryLatents  # retained $Z^{(0)},Z^{(1)}$
+    latents: GeometryLatents  # retained unified $Z$
     query_features: torch.Tensor  # `[B,G,N_Q,D_q]`，共享点—锚点前端
     density: torch.Tensor  # `[B,G,N_Q,N_sigma]`
     kappa: torch.Tensor  # `[B,E]`
@@ -69,7 +69,7 @@ class GeometrySSLModel(nn.Module):
     r"""统一 encoder/query/decoder 调用，但保持 checkpoint 生命周期可分离。
 
     模型不读取 distance、closest point、Jacobian、query stratum、joint limits、object 或 task state。
-    物理 q 与 query 是模型条件；三项训练目标只对 encoder 和两个 decoder 的参数建立梯度图。
+    物理 q 与 query 是模型条件；rho/kappa 两项目标对 encoder 和两个 decoder 的参数建立梯度图。
     """
 
     def __init__(self, config: GeometrySSLModelCfg = GeometrySSLModelCfg()) -> None:
@@ -82,20 +82,18 @@ class GeometrySSLModel(nn.Module):
         super().__init__()  # 注册 PyTorch parameter/module 生命周期
         self.config = config  # resolved config 应随完整 checkpoint 保存
         self.encoder = ImplicitGeometryEncoder(config.encoder)  # SSL 后迁入 PPO
-        zero_order_width = config.encoder.heads.zero_order_width  # decoder 类型轴只从 encoder 派生
-        first_order_width = config.encoder.heads.first_order_width
+        entity_width = config.encoder.backbone.hidden_width  # final-norm entity token 宽度 $D$
         query_width = config.encoder.frontend.relation_width
         self.density_decoder = ConditionalDensityDecoder(
             config.ssl_decoders.density,
-            zero_order_width=zero_order_width,
+            entity_width=entity_width,
             query_width=query_width,
         )  # SSL-only FiLM density reader
         self.sensitivity_decoder = DistanceSensitivityDecoder(
             config.ssl_decoders.sensitivity,
-            zero_order_width=zero_order_width,
-            first_order_width=first_order_width,
+            entity_width=entity_width,
             query_width=query_width,
-        )  # SSL-only unbiased odd sensitivity reader
+        )  # SSL-only query-main dual-token FiLM sensitivity reader
 
     def forward(
         self,
@@ -133,10 +131,11 @@ class GeometrySSLModel(nn.Module):
                 entity_valid = entity_valid.unsqueeze(0).expand(q.shape[0], -1)  # `[B,G]` view
             query_features = query_features * entity_valid.unsqueeze(-1).unsqueeze(-1)  # invalid owner 精确零
         return self.decode_latents(  # 集中 disposable 路径供完整模型与 ablation 共用
-            latents,  # retained $Z^{(0)},Z^{(1)}$
+            latents,  # retained unified $Z$
             query_features,  # `[B,G,N_Q,D_q]`
             bandwidths=bandwidths,  # 显式 sigma 数据轴
             entity_valid_mask=entity_valid,  # padding owner mask
+            joint_entity_index=evidence.joint_entity_index,  # JOINT 坐标到统一 entity 轴的静态路由
             owner_index=owner_index,  # sampled owner
             query_index=query_index,  # sampled query
             joint_index=joint_index,  # sampled JOINT
@@ -149,6 +148,7 @@ class GeometrySSLModel(nn.Module):
         *,
         bandwidths: torch.Tensor,  # `[N_σ]` 或 `[B,N_σ]`
         entity_valid_mask: torch.Tensor | None,  # `[B,G]`
+        joint_entity_index: torch.Tensor,  # `[N_J]`/`[B,N_J]`
         owner_index: torch.Tensor,  # `[E]`/`[B,E]`
         query_index: torch.Tensor,  # `[E]`/`[B,E]`
         joint_index: torch.Tensor,  # `[E]`/`[B,E]`
@@ -160,17 +160,28 @@ class GeometrySSLModel(nn.Module):
         latent 而保持 decoder/query path 相同。
         """
 
-        density = self.density_decoder(latents.zero_order, query_features, bandwidths)  # `[B,G,N_Q,N_σ]`
+        entities = latents.entities  # `[B,G,D]`，density 与 kappa 共享同一 retained 表征
+        density = self.density_decoder(entities, query_features, bandwidths)  # `[B,G,N_Q,N_σ]`
         if entity_valid_mask is not None:  # padding owner 不属于物理监督测度
             density = density * entity_valid_mask.unsqueeze(-1).unsqueeze(-1)  # padding owner 不产生虚假场值
-        kappa = self.sensitivity_decoder(  # 读取 sampled `(g,r,i)`，不物化完整 $G\times N_Q\times N_J$
-            latents.zero_order,  # owner $z_g^{(0)}$
-            latents.first_order,  # JOINT $z_i^{(1)}$
-            query_features,  # query $u_{g,r}$
-            owner_index,  # edge owner $g$
-            query_index,  # edge query $r$
-            joint_index,  # edge JOINT $i$
-        )  # `[B,E]`，结构性 joint-sign 奇
+        if owner_index.ndim not in {1, 2} or query_index.shape != owner_index.shape or joint_index.shape != owner_index.shape:
+            raise ValueError("owner/query/joint selectors must share [E] or [B,E] shape")
+        if owner_index.ndim == 1:
+            if joint_entity_index.ndim != 1:
+                raise ValueError("shared selectors require shared joint_entity_index")
+            owner_latent = entities.index_select(1, owner_index)  # `[B,E,D]` 的 $z_o$
+            joint_entities = joint_entity_index.index_select(0, joint_index)  # edge JOINT -> entity slot
+            joint_latent = entities.index_select(1, joint_entities)  # `[B,E,D]` 的 $z_i$
+            selected_query = query_features[:, owner_index, query_index]  # `[B,E,D_q]`
+        else:
+            if owner_index.shape[0] != entities.shape[0] or joint_entity_index.ndim != 2:
+                raise ValueError("batched selectors/routing must share B with entity latents")
+            batch_index = torch.arange(entities.shape[0], device=entities.device).unsqueeze(1)  # `[B,1]`
+            owner_latent = entities[batch_index, owner_index]  # 每个样本自己的 edge owner token
+            joint_entities = torch.gather(joint_entity_index, 1, joint_index)  # `[B,E]` entity selectors
+            joint_latent = entities[batch_index, joint_entities]  # 每个样本自己的 edge JOINT token
+            selected_query = query_features[batch_index, owner_index, query_index]  # `[B,E,D_q]`
+        kappa = self.sensitivity_decoder(owner_latent, joint_latent, selected_query)  # `[B,E]` signed scalar
         return GeometrySSLForward(latents, query_features, density, kappa)  # 类型化 objective 输入
 
     def retained_state_dict(self) -> dict[str, torch.Tensor]:

@@ -8,7 +8,6 @@ r"""多锚点 Gaussian 隐式场实验的完整 Python 装配。
 
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field import (
     DensityObjectiveCfg,
-    DerivedFieldObjectiveCfg,
     JointConfigurationMeasureCfg,
     JointSignRewriteCfg,
     KappaObjectiveCfg,
@@ -24,7 +23,6 @@ from anymani.distill.models.decoders.representations.implicit_field import (
 from anymani.distill.models.geometry_ssl import GeometrySSLModelCfg
 from anymani.distill.models.input_adapters.geometry import (
     GeometryEncoderCfg,
-    GeometryLatentHeadsCfg,
     SO2AnchorFrontendCfg,
 )
 from anymani.distill.representations.geometry import GeometryRepresentationCfg
@@ -121,11 +119,6 @@ MODEL_CFG = GeometrySSLModelCfg(
             dropout=0.0,
             max_graph_distance=8,
         ),
-        heads=GeometryLatentHeadsCfg(
-            zero_order_width=128,
-            first_order_width=64,
-            first_order_source="residual_screw",
-        ),
     ),
     ssl_decoders=GeometrySSLDecoderCfg(
         density=ScalarSigmaFiLMDensityDecoderCfg(
@@ -134,9 +127,8 @@ MODEL_CFG = GeometrySSLModelCfg(
             sigma_reference_m=0.016,
         ),
         sensitivity=DistanceSensitivityDecoderCfg(
-            coefficient_hidden_width=128,
-            readout_bias=False,
-            carrier_scale="inverse_sqrt",
+            hidden_width=128,
+            residual_blocks=3,
         ),
     ),
 )
@@ -144,8 +136,7 @@ MODEL_CFG = GeometrySSLModelCfg(
 ## 目标配置
 OBJECTIVES_CFG = MultiAnchorGaussianObjectivesCfg(
     density=DensityObjectiveCfg(weight=1.0),
-    kappa=KappaObjectiveCfg(weight=20.0),
-    derived_field=DerivedFieldObjectiveCfg(weight=0.01),
+    kappa=KappaObjectiveCfg(weight=1.0),
 )
 
 ## 数据增强配置
@@ -186,7 +177,7 @@ VALIDATION_CFG = ValidationCfg(
     q_per_asset=64,
     assets_per_minibatch=2,
     q_per_asset_per_minibatch=2,
-    selection_metrics=("density", "kappa", "derived_field"),
+    selection_metrics=("density", "kappa"),
     seed_offset=1_000_003,
     max_resident_assets=64,
 )
@@ -200,9 +191,7 @@ EVALUATION_CFG = EvaluationCfg(
         "query_only",
         "same_asset_q_shuffle",
         "cross_asset_shuffle",
-        "first_order_zero",
-        "first_order_joint_shuffle",
-        "first_order_sign_flip",
+        "joint_token_shuffle",
     ),
     bootstrap_replicates=2_000,
     evaluation_seed_offset=2_000_003,

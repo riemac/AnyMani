@@ -14,7 +14,7 @@ models/
 │   ├── geometry_transformer.py      graph-biased encoder-only Transformer
 │   └── candidates/                  非主线对照，不得 silently 替换 canonical
 ├── decoders/representations/
-│   └── implicit_field.py            FiLM density reader 与 unbiased κ reader
+│   └── implicit_field.py            density FiLM 与 owner/JOINT-conditioned κ FiLM
 ├── heads/                           PPO action / value / auxiliary
 ├── policy.py                        EmbodimentPolicy 组装
 ├── tokens.py / relations.py         token 与关系特征
@@ -37,11 +37,11 @@ SSL 后只保留 `encoder.` namespace。density/sensitivity readers、query back
 
 ### 表示
 
-$Z^{(0)}\in\mathbb R^{B\times G\times D_0}$ 与 owner 同索引；$z_i^{(1)}\in\mathbb R^{D_1}$ 与活动 JOINT 同索引，是整手场 Jacobian 第 $i$ 列的固定宽度表示，不是对自身 $z_i^{(0)}$ 求导。canonical $D_0=128$、$D_1=64$。physical anchors 是完整、无序、等地位集合；finger seed 只属于采样 provenance。
+$Z\in\mathbb R^{B\times G\times128}$ 直接取 graph-biased Transformer final-norm tokens，并与 PALM/JOINT/TIP owner 同索引。JOINT view 只通过 `joint_entity_index` 从同一 $Z$ gather，不产生第二 latent/head。physical anchors 是完整、无序、等地位集合；finger seed 只属于采样 provenance。
 
 ### Gauge
 
-`{h}` 面内 $SO(2)$ 是 gauge；reflection/chirality 不是。joint-sign 成对改写下 $Z^{(0)}$ 偶，$z_i^{(1)}$、$\kappa$ 与同坐标动作为奇。
+`{h}` 面内 $SO(2)$ 是 gauge；reflection/chirality 不是。joint-sign 只约束 observable density 不变与对应 $\kappa$/动作变号；不得恢复 latent parity loss 或手工 latent sign flip。
 
 ### Padding 与性能
 

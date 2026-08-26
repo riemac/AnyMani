@@ -1,12 +1,11 @@
-r"""显式 sigma 条件密度与 sampled-edge 距离灵敏度解码器。
+r"""统一 entity 表征上的显式 sigma 密度与 sampled-edge 距离灵敏度解码器。
 
-设 $z_g^{(0)}\in\mathbb R^{D_0}$ 是归属体 $g$ 的关节符号偶零阶表征，
-$z_i^{(1)}\in\mathbb R^{D_1}$ 是 JOINT $i$ 的符号奇一阶表征，
+设 $z_g,z_i\in\mathbb R^D$ 分别是统一 $Z$ 中的 owner token 与 JOINT token，
 $u(x)=\Psi_C(x)\in\mathbb R^{D_q}$ 是查询点相对完整 anchor 星座的共享特征。
 密度解码器对每个显式 `(query,sigma)` 条件输出一个 scalar：
 
 $$
-D_\rho\left(z_g^{(0)},u(x),\log\frac{\sigma}{\sigma_{ref}}\right)
+D_\rho\left(z_g,u(x),\log\frac{\sigma}{\sigma_{ref}}\right)
 \longrightarrow
 \hat\rho_{g,\sigma}(x;q)
 \in(0,1).
@@ -15,15 +14,15 @@ $$
 距离灵敏度解码器只在 sampled owner--query--JOINT edges 上读取：
 
 $$
-D_\kappa\left(z_g^{(0)},z_i^{(1)},u(x),i\right)
+D_\kappa\left(z_g,z_i,u(x)\right)
 \longrightarrow
 \hat\kappa_{g,i}(x;q)
 \quad[\mathrm{m/rad}].
 $$
 
-密度解码器使用 FiLM（特征线性调制）残差块，使归属体表征在每层持续调制查询特征，
-而不是只在入口拼接一次。$D_\kappa$ 的最终读取对 $z_i^{(1)}$ 结构性线性且无偏置，
-因此在成对关节符号重写下严格满足 $\hat\kappa'_{g,i}=s_i\hat\kappa_{g,i}$。
+两个解码器都使用 FiLM（特征线性调制）残差块，使 retained token 在每层持续调制查询主路径。
+$D_\kappa$ 每层由拼接条件 $[z_g\Vert z_i]$ 独立生成 $\gamma,\beta$，最后用带偏置线性层输出
+无界 signed scalar。joint-sign 是完整物理坐标改写下的可观测测试合同，不由 latent parity 硬编码。
 
 解码器只在 SSL 期间存在。查询点来源、最近点、距离标签、Jacobian 与场标签都不进入
 解码器输入；SSL 完成后整个模块删除，不迁入 PPO。
@@ -31,8 +30,7 @@ $$
 张量轴约定：
 
 ```text
-zero_order       : [B, G, D_0]
-first_order      : [B, N_J, D_1]
+entities         : [B, G, D]
 query_features   : [B, G, N_Q, D_q]
 density          : [B, G, N_Q, N_sigma]
 sampled kappa    : [B, E]
@@ -42,17 +40,16 @@ $E$ 是抽样的归属体—查询点—JOINT 边数。密度路径保留完整�
 `owner_index/query_index/joint_index` 只读取需要监督的边，避免实际生成
 ``[B,G,N_Q,N_J]`` 大张量。$N_Q$ 与 $N_\sigma$ 都是数据轴，不进入网络固定宽度。
 
-FiLM 条件来自同一归属体的 $z_g^{(0)}$，不会混入其他归属体的标签；跨归属体信息已经由
-保留的整手 Transformer 写入 $z_g^{(0)}$。查询特征来自与基准表面共享参数的点—锚点前端，
+密度 FiLM 条件来自同一归属体的 $z_g$，不会混入其他归属体的标签；跨归属体信息已经由
+保留的整手 Transformer 写入 $z_g$。查询特征来自与基准表面共享参数的点—锚点前端，
 因此模型不能通过另一套查询编码器形成训练期专用坐标捷径。
 
 密度输出采用 sigmoid 是因为物理邻近场满足 $\rho\in(0,1]$。精确表面真值可等于 1，而有限
 logit 只能逼近 1；因此精确 $d=0$ 点主要用于评估，训练查询点以近表面壳层和工作空间为主。
-这一数值边界不意味着对潜变量使用 sigmoid；特别是一阶表征必须允许跨过零点。
+这一数值边界不意味着对潜变量或 $\kappa$ 使用 sigmoid；二者都必须允许跨过零点。
 
-距离灵敏度解码器不直接读取原始三维轴线。轴线符号已经在保留前端中压缩为
-$z_i^{(1)}$，策略迁移时也只保留该类型化结果。解析最近点、表面点 Jacobian 与
-$\kappa/g$ 教师只参与损失，不参与普通前向。
+距离灵敏度解码器不读取原始三维轴线、sigma 或 task one-hot。轴线与当前 $q$ 已在 Transformer
+之前写入 JOINT token；解析最近点、表面点 Jacobian 与 $\kappa/g$ 教师只参与监督和诊断。
 
 NOTE: 低重建误差不能单独证明零阶表征被使用。正式训练必须同时运行仅查询点基线与批内
 表征打乱诊断，确认解码器没有绕过整手几何记忆。
@@ -60,7 +57,6 @@ NOTE: 低重建误差不能单独证明零阶表征被使用。正式训练必�
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
@@ -86,23 +82,16 @@ class ScalarSigmaFiLMDensityDecoderCfg:
 
 @dataclass(frozen=True)
 class DistanceSensitivityDecoderCfg:
-    r"""距离灵敏度 coefficient reader 的容量与结构性奇读取合同。
+    r"""query-main、owner/JOINT-conditioned 的距离灵敏度 FiLM reader 容量。"""
 
-    ``readout_bias=False`` 与 ``carrier_scale='inverse_sqrt'`` 暂不是可自由切换的候选：二者明确
-    记录 canonical 结构，解析时拒绝其他值，避免偶偏置破坏 joint-sign parity。
-    """
-
-    coefficient_hidden_width: int = 128  # 偶上下文到 $D_1$ coefficient 的中间宽度
-    readout_bias: bool = False  # 最终输出必须由 coefficient 与奇 carrier 的纯内积产生
-    carrier_scale: str = "inverse_sqrt"  # 按 $1/\sqrt{D_1}$ 稳定初始点积尺度
+    hidden_width: int = 128  # 查询主路径与三个残差块的统一宽度
+    residual_blocks: int = 3  # 每块独立从 $[z_o\Vert z_i]$ 生成 FiLM 参数
 
     def __post_init__(self) -> None:
-        r"""拒绝空 coefficient 网络及破坏严格奇性的读取形式。"""
+        r"""拒绝空主路径或没有条件更新的退化 reader。"""
 
-        if self.coefficient_hidden_width < 1:
-            raise ValueError("sensitivity coefficient hidden width must be positive")
-        if self.readout_bias or self.carrier_scale != "inverse_sqrt":
-            raise ValueError("sensitivity reader requires unbiased inverse-sqrt carrier readout")
+        if self.hidden_width < 1 or self.residual_blocks < 1:
+            raise ValueError("sensitivity decoder hidden width and residual blocks must be positive")
 
 
 @dataclass(frozen=True)
@@ -114,15 +103,15 @@ class GeometrySSLDecoderCfg:
 
 
 class _FiLMResidualBlock(nn.Module):
-    r"""由归属体零阶表征调制的逐查询点残差块。
+    r"""由归属体条件表征调制的逐查询点残差块。
 
-    对隐藏特征 $h$ 与归属体条件 $z_g^{(0)}$，调制形式为：
+    对隐藏特征 $h$ 与归属体条件 $z_g$，调制形式为：
 
     $$
     \tilde h
     =
-    \left(1+\gamma(z_g^{(0)})\right)\operatorname{LN}(h)
-    +\beta(z_g^{(0)}).
+    \left(1+\gamma(z_g)\right)\operatorname{LN}(h)
+    +\beta(z_g).
     $$
     """
 
@@ -131,7 +120,7 @@ class _FiLMResidualBlock(nn.Module):
 
         Args:
             hidden_width (int): 每个查询点的隐藏宽度。
-            condition_width (int): 归属体零阶表征宽度 $D_0$。
+            condition_width (int): owner 或 owner/JOINT 条件表征宽度。
 
         `modulation` 同时输出缩放与平移，故宽度为 ``2 * hidden_width``；缩放使用
         $1+\gamma$，使参数初始化附近保留接近恒等的调制路径。
@@ -164,7 +153,7 @@ class ConditionalDensityDecoder(nn.Module):
     \longrightarrow \hat\rho_{g,r,\sigma}\in(0,1).
     $$
 
-    ``query_features`` 与显式 sigma 进入主特征路径；``zero_order`` 只作为每层 FiLM 条件。输出逻辑
+    ``query_features`` 与显式 sigma 进入主特征路径；``owner_latent`` 只作为每层 FiLM 条件。输出逻辑
     shape 仍为 ``[B,G,N_Q,N_sigma]``，但最后一轴是可变的采样轴，不是线性层固定输出宽度。
     """
 
@@ -172,36 +161,36 @@ class ConditionalDensityDecoder(nn.Module):
         self,
         config: ScalarSigmaFiLMDensityDecoderCfg,
         *,
-        zero_order_width: int,
+        entity_width: int,
         query_width: int,
     ) -> None:
         r"""构造 query--sigma 投影、连续 owner FiLM 残差块和标量输出层。
 
         Args:
             config (ScalarSigmaFiLMDensityDecoderCfg): sigma reference、隐藏宽度与残差块数量。
-            zero_order_width (int): encoder 派生的 owner latent 宽度 $D_0$。
+            entity_width (int): encoder final-norm owner token 宽度 $D$。
             query_width (int): 共享点—anchor 前端派生的查询宽度 $D_q$。
         """
 
         super().__init__()
         self.config = config
-        if zero_order_width < 1 or query_width < 1:
+        if entity_width < 1 or query_width < 1:
             raise ValueError("density decoder latent/query widths must be positive")
-        self.zero_order_width = zero_order_width  # 派生宽度不在实验配置中重复声明
+        self.entity_width = entity_width  # 派生宽度不在实验配置中重复声明
         self.query_width = query_width
         self.query_projection = nn.Linear(  # $[u(x)\Vert\log(\sigma/\sigma_{ref})]$ -> decoder width
             query_width + 1,
             config.hidden_width,
         )
         self.blocks = nn.ModuleList(
-            _FiLMResidualBlock(config.hidden_width, zero_order_width)
+            _FiLMResidualBlock(config.hidden_width, entity_width)
             for _ in range(config.residual_blocks)
         )
         self.output = nn.Linear(config.hidden_width, 1)  # 每个 `(owner,query,sigma)` 只输出一个标量 $\rho$
 
     def forward(
         self,
-        zero_order: torch.Tensor,
+        owner_latent: torch.Tensor,
         query_features: torch.Tensor,
         bandwidths: torch.Tensor,
     ) -> torch.Tensor:
@@ -211,12 +200,12 @@ class ConditionalDensityDecoder(nn.Module):
         ``bandwidths`` 接受跨 batch 共享的 ``[N_sigma]`` 或逐样本 ``[B,N_sigma]``，单位 m。
         """
 
-        if zero_order.ndim != 3 or query_features.ndim != 4:
-            raise ValueError("zero_order/query_features must have shapes [B,G,D_0] and [B,G,N_Q,D_q]")
-        if zero_order.shape[:2] != query_features.shape[:2]:
-            raise ValueError("zero_order and query_features must share [B,G] axes")
-        if zero_order.shape[-1] != self.zero_order_width:
-            raise ValueError("zero_order width does not match decoder config")
+        if owner_latent.ndim != 3 or query_features.ndim != 4:
+            raise ValueError("owner_latent/query_features must have shapes [B,G,D] and [B,G,N_Q,D_q]")
+        if owner_latent.shape[:2] != query_features.shape[:2]:
+            raise ValueError("owner_latent and query_features must share [B,G] axes")
+        if owner_latent.shape[-1] != self.entity_width:
+            raise ValueError("owner latent width does not match decoder config")
         if query_features.shape[-1] != self.query_width:
             raise ValueError("query feature width does not match decoder config")
         bandwidths = bandwidths.detach()  # sigma 是外生物理条件，不建立优化或 q->sigma 梯度路径
@@ -232,7 +221,7 @@ class ConditionalDensityDecoder(nn.Module):
             -1, query_features.shape[1], query_features.shape[2], -1, -1
         )
         hidden = self.query_projection(torch.cat((query, log_sigma), dim=-1))  # `[B,G,N_Q,N_σ,D_h]`
-        condition = zero_order[:, :, None, None, :].expand(  # 同一 owner latent 调制全部 query/sigma slots
+        condition = owner_latent[:, :, None, None, :].expand(  # 同一 owner latent 调制全部 query/sigma slots
             -1, -1, query_features.shape[2], sigma_count, -1
         )
         for block in self.blocks:
@@ -241,82 +230,73 @@ class ConditionalDensityDecoder(nn.Module):
 
 
 class DistanceSensitivityDecoder(nn.Module):
-    r"""在抽样的归属体—查询点—JOINT 边上结构性读取符号奇 $\hat\kappa$。
+    r"""在 sampled owner—query—JOINT edges 上解码无界 signed $\hat\kappa$。
 
-    系数只读取关节符号偶的归属体零阶表征与查询特征；最终与对应
-    $z_i^{(1)}$ 做无偏置线性内积。因此 $z_i^{(1)}\mapsto-z_i^{(1)}$ 时输出严格翻号：
+    model assembly 先从统一 $Z$ 路由 $z_o,z_i$ 与查询特征 $u(x)$。reader 以查询为主路径，
+    每个残差块独立使用拼接条件 $c_{o,i}=[z_o\Vert z_i]$：
 
     $$
-    \hat\kappa_{g,i}
-    =
-    \frac{1}{\sqrt{D_1}}
-    a\left(z_g^{(0)},u(x)\right)^Tz_i^{(1)}.
+    h_0=W_qu(x),\qquad
+    h_{l+1}=h_l+F_l\!\left((1+\gamma_l(c_{o,i}))\operatorname{LN}_l(h_l)+\beta_l(c_{o,i})\right),
+    \qquad \hat\kappa=w^Th_3+b.
     $$
 
-    $1/\sqrt{D_1}$ 只稳定不同一阶宽度下的初始点积尺度，不改变物理单位；m/rad 语义来自
-    解析 $\kappa$ 教师监督。
+    canonical 数值锚点为 3 个 residual blocks、hidden width 128。输出层不使用 sigmoid/tanh，
+    因为距离 Jacobian 元素 $\partial d_o(x;q)/\partial q_i$ 可正、可负且不具固定数值界。
     """
 
     def __init__(
         self,
         config: DistanceSensitivityDecoderCfg,
         *,
-        zero_order_width: int,
-        first_order_width: int,
+        entity_width: int,
         query_width: int,
     ) -> None:
-        r"""构造只产生符号偶读取系数的灵敏度网络。
+        r"""构造 query projection、逐层双-token FiLM 与 signed scalar readout。
 
         Args:
-            config (DistanceSensitivityDecoderCfg): coefficient 容量与结构性读取形式。
-            zero_order_width (int): encoder 派生的 $D_0$。
-            first_order_width (int): encoder 派生的 $D_1$。
+            config (DistanceSensitivityDecoderCfg): 隐藏宽度与 FiLM residual block 数。
+            entity_width (int): encoder final-norm entity token 宽度 $D$。
             query_width (int): 点—anchor 前端派生的 $D_q$。
-
-        本构造函数不创建带偏置的一阶输出层。最终标量只能由偶系数与 $z_i^{(1)}$ 内积产生，
-        从结构上排除“偏置项在符号翻转后保持不变”的奇偶违约。
         """
 
         super().__init__()
         self.config = config
-        widths = (zero_order_width, first_order_width, query_width)
-        if min(widths) < 1:
-            raise ValueError("sensitivity decoder latent/query widths must be positive")
-        self.first_order_width = first_order_width  # 决定无偏置 carrier 内积及 $1/\sqrt{D_1}$ 尺度
-        self.coefficient = nn.Sequential(
-            nn.Linear(zero_order_width + query_width, config.coefficient_hidden_width),
-            nn.GELU(),
-            nn.Linear(config.coefficient_hidden_width, first_order_width),
-        )  # sign 偶上下文 -> 对一阶 carrier 的读取系数
+        if min(entity_width, query_width) < 1:
+            raise ValueError("sensitivity decoder entity/query widths must be positive")
+        self.entity_width = entity_width  # owner 与 JOINT 来自同一 final-norm token 空间
+        self.query_width = query_width  # $u(x)$ 不携带 sigma 或 query-stratum identity
+        self.query_projection = nn.Linear(query_width, config.hidden_width)  # $u(x)\mapsto h_0\in\mathbb R^{128}$
+        self.blocks = nn.ModuleList(
+            _FiLMResidualBlock(config.hidden_width, 2 * entity_width)
+            for _ in range(config.residual_blocks)
+        )  # 每个 block 拥有独立 $\gamma_l,\beta_l,F_l$
+        self.output = nn.Linear(config.hidden_width, 1)  # 无界 signed scalar，允许零点与正负响应
 
     def forward(
         self,
-        zero_order: torch.Tensor,
-        first_order: torch.Tensor,
-        query_features: torch.Tensor,
-        owner_index: torch.Tensor,
-        query_index: torch.Tensor,
-        joint_index: torch.Tensor,
+        owner_latent: torch.Tensor,
+        joint_latent: torch.Tensor,
+        selected_query: torch.Tensor,
     ) -> torch.Tensor:
-        r"""输出形状 `[B,E]`、单位由监督校准为 m/rad 的距离灵敏度。"""
+        r"""从已经路由的三类特征输出 `[B,E]` 距离灵敏度，监督单位为 m/rad。
 
-        if owner_index.ndim not in {1, 2} or query_index.shape != owner_index.shape or joint_index.shape != owner_index.shape:
-            raise ValueError("owner/query/joint selectors must share [E] or [B,E] shape")
-        if owner_index.ndim == 1:
-            owner_latent = zero_order.index_select(1, owner_index)  # `[B,E,D_0]`
-            joint_latent = first_order.index_select(1, joint_index)  # `[B,E,D_1]`，joint-sign 奇
-            selected_query = query_features[:, owner_index, query_index]  # `[B,E,D_q]`
-        else:
-            if owner_index.shape[0] != zero_order.shape[0]:
-                raise ValueError("batched selectors must share B with latent tensors")
-            owner_gather = owner_index.unsqueeze(-1).expand(-1, -1, zero_order.shape[-1])
-            joint_gather = joint_index.unsqueeze(-1).expand(-1, -1, first_order.shape[-1])
-            owner_latent = torch.gather(zero_order, 1, owner_gather)  # 每个样本自己的 owner edge
-            joint_latent = torch.gather(first_order, 1, joint_gather)  # 每个样本自己的 JOINT edge
-            batch_index = torch.arange(zero_order.shape[0], device=zero_order.device).unsqueeze(1)
-            selected_query = query_features[batch_index, owner_index, query_index]  # `[B,E,D_q]`
-        coefficient = self.coefficient(torch.cat((owner_latent, selected_query), dim=-1))  # `[B,E,D_1]` 偶
-        return torch.sum(coefficient * joint_latent, dim=-1) / math.sqrt(self.first_order_width)  # 偶·奇=奇
+        ``owner_latent`` 与 ``joint_latent`` 都是 `[B,E,D]` 的统一 entity tokens；
+        ``selected_query`` 是 `[B,E,D_q]`。selector 解释属于 model assembly，本 reader 不持有
+        owner/JOINT 轴规则，因而也不能绕过统一 $Z$ 读取 raw screw 或固定 slot identity。
+        """
+
+        if owner_latent.shape != joint_latent.shape or owner_latent.ndim != 3:
+            raise ValueError("owner_latent and joint_latent must share [B,E,D] shape")
+        if owner_latent.shape[-1] != self.entity_width:
+            raise ValueError("owner/JOINT latent width does not match sensitivity decoder")
+        if selected_query.shape != (*owner_latent.shape[:2], self.query_width):
+            raise ValueError("selected_query must have shape [B,E,D_q]")
+        hidden = self.query_projection(selected_query)  # `[B,E,128]` 的 query-main 初始状态
+        condition = torch.cat((owner_latent, joint_latent), dim=-1)  # `[B,E,2D]` 的双-token 条件
+        for block in self.blocks:
+            hidden = block(hidden, condition)  # 独立 FiLM 后的两层 MLP residual update
+        return self.output(hidden).squeeze(-1)  # `[B,E]`，不施加数值范围压缩
 
 
 __all__ = [

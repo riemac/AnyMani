@@ -5,8 +5,11 @@ from __future__ import annotations
 import torch
 from anymani.distill.diagnostics.evaluation.geometry_ssl import (
     cross_asset_permutation,
+    density_configuration_jvp,
     geometry_ssl_ablation_forward,
+    joint_sign_observable_metrics,
     same_asset_q_permutation,
+    task_gradient_gram,
 )
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.decoders.representations.implicit_field import (
@@ -15,10 +18,10 @@ from anymani.distill.models.decoders.representations.implicit_field import (
     GeometrySSLDecoderCfg,
     ScalarSigmaFiLMDensityDecoderCfg,
 )
-from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelCfg
+from anymani.distill.models.geometry_ssl import GeometrySSLForward, GeometrySSLModel, GeometrySSLModelCfg
 from anymani.distill.models.input_adapters.geometry import (
     GeometryEncoderCfg,
-    GeometryLatentHeadsCfg,
+    GeometryLatents,
     SO2AnchorFrontendCfg,
     StaticGeometryEvidence,
 )
@@ -64,11 +67,10 @@ def _model() -> GeometrySSLModel:
                     feedforward_width=24,
                     dropout=0.0,
                 ),
-                heads=GeometryLatentHeadsCfg(zero_order_width=12, first_order_width=8),
             ),
             ssl_decoders=GeometrySSLDecoderCfg(
                 density=ScalarSigmaFiLMDensityDecoderCfg(hidden_width=16, residual_blocks=1),
-                sensitivity=DistanceSensitivityDecoderCfg(coefficient_hidden_width=16),
+                sensitivity=DistanceSensitivityDecoderCfg(hidden_width=16, residual_blocks=3),
             ),
         )
     ).to(dtype=torch.float64)
@@ -117,8 +119,7 @@ def test_query_only_zeros_latents_but_preserves_query_features() -> None:
         ablation="query_only",
     )
 
-    assert torch.count_nonzero(result.latents.zero_order) == 0
-    assert torch.count_nonzero(result.latents.first_order) == 0
+    assert torch.count_nonzero(result.latents.entities) == 0
     torch.testing.assert_close(result.query_features, expected_query)
 
 
@@ -143,8 +144,7 @@ def test_latent_shuffle_reorders_only_batch_latents() -> None:
         batch_permutation=torch.tensor([1, 0]),
     )
 
-    torch.testing.assert_close(result.latents.zero_order, original.zero_order.flip(0))
-    torch.testing.assert_close(result.latents.first_order, original.first_order.flip(0))
+    torch.testing.assert_close(result.latents.entities, original.entities.flip(0))
     torch.testing.assert_close(result.query_features, model.encoder.encode_points(queries, evidence))
 
 
@@ -160,8 +160,8 @@ def test_fixed_asset_permutations_preserve_declared_shuffle_semantics() -> None:
     assert all(asset_ids[source] != asset_ids[target] for target, source in enumerate(cross_asset.tolist()))
 
 
-def test_first_order_ablations_leave_zero_order_and_query_path_unchanged() -> None:
-    """z1 zero/sign/JOINT shuffle 只能干预一阶包，不得暗改零阶 morphology 或 query evidence。"""
+def test_joint_token_shuffle_changes_only_valid_joint_entities() -> None:
+    """JOINT shuffle 只错配统一 Z 中的有效 JOINT tokens，不得暗改 PALM/TIP 或 query evidence。"""
 
     model = _model().eval()
     evidence = _two_joint_evidence()
@@ -175,18 +175,13 @@ def test_first_order_ablations_leave_zero_order_and_query_path_unchanged() -> No
         "joint_index": torch.tensor([0, 1]),
     }
 
-    zero = geometry_ssl_ablation_forward(model, q, evidence, queries, ablation="first_order_zero", **common)
-    sign = geometry_ssl_ablation_forward(model, q, evidence, queries, ablation="first_order_sign_flip", **common)
     shuffled = geometry_ssl_ablation_forward(
-        model, q, evidence, queries, ablation="first_order_joint_shuffle", **common
+        model, q, evidence, queries, ablation="joint_token_shuffle", **common
     )
 
-    for result in (zero, sign, shuffled):
-        torch.testing.assert_close(result.latents.zero_order, original.zero_order)
-        torch.testing.assert_close(result.query_features, model.encoder.encode_points(queries, evidence))
-    assert torch.count_nonzero(zero.latents.first_order) == 0
-    torch.testing.assert_close(sign.latents.first_order, -original.first_order)
-    torch.testing.assert_close(shuffled.latents.first_order, original.first_order.roll(1, dims=1))
+    torch.testing.assert_close(shuffled.latents.entities[:, :1], original.entities[:, :1])
+    torch.testing.assert_close(shuffled.latents.entities[:, 1:3], original.entities[:, 1:3].roll(1, dims=1))
+    torch.testing.assert_close(shuffled.query_features, model.encoder.encode_points(queries, evidence))
 
 
 def test_density_decoder_treats_sigma_as_a_variable_data_axis() -> None:
@@ -200,9 +195,9 @@ def test_density_decoder_treats_sigma_as_a_variable_data_axis() -> None:
     query_features = model.encoder.encode_points(queries, evidence)
 
     repeated_sigma = torch.tensor([0.004, 0.004], dtype=torch.float64, requires_grad=True)
-    repeated = model.density_decoder(latents.zero_order, query_features, repeated_sigma)
+    repeated = model.density_decoder(latents.entities, query_features, repeated_sigma)
     five_sigma = model.density_decoder(
-        latents.zero_order,
+        latents.entities,
         query_features,
         torch.tensor([0.004, 0.008, 0.016, 0.032, 0.064], dtype=torch.float64),
     )
@@ -220,7 +215,7 @@ def test_every_density_residual_block_reads_owner_latent_through_film() -> None:
 
     decoder = ConditionalDensityDecoder(
         ScalarSigmaFiLMDensityDecoderCfg(hidden_width=16, residual_blocks=3),
-        zero_order_width=12,
+        entity_width=12,
         query_width=8,
     )
 
@@ -230,3 +225,77 @@ def test_every_density_residual_block_reads_owner_latent_through_film() -> None:
     assert {
         name for name in decoder.state_dict() if name.endswith("modulation.weight")
     } == {f"blocks.{index}.modulation.weight" for index in range(3)}
+
+
+def test_kappa_decoder_uses_query_main_and_owner_joint_film_without_sigma_or_screw() -> None:
+    r"""三个独立 FiLM blocks 必须同时依赖 $z_o,z_i$，并输出可正可负的无界 scalar。"""
+
+    model = _model()
+    decoder = model.sensitivity_decoder
+    assert len(decoder.blocks) == 3
+    assert all(block.modulation.in_features == 32 for block in decoder.blocks)  # $2D=2\times16$
+    assert decoder.output.out_features == 1
+    assert not any("sigma" in name or "screw" in name for name, _module in decoder.named_modules())
+
+    owner = torch.randn(2, 4, 16, dtype=torch.float64, requires_grad=True)
+    joint = torch.randn(2, 4, 16, dtype=torch.float64, requires_grad=True)
+    query = torch.randn(2, 4, 8, dtype=torch.float64, requires_grad=True)
+    prediction = decoder(owner, joint, query)
+    prediction.square().mean().backward()
+
+    assert prediction.shape == (2, 4)
+    assert owner.grad is not None and torch.count_nonzero(owner.grad) > 0
+    assert joint.grad is not None and torch.count_nonzero(joint.grad) > 0
+    assert query.grad is not None and torch.count_nonzero(query.grad) > 0
+
+
+def test_manual_observable_rewrite_jvp_and_parameter_gradient_probes() -> None:
+    r"""post-hoc API 只检查 observable/JVP/所选参数梯度，不引入 latent parity objective。"""
+
+    density = torch.tensor([[[[0.2], [0.4]]]], dtype=torch.float64)
+    kappa = torch.tensor([[0.3, -0.5]], dtype=torch.float64)
+    latents = GeometryLatents(torch.zeros(1, 1, 2, dtype=torch.float64))
+    query_features = torch.zeros(1, 1, 2, 2, dtype=torch.float64)
+    reference = GeometrySSLForward(latents, query_features, density, kappa)
+    rewritten = GeometrySSLForward(
+        latents,
+        query_features,
+        density.clone(),
+        torch.tensor([[-0.3, -0.5]], dtype=torch.float64),
+    )
+    parity = joint_sign_observable_metrics(
+        reference,
+        rewritten,
+        joint_sign=torch.tensor([-1.0, 1.0]),
+        joint_index=torch.tensor([0, 1]),
+        density_valid_mask=torch.ones(1, 1, 2, dtype=torch.bool),
+        edge_valid_mask=torch.ones(1, 2, dtype=torch.bool),
+    )
+    assert parity == {"density_invariance_mse": 0.0, "kappa_sign_equivariance_mse": 0.0}
+
+    model = _model().eval()
+    evidence = _evidence()
+    q = torch.tensor([[0.2], [-0.3]], dtype=torch.float64)
+    queries = torch.randn(2, 3, 4, 3, dtype=torch.float64) * 0.02
+    primal, tangent = density_configuration_jvp(
+        model,
+        q,
+        evidence,
+        queries,
+        torch.tensor([0.004, 0.016], dtype=torch.float64),
+        owner_index=torch.tensor([1]),
+        query_index=torch.tensor([0]),
+        joint_index=torch.tensor([0]),
+        direction=torch.ones_like(q),
+    )
+    assert primal.shape == tangent.shape == (2, 3, 4, 2)
+    assert torch.isfinite(tangent).all()
+
+    parameter = torch.nn.Parameter(torch.tensor([1.0, 2.0], dtype=torch.float64))
+    gram = task_gradient_gram(
+        {"density": parameter.square().sum(), "kappa": (parameter - 3.0).square().sum()},
+        (parameter,),
+        baselines={"density": 1.0, "kappa": 2.0},
+    )
+    assert gram["rho_norm"] > 0.0 and gram["kappa_norm"] > 0.0
+    assert -1.0 <= gram["cosine"] <= 1.0

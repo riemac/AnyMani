@@ -1,9 +1,9 @@
-r"""AnyMani policy model 的集中式配置契约。
+r"""AnyMani policy model 的既有集中式配置草稿。
 
-本文件是 `distill/models` 的配置单一事实源，服务于科研核对而非软件封装。
-所有会影响网络结构、token 语义、mask 路径、attention bias、输出头与几何
-adapter 的关键开关，都应优先在这里声明，再由 `tokenizer.py`、`backbone.py`、
-`heads.py`、`geometry/mesh_adapter.py` 等模块消费。
+本文件保存早期 joint-centric policy dataclass 与数值锚点，当前不移动其 executable
+symbols，也不把它宣称为新 component registry/preset 的单一事实源。新的物理 target/query
+配置属于 `distill/representations`，learnable adapter/backbone/decoder 属于 `distill/models`
+的分层模块，完整实验组合未来由 registry + preset 显式解析。
 
 == 为什么集中在一个文件 ==
 
@@ -14,8 +14,8 @@ dataclass，容易出现：
 2. teacher 与 student 复用同一模型时，配置项被复制出两个版本；
 3. 后续写 Hydra / YAML / rl_games adapter 时，不清楚哪个字段是唯一入口。
 
-因此本文件只做一件事：把当前网络设计中的**可裁定配置面**集中写清楚。
-具体 `nn.Module` 实现暂不在本轮落地。
+这些已有字段仍服务旧设计核对，但其中 Transformer、`hybrid_se3`、geometry mode 与 pooling
+默认值都不是 heterogeneous SSL 的已选结论。具体 `nn.Module` 与新配置迁移暂不在本轮落地。
 
 == 形状与符号约定 ==
 
@@ -128,7 +128,7 @@ class RelationFeatureCfg:
     """静态边特征模式；作为 dynamic edge 的形态补充，不用纯 hop count 做 teacher 主信号。"""
 
     dynamic_edge_mode: str = "current_all_pairs_se3"
-    """动态边特征模式；teacher 当前合意为 `current_all_pairs_se3`，即所有 token pair 的当前 FK 相对位姿。"""
+    """历史 teacher 草稿的动态边候选；不是 geometry SSL retained input 的当前默认。"""
 
     include_palm_to_root_pose: bool = True
     """是否把 palm frame 到每个 root joint frame 的相对位姿作为 edge feature。"""
@@ -159,7 +159,7 @@ class AttentionBiasCfg:
     a_{ij}^{(h)} = \frac{q_i^{(h)\top} k_j^{(h)}}{\sqrt{d_h}} + b_{ij}^{(h)}.
     $$
 
-    teacher 第一版默认使用 `mode="hybrid_se3"`，即把结构先验与连续几何边特征
+    历史 teacher 草稿使用 `mode="hybrid_se3"`，即把结构先验与连续几何边特征
     相加注入 logits：
 
     $$
@@ -181,7 +181,7 @@ class AttentionBiasCfg:
     - `none`：$b_{ij}=0$，检验 Transformer 本体是否已足够；
     - `structural`：只用 edge type / distance / same-finger；
     - `se3`：只用 dynamic SE(3) edge MLP；
-    - `hybrid_se3`：结构 bias + SE(3) edge MLP，teacher 默认。
+    - `hybrid_se3`：结构 bias + SE(3) edge MLP，历史增强候选。
 
     PPO 稳定性约束：SE(3) MLP 最后一层建议零初始化，或用 learnable gate
     $\alpha\approx0$ 起步，使初期网络近似 no-bias，避免随机 $b_{ij}$ 直接打爆
@@ -189,7 +189,7 @@ class AttentionBiasCfg:
     """
 
     mode: str = "hybrid_se3"
-    """bias 模式：`none` / `structural` / `se3` / `hybrid_se3`；teacher 默认 `hybrid_se3`。"""
+    """历史 bias 候选：`none` / `structural` / `se3` / `hybrid_se3`；当前未选择。"""
 
     num_edge_types: int | None = None
     """离散有向 edge type 数；`structural` / `hybrid_se3` 模式需要。"""
@@ -247,7 +247,7 @@ class BackboneCfg:
     """是否使用 Pre-LN；RL 训练中通常比 Post-LN 稳定。"""
 
     attention_bias: AttentionBiasCfg = field(default_factory=AttentionBiasCfg)
-    """attention bias 配置；teacher 默认启用 SE(3) edge feature bias，no-bias 仅作消融。"""
+    """历史 attention-bias 配置草稿；当前 backbone 未选择，no-bias 不再只是消融。"""
 
 
 @dataclass(slots=True)

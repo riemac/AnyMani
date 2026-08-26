@@ -5,7 +5,7 @@ $$
 \mathcal M=\left(\mu_q,\mathcal R,f_\theta,\mathcal L,\mathcal A\right):
 $$
 `state_measure` 定义 $q$ 的测度，`representation` 定义物理真值体系，`model` 是可学习映射，
-`objectives` 定义三项训练约束，`joint_sign_rewrite` 是方法专属坐标增强。Trainer 预算、
+`objectives` 定义 rho/kappa 两项训练约束，`joint_sign_rewrite` 是方法专属坐标增强。Trainer 预算、
 resident window 和 `calibrate_objectives` 阶段不属于本配置。
 """
 
@@ -95,19 +95,11 @@ class KappaObjectiveCfg(ObjectiveTermCfg):
 
 
 @dataclass(frozen=True)
-class DerivedFieldObjectiveCfg(ObjectiveTermCfg):
-    r"""由 $\hat\rho$、$\hat\kappa$ 与 teacher $d$ 组成的 $\hat g^{(\kappa)}$ 对齐 teacher $g$。"""
-
-    name: ClassVar[str] = "derived_field"
-
-
-@dataclass(frozen=True)
 class MultiAnchorGaussianObjectivesCfg:
-    r"""三项主 objective 的 typed aggregate；字段为 None 表示显式关闭。"""
+    r"""rho/kappa 双主 objective 的 typed aggregate；字段为 None 表示显式关闭。"""
 
     density: DensityObjectiveCfg | None = field(default_factory=DensityObjectiveCfg)
     kappa: KappaObjectiveCfg | None = field(default_factory=KappaObjectiveCfg)
-    derived_field: DerivedFieldObjectiveCfg | None = field(default_factory=DerivedFieldObjectiveCfg)
 
     def enabled(self) -> dict[str, ObjectiveTermCfg]:
         r"""返回开启的 term 名称到配置。"""
@@ -115,15 +107,16 @@ class MultiAnchorGaussianObjectivesCfg:
         terms = {
             "density": self.density,
             "kappa": self.kappa,
-            "derived_field": self.derived_field,
         }
         return {name: config for name, config in terms.items() if config is not None}
 
     def __post_init__(self) -> None:
-        r"""拒绝空 objective 集合。"""
+        r"""固定 rho/kappa 双主任务与 1:1 normalized vanilla aggregation。"""
 
-        if not self.enabled():
-            raise ValueError("multi-anchor method requires at least one enabled objective")
+        if self.density is None or self.kappa is None:
+            raise ValueError("unified multi-anchor method requires both density and kappa objectives")
+        if self.density.weight != 1.0 or self.kappa.weight != 1.0:
+            raise ValueError("unified multi-anchor method fixes density/kappa normalized weights to 1.0")
 
 
 @dataclass(frozen=True)
@@ -154,7 +147,6 @@ class MultiAnchorGaussianMethodCfg:
 
 __all__ = [
     "DensityObjectiveCfg",
-    "DerivedFieldObjectiveCfg",
     "JointConfigurationMeasureCfg",
     "JointSignRewriteCfg",
     "KappaObjectiveCfg",

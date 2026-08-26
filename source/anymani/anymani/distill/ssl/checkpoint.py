@@ -7,7 +7,7 @@ retained/disposable 边界和下游 loader 均由 concrete Method 拥有。
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,7 @@ class PretrainCheckpointMetadata:
     resolved_config: Mapping[str, Any]
     declared_objective: Mapping[str, float]
     calibration_artifact_hash: str = ""
+    teacher_baselines: Mapping[str, float] = field(default_factory=dict)
     worktree_dirty: bool = False
     worktree_fingerprint: str = ""
 

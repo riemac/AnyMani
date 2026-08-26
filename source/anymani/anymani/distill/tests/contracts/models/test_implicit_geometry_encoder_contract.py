@@ -8,7 +8,6 @@ import torch
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.input_adapters.geometry import (
     GeometryEncoderCfg,
-    GeometryLatentHeadsCfg,
     GeometryPaddingCfg,
     ImplicitGeometryEncoder,
     SO2AnchorFrontendCfg,
@@ -16,11 +15,7 @@ from anymani.distill.models.input_adapters.geometry import (
     pad_static_geometry_evidence,
     stack_static_geometry_evidence,
 )
-from anymani.distill.objectives.representations.gauge_consistency import (
-    deterministic_partial_joint_sign,
-    joint_sign_paired_loss,
-    rewrite_joint_sign_coordinates,
-)
+from anymani.distill.objectives.representations.gauge_consistency import rewrite_joint_sign_coordinates
 
 pytestmark = pytest.mark.contract
 
@@ -83,7 +78,6 @@ def _encoder() -> ImplicitGeometryEncoder:
             dropout=0.0,
             max_graph_distance=4,
         ),
-        heads=GeometryLatentHeadsCfg(zero_order_width=32, first_order_width=16),
     )
     return ImplicitGeometryEncoder(config).to(dtype=torch.float64)
 
@@ -98,7 +92,9 @@ def _two_joint_static_evidence(*, dtype: torch.dtype = torch.float64) -> StaticG
     )
     return StaticGeometryEvidence(
         anchors=base.anchors,
-        home_surface_points=torch.cat((base.home_surface_points[:2], extra_surface, base.home_surface_points[2:]), dim=0),
+        home_surface_points=torch.cat(
+            (base.home_surface_points[:2], extra_surface, base.home_surface_points[2:]), dim=0
+        ),
         home_surface_mask=torch.ones(4, 4, dtype=torch.bool),
         palm_normal=base.palm_normal,
         space_screws=torch.tensor(
@@ -109,15 +105,9 @@ def _two_joint_static_evidence(*, dtype: torch.dtype = torch.float64) -> StaticG
         entity_role=torch.tensor([0, 1, 1, 2], dtype=torch.long),
         entity_joint_index=torch.tensor([-1, 0, 1, -1], dtype=torch.long),
         joint_entity_index=torch.tensor([1, 2], dtype=torch.long),
-        shortest_path=torch.tensor(
-            [[0, 1, 2, 3], [1, 0, 1, 2], [2, 1, 0, 1], [3, 2, 1, 0]], dtype=torch.long
-        ),
-        parent_direction=torch.tensor(
-            [[0, 4, 4, 4], [1, 0, 4, 4], [2, 1, 0, 4], [3, 2, 1, 0]], dtype=torch.long
-        ),
-        child_direction=torch.tensor(
-            [[0, 1, 2, 3], [4, 0, 1, 2], [4, 4, 0, 1], [4, 4, 4, 0]], dtype=torch.long
-        ),
+        shortest_path=torch.tensor([[0, 1, 2, 3], [1, 0, 1, 2], [2, 1, 0, 1], [3, 2, 1, 0]], dtype=torch.long),
+        parent_direction=torch.tensor([[0, 4, 4, 4], [1, 0, 4, 4], [2, 1, 0, 4], [3, 2, 1, 0]], dtype=torch.long),
+        child_direction=torch.tensor([[0, 1, 2, 3], [4, 0, 1, 2], [4, 4, 0, 1], [4, 4, 4, 0]], dtype=torch.long),
     )
 
 
@@ -156,11 +146,10 @@ def test_encoder_has_no_joint_limit_input_and_returns_typed_shapes() -> None:
     q = torch.tensor([[0.2], [-0.4]], dtype=torch.float64, requires_grad=True)
 
     latents = encoder(q, evidence)
-    assert latents.zero_order.shape == (2, 3, 32)
-    assert latents.first_order.shape == (2, 1, 16)
+    assert latents.entities.shape == (2, 3, 48)
     assert "joint_limits" not in {item.name for item in fields(StaticGeometryEvidence)}
 
-    (latents.zero_order.square().mean() + latents.first_order.square().mean()).backward()
+    latents.entities.square().mean().backward()
     assert q.grad is not None and torch.isfinite(q.grad).all()
 
 
@@ -191,68 +180,53 @@ def test_anchor_permutation_and_common_so2_rotation_do_not_change_latents() -> N
     permuted_latents = encoder(q, permuted)
     rotated_latents = encoder(q, _rotate_about_palm_normal(evidence, 1.137))
 
-    torch.testing.assert_close(permuted_latents.zero_order, reference.zero_order, atol=1.0e-10, rtol=1.0e-10)
-    torch.testing.assert_close(permuted_latents.first_order, reference.first_order, atol=1.0e-10, rtol=1.0e-10)
-    torch.testing.assert_close(rotated_latents.zero_order, reference.zero_order, atol=1.0e-10, rtol=1.0e-10)
-    torch.testing.assert_close(rotated_latents.first_order, reference.first_order, atol=1.0e-10, rtol=1.0e-10)
+    torch.testing.assert_close(permuted_latents.entities, reference.entities, atol=1.0e-10, rtol=1.0e-10)
+    torch.testing.assert_close(rotated_latents.entities, reference.entities, atol=1.0e-10, rtol=1.0e-10)
 
 
-def test_encoder_uses_single_screw_feature_and_shared_residual_head() -> None:
-    r"""canonical encoder 不得保留 even/odd 双投影与 coefficient/carrier 乘法结构。"""
+def test_entity_permutation_equivariance_includes_graph_and_joint_routing() -> None:
+    r"""同步置换 entity evidence、图两轴与 JOINT routing 后，统一 $Z$ 必须按同一置换等变。"""
+
+    torch.manual_seed(11)
+    evidence = _static_evidence()
+    encoder = _encoder().eval()
+    q = torch.tensor([[0.27], [-0.14]], dtype=torch.float64)
+    reference = encoder(q, evidence).entities  # `[B,G,D]`
+    permutation = torch.tensor([2, 0, 1], dtype=torch.long)  # 新轴位置读取的旧 entity index
+    old_to_new = torch.empty_like(permutation)
+    old_to_new[permutation] = torch.arange(permutation.numel())  # routing 从旧 index 映射到新 index
+    permuted = StaticGeometryEvidence(
+        anchors=evidence.anchors,
+        home_surface_points=evidence.home_surface_points[permutation],
+        home_surface_mask=evidence.home_surface_mask[permutation],
+        palm_normal=evidence.palm_normal,
+        space_screws=evidence.space_screws,
+        q_home=evidence.q_home,
+        entity_role=evidence.entity_role[permutation],
+        entity_joint_index=evidence.entity_joint_index[permutation],
+        joint_entity_index=old_to_new[evidence.joint_entity_index],
+        shortest_path=evidence.shortest_path[permutation][:, permutation],
+        parent_direction=evidence.parent_direction[permutation][:, permutation],
+        child_direction=evidence.child_direction[permutation][:, permutation],
+    )
+
+    actual = encoder(q, permuted).entities
+    torch.testing.assert_close(actual, reference[:, permutation], atol=1.0e-10, rtol=1.0e-10)
+
+
+def test_encoder_uses_single_screw_feature_and_no_post_backbone_heads() -> None:
+    r"""canonical encoder 只在主干前注入 screw，final-norm tokens 后不得存在 latent heads。"""
 
     encoder = _encoder()
     module_names = {name for name, _module in encoder.named_modules()}
 
     assert "screw_projection" in module_names
-    assert "first_order_head" in module_names
+    assert "zero_order_head" not in module_names
+    assert "first_order_head" not in module_names
     assert "screw_even_projection" not in module_names
     assert "screw_odd_projection" not in module_names
     assert "first_order_coefficient" not in module_names
     assert "first_order_carrier" not in module_names
-
-
-def test_partial_joint_sign_rewrite_and_paired_loss_encode_even_odd_contract() -> None:
-    r"""只改写 JOINT 1 时，paired loss 要求全部 Z0 偶且只有对应 z1 分量为奇。"""
-
-    torch.manual_seed(13)
-    evidence = _two_joint_static_evidence()
-    encoder = _encoder().eval()
-    q = torch.tensor([[0.37, -0.18], [-0.21, 0.42]], dtype=torch.float64)
-    reference = encoder(q, evidence)
-    rewritten_q, rewritten_evidence, sign = rewrite_joint_sign_coordinates(q, evidence, joint_index=1)
-
-    torch.testing.assert_close(rewritten_q[:, 0], q[:, 0])
-    torch.testing.assert_close(rewritten_q[:, 1], -q[:, 1])
-    torch.testing.assert_close(rewritten_evidence.space_screws[0], evidence.space_screws[0])
-    torch.testing.assert_close(rewritten_evidence.space_screws[1], -evidence.space_screws[1])
-    torch.testing.assert_close(rewritten_evidence.q_home[0], evidence.q_home[0])
-    torch.testing.assert_close(rewritten_evidence.q_home[1], -evidence.q_home[1])
-    torch.testing.assert_close(sign, torch.tensor([1.0, -1.0], dtype=torch.float64))
-
-    ideal_paired = reference.__class__(
-        zero_order=reference.zero_order,
-        first_order=reference.first_order * sign.view(1, -1, 1),
-    )
-    ideal_loss = joint_sign_paired_loss(reference, ideal_paired, joint_sign=sign)
-    torch.testing.assert_close(ideal_loss, torch.zeros_like(ideal_loss))
-    shifted_paired = reference.__class__(
-        zero_order=reference.zero_order + 1.0,
-        first_order=reference.first_order * sign.view(1, -1, 1) + 2.0,
-    )
-    shifted_loss = joint_sign_paired_loss(reference, shifted_paired, joint_sign=sign)
-    torch.testing.assert_close(shifted_loss, torch.tensor(5.0, dtype=torch.float64))  # $1^2+2^2$
-
-    actual_paired = encoder(rewritten_q, rewritten_evidence)
-    actual_loss = joint_sign_paired_loss(reference, actual_paired, joint_sign=sign)
-    actual_loss.backward()
-    assert torch.isfinite(actual_loss)
-    assert any(parameter.grad is not None for parameter in encoder.parameters())
-
-    valid = torch.tensor([[True, True, False], [True, False, False]])
-    first_pattern = deterministic_partial_joint_sign(valid, step=0, dtype=torch.float64)
-    repeated_pattern = deterministic_partial_joint_sign(valid, step=0, dtype=torch.float64)
-    torch.testing.assert_close(first_pattern, repeated_pattern)
-    torch.testing.assert_close(first_pattern[:, 2], torch.ones(2, dtype=torch.float64))
 
 
 def test_so2_and_partial_joint_sign_rewrites_commute() -> None:
@@ -313,10 +287,8 @@ def test_same_structure_assets_share_one_forward_with_per_sample_static_evidence
     first_alone = encoder(q[:1], first)
     second_alone = encoder(q[1:], second)
 
-    torch.testing.assert_close(together.zero_order[:1], first_alone.zero_order, atol=1.0e-10, rtol=1.0e-10)
-    torch.testing.assert_close(together.zero_order[1:], second_alone.zero_order, atol=1.0e-10, rtol=1.0e-10)
-    torch.testing.assert_close(together.first_order[:1], first_alone.first_order, atol=1.0e-10, rtol=1.0e-10)
-    torch.testing.assert_close(together.first_order[1:], second_alone.first_order, atol=1.0e-10, rtol=1.0e-10)
+    torch.testing.assert_close(together.entities[:1], first_alone.entities, atol=1.0e-10, rtol=1.0e-10)
+    torch.testing.assert_close(together.entities[1:], second_alone.entities, atol=1.0e-10, rtol=1.0e-10)
 
 
 def test_cross_structure_padding_matches_independent_variable_length_forwards() -> None:
@@ -336,29 +308,80 @@ def test_cross_structure_padding_matches_independent_variable_length_forwards() 
     one_alone = encoder(q[:1, :1], one_joint)
     two_alone = encoder(q[1:2, :2], two_joint)
 
-    torch.testing.assert_close(padded.zero_order[0, :3], one_alone.zero_order[0], atol=1.0e-10, rtol=1.0e-10)
-    torch.testing.assert_close(padded.zero_order[1, :4], two_alone.zero_order[0], atol=1.0e-10, rtol=1.0e-10)
-    torch.testing.assert_close(padded.first_order[0, :1], one_alone.first_order[0], atol=1.0e-10, rtol=1.0e-10)
-    torch.testing.assert_close(padded.first_order[1, :2], two_alone.first_order[0], atol=1.0e-10, rtol=1.0e-10)
-    assert torch.count_nonzero(padded.zero_order[0, 3:]) == 0
-    assert torch.count_nonzero(padded.first_order[0, 1:]) == 0
-    assert torch.count_nonzero(padded.zero_order[1, 4:]) == 0
-    assert torch.count_nonzero(padded.first_order[1, 2:]) == 0
+    torch.testing.assert_close(padded.entities[0, :3], one_alone.entities[0], atol=1.0e-10, rtol=1.0e-10)
+    torch.testing.assert_close(padded.entities[1, :4], two_alone.entities[0], atol=1.0e-10, rtol=1.0e-10)
+    assert torch.count_nonzero(padded.entities[0, 3:]) == 0
+    assert torch.count_nonzero(padded.entities[1, 4:]) == 0
 
     parameters = tuple(encoder.parameters())
-    padded_valid_loss = (
-        padded.zero_order[0, :3].square().sum()
-        + padded.first_order[0, :1].square().sum()
-        + padded.zero_order[1, :4].square().sum()
-        + padded.first_order[1, :2].square().sum()
-    )
-    independent_valid_loss = (
-        one_alone.zero_order.square().sum()
-        + one_alone.first_order.square().sum()
-        + two_alone.zero_order.square().sum()
-        + two_alone.first_order.square().sum()
-    )
+    padded_valid_loss = padded.entities[0, :3].square().sum() + padded.entities[1, :4].square().sum()
+    independent_valid_loss = one_alone.entities.square().sum() + two_alone.entities.square().sum()
     padded_gradients = torch.autograd.grad(padded_valid_loss, parameters, retain_graph=True)
     independent_gradients = torch.autograd.grad(independent_valid_loss, parameters)
     for padded_gradient, independent_gradient in zip(padded_gradients, independent_gradients):
         torch.testing.assert_close(padded_gradient, independent_gradient, atol=1.0e-9, rtol=1.0e-9)
+
+
+def test_anchor_padding_mask_matches_independent_ragged_anchor_forward() -> None:
+    r"""三指/四指资产的不同 K 必须共享 batch，padding anchor 不能改变有效 latent。"""
+
+    torch.manual_seed(31)
+    full = _static_evidence()
+    short = StaticGeometryEvidence(
+        anchors=full.anchors[:-1],
+        home_surface_points=full.home_surface_points,
+        home_surface_mask=full.home_surface_mask,
+        palm_normal=full.palm_normal,
+        space_screws=full.space_screws,
+        q_home=full.q_home,
+        entity_role=full.entity_role,
+        entity_joint_index=full.entity_joint_index,
+        joint_entity_index=full.joint_entity_index,
+        shortest_path=full.shortest_path,
+        parent_direction=full.parent_direction,
+        child_direction=full.child_direction,
+    )
+    padding = GeometryPaddingCfg(max_joint_count=1, max_tip_count=1, max_graph_distance=4)
+    evidence = pad_static_geometry_evidence((full, short), config=padding)
+    q = torch.tensor([[0.19], [-0.23]], dtype=torch.float64)
+    encoder = _encoder().eval()
+
+    together = encoder(q, evidence)
+    full_alone = encoder(q[:1], full)
+    short_alone = encoder(q[1:], short)
+
+    torch.testing.assert_close(together.entities[:1], full_alone.entities, atol=1.0e-10, rtol=1.0e-10)
+    torch.testing.assert_close(together.entities[1:], short_alone.entities, atol=1.0e-10, rtol=1.0e-10)
+    assert evidence.anchor_valid_mask is not None
+    assert evidence.anchor_valid_mask.sum(dim=-1).tolist() == [full.anchors.shape[0], short.anchors.shape[0]]
+
+
+def test_unique_evidence_row_routing_matches_expanded_static_batch() -> None:
+    r"""同一 minibatch 重复 asset row 时，静态证据去重前向必须与逐样本展开严格等价。"""
+
+    torch.manual_seed(37)
+    first = _static_evidence()
+    second = StaticGeometryEvidence(
+        anchors=first.anchors + 0.002,
+        home_surface_points=first.home_surface_points * 1.03,
+        home_surface_mask=first.home_surface_mask,
+        palm_normal=first.palm_normal,
+        space_screws=first.space_screws,
+        q_home=first.q_home + 0.05,
+        entity_role=first.entity_role,
+        entity_joint_index=first.entity_joint_index,
+        joint_entity_index=first.joint_entity_index,
+        shortest_path=first.shortest_path,
+        parent_direction=first.parent_direction,
+        child_direction=first.child_direction,
+    )
+    unique = stack_static_geometry_evidence((first, second))
+    expanded = stack_static_geometry_evidence((first, second, first, second))
+    row_index = torch.tensor([0, 1, 0, 1], dtype=torch.long)
+    q = torch.tensor([[0.1], [-0.2], [0.3], [-0.4]], dtype=torch.float64)
+    encoder = _encoder().eval()
+
+    routed = encoder(q, unique, evidence_row_index=row_index)
+    repeated = encoder(q, expanded)
+
+    torch.testing.assert_close(routed.entities, repeated.entities, atol=1.0e-10, rtol=1.0e-10)

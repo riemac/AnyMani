@@ -147,8 +147,8 @@ def test_padding_derivation_reads_only_typed_semantic_axis_lengths() -> None:
     assert padding.max_graph_distance == 8  # backbone graph-distance 截断不由资产重写
 
 
-def test_all_phases_use_64_sample_three_objective_microbatches() -> None:
-    r"""三项普通参数图在 train/calibration/eval 统一使用 64-sample 形状合同。"""
+def test_all_phases_use_64_sample_microbatches() -> None:
+    r"""train/calibration/eval 的普通批处理路径统一使用 64-sample 形状合同。"""
 
     assert _forward_microbatch_samples("calibration") == 64
     assert _forward_microbatch_samples("train") == 64
@@ -390,15 +390,15 @@ def test_forward_microbatch_split_preserves_sample_axis_and_nested_targets() -> 
 
 
 def test_streaming_backward_matches_full_group_additive_gradient(monkeypatch: pytest.MonkeyPatch) -> None:
-    r"""逐块普通 backward 必须等价于完整 group 的三项加权充分统计梯度。"""
+    r"""逐块普通 backward 必须等价于完整 group 的双项 baseline-normalized 充分统计梯度。"""
 
     block = _sample(torch.tensor([[0.1, -0.2], [0.3, 0.4], [-0.5, 0.2], [0.7, -0.1]]))
     batch = pad_online_geometry_samples(
         list(split_online_geometry_sample(block)),
         padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
     )
-    parameter = torch.nn.Parameter(torch.tensor(2.0))  # 三项均为 $p^2$：总损失 $3p^2=12$，梯度 $6p=12$
-    names = ("density", "kappa", "derived_field")
+    parameter = torch.nn.Parameter(torch.tensor(2.0))  # 两项均为 $p^2$：总损失 $2p^2=8$，梯度 $4p=8$
+    names = ("density", "kappa")
     enabled = {name: SimpleNamespace(weight=1.0) for name in names}
 
     def synthetic_forward(microbatch, **_kwargs):
@@ -410,7 +410,11 @@ def test_streaming_backward_matches_full_group_additive_gradient(monkeypatch: py
             numerator = parameter.square() * count  # $N_{j,m}=B_mp^2$
             statistic = AdditiveStatistic(name, numerator, count)
             objectives[name] = ObjectiveTermResult(name, (statistic,), {"loss": statistic.mean})
-        return MethodStep(objectives=objectives, sample_count=microbatch.q.shape[0]), None
+        prediction = SimpleNamespace(
+            density=torch.zeros_like(microbatch.field_targets.density),
+            kappa=torch.zeros_like(microbatch.sensitivity_targets.kappa),
+        )
+        return MethodStep(objectives=objectives, sample_count=microbatch.q.shape[0]), prediction
 
     fake_method = SimpleNamespace(
         config=SimpleNamespace(
@@ -418,6 +422,7 @@ def test_streaming_backward_matches_full_group_additive_gradient(monkeypatch: py
             joint_sign_rewrite=SimpleNamespace(),
         ),
         _forward_with_prediction=synthetic_forward,
+        require_teacher_baselines=lambda: {"density": 1.0, "kappa": 1.0},
     )
     fake_method._q_per_asset_block = MultiAnchorGaussianMethod._q_per_asset_block  # type: ignore[attr-defined]
     fake_method._training_minibatch_denominators = lambda batch: (  # type: ignore[attr-defined]
@@ -429,8 +434,76 @@ def test_streaming_backward_matches_full_group_additive_gradient(monkeypatch: py
 
     assert update.sample_count == 4
     assert update.terms == {name: pytest.approx(4.0) for name in names}
-    assert float(update.loss) == pytest.approx(12.0)
-    assert float(parameter.grad) == pytest.approx(12.0)  # $\partial(3p^2)/\partial p=6p=12$
+    assert float(update.loss) == pytest.approx(8.0)
+    assert float(parameter.grad) == pytest.approx(8.0)  # $\partial(2p^2)/\partial p=4p=8$
+
+
+def test_streaming_backward_collects_unified_z_gradient_sufficient_statistics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""microbatch-denominator 下的 rho/kappa $Z$ 梯度应产生可重算 norm、dot、cosine 与 Gram 证据。"""
+
+    block = _sample(torch.tensor([[0.1, -0.2], [0.3, 0.4], [-0.5, 0.2], [0.7, -0.1]]))
+    batch = pad_online_geometry_samples(
+        list(split_online_geometry_sample(block)),
+        padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
+    )
+    parameter = torch.nn.Parameter(torch.tensor(2.0))
+    enabled = {name: SimpleNamespace(weight=1.0) for name in ("density", "kappa")}
+
+    def synthetic_forward(microbatch, **_kwargs):
+        count = parameter.new_tensor(float(microbatch.q.shape[0]))
+        entities = parameter * torch.ones(microbatch.q.shape[0], 1, 1)
+        rho_numerator = entities.square().sum()  # $\nabla_ZL_\rho$ 在 $p=2$ 时为正
+        kappa_numerator = (entities - 3.0).square().sum()  # $\nabla_ZL_\kappa$ 在 $p=2$ 时为负
+        objectives = {
+            "density": ObjectiveTermResult(
+                "density",
+                (AdditiveStatistic("density", rho_numerator, count),),
+                {"loss": rho_numerator / count},
+            ),
+            "kappa": ObjectiveTermResult(
+                "kappa",
+                (AdditiveStatistic("kappa", kappa_numerator, count),),
+                {"loss": kappa_numerator / count},
+            ),
+        }
+        prediction = SimpleNamespace(
+            latents=SimpleNamespace(entities=entities),
+            density=torch.zeros_like(microbatch.field_targets.density),
+            kappa=torch.zeros_like(microbatch.sensitivity_targets.kappa),
+        )
+        return MethodStep(objectives=objectives, sample_count=microbatch.q.shape[0]), prediction
+
+    fake_method = SimpleNamespace(
+        config=SimpleNamespace(
+            objectives=SimpleNamespace(enabled=lambda: enabled),
+            joint_sign_rewrite=SimpleNamespace(),
+        ),
+        _forward_with_prediction=synthetic_forward,
+        require_teacher_baselines=lambda: {"density": 1.0, "kappa": 2.0},
+    )
+    fake_method._q_per_asset_block = MultiAnchorGaussianMethod._q_per_asset_block  # type: ignore[attr-defined]
+    fake_method._training_minibatch_denominators = lambda realized: (  # type: ignore[attr-defined]
+        MultiAnchorGaussianMethod._training_minibatch_denominators(fake_method, realized)
+    )
+    monkeypatch.setattr(method_module, "maybe_rewrite_batch", lambda value, **_kwargs: value)
+
+    update = MultiAnchorGaussianMethod.backward_update(
+        fake_method,
+        batch,
+        forward_step=0,
+        microbatch_size=4,
+        collect_z_gradients=True,
+    )
+
+    evidence = update.gradient_evidence
+    assert evidence["raw/rho_norm"] > 0.0
+    assert evidence["raw/kappa_norm"] > 0.0
+    assert evidence["raw/dot"] < 0.0
+    assert evidence["raw/cosine"] == pytest.approx(-1.0)
+    assert evidence["normalized/gram_determinant"] == pytest.approx(0.0, abs=1.0e-12)
+    assert evidence["vanilla/joint_norm"] > 0.0
 
 
 def test_ragged_anchor_padding_mask_matches_independent_relation_encoding() -> None:

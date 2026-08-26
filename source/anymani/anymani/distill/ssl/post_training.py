@@ -24,12 +24,12 @@ EVALUATION_SCHEMA_VERSION = "1.0.0"
 
 @dataclass(frozen=True)
 class ValidationCfg:
-    r"""固定 validation bank、初始化归一化和 GPU 资源配置。"""
+    r"""固定 validation bank、teacher-baseline selection 和 GPU 资源配置。"""
 
     q_per_asset: int = 64
     assets_per_minibatch: int = 2
     q_per_asset_per_minibatch: int = 2
-    selection_metrics: tuple[str, ...] = ("density", "kappa", "derived_field")
+    selection_metrics: tuple[str, ...] = ("density", "kappa")
     seed_offset: int = 1_000_003
     max_resident_assets: int = 64
     device: str = "cuda:0"
@@ -64,11 +64,9 @@ class EvaluationCfg:
         "query_only",
         "same_asset_q_shuffle",
         "cross_asset_shuffle",
-        "first_order_zero",
-        "first_order_joint_shuffle",
-        "first_order_sign_flip",
+        "joint_token_shuffle",
     )
-    selection_metrics: tuple[str, ...] = ("density", "kappa", "derived_field")
+    selection_metrics: tuple[str, ...] = ("density", "kappa")
     bootstrap_replicates: int = 2_000
     evaluation_seed_offset: int = 2_000_003
     training_q_bank_seed_offset: int = 3_000_003

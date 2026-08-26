@@ -28,7 +28,6 @@ from anymani.distill.models.decoders.representations.implicit_field import (
 from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelCfg
 from anymani.distill.models.input_adapters.geometry import (
     GeometryEncoderCfg,
-    GeometryLatentHeadsCfg,
     GeometryPaddingCfg,
     SO2AnchorFrontendCfg,
 )
@@ -54,7 +53,7 @@ _requires_local_mother = pytest.mark.skipif(
 
 
 def _loss(model: GeometrySSLModel, batch) -> torch.Tensor:
-    """对固定 teacher batch 重新计算三项普通监督目标。"""
+    """对固定 teacher batch 重新计算 rho/kappa baseline-normalized 监督目标。"""
 
     q = batch.q.detach()
     prediction = model(
@@ -68,12 +67,16 @@ def _loss(model: GeometrySSLModel, batch) -> torch.Tensor:
     )
     context = MultiAnchorObjectiveContext(prediction=prediction, batch=batch)
     step = MethodStep(objectives=evaluate_objectives(context, MultiAnchorGaussianObjectivesCfg()), sample_count=1)
-    return reduce_method_steps((step,), MultiAnchorGaussianObjectivesCfg()).loss
+    return reduce_method_steps(
+        (step,),
+        MultiAnchorGaussianObjectivesCfg(),
+        {"density": 1.0, "kappa": 1.0},
+    ).loss
 
 
 @_requires_local_mother
 def test_real_mother_fixed_batch_loss_decreases() -> None:
-    """验证三项 method objective 能在一份真实几何 batch 上被优化，而非只完成 backward。"""
+    """验证双项 method objective 能在一份真实几何 batch 上被优化，而非只完成 backward。"""
 
     if not torch.cuda.is_available():
         pytest.skip("real mother online teacher requires CUDA Warp")
@@ -125,11 +128,10 @@ def test_real_mother_fixed_batch_loss_decreases() -> None:
                     feedforward_width=64,
                     dropout=0.0,
                 ),
-                heads=GeometryLatentHeadsCfg(zero_order_width=24, first_order_width=12),
             ),
             ssl_decoders=GeometrySSLDecoderCfg(
                 density=ScalarSigmaFiLMDensityDecoderCfg(hidden_width=32, residual_blocks=1),
-                sensitivity=DistanceSensitivityDecoderCfg(coefficient_hidden_width=32),
+                sensitivity=DistanceSensitivityDecoderCfg(hidden_width=32, residual_blocks=2),
             ),
         )
     ).cuda()

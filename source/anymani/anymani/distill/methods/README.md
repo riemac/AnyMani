@@ -10,7 +10,7 @@ $$
 \rho_{\sigma,g}(x;q)=\exp\!\left[-\frac{d_g(x;q)^2}{2\sigma^2}\right].
 $$
 
-一阶监督先取距离灵敏度 $\kappa_{g,i}=\partial d_g/\partial q_i$，单位 m/rad，再由链式法则得到场灵敏度 $g_{\sigma,g,i}=-(d_g/\sigma^2)\rho_{\sigma,g}\kappa_{g,i}$，单位 rad$^{-1}$。retained encoder 只读当前物理 $q$ 与静态证据；query、sigma、最近点、Jacobian 和 teacher 只属于 SSL。$z_i^{(1)}$ 是整手场 Jacobian 第 $i$ 列的固定宽度表示，不是对自身 $z_i^{(0)}$ 求导。
+一阶监督取距离灵敏度 $\kappa_{g,i}=\partial d_g/\partial q_i$，单位 m/rad；链式场灵敏度 $g_{\sigma,g,i}=-(d_g/\sigma^2)\rho_{\sigma,g}\kappa_{g,i}$ 只作事后诊断。retained encoder 只读当前物理 $q$ 与静态证据；query、sigma、最近点、Jacobian 和 teacher 只属于 SSL。JOINT view 从统一 owner-token $Z$ gather，不产生一阶 latent 包。
 
 ## 方法内部耦合
 
@@ -18,7 +18,7 @@ $$
 μ_q                完整 joint-limit 超矩形上的 scrambled Sobol
 R                  物理 source / field / query / target
 f_θ                GeometrySSLModel
-L                  三项比较公式
+L                  rho/kappa、teacher baseline 与固定归一化
 A                  单 JOINT 符号改写
 ```
 
@@ -26,15 +26,15 @@ A                  单 JOINT 符号改写
 
 每资产独立生成 8 套 physical anchor bank。同资产 q-block 内共享一套并均衡轮换；validation、independent q-bank 与 PPO 固定 $A^{(0)}$。home-surface 每 owner 64 个 boundary 点。query 保持 workspace/shell/adjacent = 50/25/25；一阶边只从 shell 抽。训练 sigma 中心为 4/16/64 mm，log-space ±10% jitter；validation 关闭 jitter，仍用同一组。每个有效 JOINT：train 1 条 active + 1 条 structure-zero，validation 为 4+4。
 
-## 三项约束
+## 双项约束
 
-主损失是 density、κ 与 derived-field，其中 $\hat g^{(\kappa)}=-(d/\sigma^2)\hat\rho\hat\kappa$ 对齐物理 teacher $g$。paired parity 只属于独立评估。joint-sign rewrite 是输入增强：每个 $(asset,q)$ 以 0.20 概率恰好翻一个有效 JOINT 的 $(q,q_{home},\mathcal S)$；density/distance 不变，对应 $\kappa/g$ 翻号。validation 另做双前向 parity audit。
+主损失固定为 $L=L_\rho/B_\rho+L_\kappa/B_\kappa$。$B_\rho$ 来自完整 train teacher distribution 的逐 bandwidth-slot constant mean，$B_\kappa$ 是 zero predictor，并复用 active/zero 归约。derived-field、density JVP 与 full-gradient Gram 只属于显式 diagnostics。joint-sign rewrite 以 0.20 概率翻一个有效 JOINT 的 $(q,q_{home},\mathcal S)$；只验收 observable density 不变与对应 κ 变号。
 
 归约按 $(asset,q)$ 等权。一阶 active/zero 先分别平均，再 1:1 合并，避免最近点 mask 丢掉全部 active 后被 zero 主导。owner、query 和 edge 轴由 Method 解释，Trainer 只接收归约后的充分统计。
 
-`calibrate_objectives` 与 `pretrain` 共用同一 façade 和 `max_epochs / num_minibatches / mini_epochs / microbatch_size / sampling` 配置接口。Method 按完整 minibatch denominator 把显存切片合成为一次精确更新；Trainer 不跨 minibatch 累积梯度。预实验强制单遍、无反向且不自动改权重；正式训练引用 artifact 时核对数据集、损失公式、method 类型和代码 lineage。
+`calibrate_objectives` 与 `pretrain` 共用同一 façade 和 `max_epochs / num_minibatches / mini_epochs / microbatch_size / sampling` 配置接口。Method 按完整 minibatch denominator 把显存切片合成为一次精确更新；Trainer 不跨 minibatch 累积梯度。baseline pass 必须恰好覆盖每项 train asset 一次且不运行 learned model；正式训练引用 schema-7 artifact 时核对数据集、公式、method、代码 lineage 和 hash。
 
-Method session 封装 source、Sobol cursor、resident window 和具体 batch。固定 validation/final-evaluation 测度也由 Method 执行：$A^{(0)}$、4/16/64 mm、关闭 jitter/rewrite、每 JOINT 4+4 edges。Trainer 只统筹调用时机、三项 selection score、best checkpoint 和冻结后的 unseen-suite 报告。
+Method session 封装 source、Sobol cursor、resident window 和具体 batch。固定 validation/final-evaluation 测度也由 Method 执行：$A^{(0)}$、4/16/64 mm、关闭 jitter/rewrite、每 JOINT 4+4 edges。独立 validation 只用 teacher-normalized density/κ selection score；训练进程不自动启动它。
 
 ## 阅读边界
 

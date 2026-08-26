@@ -30,7 +30,7 @@ space 中比较它们诱导出的物理场。
 - 所有 learnable input adapter、backbone 与 decoder 位于 ``distill.models``；
 - loss 位于 ``distill.objectives``；SSL / RL / IL 只负责阶段编排；
 - 本包不得 import、解析或要求 ``Research`` vault 存在；Research 只能下游引用代码证据；
-- pretraining-only target generator 可以较重；PPO 保留的是 adapter + backbone +
-  $z^{(0)}/z^{(1)}$ heads。当前自动性能门槛只覆盖 RTX 5070 Ti、$B=4096$、单结构组的
-  GPU-resident $X\rightarrow(Z^{(0)},Z^{(1)})$，50 次计时 p95 不超过 40 ms。
+- pretraining-only target generator 可以较重；PPO 保留的是 adapter + backbone final-norm unified
+  $Z$。当前自动性能门槛只覆盖 RTX 5070 Ti、$B=4096$、单结构组的 GPU-resident
+  $X\rightarrow Z$，50 次计时 p95 不超过 40 ms。
 """

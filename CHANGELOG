@@ -1,3 +1,12 @@
+0.7.2 - 2026-08-27
+==================
+
+- Geometry SSL retained representation 收敛为单一 PALM/JOINT/TIP typed $Z$：直接保留 128-width graph-biased Transformer final-norm tokens，删除 zero/first-order heads 与主干后 screw bypass；density 保留 owner FiLM，kappa 改为 query-main、owner/JOINT-conditioned 的 3×128 residual FiLM-MLP。
+- Active training 固定为 teacher-baseline-normalized density/κ 双目标；schema-7 baseline pass 恰好覆盖完整 8192-asset train catalog × 8 q，分别生成逐 bandwidth constant-density 与 active/structural-zero zero-kappa baseline，旧 schema-6 random-model calibration fail-closed。
+- 每 4 epochs 最后一次 update 在参数更新前记录 unified-Z 双任务 gradient sufficient statistics；JSONL/TensorBoard 增加 raw/normalized loss、skill、RMS、valid ratio、吞吐、显存与诊断耗时，NPZ 升级为可重算 prediction/target/mask/selectors/strata/$Z$ 证据。
+- Full checkpoint 保持 schema 7 并绑定 teacher baseline hash/value；standalone retained artifact 升至 schema 5，并发布单一 unified feature contract。Derived-field、完整 coordinate rewrite、density JVP 与 selected-parameter full-gradient Gram 只保留为显式事后诊断，训练结束不自动评估。
+- RTX 5070 Ti、$B=4096$、20 warmups + 50 CUDA Events 下 unified retained encoder 为 317,383 parameters，median 17.844 ms、p95 18.275 ms、peak allocated 811.42 MiB，通过 40 ms 子预算；disposable decoders p95 1.461 ms。
+
 0.7.1 - 2026-08-24
 ==================
 

@@ -17,7 +17,7 @@ distill/
 │   └── multi_anchor_gaussian_implicit_field/
 │       ├── method.py               prepare/realize/forward/reduce/evaluate/export
 │       ├── batch.py                选 A^(k)、evidence、padding、三块视图
-│       └── objectives.py           三项比较公式
+│       └── objectives.py           rho/kappa、teacher baseline 与归一化
 ├── models/
 │   ├── input_adapters/geometry.py  StaticGeometryEvidence 与 retained encoder
 │   ├── backbones/                  graph-biased Transformer
@@ -41,7 +41,7 @@ distill/
 | `representations/` | 物理 source/field/query/target | `torch.nn`、padding、loss 权重 |
 | `methods/` | 科学聚合根；对外封闭给 trainer | catalog、optimizer、MDP |
 | `models/` | adapter、backbone、decoder、policy heads | teacher、loss |
-| `objectives/` | 可复用比较合同 | sampling、方法专属三项公式 |
+| `objectives/` | 可复用比较合同 | sampling、方法专属双项公式 |
 | `ssl/` `rl/` `il/` | 各阶段数据流、入口、checkpoint | 共享 trunk 的重复实现 |
 | `diagnostics/` | 记录、固定 evaluation、只读分析 | 训练选择或物理真值 |
 
@@ -69,13 +69,13 @@ retained encoder 的输入是当前物理 `q` 与静态证据；distance、最�
 
 ### 几何 SSL 合同
 
-主线是多锚点条件 Gaussian 场。三项损失为 density、κ 与 derived-field；paired 只用于独立评估。schema 6 根配置为 `data / method / trainer / run`，训练层级是 epoch → mini-epoch → minibatch → microbatch；每个 minibatch 独立更新，microbatch 只解决显存切分。Trainer 只调 Method/session 封闭接口；full checkpoint 只服务 SSL resume，RL/IL 只消费 standalone retained artifact。
+主线是多锚点条件 Gaussian 场与 unified owner-token $Z$。active loss 固定为 teacher-baseline-normalized density/κ；derived-field、density JVP 与 full-gradient 只作显式事后诊断。schema 7 根配置为 `data / method / trainer / run`，训练层级是 epoch → mini-epoch → minibatch → microbatch；每个 minibatch 独立更新，microbatch 只解决显存切分。Trainer 只调 Method/session 封闭接口；full checkpoint 只服务 SSL resume，RL/IL 只消费 schema-5 standalone retained artifact。
 
 official LEAP/Allegro 不参与 train、calibration 或 checkpoint selection。split 按 `physical_geometry_hash` 隔离；路径、asset ID 或 `content_hash` 不足以识别 limit-only 重复。
 
 ### 性能门槛
 
-RTX 5070 Ti、`B=4096`、单结构组、20 预热 + 50 CUDA Event，p95 ≤ 40 ms。计时覆盖 adapter、聚合、backbone、零/一阶 heads，边界从 GPU-resident 输入开始并止于 retained 表征。PPO full fine-tune 每次重算 learned activation，以保持参数更新后的特征一致。
+RTX 5070 Ti、`B=4096`、单结构组、20 预热 + 50 CUDA Event，p95 ≤ 40 ms。计时覆盖 adapter、聚合与 backbone final-norm unified $Z$，边界从 GPU-resident 输入开始并止于 retained 表征。PPO full fine-tune 每次重算 learned activation，以保持参数更新后的特征一致。
 
 ## Common Operations And Tools
 
@@ -86,4 +86,4 @@ pytest source/anymani/anymani/distill/tests/integration -q
 ruff check source/anymani/anymani/distill/methods source/anymani/anymani/distill/ssl
 ```
 
-嵌套合同见 `methods/`、`representations/`、`models/`、`objectives/`、`ssl/`、`rl/`、`tests/` 的 `AGENTS.md`。人类阅读入口见各目录 README。跨手型泛化结论以正式 pilot、unseen-suite evaluation 和 PPO transfer 证据为准。
+嵌套合同见 `methods/`、`representations/`、`models/`、`objectives/`、`ssl/`、`rl/`、`diagnostics/`、`tests/` 的 `AGENTS.md`。人类阅读入口见各目录 README。跨手型泛化结论以正式 pilot、unseen-suite evaluation 和 PPO transfer 证据为准。

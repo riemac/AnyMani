@@ -30,13 +30,12 @@ E_\theta
 \left(
 q,\ q_{home},\ topology,\ home\_screws,\ home\_surface,\ anchors
 \right)
-\longrightarrow
-\left(Z^{(0)},\{z_i^{(1)}\}_{i=1}^{N_J}\right).
+\longrightarrow Z.
 $$
 
-$Z^{(0)}\in\mathbb R^{B\times G\times D_0}$ 描述当前整手逐 owner 零阶碰撞几何，
-$z_i^{(1)}\in\mathbb R^{D_1}$ 描述沿物理关节坐标 $q_i$ 的局部运动学—几何响应。
-二者都对 hand-frame 面内 $SO(2)$ 坐标重写不变；成对 joint-sign 重写下零阶为偶、一阶为奇。
+$Z\in\mathbb R^{B\times G\times D}$ 是与 PALM/JOINT/TIP owner 同索引的唯一表征，直接取
+graph-biased Transformer 的 final-norm tokens。JOINT view 只按 ``joint_entity_index`` 从同一
+$Z$ gather，不产生第二组 latent，也不对 latent 本身施加 joint-sign parity 假设。
 
 共享点—锚点前端先沿全部等地位锚点聚合，再沿每个归属体的真实基准表面点聚合；约 $N_E$ 个
 PALM/JOINT/TIP 表征单元随后进入图偏置整手 Transformer。不同手指只负责生成锚点采样分布，
@@ -52,9 +51,8 @@ q                    : [B, N_J]       # 当前物理关节角，rad
 anchors              : [K, 3]         # `{h}` 中的固定物理锚点，m
 home_surface_points  : [G, M, 3]      # 归属体真实并集边界样本，m
 space_screws         : [N_J, 6]       # 基准 `{h}` 空间旋量
-entity tokens        : [B, G, D]       # G=N_E，不使用实体填充
-Z^(0)                : [B, G, D_0]     # 零阶表征
-Z^(1)                : [B, N_J, D_1]   # 逐 JOINT 一阶表征
+entity tokens / Z    : [B, G, D]       # G=N_E，跨结构时显式 padding
+JOINT view           : [B, N_J, D]     # 从 Z gather，不是独立 latent
 ```
 
 这里 $B$ 是同一结构模式的微批次大小，$G$ 是 PALM/JOINT/TIP 归属体数，$K$ 是当前资产
@@ -93,25 +91,19 @@ $$
 \theta_i=\frac{q_i-q_{home,i}}{\pi}.
 $$
 
-所有 JOINT 共享一个普通 residual head：
-
-$$
-z_i^{(1)}=H_1\!\left([z_i^{(0)}\Vert f_i^{screw}]\right).
-$$
-
-普通 $H_1$ 不人为硬编码 parity；训练目标对同步改写后的成对 latent 约束
-$Z^{(0)}$ 为偶、对应 $z_i^{(1)}$ 为奇。测试仍需检查广播、索引和资产 lowering
-是否同步翻转了全部物理量。
+带符号的 $\theta_i$ 与 $f_i^{screw}$ 只在 Transformer 之前写入对应 JOINT entity。正式约束
+作用于可观测输出：同步坐标改写后 density 不变、对应 $\kappa$ 变号；不增加 latent parity loss。
+测试仍需检查广播、索引和资产 lowering 是否同步翻转了全部物理量。
 
 关节限位不属于本模块输入。两个仅限位不同、运动学与碰撞几何相同的手，在相同物理 $q$
 下必须得到相同几何表征。限位只服务构型采样、边界验证和后续策略局部状态。
 
-数值锚点：canonical 配置使用 $D_0=128$、$D_1=64$、2 层、4 头、随机失活为 0，
+数值锚点：canonical 配置使用 $D=128$、2 层、4 头、FFN width 256、随机失活为 0，
 固定长度数值尺度为 0.1 m。它们是工程起点，不是实验结论。正式选择必须同时报告留出误差、
 参数量、激活显存，以及 RTX 5070 Ti、$B=4096$ 下完整保留路径的 p95 延迟。
 
 NOTE: 该实现不追求镜像不变性。左右镜像、拇指挂载方向和锚点星座手性属于真实形态差异，
-必须允许零阶表征发生变化。
+必须允许统一实体表征发生变化。
 
 NOTE: 基准表面点只表示真实碰撞皮肤，不含实体内部点；实体内部点只允许出现在物理锚点采样中，
 两种点集的监督语义不得复用或混写。
@@ -127,6 +119,7 @@ import torch
 from torch import nn
 
 from anymani.assets.asset_schema_geometry import HandGeometrySemanticsCfg
+from anymani.assets.canonical_runtime import CANONICAL_HAND_SCHEMA_V1, CanonicalHandRouting
 from anymani.distill.representations.sources.collision_geometry import AnchorSamples, HomeSurfaceSamples
 from anymani.distill.representations.sources.kinematics import EmbodimentGeometrySpec
 
@@ -158,25 +151,8 @@ class SO2AnchorFrontendCfg:
 
 
 @dataclass(frozen=True)
-class GeometryLatentHeadsCfg:
-    r"""零阶 owner 表征与逐 JOINT 一阶 residual 表征的固定类型宽度。"""
-
-    zero_order_width: int = 128  # 每 owner 零阶 latent 宽度 $D_0$
-    first_order_width: int = 64  # 每活动 JOINT 一阶 latent 宽度 $D_1$
-    first_order_source: str = "residual_screw"  # 当前 $H_1([z_i^{(0)}\Vert f_i^{screw}])$ 路线
-
-    def __post_init__(self) -> None:
-        r"""拒绝空 latent，并防止未实现的一阶候选被静默当作 canonical。"""
-
-        if self.zero_order_width < 1 or self.first_order_width < 1:
-            raise ValueError("zero/first-order latent widths must be positive")
-        if self.first_order_source != "residual_screw":
-            raise ValueError("only first_order_source='residual_screw' is currently implemented")
-
-
-@dataclass(frozen=True)
 class GeometryEncoderCfg:
-    r"""部署保留几何编码器的前端、整手主干与类型化 heads 组合。
+    r"""部署保留几何编码器的前端与统一整手主干组合。
 
     canonical experiment 明确使用 2 层 graph-biased encoder-only Transformer，而不是依赖底层
     默认值。全部容量仍是首个可运行锚点；正式选择需同时比较留出误差、参数量、激活显存和
@@ -185,7 +161,6 @@ class GeometryEncoderCfg:
 
     frontend: SO2AnchorFrontendCfg = SO2AnchorFrontendCfg()  # 点/旋量—anchor 与 owner 内聚合
     backbone: GraphBiasedTransformerCfg = GraphBiasedTransformerCfg()  # 全连接图偏置整手上下文
-    heads: GeometryLatentHeadsCfg = GeometryLatentHeadsCfg()  # $Z^{(0)}$ 与 $z_i^{(1)}$
 
 
 @dataclass(frozen=True)
@@ -308,7 +283,10 @@ class StaticGeometryEvidence:
             raise ValueError("every valid owner must have at least one home surface point")
 
         allowed_entity_shapes = {(owner_count,), (batch_size, owner_count)} if batched else {(owner_count,)}
-        if self.entity_role.shape not in allowed_entity_shapes or self.entity_joint_index.shape not in allowed_entity_shapes:
+        if (
+            self.entity_role.shape not in allowed_entity_shapes
+            or self.entity_joint_index.shape not in allowed_entity_shapes
+        ):
             raise ValueError("entity_role/entity_joint_index must have shape [G] or [B,G]")
         allowed_joint_shapes = {(joint_count,), (batch_size, joint_count)} if batched else {(joint_count,)}
         if self.joint_entity_index.shape not in allowed_joint_shapes:
@@ -322,7 +300,9 @@ class StaticGeometryEvidence:
             raise ValueError("graph relation matrices must have shape [G,G] or [B,G,G]")
 
         check_batch = batch_size if batched else 1
-        role_batch = self.entity_role if self.entity_role.ndim == 2 else self.entity_role.unsqueeze(0).expand(check_batch, -1)
+        role_batch = (
+            self.entity_role if self.entity_role.ndim == 2 else self.entity_role.unsqueeze(0).expand(check_batch, -1)
+        )
         entity_joint_batch = (
             self.entity_joint_index
             if self.entity_joint_index.ndim == 2
@@ -336,9 +316,7 @@ class StaticGeometryEvidence:
         entity_valid_batch = entity_valid if entity_valid.ndim == 2 else entity_valid.unsqueeze(0)
         joint_valid_batch = joint_valid if joint_valid.ndim == 2 else joint_valid.unsqueeze(0)
         for batch_index in range(check_batch):
-            expected_joint_entities = torch.where(
-                (role_batch[batch_index] == 1) & entity_valid_batch[batch_index]
-            )[0]
+            expected_joint_entities = torch.where((role_batch[batch_index] == 1) & entity_valid_batch[batch_index])[0]
             valid_joint_slots = torch.where(joint_valid_batch[batch_index])[0]
             mapped_entities = joint_entity_batch[batch_index, valid_joint_slots]
             if not torch.equal(expected_joint_entities, mapped_entities):
@@ -349,15 +327,14 @@ class StaticGeometryEvidence:
 
 @dataclass(frozen=True)
 class GeometryLatents:
-    r"""部署保留的类型化零阶与逐 JOINT 一阶表征。
+    r"""部署保留的单一 PALM/JOINT/TIP typed entity 表征。
 
-    `zero_order[g]` 与物理实体/表面归属体同索引；`first_order[i]` 与活动关节坐标同索引。
-    二者不是把一个匿名向量任意切成两半，而是具有不同的规范变换：零阶对成对关节符号为偶，
-    一阶对自身关节符号为奇。
+    ``entities[g]`` 与物理实体/表面归属体同索引，且直接等于 Transformer final-norm token。
+    逐 JOINT 消费者必须通过静态证据中的 ``joint_entity_index`` gather；该 view 与 owner view
+    共享同一存储和梯度，不是独立 head 或第二表征空间。
     """
 
-    zero_order: torch.Tensor  # `[B,G,D_0]`，$SO(2)$ 不变且 joint-sign 偶
-    first_order: torch.Tensor  # `[B,N_J,D_1]`，$SO(2)$ 不变且对自身 joint sign 为奇
+    entities: torch.Tensor  # `[B,G,D]`，与 PALM/JOINT/TIP owner 同索引的统一 $Z$
 
 
 class SO2AnchorRelationEncoder(nn.Module):
@@ -438,9 +415,7 @@ class SO2AnchorRelationEncoder(nn.Module):
             ).clamp_min(1.0).unsqueeze(-1)
             anchor_centered = anchors - center  # `[B,K,3]`
             anchors_for_points = anchors.view(anchors.shape[0], *singleton_axes, anchors.shape[1], 3)
-            centered_for_points = anchor_centered.view(
-                anchors.shape[0], *singleton_axes, anchors.shape[1], 3
-            )
+            centered_for_points = anchor_centered.view(anchors.shape[0], *singleton_axes, anchors.shape[1], 3)
             if palm_normal.ndim == 1:
                 normal_for_points = palm_normal  # 所有资产共享 `{h}` 有向 palm normal
             else:
@@ -514,7 +489,7 @@ class SO2AnchorRelationEncoder(nn.Module):
 
 
 class ImplicitGeometryEncoder(nn.Module):
-    r"""从静态手型证据与当前物理 $q$ 输出类型化整手几何表征。
+    r"""从静态手型证据与当前物理 $q$ 输出统一整手几何表征。
 
     前向只接收部署可见信息。当前表面、距离、最近点与解析 Jacobian 只在训练监督侧出现，
     不允许通过便利特征进入本类。静态原始几何可以缓存，但本类产生的学习式激活在 PPO 微调时
@@ -522,23 +497,22 @@ class ImplicitGeometryEncoder(nn.Module):
     """
 
     def __init__(self, config: GeometryEncoderCfg) -> None:
-        r"""组装部署保留的点—锚点前端、整手主干与零/一阶输出头。
+        r"""组装部署保留的点—锚点前端与整手主干。
 
         Args:
-            config (GeometryEncoderCfg): 前端、graph-biased backbone 与类型化 heads 配置。
+            config (GeometryEncoderCfg): 前端与 graph-biased backbone 配置。
 
         模块生命周期：本类全部参数随 SSL 检查点迁入 PPO；密度和灵敏度解码器不在本类中，
         因而导出保留检查点时无需根据参数名字猜测哪些层应删除。
 
-        一阶路径复用唯一的 $f_i^{screw}$，不建立第二套逐锚点网络。完整 screw feature
-        同时进入 JOINT entity 输入和整手主干后的共享 residual head。
+        完整 $f_i^{screw}$ 与当前 $q_i$ 只进入 JOINT entity 输入。主干 final-norm token
+        就是 retained $Z$，其后不再接 task-specific projection 或 screw residual bypass。
         """
 
         super().__init__()
         self.config = config
         frontend = config.frontend  # 点/旋量—anchor 与 owner 内聚合容量
         backbone = config.backbone  # 全手上下文容量与图偏置桶
-        heads = config.heads  # 零阶/一阶输出类型宽度
         self.point_anchor_encoder = SO2AnchorRelationEncoder(frontend.relation_width, frontend.length_scale_m)
         self.home_point_projection = nn.Sequential(
             nn.Linear(frontend.relation_width, frontend.home_width),
@@ -561,16 +535,8 @@ class ImplicitGeometryEncoder(nn.Module):
         )
         self.role_embedding = nn.Embedding(3, frontend.role_width)  # 角色不编码 finger identity
         entity_input_width = frontend.home_width * 2 + frontend.screw_width + frontend.role_width
-        self.entity_projection = nn.Linear(
-            entity_input_width, backbone.hidden_width
-        )  # 属性拼接到共享表征宽度
+        self.entity_projection = nn.Linear(entity_input_width, backbone.hidden_width)  # 属性拼接到共享表征宽度
         self.backbone = GraphBiasedTransformer(backbone)
-        self.zero_order_head = nn.Linear(backbone.hidden_width, heads.zero_order_width)  # $Z^{(0)}$ 投影
-        self.first_order_head = nn.Sequential(
-            nn.Linear(heads.zero_order_width + frontend.screw_width, heads.first_order_width),
-            nn.GELU(),
-            nn.Linear(heads.first_order_width, heads.first_order_width),
-        )  # 所有 JOINT 共享的 canonical residual $H_1([z_i^{(0)}\Vert f_i^{screw}])$
 
     def encode_points(self, points: torch.Tensor, evidence: StaticGeometryEvidence) -> torch.Tensor:
         r"""公开共享点—锚点前端，供基准表面点与训练期查询点使用同一组参数。
@@ -671,15 +637,20 @@ class ImplicitGeometryEncoder(nn.Module):
         summary = torch.sum(weights * relation_tokens, dim=-2)  # `[...,N_J,D_r]`，anchor permutation 不变
         return self.screw_projection(summary)  # `[...,N_J,D_s]`，单一 $f_i^{screw}$
 
-    def forward(self, q: torch.Tensor, evidence: StaticGeometryEvidence) -> GeometryLatents:
-        r"""计算部署保留的零阶/一阶几何表征。
+    def forward(
+        self,
+        q: torch.Tensor,
+        evidence: StaticGeometryEvidence,
+        evidence_row_index: torch.Tensor | None = None,
+    ) -> GeometryLatents:
+        r"""计算部署保留的统一 PALM/JOINT/TIP entity 表征。
 
         Args:
             q (torch.Tensor): 当前物理关节角，形状 `[B,N_J]`，单位 rad。
             evidence (StaticGeometryEvidence): 当前结构模式的静态物理证据。
 
         Returns:
-            GeometryLatents: `[B,G,D_0]` 零阶与 `[B,N_J,D_1]` 一阶表征。
+            GeometryLatents: ``entities`` 为 `[B,G,D]` 的 final-norm Transformer tokens。
         """
 
         joint_count = evidence.space_screws.shape[-2]  # 活动 JOINT 数 $N_J$
@@ -689,20 +660,35 @@ class ImplicitGeometryEncoder(nn.Module):
         if q.device != evidence.anchors.device:
             raise ValueError("q and StaticGeometryEvidence tensors must share a device")
         evidence_is_batched = evidence.anchors.ndim == 3
-        if evidence_is_batched and evidence.anchors.shape[0] != q.shape[0]:
-            raise ValueError("batched StaticGeometryEvidence must share B with q")
+        if evidence_row_index is not None:
+            if not evidence_is_batched:
+                raise ValueError("evidence_row_index requires batched StaticGeometryEvidence")
+            if evidence_row_index.shape != (q.shape[0],) or evidence_row_index.dtype != torch.long:
+                raise ValueError("evidence_row_index must have shape [B] and dtype torch.long")
+            if torch.any(evidence_row_index < 0) or torch.any(evidence_row_index >= evidence.anchors.shape[0]):
+                raise IndexError("evidence_row_index contains a row outside StaticGeometryEvidence")
+        elif evidence_is_batched and evidence.anchors.shape[0] != q.shape[0]:
+            raise ValueError("batched StaticGeometryEvidence must share B with q unless row routing is provided")
+
+        def route_rows(value: torch.Tensor) -> torch.Tensor:
+            if evidence_row_index is not None:
+                return value[evidence_row_index]
+            return value
 
         batch_size = q.shape[0]  # 同一次 padding/同结构微批次大小 $B$
-        entity_valid = (
+        evidence_batch_size = evidence.anchors.shape[0] if evidence_is_batched else batch_size
+        entity_valid_source = (
             evidence.entity_valid_mask
             if evidence.entity_valid_mask is not None
-            else torch.ones(batch_size, owner_count, device=q.device, dtype=torch.bool)
+            else torch.ones(evidence_batch_size, owner_count, device=q.device, dtype=torch.bool)
         )
-        joint_valid = (
+        joint_valid_source = (
             evidence.joint_valid_mask
             if evidence.joint_valid_mask is not None
-            else torch.ones(batch_size, joint_count, device=q.device, dtype=torch.bool)
+            else torch.ones(evidence_batch_size, joint_count, device=q.device, dtype=torch.bool)
         )
+        entity_valid = route_rows(entity_valid_source) if entity_valid_source.ndim == 2 else entity_valid_source
+        joint_valid = route_rows(joint_valid_source) if joint_valid_source.ndim == 2 else joint_valid_source
         if entity_valid.ndim == 1:
             entity_valid = entity_valid.unsqueeze(0).expand(batch_size, -1)
         if joint_valid.ndim == 1:
@@ -710,9 +696,10 @@ class ImplicitGeometryEncoder(nn.Module):
 
         home_feature = self._home_features(evidence)  # `[G,D_home]` 或 `[B,G,D_home]`
         screw_feature = self._screw_features(evidence)  # `[...,N_J,D_s]` 完整 $f_i^{screw}$
-        theta = ((q - evidence.q_home) / math.pi) * joint_valid  # padding JOINT 的运动严格为零
+        q_home = route_rows(evidence.q_home) if evidence.q_home.ndim == 2 else evidence.q_home
+        theta = ((q - q_home) / math.pi) * joint_valid  # padding JOINT 的运动严格为零
         screw_batch = (
-            screw_feature if evidence_is_batched else screw_feature.unsqueeze(0).expand(q.shape[0], -1, -1)
+            route_rows(screw_feature) if evidence_is_batched else screw_feature.unsqueeze(0).expand(q.shape[0], -1, -1)
         )
         screw_batch = screw_batch * joint_valid.unsqueeze(-1)  # padding screw 不携带形态证据
         motion_input = torch.cat(
@@ -734,42 +721,29 @@ class ImplicitGeometryEncoder(nn.Module):
             entity_motion[:, evidence.joint_entity_index] = joint_motion_feature  # 同结构共享 routing
             entity_screw[:, evidence.joint_entity_index] = screw_batch
         else:
-            routing = evidence.joint_entity_index.clamp_min(0).unsqueeze(-1).expand(
-                -1, -1, self.config.frontend.home_width
-            )
+            routed_joint_entities = route_rows(evidence.joint_entity_index)
+            routing = routed_joint_entities.clamp_min(0).unsqueeze(-1).expand(-1, -1, self.config.frontend.home_width)
             entity_motion.scatter_(1, routing, joint_motion_feature * joint_valid.unsqueeze(-1))
-            screw_routing = evidence.joint_entity_index.clamp_min(0).unsqueeze(-1).expand(
-                -1, -1, self.config.frontend.screw_width
+            screw_routing = (
+                routed_joint_entities.clamp_min(0).unsqueeze(-1).expand(-1, -1, self.config.frontend.screw_width)
             )
             entity_screw.scatter_(1, screw_routing, screw_batch)
 
-        role = self.role_embedding(evidence.entity_role)
+        role_source = self.role_embedding(evidence.entity_role)
+        role = route_rows(role_source) if role_source.ndim == 3 else role_source
         if role.ndim == 2:
             role = role.unsqueeze(0).expand(batch_size, -1, -1)  # 同结构共享角色轴
-        home = home_feature if evidence_is_batched else home_feature.unsqueeze(0).expand(batch_size, -1, -1)
+        home = route_rows(home_feature) if evidence_is_batched else home_feature.unsqueeze(0).expand(batch_size, -1, -1)
         entity_input = torch.cat((entity_motion, home, entity_screw, role), dim=-1)  # 按属性直接拼接
         tokens = self.entity_projection(entity_input) * entity_valid.unsqueeze(-1)  # padding token 输入严格为零
-        contextual = self.backbone(
+        entities = self.backbone(
             tokens,
-            evidence.shortest_path,
-            evidence.parent_direction,
-            evidence.child_direction,
+            route_rows(evidence.shortest_path) if evidence.shortest_path.ndim == 3 else evidence.shortest_path,
+            route_rows(evidence.parent_direction) if evidence.parent_direction.ndim == 3 else evidence.parent_direction,
+            route_rows(evidence.child_direction) if evidence.child_direction.ndim == 3 else evidence.child_direction,
             entity_valid,
-        )  # `[B,G,D]`，全连接整手上下文
-        zero_order = self.zero_order_head(contextual) * entity_valid.unsqueeze(-1)  # padding owner 输出严格为零
-
-        if evidence.joint_entity_index.ndim == 1:
-            joint_zero_order = zero_order.index_select(1, evidence.joint_entity_index)  # 同结构共享 routing
-        else:
-            gather_routing = evidence.joint_entity_index.clamp_min(0).unsqueeze(-1).expand(
-                -1, -1, self.config.heads.zero_order_width
-            )
-            joint_zero_order = torch.gather(zero_order, 1, gather_routing)
-        first_order_input = torch.cat(
-            (joint_zero_order, screw_batch), dim=-1
-        )  # `[B,N_J,D_0+D_s]`，所有 JOINT 共享同一输入类型
-        first_order = self.first_order_head(first_order_input) * joint_valid.unsqueeze(-1)  # canonical residual
-        return GeometryLatents(zero_order=zero_order, first_order=first_order)
+        )  # `[B,G,D]`，final norm 后的统一 $Z$
+        return GeometryLatents(entities=entities)  # padding token 已由 backbone 保证严格为零
 
 
 def build_static_geometry_evidence(
@@ -809,11 +783,14 @@ def build_static_geometry_evidence(
     target_device = torch.device(device)
     owner_home = spec.owner_home_transforms.to(device=target_device, dtype=dtype)
     local_home = torch.as_tensor(home_surface.points_owner_local_m, device=target_device, dtype=dtype)
-    home_points = torch.einsum(
-        "gij,gmj->gmi",
-        owner_home[:, :3, :3],
-        local_home,
-    ) + owner_home[:, None, :3, 3]  # `[G,M,3]`，严格回到 `{h}`
+    home_points = (
+        torch.einsum(
+            "gij,gmj->gmi",
+            owner_home[:, :3, :3],
+            local_home,
+        )
+        + owner_home[:, None, :3, 3]
+    )  # `[G,M,3]`，严格回到 `{h}`
     anchor_points = torch.as_tensor(anchors.anchors_hand_m, device=target_device, dtype=dtype)
     role_index = {"palm": 0, "joint": 1, "tip": 2}
     entity_role = torch.tensor(
@@ -849,6 +826,114 @@ def build_static_geometry_evidence(
         parent_direction=spec.owner_graph_parent.to(device=target_device),
         child_direction=spec.owner_graph_child.to(device=target_device),
         anchor_valid_mask=torch.ones(anchor_points.shape[:-1], device=target_device, dtype=torch.bool),
+    )
+
+
+def canonicalize_static_geometry_evidence(
+    evidence: StaticGeometryEvidence,
+    semantics: HandGeometrySemanticsCfg,
+    routing: CanonicalHandRouting,
+    *,
+    max_graph_distance: int = 8,
+) -> StaticGeometryEvidence:
+    r"""把 source PALM/JOINT/TIP 证据显式 scatter 到 canonical `[21,16]` 轴。
+
+    source owner 轴是 ``PALM -> source JOINT -> source TIP``，而 canonical JOINT 轴采用
+    depth-major PhysX 顺序，TIP 轴采用 ``index/middle/ring/thumb``。该重排只读取 typed
+    semantics 与 manifest routing；ghost slots 保持零值和 invalid mask，不产生几何表面。
+    """
+
+    if evidence.anchors.ndim != 2 or evidence.space_screws.ndim != 2:
+        raise ValueError("canonicalization expects one unbatched source evidence")
+    schema = CANONICAL_HAND_SCHEMA_V1
+    device = evidence.anchors.device
+    dtype = evidence.anchors.dtype
+    home_budget = evidence.home_surface_points.shape[1]
+    owner_count = 1 + schema.dof_count + len(schema.physx_finger_order)
+    joint_count = schema.dof_count
+
+    owner_by_joint = {
+        str(owner.joint_name): owner.owner_index
+        for owner in semantics.owners
+        if owner.role == "joint" and owner.joint_name is not None
+    }
+    tip_by_finger = {
+        str(owner.finger_name): owner.owner_index
+        for owner in semantics.owners
+        if owner.role == "tip" and owner.finger_name is not None
+    }
+    palm_indices = [owner.owner_index for owner in semantics.owners if owner.role == "palm"]
+    if len(palm_indices) != 1:
+        raise ValueError("canonical evidence requires exactly one PALM owner")
+    source_joint_index = {name: index for index, name in enumerate(semantics.active_joint_names)}
+    canonical_to_source = {canonical: source for source, canonical in routing.source_to_canonical}
+
+    owner_source_indices: list[int | None] = [palm_indices[0]]
+    joint_source_indices: list[int | None] = []
+    for canonical_name in schema.joint_names:
+        source_name = canonical_to_source.get(canonical_name)
+        owner_source_indices.append(owner_by_joint.get(source_name) if source_name is not None else None)
+        joint_source_indices.append(source_joint_index.get(source_name) if source_name is not None else None)
+    owner_source_indices.extend(tip_by_finger.get(finger) for finger in schema.physx_finger_order)
+
+    home_points = torch.zeros(owner_count, home_budget, 3, device=device, dtype=dtype)
+    home_mask = torch.zeros(owner_count, home_budget, device=device, dtype=torch.bool)
+    screws = torch.zeros(joint_count, 6, device=device, dtype=dtype)
+    q_home = torch.zeros(joint_count, device=device, dtype=dtype)
+    owner_valid = torch.zeros(owner_count, device=device, dtype=torch.bool)
+    joint_valid = torch.zeros(joint_count, device=device, dtype=torch.bool)
+    graph_shape = (owner_count, owner_count)
+    shortest = torch.full(graph_shape, max_graph_distance, device=device, dtype=torch.long)
+    parent = torch.full_like(shortest, max_graph_distance)
+    child = torch.full_like(shortest, max_graph_distance)
+
+    valid_owner_destinations: list[int] = []
+    valid_owner_sources: list[int] = []
+    for destination, source in enumerate(owner_source_indices):
+        if source is None:
+            continue
+        home_points[destination] = evidence.home_surface_points[source]
+        home_mask[destination] = evidence.home_surface_mask[source]
+        owner_valid[destination] = True
+        valid_owner_destinations.append(destination)
+        valid_owner_sources.append(source)
+    for destination, source in enumerate(joint_source_indices):
+        if source is None:
+            continue
+        screws[destination] = evidence.space_screws[source]
+        q_home[destination] = evidence.q_home[source]
+        joint_valid[destination] = True
+
+    destination_index = torch.tensor(valid_owner_destinations, device=device, dtype=torch.long)
+    source_index = torch.tensor(valid_owner_sources, device=device, dtype=torch.long)
+    destination_grid = destination_index[:, None], destination_index[None, :]
+    source_grid = source_index[:, None], source_index[None, :]
+    shortest[destination_grid] = evidence.shortest_path[source_grid]
+    parent[destination_grid] = evidence.parent_direction[source_grid]
+    child[destination_grid] = evidence.child_direction[source_grid]
+
+    if tuple(joint_valid.tolist()) != routing.active_joint_mask:
+        raise ValueError("canonical geometry joint mask disagrees with artifact routing")
+    tip_valid = tuple(owner_valid[1 + joint_count :].tolist())
+    if tip_valid != routing.active_tip_mask:
+        raise ValueError("canonical geometry TIP mask disagrees with artifact routing")
+
+    return StaticGeometryEvidence(
+        anchors=evidence.anchors,
+        home_surface_points=home_points,
+        home_surface_mask=home_mask,
+        palm_normal=evidence.palm_normal,
+        space_screws=screws,
+        q_home=q_home,
+        entity_role=torch.tensor([0, *([1] * joint_count), *([2] * 4)], device=device, dtype=torch.long),
+        entity_joint_index=torch.tensor([-1, *range(joint_count), *([-1] * 4)], device=device, dtype=torch.long),
+        joint_entity_index=torch.arange(1, 1 + joint_count, device=device, dtype=torch.long),
+        shortest_path=shortest,
+        parent_direction=parent,
+        child_direction=child,
+        entity_valid_mask=owner_valid,
+        joint_valid_mask=joint_valid,
+        anchor_valid_mask=evidence.anchor_valid_mask,
     )
 
 
@@ -928,7 +1013,7 @@ def pad_static_geometry_evidence(
     r"""把不同 owner/JOINT 长度的资产填充为统一 20-JOINT/26-entity batch。
 
     只有张量容器被填充；有效 owner/JOINT 的原始顺序、图距离和物理证据保持不变。padding 区域
-    anchor/home/screw/q 均为零，routing 为 -1，attention/loss 由显式 mask 屏蔽。
+    anchors 不存在独立槽，home/screw/q 均为零，routing 为 -1，attention/loss 由显式 mask 屏蔽。
     """
 
     if not evidences:
@@ -954,12 +1039,8 @@ def pad_static_geometry_evidence(
     screws = torch.zeros(batch_size, max_joint_count, 6, device=device, dtype=dtype)
     q_home = torch.zeros(batch_size, max_joint_count, device=device, dtype=dtype)
     entity_role = torch.zeros(batch_size, max_owner_count, device=device, dtype=torch.long)
-    entity_joint_index = torch.full(
-        (batch_size, max_owner_count), -1, device=device, dtype=torch.long
-    )
-    joint_entity_index = torch.full(
-        (batch_size, max_joint_count), -1, device=device, dtype=torch.long
-    )
+    entity_joint_index = torch.full((batch_size, max_owner_count), -1, device=device, dtype=torch.long)
+    joint_entity_index = torch.full((batch_size, max_joint_count), -1, device=device, dtype=torch.long)
     entity_valid = torch.zeros(batch_size, max_owner_count, device=device, dtype=torch.bool)
     joint_valid = torch.zeros(batch_size, max_joint_count, device=device, dtype=torch.bool)
     graph_shape = (batch_size, max_owner_count, max_owner_count)
@@ -993,8 +1074,16 @@ def pad_static_geometry_evidence(
         entity_role[batch_index, :owner_count] = evidence.entity_role
         entity_joint_index[batch_index, :owner_count] = evidence.entity_joint_index
         joint_entity_index[batch_index, :joint_count] = evidence.joint_entity_index
-        entity_valid[batch_index, :owner_count] = True
-        joint_valid[batch_index, :joint_count] = True
+        entity_valid[batch_index, :owner_count] = (
+            evidence.entity_valid_mask
+            if evidence.entity_valid_mask is not None
+            else torch.ones(owner_count, device=device, dtype=torch.bool)
+        )
+        joint_valid[batch_index, :joint_count] = (
+            evidence.joint_valid_mask
+            if evidence.joint_valid_mask is not None
+            else torch.ones(joint_count, device=device, dtype=torch.bool)
+        )
         shortest_path[batch_index, :owner_count, :owner_count] = evidence.shortest_path
         parent_direction[batch_index, :owner_count, :owner_count] = evidence.parent_direction
         child_direction[batch_index, :owner_count, :owner_count] = evidence.child_direction
@@ -1020,7 +1109,6 @@ def pad_static_geometry_evidence(
 
 __all__ = [
     "GeometryEncoderCfg",
-    "GeometryLatentHeadsCfg",
     "GeometryPaddingCfg",
     "GeometryLatents",
     "ImplicitGeometryEncoder",
@@ -1028,6 +1116,7 @@ __all__ = [
     "SO2AnchorFrontendCfg",
     "StaticGeometryEvidence",
     "build_static_geometry_evidence",
+    "canonicalize_static_geometry_evidence",
     "pad_static_geometry_evidence",
     "stack_static_geometry_evidence",
 ]

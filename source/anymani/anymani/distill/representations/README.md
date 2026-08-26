@@ -50,16 +50,16 @@ g_{\sigma_\ell,g}(x;q)
 \kappa_g(x;q),
 $$
 
-其中 $g_{\sigma_\ell,g}\in\mathbb R^{N_J}$，单位为 $\mathrm{rad}^{-1}$。这一关系把 configuration-level geometry state 与 local differential geometry 绑定起来：$Z^{(0)}$ 应足以解码逐归属体 $\rho$；第一版 residual $f_i^{screw}$ 一阶 head 输出的 $z_i^{(1)}$ 由 $D_\kappa$ 读取 $\kappa_{g,i}$；再由 $\hat\rho$、$\hat\kappa$ 与链式法则得到 $\hat g^{(\kappa)}$，并与教师 $g$ 和同一密度预测器的 $\hat g^{auto}$ 对齐。直接从 $z_i^{(1)}$ 读取 $g$ 的独立 $D_g$ 是正式候选，第一版默认关闭而不是从研究空间删除。
+其中 $g_{\sigma_\ell,g}\in\mathbb R^{N_J}$，单位为 $\mathrm{rad}^{-1}$。这一关系把 configuration-level geometry state 与 local differential geometry 绑定起来：统一 PALM/JOINT/TIP typed $Z$ 同时为 density reader 提供 owner token，并通过 ``joint_entity_index`` 为 kappa reader 提供 owner/JOINT views。训练只直接优化 $\hat\rho$ 与 $\hat\kappa$；$\hat g=-(d/\sigma^2)\hat\rho\hat\kappa$ 只在显式事后诊断中与教师 $g$ 比较。
 
-当前主线是多锚点 Gaussian 条件隐式路线。解析直接压缩保留为后续公平对照候选：它共享 PALM/JOINT/TIP 归属、锚点与类型化 $Z^{(0)}/z_i^{(1)}$ 下游接口，但本轮 scaffold 只记录“可读取缓存支撑点经当前 FK 得到的 physical points”这一边界，不提前设计其完整 adapter、dataset 或训练 pipeline。
+当前主线是多锚点 Gaussian 条件隐式路线。解析直接压缩保留为后续公平对照候选：它共享 PALM/JOINT/TIP 归属、锚点与统一 typed $Z$ 下游接口，但本轮 scaffold 只记录“可读取缓存支撑点经当前 FK 得到的 physical points”这一边界，不提前设计其完整 adapter、dataset 或训练 pipeline。
 
 uniform scale 验收同时缩放 geometry、query、anchor 与带宽：$x'=\lambda x$、$\mathcal S'=\lambda\mathcal S$、$\sigma'=\lambda\sigma$，而关节角 $q$ 不变。此时 $d'=\lambda d$，所以 $\rho'=\rho$、$g'=g$，但 $\kappa'=\lambda\kappa$。若保持米制 $\sigma$ 不变而只改变几何，$\rho$ 会变化；实现和评估不能把这两种尺度实验混为同一个 invariance claim。
 
 物理 entity/owner 语义包括：
 
 - `PALM`：静态 palm-owned geometry；
-- `JOINT`：该关节物理实体所拥有的 collision surface、运动学属性与 $z_i^{(1)}$ routing；
+- `JOINT`：该关节物理实体所拥有的 collision surface、运动学属性与统一 $Z$ 中的 JOINT-view routing；
 - `TIP`：distal/tip posed geometry。
 
 当前密度监督保持逐归属体、逐显式 sigma 输出 `[B,G,N_Q,N_sigma]`，不训练独立 whole-hand union head。decoder 对每个 `(owner,query,sigma)` 使用同一个 scalar reader，$N_\sigma$ 不是固定输出头宽度。若需要联合诊断，只能在共同查询网格上从逐归属体预测解析派生，并明确它不是新的物理监督目标。
@@ -116,9 +116,9 @@ source 保留 primitive/mesh truth，并按 capability 暴露 surface sampling�
 
 ## Gauge、hand axes 与 physical anchors
 
-`{h}` 只固定有向 palm normal $n_p=z_h$；其 origin 和绕 $n_p$ 的 $x/y$ basis 都不提供可学习的类人手方向标签。physical anchors 必须附着于 mount-conditioned palm surface/interior support，不能直接使用 raw URDF joint origin。对同一 query $x^h$ 与 anchors $C^h=\{c_k^h\}_{k=1}^{K}$，all-anchor relation $\{x^h-c_k^h\}$ 在 origin 共同平移后保持不变；对共同的 $R_\theta\in SO(2)$ gauge rotation，$Z^{(0)}$、$z_i^{(1)}$ 与 scalar-coordinate field outputs 保持不变。reflection/chirality 不是 gauge，不能被同一不变性删除。
+`{h}` 只固定有向 palm normal $n_p=z_h$；其 origin 和绕 $n_p$ 的 $x/y$ basis 都不提供可学习的类人手方向标签。physical anchors 必须附着于 mount-conditioned palm surface/interior support，不能直接使用 raw URDF joint origin。对同一 query $x^h$ 与 anchors $C^h=\{c_k^h\}_{k=1}^{K}$，all-anchor relation $\{x^h-c_k^h\}$ 在 origin 共同平移后保持不变；对共同的 $R_\theta\in SO(2)$ gauge rotation，统一 typed entity $Z$ 与 scalar-coordinate field outputs 保持不变。reflection/chirality 不是 gauge，不能被同一不变性删除。
 
-对逐 JOINT 成对坐标符号改写，$Z^{(0)}$ 与 $\rho$ 为偶，$z_i^{(1)}$、$\kappa_{g,i}$、$g_{\sigma,g,i}$ 与同坐标动作输出为奇。一阶路径必须读取 $f_i^{screw}$ 或 encoder tangent 等合法符号奇载体，不能从完全符号偶的 $Z^{(0)}$ 凭空恢复非零奇输出。
+对逐 JOINT 成对坐标符号改写，可观测 $\rho$ 保持不变，$\kappa_{g,i}$、$g_{\sigma,g,i}$ 与同坐标动作输出变号。ordered screw、当前有符号关节坐标及其策略侧对应状态必须同步改写；统一 $Z$ 不承担人为指定的 latent parity 合同。
 
 link-local URDF gauge、joint-axis sign/zero rewrite、`{h}` origin rewrite 与 `{h}` 的 $SO(2)$ basis rewrite 是不同命题。physical posed surface、ordered screw evidence、all-anchor relation 与 paired-gauge sample 分别提供验收证据，不能把它们合并成一个含义模糊的“frame robustness”指标。
 
@@ -129,6 +129,6 @@ link-local URDF gauge、joint-axis sign/zero rewrite、`{h}` origin rewrite 与 
 
 - 不 import `torch.nn` 或 `distill.models`，不持有 checkpoint；
 - learnable adapter/backbone/decoder 位于 [`../models/`](../models/README.md)；
-- 三项比较公式与跨结构 padding 位于 [`../methods/`](../methods/AGENTS.md)；可复用的预测/真值合同位于 `../objectives/`；stage orchestration 位于 `../ssl/`、`../rl/`、`../il/`；
+- 双项训练公式与跨结构 padding 位于 [`../methods/`](../methods/AGENTS.md)；可复用的预测/真值合同位于 `../objectives/`；stage orchestration 位于 `../ssl/`、`../rl/`、`../il/`；
 - 纯公式、gauge pair、semantic coverage、query/target shape 与 cache key 使用 deterministic contract test；
 - heavy target generator 可以只用于预训练；retained encoder 的性能边界与实测证据由 [`../models/README.md`](../models/README.md) 解释。未来若激活解析直接候选，同一门槛必须包含其批量 FK/刚体支撑点变换。

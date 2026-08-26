@@ -20,7 +20,6 @@ from anymani.distill.models.decoders.representations.implicit_field import (
 )
 from anymani.distill.models.input_adapters.geometry import (
     GeometryEncoderCfg,
-    GeometryLatentHeadsCfg,
     ImplicitGeometryEncoder,
     SO2AnchorFrontendCfg,
     StaticGeometryEvidence,
@@ -31,8 +30,8 @@ from anymani.distill.representations.targets.field_samples import FieldTargetBat
 pytestmark = pytest.mark.contract
 
 
-def test_synthetic_geometry_ssl_forward_three_objectives_and_backward() -> None:
-    r"""闭合 encoder → density/κ readers → 三项损失 → 普通参数反向。"""
+def test_synthetic_geometry_ssl_forward_two_objectives_and_backward() -> None:
+    r"""闭合 unified encoder → density/κ readers → baseline-normalized 双损失 → 普通参数反向。"""
 
     torch.manual_seed(23)
     dtype = torch.float64
@@ -75,18 +74,16 @@ def test_synthetic_geometry_ssl_forward_three_objectives_and_backward() -> None:
             dropout=0.0,
             max_graph_distance=4,
         ),
-        heads=GeometryLatentHeadsCfg(zero_order_width=24, first_order_width=12),
     )
     encoder = ImplicitGeometryEncoder(encoder_config).to(dtype=dtype)
     density_decoder = ConditionalDensityDecoder(
         ScalarSigmaFiLMDensityDecoderCfg(hidden_width=32, residual_blocks=2),
-        zero_order_width=24,
+        entity_width=32,
         query_width=16,
     ).to(dtype=dtype)
     sensitivity_decoder = DistanceSensitivityDecoder(
-        DistanceSensitivityDecoderCfg(coefficient_hidden_width=32),
-        zero_order_width=24,
-        first_order_width=12,
+        DistanceSensitivityDecoderCfg(hidden_width=32, residual_blocks=2),
+        entity_width=32,
         query_width=16,
     )
     sensitivity_decoder = sensitivity_decoder.to(dtype=dtype)
@@ -106,17 +103,14 @@ def test_synthetic_geometry_ssl_forward_three_objectives_and_backward() -> None:
     latents = encoder(q, evidence)
     query_features = encoder.encode_points(query_points, evidence)  # 固定 `{h}` query 只作为 readout condition
     bandwidths = torch.tensor([0.012, 0.032], dtype=dtype)
-    density_prediction = density_decoder(latents.zero_order, query_features, bandwidths)
+    density_prediction = density_decoder(latents.entities, query_features, bandwidths)
     owner_index = torch.tensor([1, 2], dtype=torch.long)
     query_index = torch.tensor([1, 2], dtype=torch.long)
     joint_index = torch.tensor([0, 0], dtype=torch.long)
     kappa_prediction = sensitivity_decoder(
-        latents.zero_order,
-        latents.first_order,
-        query_features,
-        owner_index,
-        query_index,
-        joint_index,
+        latents.entities[:, owner_index],
+        latents.entities[:, evidence.joint_entity_index[joint_index]],
+        query_features[:, owner_index, query_index],
     )
 
     distance = torch.full((batch_size, owner_count, query_count), 0.02, dtype=dtype)
@@ -159,6 +153,7 @@ def test_synthetic_geometry_ssl_forward_three_objectives_and_backward() -> None:
     update = reduce_method_steps(
         (MethodStep(objectives=evaluate_objectives(context, objectives_cfg), sample_count=batch_size),),
         objectives_cfg,
+        {"density": 1.0, "kappa": 1.0},
     )
     update.loss.backward()
 

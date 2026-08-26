@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from time import perf_counter
@@ -105,7 +105,7 @@ def _restore_sampling_state(
 
 
 def _declared_objective_weights(method: Any) -> dict[str, float]:
-    r"""读取 method 显式声明的三项权重，不经过自动标定。"""
+    r"""读取 method 显式声明的 rho/kappa 权重；baseline 归一化不改写该声明。"""
 
     return dict(method.declared_objective_weights())
 
@@ -254,47 +254,33 @@ def _write_calibration_artifact(
     microbatch_size: int,
     manifest_hash: str,
     resolved_config: dict[str, Any] | None = None,
-    after_first_forward: Callable[[], object] | None = None,
-    before_write: Callable[[], object] | None = None,
     runtime_timing: dict[str, float] | None = None,
 ) -> str:
-    r"""按 schema-6 epoch/minibatch 顺序运行单遍预实验，不 backward 或更新参数。"""
+    r"""按 schema-7 epoch/minibatch 顺序单遍统计完整 teacher distribution 的 naive baselines。
 
-    traces: dict[str, list[float]] = {name: [] for name in _declared_objective_weights(method)}
-    totals: dict[str, list[float]] = {}
+    本阶段不运行 learned model。每个 batch 只读取 teacher truth，累计 constant-density 所需一/二阶矩、
+    zero-kappa MSE、query-stratum 诊断与 catalog provenance；因此 artifact 不能被误解为 epoch-0 网络输出。
+    """
+
+    statistics: dict[str, torch.Tensor] | None = None  # 完整 catalog 单遍的 teacher-only 充分统计
     minibatch_count = 0  # 已生成的新 minibatch 数
     forward_count = 0  # calibration 中等于新 minibatch 数
     new_pair_count = 0  # 新 realization 的 $(asset,q)$ pair 数
     asset_indices_seen: set[int] = set()  # 本次预实验实际接触的互异训练资产
-    audit_started = False  # 首个 forward 完成后才允许后台物理审计争抢 CPU
-    method.train_mode()  # 保留正式训练的 dropout/normalization 行为，只取消参数更新
     total_minibatches = schedule.total_minibatches
     partial_output = output.with_name(f"{output.stem}.partial{output.suffix}")  # 中断后最近完整 epoch 证据
     calibration_started = perf_counter()  # ETA 只覆盖 calibration 主循环，不混入 catalog/model startup
     realized_seconds = 0.0  # q/query/teacher/source 完整 realization 累计时间
-    objective_seconds = 0.0  # model 与三项 objective 前向累计时间
+    objective_seconds = 0.0  # teacher baseline 充分统计累计时间
     host_trim_seconds = 0.0  # calibration-only CPython/glibc host-page 回收时间
 
     def consume_forward(batch: Any) -> None:
-        r"""累计一个 logical batch 的充分统计，不跨 batch 保留 autograd 图。"""
+        r"""累计一个 logical batch 的 teacher-only 充分统计，不运行 learned model。"""
 
-        nonlocal audit_started, forward_count
-        result = method.forward_objectives(
-            batch,
-            step=forward_count,
-            mode="calibration",
-            microbatch_size=microbatch_size,
-        )
-        forward_count += 1  # joint-sign rewrite 的独立 forward identity
-        if forward_count == 1 and after_first_forward is not None and not audit_started:
-            after_first_forward()  # 首个 GPU forward 后才允许后台 audit 争抢 CPU
-            audit_started = True
-        for name, objective in result.objectives.items():
-            for component in objective.components:
-                current = totals.setdefault(component.name, [0.0, 0.0])
-                current[0] += float(component.numerator.detach())  # additive $N_j$
-                current[1] += float(component.denominator.detach())  # additive $D_j$
-            traces.setdefault(name, []).append(float(objective.metrics["loss"].detach()))
+        nonlocal forward_count, statistics
+        block = method.teacher_baseline_statistics(batch)
+        statistics = method.merge_teacher_baseline_statistics(statistics, block)
+        forward_count += 1  # 此计数表示 teacher statistic blocks，不表示 model forward
 
     print(
         f"[Calibration] Starting: {max_epochs} epochs × {num_minibatches} minibatches, "
@@ -358,12 +344,15 @@ def _write_calibration_artifact(
                     }
                 )
             # 只在完整 epoch 结束后发布 partial；中断恢复会重放整个未完成 epoch。
+            if statistics is None:
+                raise RuntimeError("teacher baseline pass did not produce sufficient statistics")
+            partial_baselines = method.finalize_teacher_baselines(statistics)
             _write_yaml(
                 partial_output,
                 {
-                    "schema_version": "6.0.0",
+                    "schema_version": "7.0.0",
                     "status": "in_progress",
-                    "source": "formal_train_forward_preflight",
+                    "source": "teacher_distribution_naive_baselines",
                     "dataset_source_sha256": manifest_hash,
                     "execution": {
                         "asset_count": session.asset_count,
@@ -383,27 +372,37 @@ def _write_calibration_artifact(
                         "sampling": asdict(schedule.config),
                     },
                     "formula_identity": dict(method.formula_identity()),
-                    "term_means": {
-                        name: numerator / denominator
-                        for name, (numerator, denominator) in totals.items()
-                    },
-                    "term_traces": traces,
+                    "teacher_baselines": partial_baselines,
+                    "random_model_preflight": None,
                 },
             )
     if minibatch_count < 1:
         raise ValueError("objective calibration requires at least one generated train minibatch")
+    asset_use_count = minibatch_count * schedule.config.assets_per_minibatch
+    expected_pair_count = session.asset_count * schedule.config.q_per_asset_per_minibatch
+    if len(asset_indices_seen) != session.asset_count or asset_use_count != session.asset_count:
+        raise ValueError(
+            "teacher baseline calibration must cover every train asset exactly once: "
+            f"distinct={len(asset_indices_seen)}, uses={asset_use_count}, catalog={session.asset_count}"
+        )
+    if new_pair_count != expected_pair_count:
+        raise ValueError(
+            "teacher baseline calibration pair count must equal catalog_size * q_per_asset: "
+            f"actual={new_pair_count}, expected={expected_pair_count}"
+        )
     print(f"[Calibration] Completed: {minibatch_count} minibatches, {forward_count} forward passes, "
           f"{len(asset_indices_seen)} unique assets sampled")
     print("[Calibration] Writing artifact...")
-    if before_write is not None:
-        before_write()  # 完整 physical isolation audit 必须先通过，再发布 calibration artifact
     formula_identity = dict(method.formula_identity())
     recorded_config = dict(resolved_config or {})
     worktree_dirty, worktree_fingerprint = _worktree_fingerprint()
+    if statistics is None:
+        raise RuntimeError("teacher baseline pass completed without sufficient statistics")
+    teacher_baselines = method.finalize_teacher_baselines(statistics)
     payload = {
-        "schema_version": "6.0.0",
+        "schema_version": "7.0.0",
         "status": "complete",
-        "source": "formal_train_forward_preflight",
+        "source": "teacher_distribution_naive_baselines",
         "execution": {
             "asset_count": session.asset_count,
             "distinct_asset_count": len(asset_indices_seen),
@@ -434,18 +433,16 @@ def _write_calibration_artifact(
             if recorded_config
             else {}
         ),
-        "term_means": {
-            name: numerator / denominator for name, (numerator, denominator) in totals.items()
-        },
-        "term_traces": traces,
+        "teacher_baselines": teacher_baselines,
+        "random_model_preflight": None,
     }
     _write_yaml(output, payload)
     partial_output.unlink(missing_ok=True)  # 最终 artifact 已原子发布，中间态不再具有独立语义
     artifact_hash = hashlib.sha256(output.read_bytes()).hexdigest()
     print(f"[Calibration] Artifact written: {output}")
-    print("[Calibration] Loss scale summary:")
-    for name, mean_value in sorted(payload["term_means"].items()):
-        print(f"  {name}: {mean_value:.6e}")
+    print("[Calibration] Teacher baseline summary:")
+    for name, record in sorted(teacher_baselines.items()):
+        print(f"  {name}: {float(record['baseline_mse']):.6e}")
     return artifact_hash
 
 
@@ -460,8 +457,8 @@ def _require_calibration_identity(
     payload = yaml.safe_load(artifact.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("calibration artifact must be a mapping")
-    if payload.get("schema_version") != "6.0.0":
-        raise ValueError("calibration artifact schema must be 6.0.0")
+    if payload.get("schema_version") != "7.0.0":
+        raise ValueError("calibration artifact schema must be 7.0.0")
     if payload.get("status") != "complete":
         raise ValueError("calibration artifact must have status='complete'")
     if payload.get("dataset_source_sha256") != manifest_hash:
@@ -475,6 +472,10 @@ def _require_calibration_identity(
     expected_method_type = f"{type(method).__module__}.{type(method).__qualname__}"
     if payload.get("method_type") != expected_method_type:
         raise ValueError("calibration artifact method type does not match current method")
+    teacher_baselines = payload.get("teacher_baselines")
+    if not isinstance(teacher_baselines, Mapping):
+        raise ValueError("calibration artifact lacks teacher_baselines mapping")
+    method.set_teacher_baselines(teacher_baselines)
     recorded_revision = payload.get("code_revision")
     if not isinstance(recorded_revision, str) or not recorded_revision:
         raise ValueError("calibration artifact lacks code revision provenance")
@@ -610,7 +611,7 @@ def fit_embodiment_pretrain(
                 method,
                 train_session,
                 schedule,
-                output_dir / "loss_calibration.yaml",
+                output_dir / "teacher_baselines.yaml",
                 max_epochs=trainer.config.max_epochs,
                 num_minibatches=trainer.config.num_minibatches,
                 microbatch_size=trainer.config.microbatch_size,
@@ -625,16 +626,16 @@ def fit_embodiment_pretrain(
             method.close()
             logger.close()
 
-    calibration_hash = ""  # 正式训练可独立运行；提供预实验产物时只记录可审计 lineage
-    if run.config.calibration_artifact:
-        calibration_path = Path(run.config.calibration_artifact).expanduser()
-        if not calibration_path.is_file():
-            raise ValueError("run.calibration_artifact does not point to an existing loss_calibration.yaml")
-        calibration_hash = _require_calibration_identity(
-            calibration_path,
-            method=method,
-            manifest_hash=str(catalog.dataset.source_sha256),
-        )
+    if not run.config.calibration_artifact:
+        raise ValueError("pretrain requires a schema-7 teacher baseline artifact")
+    calibration_path = Path(run.config.calibration_artifact).expanduser()
+    if not calibration_path.is_file():
+        raise ValueError("run.calibration_artifact does not point to an existing teacher baseline YAML")
+    calibration_hash = _require_calibration_identity(
+        calibration_path,
+        method=method,
+        manifest_hash=str(catalog.dataset.source_sha256),
+    )
     train_schedule = OnlineMinibatchSchedule(
         train_session.asset_count,
         trainer.config.sampling,
@@ -666,6 +667,7 @@ def fit_embodiment_pretrain(
             resolved_config=resolved_config,
             declared_objective=declared_weights,
             calibration_artifact_hash=calibration_hash,
+            teacher_baselines=method.require_teacher_baselines(),
             worktree_dirty=dirty,
             worktree_fingerprint=fingerprint,
         )
@@ -778,18 +780,30 @@ def fit_embodiment_pretrain(
                     epoch_index=epoch_index,
                     mini_epoch_index=mini_epoch_index,
                 )
-                for buffer_index in order:
+                for order_position, buffer_index in enumerate(order):
+                    update_started = perf_counter()  # 覆盖 zero_grad、forward/backward、clip 与 optimizer.step
+                    if device.type == "cuda":
+                        torch.cuda.reset_peak_memory_stats(device)
                     batch = batches[buffer_index]
                     schedule_item = schedule_items[buffer_index]
                     optimizer.zero_grad(set_to_none=True)
                     update: Any
+                    diagnostic_seconds = 0.0  # 非 cadence update 不承担 proxy 开销
                     backward_update = getattr(method, "backward_update", None)
                     if callable(backward_update):
+                        collect_z_gradients = (
+                            (epoch_index + 1) % 4 == 0
+                            and mini_epoch_index == trainer.config.mini_epochs - 1
+                            and order_position == len(order) - 1
+                        )  # 每 4 epochs 只采最后一个 update，且必须发生在 optimizer.step 前
+                        diagnostic_started = perf_counter()
                         update = backward_update(
                             batch,
                             forward_step=forward_index,
                             microbatch_size=trainer.config.microbatch_size,
+                            collect_z_gradients=collect_z_gradients,
                         )
+                        diagnostic_seconds = perf_counter() - diagnostic_started if collect_z_gradients else 0.0
                         forward_index += 1
                     else:
                         update_step = method.forward_objectives(
@@ -810,13 +824,19 @@ def fit_embodiment_pretrain(
                         )
                     optimizer.step()
                     optimizer_update += 1
+                    step_seconds = perf_counter() - update_started
                     if mini_epoch_index == 0:
                         new_pairs_seen += int(update.sample_count)
                     pair_uses += int(update.sample_count)
                     microbatches_consumed = int(update.sample_count) // trainer.config.microbatch_size
                     record = {
                         "terms": update.terms,
+                        "normalized_terms": update.normalized_terms,
+                        "skills": update.skills,
                         "gradient_norm": float(gradient_norm.detach()),
+                        "gradient_evidence": update.gradient_evidence,
+                        "diagnostic_seconds": diagnostic_seconds,
+                        "diagnostics": update.diagnostics,
                     }
                     epoch_records.append(record)
                     logger.log_terms(
@@ -837,6 +857,28 @@ def fit_embodiment_pretrain(
                         gradient_norm=float(gradient_norm.detach()),
                         batch=batch if hasattr(batch, "q_index") else None,
                         total=float(update.loss.detach()),
+                        normalized_terms=update.normalized_terms,
+                        skills=update.skills,
+                        baselines=method.require_teacher_baselines(),
+                        gradient_evidence=update.gradient_evidence,
+                        diagnostic_seconds=diagnostic_seconds,
+                        diagnostics=update.diagnostics,
+                    )
+                    logger.log_runtime_event(
+                        {
+                            "event": "optimizer_update",
+                            "optimizer_update": optimizer_update,
+                            "epoch": epoch_index + 1,
+                            "step_seconds": step_seconds,
+                            "q_samples_per_second": float(update.sample_count) / max(step_seconds, 1.0e-12),
+                            "cuda_peak_allocated_bytes": (
+                                int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else None
+                            ),
+                            "cuda_peak_reserved_bytes": (
+                                int(torch.cuda.max_memory_reserved(device)) if device.type == "cuda" else None
+                            ),
+                            "z_gradient_diagnostic_seconds": diagnostic_seconds,
+                        }
                     )
 
             completed_epochs = epoch_index + 1
@@ -844,17 +886,47 @@ def fit_embodiment_pretrain(
                 name: sum(float(record["terms"][name]) for record in epoch_records) / len(epoch_records)
                 for name in declared_weights
             }
+            epoch_normalized = {
+                name: sum(float(record["normalized_terms"][name]) for record in epoch_records) / len(epoch_records)
+                for name in declared_weights
+            }
+            epoch_skills = {
+                name: sum(float(record["skills"][name]) for record in epoch_records) / len(epoch_records)
+                for name in declared_weights
+            }
+            epoch_payload = {
+                **{f"raw/{name}": value for name, value in epoch_terms.items()},
+                **{f"normalized/{name}": value for name, value in epoch_normalized.items()},
+                **{f"skill/{name}": value for name, value in epoch_skills.items()},
+            }  # TensorBoard、终端与 JSONL update 均由同一批 update facts 聚合
             logger.log_epoch_terms(
                 epoch=completed_epochs,
                 new_pairs_seen=new_pairs_seen,
                 pair_uses=pair_uses,
                 optimizer_updates=optimizer_update,
-                terms=epoch_terms,
+                terms=epoch_payload,
+            )
+            print(
+                f"[SSL] epoch {completed_epochs:03d}/{trainer.config.max_epochs} "
+                f"rho={epoch_normalized['density']:.4f} kappa={epoch_normalized['kappa']:.4f} "
+                f"skill=({epoch_skills['density']:+.4f},{epoch_skills['kappa']:+.4f}) "
+                f"updates={optimizer_update} pairs={new_pairs_seen}",
+                flush=True,
             )
             del batches
             checkpoint_due = completed_epochs % trainer.config.checkpoint_every_epochs == 0 or train_schedule.complete
             if checkpoint_due:
                 save_checkpoint(output_dir / "checkpoints" / f"epoch_{completed_epochs:06d}.pt")
+                print(
+                    "[SSL checkpoint]\n"
+                    f"  epoch={completed_epochs} optimizer_updates={optimizer_update}\n"
+                    f"  raw_density={epoch_terms['density']:.6e} raw_kappa={epoch_terms['kappa']:.6e}\n"
+                    f"  normalized_density={epoch_normalized['density']:.6f} "
+                    f"normalized_kappa={epoch_normalized['kappa']:.6f}\n"
+                    f"  skill_density={epoch_skills['density']:+.6f} skill_kappa={epoch_skills['kappa']:+.6f}\n"
+                    f"  new_pairs_seen={new_pairs_seen} pair_uses={pair_uses}",
+                    flush=True,
+                )
 
         final_checkpoint = output_dir / "checkpoints" / f"epoch_{completed_epochs:06d}.pt"
         if not final_checkpoint.is_file():

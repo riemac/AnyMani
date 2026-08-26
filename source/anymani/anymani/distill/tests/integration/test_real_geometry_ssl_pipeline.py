@@ -1,4 +1,4 @@
-"""真实 mother cache -> Warp teacher -> SSL model -> 三项目标 -> backward 集成合同。"""
+"""真实 mother cache -> Warp teacher -> unified SSL model -> 双目标 -> backward 集成合同。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,6 @@ from anymani.distill.models.decoders.representations.implicit_field import (
 from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelCfg
 from anymani.distill.models.input_adapters.geometry import (
     GeometryEncoderCfg,
-    GeometryLatentHeadsCfg,
     SO2AnchorFrontendCfg,
     build_static_geometry_evidence,
 )
@@ -122,14 +121,13 @@ def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
             dropout=0.0,
             max_graph_distance=8,
         ),
-        heads=GeometryLatentHeadsCfg(zero_order_width=24, first_order_width=12),
     )
     model = GeometrySSLModel(
         GeometrySSLModelCfg(
             encoder=encoder_config,
             ssl_decoders=GeometrySSLDecoderCfg(
                 density=ScalarSigmaFiLMDensityDecoderCfg(hidden_width=32, residual_blocks=2),
-                sensitivity=DistanceSensitivityDecoderCfg(coefficient_hidden_width=32),
+                sensitivity=DistanceSensitivityDecoderCfg(hidden_width=32, residual_blocks=2),
             ),
         )
     ).to(device="cuda:0", dtype=torch.float32)
@@ -148,12 +146,12 @@ def test_real_mother_geometry_ssl_forward_objective_and_backward() -> None:
     update = reduce_method_steps(
         (MethodStep(objectives=evaluate_objectives(context, objectives_cfg), sample_count=1),),
         objectives_cfg,
+        {"density": 1.0, "kappa": 1.0},
     )
     update.loss.backward()
     torch.cuda.synchronize()
 
-    assert prediction.latents.zero_order.shape == (1, 21, 24)
-    assert prediction.latents.first_order.shape == (1, 16, 12)
+    assert prediction.latents.entities.shape == (1, 21, 32)
     assert prediction.density.shape == (1, 21, 64, 3)
     assert prediction.kappa.shape == (1, 32)
     assert torch.isfinite(update.loss)

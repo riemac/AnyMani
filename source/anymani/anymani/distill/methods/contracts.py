@@ -19,23 +19,24 @@ from anymani.distill.objectives.contracts import AdditiveStatistic, ObjectiveTer
 
 @dataclass(frozen=True)
 class FeatureSpec:
-    r"""部署期 retained 表征向下游声明的实体轴、关节轴和规范变换语义。"""
+    r"""部署期 unified retained 表征向下游声明的实体轴与 JOINT view 合同。
 
-    zero_order_width: int  # 每个 PALM/JOINT/TIP entity 的固定宽度 $D_0$
-    first_order_width: int | None  # 每个活动 JOINT 的 $D_1$；None 表示该方法不导出一阶包
+    唯一存储是与 PALM/JOINT/TIP owner 同索引的 $Z\in\mathbb R^{B\times G\times D}$。
+    JOINT view 由每个样本的 ``joint_entity_index`` 从该轴 gather；它既不是独立 latent，
+    也不声明 latent-level joint-sign parity。物理坐标改写只验收下游 observable。
+    """
+
+    entity_width: int  # 每个 PALM/JOINT/TIP final-norm token 的固定宽度 $D$
     entity_axis: str = "PALM/JOINT/TIP owner sequence"
-    joint_axis: str = "active JOINT sequence"
+    joint_view: str = "gather entities with joint_entity_index"
     frame_contract: str = "hand frame {h}; in-plane SO(2) gauge"
-    zero_order_transform: str = "joint-sign even"
-    first_order_transform: str = "joint-sign odd"
+    coordinate_rewrite_contract: str = "density invariant; kappa sign-equivariant"
 
     def __post_init__(self) -> None:
-        r"""拒绝空表征宽度和无意义的一阶零宽度。"""
+        r"""拒绝空 unified entity 表征。"""
 
-        if self.zero_order_width < 1:
-            raise ValueError("zero_order_width must be positive")
-        if self.first_order_width is not None and self.first_order_width < 1:
-            raise ValueError("first_order_width must be positive when first-order features are enabled")
+        if self.entity_width < 1:
+            raise ValueError("entity_width must be positive")
 
 
 @dataclass(frozen=True)
@@ -48,12 +49,16 @@ class MethodStep:
 
 @dataclass(frozen=True)
 class MethodUpdate:
-    r"""一个 optimizer update 的标量损失与可记录均值。"""
+    r"""一个 optimizer update 的 normalized 标量损失与可记录 raw/normalized 均值。"""
 
-    loss: torch.Tensor  # 当前方法全部启用 objective 的加权总损失，保留计算图
-    terms: dict[str, float]  # 各 term 的 $(asset,q)$ 等权均值
+    loss: torch.Tensor  # $L_\rho/B_\rho+L_\kappa/B_\kappa$，训练时保留计算图
+    terms: dict[str, float]  # 各 term 的 raw $(asset,q)$ 等权 MSE
     sample_count: int
     denominators: dict[str, float] = field(default_factory=dict)  # 完整 minibatch 的有效 pair 计数
+    normalized_terms: dict[str, float] = field(default_factory=dict)  # $L_j/B_j$
+    skills: dict[str, float] = field(default_factory=dict)  # $1-L_j/B_j$，正值表示超过 naive baseline
+    gradient_evidence: dict[str, float] = field(default_factory=dict)  # 稀疏 unified-Z task-gradient proxy
+    diagnostics: dict[str, float] = field(default_factory=dict)  # RMS、active/zero error 与 valid ratio
 
 
 @dataclass(frozen=True)
@@ -182,7 +187,7 @@ class EmbodimentMethod(Protocol):
         ...
 
     def feature_spec(self) -> FeatureSpec:
-        r"""返回下游消费的零/一阶合同。"""
+        r"""返回下游消费的 unified entity/JOINT-view 合同。"""
         ...
 
     def training_state_dict(self) -> dict[str, torch.Tensor]:

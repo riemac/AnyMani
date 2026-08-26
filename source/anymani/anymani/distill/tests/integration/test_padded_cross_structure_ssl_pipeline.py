@@ -23,7 +23,6 @@ from anymani.distill.models.decoders.representations.implicit_field import (
 from anymani.distill.models.geometry_ssl import GeometrySSLModel, GeometrySSLModelCfg
 from anymani.distill.models.input_adapters.geometry import (
     GeometryEncoderCfg,
-    GeometryLatentHeadsCfg,
     GeometryPaddingCfg,
     SO2AnchorFrontendCfg,
     StaticGeometryEvidence,
@@ -138,11 +137,10 @@ def test_padded_cross_structure_model_objective_and_backward() -> None:
                     dropout=0.0,
                     max_graph_distance=4,
                 ),
-                heads=GeometryLatentHeadsCfg(zero_order_width=24, first_order_width=12),
             ),
             ssl_decoders=GeometrySSLDecoderCfg(
                 density=ScalarSigmaFiLMDensityDecoderCfg(hidden_width=32, residual_blocks=1),
-                sensitivity=DistanceSensitivityDecoderCfg(coefficient_hidden_width=32),
+                sensitivity=DistanceSensitivityDecoderCfg(hidden_width=32, residual_blocks=2),
             ),
         ),
     ).to(dtype=torch.float64)
@@ -160,13 +158,13 @@ def test_padded_cross_structure_model_objective_and_backward() -> None:
     update = reduce_method_steps(
         (MethodStep(objectives=evaluate_objectives(context, objectives_cfg), sample_count=2),),
         objectives_cfg,
+        {"density": 1.0, "kappa": 1.0},
     )
     update.loss.backward()
 
     assert batch.q.shape == (2, 20)
     assert batch.evidence.entity_valid_mask.shape == (2, 26)
     assert batch.sensitivity_targets.valid_mask.tolist() == [[True, False], [True, True]]
-    assert torch.count_nonzero(prediction.latents.zero_order[0, 3:]) == 0
-    assert torch.count_nonzero(prediction.latents.first_order[0, 1:]) == 0
+    assert torch.count_nonzero(prediction.latents.entities[0, 3:]) == 0
     assert torch.isfinite(update.loss)
     assert all(parameter.grad is not None for parameter in model.parameters())

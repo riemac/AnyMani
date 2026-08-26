@@ -32,11 +32,11 @@ Hydra 只从 ConfigStore 加载 `experiments/multi_anchor_gaussion_implicit_fiel
 
 ### Role 边界
 
-Data 交付 assets、partitions、provenance。Method/session 拥有 realization、合法 microbatch 切分、三项 objective、固定评估测度、ablation、完整 state 和 retained export。Trainer 只拥有 epoch、新 minibatch 数、mini-epoch 遍历、optimizer 与训练 checkpoint。独立 validation/evaluation runtime 拥有 fixed-bank 编排，Run 拥有路径、seed 和 lineage。
+Data 交付 assets、partitions、provenance。Method/session 拥有 realization、合法 microbatch 切分、teacher baseline 统计、rho/kappa objective、固定评估测度、ablation、完整 state 和 retained export。Trainer 只拥有 epoch、新 minibatch 数、mini-epoch 遍历、optimizer 与训练 checkpoint。独立 validation/evaluation runtime 拥有 fixed-bank 编排，Run 拥有路径、seed 和 lineage。
 
 ### Checkpoint
 
-新训练在首次 update 前保存 `epoch_000000.pt`，之后只在完整 epoch 结束后的 optimizer boundary 保存。payload 覆盖 schedule cursor、每资产 Sobol cursor、optimizer、预算计数、CPU/CUDA RNG 与轻量 dataset identity；`last.pt` 硬链接最终 immutable epoch checkpoint。full checkpoint 服务 SSL resume/事后评估；Method 保留 schema-4 retained payload builder，但当前尚无独立导出 CLI。
+新训练在首次 update 前保存 `epoch_000000.pt`，之后只在完整 epoch 结束后的 optimizer boundary 保存。payload 覆盖 schedule cursor、每资产 Sobol cursor、optimizer、预算计数、CPU/CUDA RNG、轻量 dataset identity 与 teacher-baseline artifact hash；`last.pt` 硬链接最终 immutable epoch checkpoint。full checkpoint 保持 schema 7 并服务 SSL resume/事后评估；Method 的 standalone retained payload 为 schema 5，只含 unified encoder。
 
 ## Important Semantics
 

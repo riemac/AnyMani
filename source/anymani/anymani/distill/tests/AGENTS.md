@@ -46,11 +46,11 @@ tests/
 
 ### 当前 SSL 合同
 
-配置测试锁定四角色根配置、`max_epochs / num_minibatches / mini_epochs / microbatch_size` 预算接口、三项主损失、validation sigma `4/16/64 mm`、`anchor bank=8` 和当前 representation schema。预实验 artifact 核对 dataset/formula/method identity，并保存 code/worktree lineage 供对照；正式 preset 与预实验 preset 可以不同。Trainer/checkpoint 通过 Method 窄接口工作；integration 直接运行 method objective。
+配置测试锁定四角色根配置、`max_epochs / num_minibatches / mini_epochs / microbatch_size` 预算接口、baseline-normalized rho/kappa、validation sigma `4/16/64 mm`、`anchor bank=8` 和 unified representation schema。teacher-baseline artifact 核对 dataset/formula/method identity，并保存 code/worktree lineage；正式 preset 与 baseline pass 预算可以不同。Trainer/checkpoint 通过 Method 窄接口工作；integration 直接运行 method objective。
 
 ### Retained encoder 性能门槛
 
-RTX 5070 Ti、`B=4096`、单结构组、20 预热 + 50 CUDA Event，p95 ≤ 40 ms。从 GPU-resident `q` 与静态证据开始，覆盖 adapter、聚合、backbone、零/一阶 heads。计时保持已声明语义和 shape，并对 learned activation 每次重算；200 次 profile 用于显式诊断。
+RTX 5070 Ti、`B=4096`、单结构组、20 预热 + 50 CUDA Event，p95 ≤ 40 ms。从 GPU-resident `q` 与静态证据开始，覆盖 adapter、聚合和 backbone final-norm unified $Z$。计时保持已声明语义和 shape，并对 learned activation 每次重算；decoder 成本单独报告。
 
 ### 失败信息
 

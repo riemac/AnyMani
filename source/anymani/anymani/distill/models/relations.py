@@ -1,15 +1,20 @@
-r"""token 间关系 / edge feature 构造契约。
+r"""Deferred token-relation / edge-feature 候选契约。
 
-本模块负责定义“哪些 token pair 之间有什么关系特征”。它位于 `tokenizer.py`
-与 `attention_bias.py` 之间：
+本文件保存早期 teacher spatial-Transformer 的 relation 研究草稿，当前不属于公共 backbone
+或 geometry SSL partial-input contract。新的 physical kinematics source 位于
+``distill/representations/sources/kinematics.py``；current posed field oracle 位于
+``representations/sources/posed_geometry.py``。
+
+历史候选负责定义“哪些 token pair 之间有什么关系特征”，位于 grouped-token adapter 与
+attention-bias candidate 之间：
 
 ```text
-tokenizer 输出 token frames / type_ids / valid_mask
+input adapter 输出 token frames / type_ids / valid_mask
     └── relations.py 构造 edge_feat(i,j) + structural metadata
           └── attention_bias.py 将 relation batch 映射为 attention logits bias b_ij
 ```
 
-== 当前 teacher 合意 ==
+== 历史 teacher 候选 ==
 
 teacher 不承担 sim2sim，因此可以直接使用通用建模资产当前 palm/joint/tip frame 下的
 all-pairs dynamic SE(3) 关系：
@@ -38,8 +43,8 @@ $$
 
 == 与 static / structural edge 的关系 ==
 
-static embodiment edge（如 home pose / URDF rest pose 下的相邻相对位姿）仍可作为
-消融或额外输入，但 teacher 当前主路线是 dynamic all-pairs SE(3)。
+static embodiment edge（如 home pose / URDF rest pose 下的相邻相对位姿）曾作为
+消融或额外输入；历史 teacher 草稿的主候选是 dynamic all-pairs SE(3)。
 get-zero 式 hop distance 在 same-topology teacher 阶段通常是常量，对 post-mutate
 几何变化没有信息量，因此不作为 teacher 主特征。
 
@@ -64,8 +69,9 @@ edge feature 相加，而不是替代后者。
 mesh-based alignment、BPS/OBB/PCA 等方式探索，但不应阻塞 teacher 的训练脚手架。
 
 TOAGENT:
-    本文件当前只写设计契约，不实现 FK。实现时应避免把 edge construction 写进
-    `attention_bias.py`；后者只负责 edge_feat → logits bias。
+    本文件当前只保存 deferred network candidate，不实现 FK。geometry SSL 的 retained
+    input adapter 不得读取 current all-pairs dynamic SE(3)，否则会形成 posed-field target
+    leakage。若网络阶段重新启用 relation bias，应先重新确认 gauge、latency 与消融价值。
 """
 
 # TODO: 定义 `RelationFeatureBatch` 数据结构，至少包含：

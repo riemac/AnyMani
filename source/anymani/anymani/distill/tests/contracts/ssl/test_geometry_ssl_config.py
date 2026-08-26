@@ -39,7 +39,7 @@ def _compose() -> EmbodimentPretrainCfg:
 
 
 def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
-    """根四 role、Trainer 阶段协议与三项 objective 必须保持 concrete dataclass 类型。"""
+    """根四 role、Trainer 阶段协议与 rho/kappa objective 必须保持 concrete dataclass 类型。"""
 
     config = _compose()
     config.validate_composed()
@@ -66,11 +66,10 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
     assert set(config.method.objectives.enabled()) == {
         "density",
         "kappa",
-        "derived_field",
     }
     assert config.method.objectives.density.weight == pytest.approx(1.0)
-    assert config.method.objectives.kappa.weight == pytest.approx(20.0)
-    assert config.method.objectives.derived_field.weight == pytest.approx(0.01)
+    assert config.method.objectives.kappa.weight == pytest.approx(1.0)
+    assert not hasattr(config.method.objectives, "derived_field")
     assert not hasattr(config.method.objectives, "sobolev")
     assert not hasattr(config.method.objectives, "chain")
     assert config.method.representation.source.anchors.bank_size == 8
@@ -98,8 +97,8 @@ def test_post_training_configs_are_independent_from_trainer() -> None:
     assert evaluation.schema_version == "1.0.0"
     assert not hasattr(validation, "trainer")
     assert not hasattr(evaluation, "trainer")
-    assert validation.validation.selection_metrics == ("density", "kappa", "derived_field")
-    assert evaluation.evaluation.final_ablations[-1] == "first_order_sign_flip"
+    assert validation.validation.selection_metrics == ("density", "kappa")
+    assert evaluation.evaluation.final_ablations[-1] == "joint_token_shuffle"
     assert validation.data == evaluation.data == _compose().data
     assert validation.method == evaluation.method == _compose().method
 
@@ -312,18 +311,19 @@ def test_validation_selection_weights_named_suites_equally() -> None:
     隐式改变 checkpoint objective，而不是只提高同一指标的统计精度。
     """
 
-    metrics = ("density", "kappa", "derived_field")
+    metrics = ("density", "kappa")
     baseline = selection_baseline(
         {
-            "unseen_variant_set": {"density": 1.0, "kappa": 1.0, "derived_field": 1.0},
-            "unseen_mother": {"density": 2.0, "kappa": 2.0, "derived_field": 2.0},
+            "unseen_variant_set": {"density": 9.0, "kappa": 9.0},
+            "unseen_mother": {"density": 9.0, "kappa": 9.0},
         },
         metrics,
+        teacher_baselines={"density": 1.0, "kappa": 2.0},
     )
     score = normalized_validation_score(
         {
-            "unseen_variant_set": {"density": 0.5, "kappa": 0.5, "derived_field": 0.5},
-            "unseen_mother": {"density": 2.0, "kappa": 2.0, "derived_field": 2.0},
+            "unseen_variant_set": {"density": 0.5, "kappa": 1.0},
+            "unseen_mother": {"density": 1.0, "kappa": 2.0},
         },
         baseline,
         metrics,

@@ -40,11 +40,17 @@ from .batch import (
 )
 from .config import MultiAnchorGaussianMethodCfg
 from .context import MultiAnchorObjectiveContext
-from .objectives import evaluate_objectives, reduce_method_steps
+from .objectives import (
+    evaluate_objectives,
+    finalize_teacher_baselines,
+    merge_teacher_baseline_statistics,
+    reduce_method_steps,
+    teacher_baseline_sufficient_statistics,
+)
 from .state_measure import SobolJointSampler
 
 _TRAIN_FORWARD_MICROBATCH_SAMPLES = 64
-"""三项普通参数反向的 `(asset,q)` 样本上限；RTX 5070 Ti 实测峰值 10.06 GiB。"""
+"""rho/kappa 普通参数反向的 `(asset,q)` 样本上限。"""
 
 _EVALUATION_FORWARD_MICROBATCH_SAMPLES = 64
 """固定评估的单次样本上限，与训练使用同一张量形状合同。"""
@@ -57,10 +63,9 @@ _DEVICE_SUBWINDOW_ASSETS = 8
 
 
 def _forward_microbatch_samples(mode: str) -> int:
-    r"""按运行阶段返回三项普通前向的 sample 上限。
+    r"""按运行阶段返回 rho/kappa 普通前向的 sample 上限。
 
-    RTX 5070 Ti 上，64 samples 的三项目标普通前向与反向达到 261.04 samples/s，峰值
-    10.06 GiB。训练仍逐块立即反向，以保持完整 minibatch 的精确充分统计，
+    训练逐块立即反向，以保持完整 minibatch 的精确充分统计，
     calibration/evaluation 则在 ``no_grad`` 下复用同一块大小。
     """
 
@@ -523,7 +528,7 @@ class MultiAnchorGaussianSession:
 
 
 class MultiAnchorGaussianMethod:
-    r"""显式装配 GeometryRepresentation、GeometrySSLModel 与三项 objective。"""
+    r"""显式装配 GeometryRepresentation、GeometrySSLModel 与 rho/kappa 双 objective。"""
 
     def __init__(self, config: MultiAnchorGaussianMethodCfg) -> None:
         r"""保存配置并构造无 IO 的 representation runtime。"""
@@ -543,6 +548,7 @@ class MultiAnchorGaussianMethod:
         self.evaluation_sources: dict[str, LazyGeometrySources] = {}
         self.padding: GeometryPaddingCfg | None = None
         self.runtime_device: torch.device | None = None  # physical audit 与 resident source 共用 classifier device
+        self.teacher_baselines: dict[str, float] | None = None  # pretrain 前由 schema-7 artifact 固定
         self._anchor_classification: dict[str, int | float] = {
             "asset_count": 0,
             "query_point_count": 0,
@@ -842,12 +848,12 @@ class MultiAnchorGaussianMethod:
         ) + float(stats.elapsed_seconds)
 
     def declared_objective_weights(self) -> dict[str, float]:
-        r"""返回 OBJECTIVES_CFG 中显式写出的三项权重。"""
+        r"""返回固定 density/kappa normalized vanilla 权重。"""
 
         return {name: float(term.weight) for name, term in self.config.objectives.enabled().items()}
 
     def formula_identity(self) -> dict[str, str]:
-        r"""返回三项 objective 公式身份：模块级函数的完整限定名。"""
+        r"""返回 density/kappa objective 公式身份：模块级函数的完整限定名。"""
 
         return {name: term.qualified_func_name() for name, term in self.config.objectives.enabled().items()}
 
@@ -1002,6 +1008,49 @@ class MultiAnchorGaussianMethod:
             steps.append(_detach_method_step(micro_step) if mode == "calibration" else micro_step)
         return _merge_microbatch_steps(tuple(steps))
 
+    def teacher_baseline_statistics(self, batch: PaddedOnlineGeometryBatch) -> dict[str, torch.Tensor]:
+        r"""只读取 teacher truth，返回 constant-rho/zero-kappa 的单批充分统计。"""
+
+        return teacher_baseline_sufficient_statistics(batch)
+
+    def merge_teacher_baseline_statistics(
+        self,
+        total: dict[str, torch.Tensor] | None,
+        block: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        r"""合并完整 catalog 单遍中的 teacher-only 充分统计。"""
+
+        return merge_teacher_baseline_statistics(total, block)
+
+    def finalize_teacher_baselines(self, statistics: dict[str, torch.Tensor]) -> dict[str, object]:
+        r"""闭合 teacher-only 充分统计，形成 artifact 中的固定 normalization constants。"""
+
+        return finalize_teacher_baselines(statistics)
+
+    def set_teacher_baselines(self, payload: Mapping[str, object]) -> None:
+        r"""从已核验 artifact 装载严格正的 $B_\rho,B_\kappa$，拒绝缺项或额外 objective。"""
+
+        expected = tuple(self.config.objectives.enabled())
+        if expected != ("density", "kappa"):
+            raise ValueError("unified Geometry SSL requires exactly density and kappa objectives")
+        values: dict[str, float] = {}
+        for name in expected:
+            record = payload.get(name)
+            if not isinstance(record, Mapping):
+                raise ValueError(f"teacher baseline artifact lacks mapping for {name}")
+            value = record.get("baseline_mse")
+            if not isinstance(value, (float, int)) or float(value) <= 0.0:
+                raise ValueError(f"teacher baseline {name}.baseline_mse must be positive")
+            values[name] = float(value)
+        self.teacher_baselines = values
+
+    def require_teacher_baselines(self) -> dict[str, float]:
+        r"""返回训练固定分母；未装载 artifact 时禁止计算 optimizer loss。"""
+
+        if self.teacher_baselines is None:
+            raise RuntimeError("pretraining requires configured teacher-only density/kappa baselines")
+        return dict(self.teacher_baselines)
+
     def _forward_with_prediction(
         self,
         batch: PaddedOnlineGeometryBatch,
@@ -1043,7 +1092,7 @@ class MultiAnchorGaussianMethod:
     def reduce_update(self, steps: tuple[MethodStep, ...]) -> MethodUpdate:
         r"""按 $(asset,q)$ 等权合并一个 optimizer update。"""
 
-        return reduce_method_steps(steps, self.config.objectives)
+        return reduce_method_steps(steps, self.config.objectives, self.require_teacher_baselines())
 
     @staticmethod
     def _q_per_asset_block(batch: PaddedOnlineGeometryBatch) -> int:
@@ -1070,21 +1119,20 @@ class MultiAnchorGaussianMethod:
     ) -> dict[str, torch.Tensor]:
         r"""在模型 forward 前由监督 mask 计算完整 minibatch 的样本 denominator。
 
-        三项 objective 都先在每个 $(asset,q)$ 行内归约，再对有效行等权。density 行有效当且仅当
-        任一 owner/query 有效；两个 edge loss 行有效当且仅当任一 sampled edge 有效。joint-sign
+        两项 objective 都先在每个 $(asset,q)$ 行内归约，再对有效行等权。density 行有效当且仅当
+        任一 owner/query 有效；kappa 行有效当且仅当任一 sampled edge 有效。joint-sign
         rewrite 不改变 mask，因此 denominator 可在 augmentation/forward 前精确得到。
         """
 
         device = batch.q.device
         dtype = batch.q.dtype
-        density = torch.zeros((), device=device, dtype=dtype)  # 有效 zero-order $(asset,q)$ 行数
-        edge = torch.zeros((), device=device, dtype=dtype)  # 有效 first-order $(asset,q)$ 行数
+        density = torch.zeros((), device=device, dtype=dtype)  # 有效 density $(asset,q)$ 行数
+        edge = torch.zeros((), device=device, dtype=dtype)  # 有效 kappa $(asset,q)$ 行数
         density += batch.field_targets.valid_mask.reshape(batch.q.shape[0], -1).any(dim=-1).sum().to(dtype)
         edge += batch.sensitivity_targets.valid_mask.reshape(batch.q.shape[0], -1).any(dim=-1).sum().to(dtype)
         available = {
             "density": density,
             "kappa": edge,
-            "derived_field": edge,
         }
         denominators = {name: available[name] for name in self.config.objectives.enabled()}
         invalid = [name for name, denominator in denominators.items() if float(denominator) <= 0.0]
@@ -1098,6 +1146,7 @@ class MultiAnchorGaussianMethod:
         *,
         forward_step: int,
         microbatch_size: int,
+        collect_z_gradients: bool = False,
     ) -> MethodUpdate:
         r"""按完整 minibatch denominator 对显式 microbatches 流式反传。
 
@@ -1114,9 +1163,10 @@ class MultiAnchorGaussianMethod:
             batch (PaddedOnlineGeometryBatch): 一次 optimizer update 的完整统计 minibatch。
             forward_step (int): 当前 update 的 augmentation/forward 随机身份。
             microbatch_size (int): 一次 forward/backward 的 $(asset,q)$ pair 数。
+            collect_z_gradients (bool): 是否累计 rho/kappa 对 unified $Z$ 的稀疏充分统计。
 
         Returns:
-            MethodUpdate: detached minibatch loss、三项均值与总 $(asset,q)$ 样本数；参数 ``.grad`` 已累积。
+            MethodUpdate: detached normalized loss、raw/normalized 双项均值与样本数；参数 ``.grad`` 已累积。
         """
 
         q_per_asset = self._q_per_asset_block(batch)
@@ -1132,7 +1182,22 @@ class MultiAnchorGaussianMethod:
             name: torch.zeros_like(denominator) for name, denominator in denominators.items()
         }
         enabled = self.config.objectives.enabled()
+        baselines = self.require_teacher_baselines()  # 固定 $B_\rho,B_\kappa$，整个 run 不更新
         sample_count = 0
+        z_gradient_squares = {name: 0.0 for name in enabled}  # $\sum_m\|\nabla_{Z_m}L_j\|^2$
+        z_gradient_dot = 0.0  # $\sum_m\langle\nabla_{Z_m}L_\rho,\nabla_{Z_m}L_\kappa\rangle$
+        diagnostic_totals: dict[str, list[float]] = {}  # 名称 -> [平方和或计数, denominator]
+
+        def accumulate_diagnostic(name: str, values: torch.Tensor, mask: torch.Tensor) -> None:
+            r"""沿完整 microbatch 累加逐元素诊断，不改变 objective 的 per-sample reduction。"""
+
+            weight = mask.to(values.dtype)
+            while weight.ndim < values.ndim:
+                weight = weight.unsqueeze(-1)
+            weight = weight.expand_as(values)
+            current = diagnostic_totals.setdefault(name, [0.0, 0.0])
+            current[0] += float((values * weight).sum().detach())
+            current[1] += float(weight.sum().detach())
 
         rewritten = maybe_rewrite_batch(
             batch,
@@ -1144,23 +1209,64 @@ class MultiAnchorGaussianMethod:
             rewritten,
             microbatch_size=microbatch_size,
         ):
-            micro_step = self._forward_with_prediction(
+            micro_step, prediction = self._forward_with_prediction(
                 microbatch,
                 step=int(forward_step),
                 mode="train",
                 apply_augmentation=False,
-            )[0]
+            )
             micro_loss: torch.Tensor | None = None
+            z_gradients: dict[str, torch.Tensor] = {}
+            field_valid = microbatch.field_targets.valid_mask
+            edge_valid = microbatch.sensitivity_targets.valid_mask
+            active_mask = microbatch.sensitivity_targets.active_mask
+            if active_mask.ndim == 1:
+                active_mask = active_mask.unsqueeze(0).expand_as(edge_valid)
+            density_error_sq = (prediction.density - microbatch.field_targets.density).square()
+            kappa_error_sq = (prediction.kappa - microbatch.sensitivity_targets.kappa).square()
+            accumulate_diagnostic("density/prediction_square", prediction.density.square(), field_valid)
+            accumulate_diagnostic("density/target_square", microbatch.field_targets.density.square(), field_valid)
+            accumulate_diagnostic("density/error_square", density_error_sq, field_valid)
+            accumulate_diagnostic("kappa/prediction_square", prediction.kappa.square(), edge_valid)
+            accumulate_diagnostic("kappa/target_square", microbatch.sensitivity_targets.kappa.square(), edge_valid)
+            accumulate_diagnostic("kappa/error_square", kappa_error_sq, edge_valid)
+            accumulate_diagnostic("kappa/active_error_square", kappa_error_sq, edge_valid & active_mask)
+            accumulate_diagnostic("kappa/zero_error_square", kappa_error_sq, edge_valid & ~active_mask)
+            diagnostic_totals.setdefault("density/valid_ratio", [0.0, 0.0])
+            diagnostic_totals["density/valid_ratio"][0] += float(field_valid.sum())
+            diagnostic_totals["density/valid_ratio"][1] += float(field_valid.numel())
+            diagnostic_totals.setdefault("kappa/valid_ratio", [0.0, 0.0])
+            diagnostic_totals["kappa/valid_ratio"][0] += float(edge_valid.sum())
+            diagnostic_totals["kappa/valid_ratio"][1] += float(edge_valid.numel())
             for term_name, result in micro_step.objectives.items():
                 if len(result.components) != 1 or result.components[0].name != term_name:
                     raise ValueError("streaming backward requires one same-name additive component per term")
                 component = result.components[0]
-                weighted = float(enabled[term_name].weight) * component.numerator / denominators[term_name]
+                raw_term = component.numerator / denominators[term_name]  # 完整 minibatch denominator 下的 $L_j$
+                if collect_z_gradients:
+                    z_gradients[term_name] = torch.autograd.grad(
+                        raw_term,
+                        prediction.latents.entities,
+                        retain_graph=True,
+                    )[0].detach()  # 当前 microbatch 的 unified-Z proxy，不写回 ``.grad``
+                weighted = (
+                    float(enabled[term_name].weight)
+                    * raw_term
+                    / float(baselines[term_name])
+                )
                 micro_loss = weighted if micro_loss is None else micro_loss + weighted
                 numerators[term_name] += component.numerator.detach()
                 observed_denominators[term_name] += component.denominator.detach()
             if micro_loss is None:
                 raise ValueError("streaming backward microbatch contains no enabled objective")
+            if collect_z_gradients:
+                if set(z_gradients) != {"density", "kappa"}:
+                    raise RuntimeError("unified-Z gradient evidence requires density and kappa gradients")
+                rho_gradient = z_gradients["density"]
+                kappa_gradient = z_gradients["kappa"]
+                z_gradient_squares["density"] += float(rho_gradient.square().sum())
+                z_gradient_squares["kappa"] += float(kappa_gradient.square().sum())
+                z_gradient_dot += float((rho_gradient * kappa_gradient).sum())
             micro_loss.backward()  # 当前普通参数图立即释放；梯度只累计到当前完整 minibatch
             sample_count += micro_step.sample_count
 
@@ -1171,14 +1277,65 @@ class MultiAnchorGaussianMethod:
                     f"observed={float(observed_denominators[name])}, expected={float(expected)}"
                 )
         terms = {name: float(numerators[name] / denominators[name]) for name in denominators}
+        normalized_terms = {name: terms[name] / float(baselines[name]) for name in denominators}
+        skills = {name: 1.0 - normalized_terms[name] for name in denominators}
         detached_loss = torch.zeros_like(next(iter(denominators.values())))
         for name in denominators:
-            detached_loss += float(enabled[name].weight) * numerators[name] / denominators[name]
+            detached_loss += float(enabled[name].weight) * normalized_terms[name]
+        gradient_evidence: dict[str, float] = {}
+        if collect_z_gradients:
+            epsilon = 1.0e-30
+            raw_rho_sq = z_gradient_squares["density"]
+            raw_kappa_sq = z_gradient_squares["kappa"]
+            raw_dot = z_gradient_dot
+            rho_scale = float(baselines["density"])
+            kappa_scale = float(baselines["kappa"])
+            normalized_rho_sq = raw_rho_sq / (rho_scale * rho_scale)
+            normalized_kappa_sq = raw_kappa_sq / (kappa_scale * kappa_scale)
+            normalized_dot = raw_dot / (rho_scale * kappa_scale)
+            trace = normalized_rho_sq + normalized_kappa_sq
+            determinant = max(normalized_rho_sq * normalized_kappa_sq - normalized_dot * normalized_dot, 0.0)
+            discriminant = max(trace * trace - 4.0 * determinant, 0.0)
+            largest = 0.5 * (trace + math.sqrt(discriminant))
+            smallest = 0.5 * (trace - math.sqrt(discriminant))
+            joint_sq = normalized_rho_sq + normalized_kappa_sq + 2.0 * normalized_dot
+            joint_norm = math.sqrt(max(joint_sq, 0.0))
+            gradient_evidence = {
+                "raw/rho_norm": math.sqrt(max(raw_rho_sq, 0.0)),
+                "raw/kappa_norm": math.sqrt(max(raw_kappa_sq, 0.0)),
+                "raw/dot": raw_dot,
+                "raw/cosine": raw_dot / math.sqrt(max(raw_rho_sq * raw_kappa_sq, epsilon)),
+                "normalized/rho_norm": math.sqrt(max(normalized_rho_sq, 0.0)),
+                "normalized/kappa_norm": math.sqrt(max(normalized_kappa_sq, 0.0)),
+                "normalized/dot": normalized_dot,
+                "normalized/cosine": normalized_dot
+                / math.sqrt(max(normalized_rho_sq * normalized_kappa_sq, epsilon)),
+                "normalized/gram_determinant": determinant,
+                "normalized/gram_condition": largest / max(smallest, epsilon),
+                "vanilla/joint_norm": joint_norm,
+                "vanilla/rho_projection": (normalized_rho_sq + normalized_dot) / max(joint_norm, epsilon),
+                "vanilla/kappa_projection": (normalized_kappa_sq + normalized_dot) / max(joint_norm, epsilon),
+            }
+        diagnostics = {
+            name: numerator / max(denominator, 1.0)
+            for name, (numerator, denominator) in diagnostic_totals.items()
+        }
+        for name in (
+            "density/prediction_square",
+            "density/target_square",
+            "kappa/prediction_square",
+            "kappa/target_square",
+        ):
+            diagnostics[name.replace("_square", "_rms")] = math.sqrt(max(diagnostics.pop(name), 0.0))
         return MethodUpdate(
             loss=detached_loss.detach(),
             terms=terms,
             sample_count=sample_count,
             denominators={name: float(value) for name, value in denominators.items()},
+            normalized_terms=normalized_terms,
+            skills=skills,
+            gradient_evidence=gradient_evidence,
+            diagnostics=diagnostics,
         )
 
     def evaluate_session(
@@ -1190,7 +1347,7 @@ class MultiAnchorGaussianMethod:
     ) -> MethodEvaluationReport:
         r"""流式执行固定 $A^{(0)}$/4-16-64 mm/4+4 edge 测度。
 
-        Trainer 只决定何时评估和如何使用三项 selection metrics；本函数拥有固定 sigma、anchor、edge、
+        Trainer 只决定何时评估；本函数拥有固定 sigma、anchor、edge、
         分层轴与具体 ablation。所有 objective 只累计 detached numerator/denominator，不保留跨 batch 图。
         """
 
@@ -1276,12 +1433,10 @@ class MultiAnchorGaussianMethod:
         )
 
     def feature_spec(self) -> FeatureSpec:
-        r"""返回下游消费的零阶实体序列与逐 JOINT 一阶序列合同。"""
+        r"""返回下游消费的 unified entity sequence 与 JOINT gather view 合同。"""
 
-        heads = self.config.model.encoder.heads
         return FeatureSpec(
-            zero_order_width=heads.zero_order_width,
-            first_order_width=heads.first_order_width,
+            entity_width=self.config.model.encoder.backbone.hidden_width,
         )
 
     def retained_state_dict(self) -> dict[str, torch.Tensor]:
@@ -1313,14 +1468,14 @@ class MultiAnchorGaussianMethod:
         if not retained or any(not key.startswith("encoder.") for key in retained):
             raise ValueError("retained artifact requires a non-empty encoder-only state")
         return {
-            "schema_version": "4.0.0",
+            "schema_version": "5.0.0",
             "artifact_type": "retained_geometry_encoder",
             "retained_state": retained,
             "retained_model_config": {"encoder": asdict(self.config.model.encoder)},
             "feature_spec": asdict(self.feature_spec()),
             "input_contract": {
                 "frame": "query/closest/surface in hand frame {h}",
-                "units": "length=m,joint=rad,density=dimensionless,kappa=m/rad,g=1/rad",
+                "units": "length=m,joint=rad,density=dimensionless,kappa=m/rad",
                 "retained_inputs": "physical q + static geometry evidence",
             },
             "lineage": {

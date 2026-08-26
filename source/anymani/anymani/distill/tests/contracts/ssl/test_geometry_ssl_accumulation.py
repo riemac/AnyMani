@@ -2,11 +2,12 @@ r"""$(asset,q)$ 等权 accumulation：尾 minibatch 不得与满 minibatch 按�
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 from anymani.distill.methods.contracts import AdditiveStatistic, MethodStep, ObjectiveTermResult
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import (
     DensityObjectiveCfg,
-    MultiAnchorGaussianObjectivesCfg,
 )
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.method import _merge_microbatch_steps
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives import reduce_method_steps
@@ -38,7 +39,8 @@ def test_update_reduction_weights_asset_q_equally() -> None:
     )
     update = reduce_method_steps(
         (first, second),
-        MultiAnchorGaussianObjectivesCfg(density=DensityObjectiveCfg(weight=1.0), kappa=None, derived_field=None),
+        SimpleNamespace(enabled=lambda: {"density": DensityObjectiveCfg(weight=1.0)}),
+        {"density": 1.0},
     )
     # $(8+1)/(4+1)=1.8$，不是两个 minibatch 均值 $(2+1)/2=1.5$。
     torch.testing.assert_close(update.loss, torch.tensor(1.8, dtype=dtype), atol=0.0, rtol=0.0)

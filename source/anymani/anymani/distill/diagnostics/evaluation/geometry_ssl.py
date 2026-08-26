@@ -1,12 +1,12 @@
 r"""几何 SSL 的 query-only 与 latent-shuffle 必要性诊断。
 
 完整模型预测写作 $f(x,q,s)$：$x$ 是固定 `{h}` query，$q$ 是当前物理关节角，$s$ 是静态手型证据。
-两项诊断共享同一 query encoder 和 disposable decoder，仅改变 morphology latent：
+诊断共享同一 query encoder 和 disposable decoder，仅改变 unified morphology latent：
 
 $$
-f_{query}(x)=f(x,\mathbf 0,\mathbf 0),
+f_{query}(x)=f(x,\mathbf 0),
 \qquad
-f_{shuffle}^{(b)}(x)=f(x,z_{\pi(b)}^{(0)},z_{\pi(b)}^{(1)}).
+f_{shuffle}^{(b)}(x)=f(x,Z_{\pi(b)}).
 $$
 
 若完整模型不优于 query-only，表示 decoder 可能绕过 hand conditioning；若 latent shuffle 不显著恶化，
@@ -15,6 +15,8 @@ $$
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping, Sequence
 from typing import Literal  # 只允许预注册 ablation，避免自由字符串改变实验含义
 
 import torch  # latent、query 与 batch permutation 全部保持 PyTorch 计算图
@@ -29,9 +31,7 @@ from anymani.distill.models.input_adapters.geometry import (  # retained latent/
 GeometrySSLAblation = Literal[
     "query_only",
     "latent_shuffle",
-    "first_order_zero",
-    "first_order_joint_shuffle",
-    "first_order_sign_flip",
+    "joint_token_shuffle",
 ]  # 受控诊断枚举
 
 StratifiedComponents = dict[
@@ -73,7 +73,7 @@ def geometry_ssl_ablation_forward(
         ValueError: permutation 不是 ``[0,B)`` 双射或 ablation 名未知时抛出。
     """
 
-    latents = model.encoder(q, evidence)  # 原始 $z^{(0)}:[B,G,D_0]$ 与 $z^{(1)}:[B,N_J,D_1]$
+    latents = model.encoder(q, evidence)  # 原始 unified $Z:[B,G,D]$
     query_features = model.encoder.encode_points(  # 与完整模型完全相同的 point-anchor 前端
         query_points_h.detach(), evidence
     )  # `[B,G,N_Q,D_q]`；固定 query 不接收 sampler 梯度
@@ -84,37 +84,31 @@ def geometry_ssl_ablation_forward(
         query_features = query_features * entity_valid.unsqueeze(-1).unsqueeze(-1)  # invalid owner 精确零
 
     if ablation == "query_only":  # 保留 query path，但删除全部 hand/q conditioning
-        ablated = GeometryLatents(  # 形状不变，避免 baseline 获得不同 decoder 容量
-            torch.zeros_like(latents.zero_order),  # $z^{(0)}\leftarrow0$
-            torch.zeros_like(latents.first_order),  # $z^{(1)}\leftarrow0$
-        )
+        ablated = GeometryLatents(torch.zeros_like(latents.entities))  # $Z\leftarrow0$，decoder 容量不变
     elif ablation == "latent_shuffle":  # 保留 latent 边缘分布，只破坏样本对应关系
         if batch_permutation is None or batch_permutation.shape != (q.shape[0],):  # 必须显式 `[B]`
             raise ValueError("latent_shuffle requires batch_permutation with shape [B]")  # 不猜 permutation
         expected = torch.arange(q.shape[0], device=batch_permutation.device)  # 合法索引集合 `[0,B)`
         if not torch.equal(torch.sort(batch_permutation).values, expected):  # 拒绝重复/遗漏样本
             raise ValueError("batch_permutation must be a bijection of [0,B)")  # 保持 batch 分布不变
-        ablated = GeometryLatents(  # 同一 permutation 同时作用零阶/一阶 latent
-            latents.zero_order.index_select(0, batch_permutation),  # $z_b^{(0)}\leftarrow z_{\pi(b)}^{(0)}$
-            latents.first_order.index_select(0, batch_permutation),  # $z_b^{(1)}\leftarrow z_{\pi(b)}^{(1)}$
-        )
-    elif ablation == "first_order_zero":  # 只删除一阶包，零阶几何和 query path 保持完整
-        ablated = GeometryLatents(latents.zero_order, torch.zeros_like(latents.first_order))
-    elif ablation == "first_order_sign_flip":  # 检查 $z_i^{(1)}$ 的有向物理语义是否被 decoder 使用
-        ablated = GeometryLatents(latents.zero_order, -latents.first_order)
-    elif ablation == "first_order_joint_shuffle":  # 只破坏每个 hand 内的 JOINT 对应关系
+        ablated = GeometryLatents(latents.entities.index_select(0, batch_permutation))  # $Z_b\leftarrow Z_{\pi(b)}$
+    elif ablation == "joint_token_shuffle":  # 只破坏每个 hand 内的 JOINT token binding
         joint_valid = evidence.joint_valid_mask
         if joint_valid is None:
-            joint_valid = torch.ones(latents.first_order.shape[:2], device=q.device, dtype=torch.bool)
+            joint_valid = torch.ones(q.shape, device=q.device, dtype=torch.bool)
         if joint_valid.ndim == 1:
             joint_valid = joint_valid.unsqueeze(0).expand(q.shape[0], -1)
-        shuffled = torch.zeros_like(latents.first_order)
+        joint_entities = evidence.joint_entity_index
+        if joint_entities.ndim == 1:
+            joint_entities = joint_entities.unsqueeze(0).expand(q.shape[0], -1)
+        shuffled = latents.entities.clone()  # PALM/TIP 和未选 entity 原样保留
         for batch_index in range(q.shape[0]):
-            valid_indices = torch.where(joint_valid[batch_index])[0]
-            if len(valid_indices) < 2:
-                raise ValueError("first_order_joint_shuffle requires at least two valid JOINTs per sample")
-            shuffled[batch_index, valid_indices] = latents.first_order[batch_index, valid_indices].roll(1, dims=0)
-        ablated = GeometryLatents(latents.zero_order, shuffled)
+            valid_joint_slots = torch.where(joint_valid[batch_index])[0]
+            if len(valid_joint_slots) < 2:
+                raise ValueError("joint_token_shuffle requires at least two valid JOINTs per sample")
+            entity_slots = joint_entities[batch_index, valid_joint_slots]  # 有效 JOINT 在统一 entity 轴的位置
+            shuffled[batch_index, entity_slots] = latents.entities[batch_index, entity_slots].roll(1, dims=0)
+        ablated = GeometryLatents(shuffled)
     else:  # 未注册诊断不得静默退回完整 forward
         raise ValueError(f"unknown geometry SSL ablation={ablation!r}")
     return model.decode_latents(  # decoder 权重、query features 与 selectors 均与完整模型相同
@@ -122,6 +116,7 @@ def geometry_ssl_ablation_forward(
         query_features,  # 未打乱的本样本 query path
         bandwidths=bandwidths,  # 与完整 forward 相同的实际 sigma realization
         entity_valid_mask=entity_valid,  # invalid owner prediction 继续严格清零
+        joint_entity_index=evidence.joint_entity_index,  # 保持原 JOINT routing，故 shuffle 是故意错配
         owner_index=owner_index,  # 保留本样本 sampled owner
         query_index=query_index,  # 保留本样本 sampled query
         joint_index=joint_index,  # 保留本样本 sampled JOINT
@@ -332,7 +327,7 @@ def geometry_ssl_stratified_components_per_sample(
 def aggregate_geometry_ssl_stratified_components(
     blocks: tuple[tuple[tuple[str, ...], StratifiedComponents], ...],
 ) -> dict[str, object]:
-    r"""把 validation blocks 聚合为 morphology/bin/axis 等权的三项选择指标。
+    r"""聚合 density/kappa 与 post-hoc derived-field 三项诊断；selection 只消费前两项。
 
     同一 ``asset_id`` 的所有 q 先对 numerator/denominator 求和得到该 morphology 的 bin MSE；
     每个 bin 再对具有有效 denominator 的 morphology 等权；每个 axis 对非空 bins 等权；每个
@@ -499,6 +494,136 @@ def _edge_inverse_sigma_squared(bandwidths: torch.Tensor) -> torch.Tensor:
     return inverse.view(1, 1, -1) if inverse.ndim == 1 else inverse.unsqueeze(1)
 
 
+def joint_sign_observable_metrics(
+    reference: GeometrySSLForward,
+    rewritten: GeometrySSLForward,
+    *,
+    joint_sign: torch.Tensor,
+    joint_index: torch.Tensor,
+    density_valid_mask: torch.Tensor,
+    edge_valid_mask: torch.Tensor,
+) -> dict[str, float]:
+    r"""评估完整 coordinate rewrite 后 density 不变与 $\kappa$ sign-equivariance。
+
+    该函数不对 latent 做比较。调用方必须先同步改写 $q,q_{home},\mathcal S$；策略侧还需在其边界
+    同步 limits、velocity、PD target、previous action 与 action。这里只根据 sampled edge 的 JOINT
+    selector 形成目标 $\kappa'_{o,i}=s_i\kappa_{o,i}$。
+    """
+
+    if reference.density.shape != rewritten.density.shape or reference.kappa.shape != rewritten.kappa.shape:
+        raise ValueError("joint-sign observable predictions must share density/kappa shapes")
+    batch_size = reference.kappa.shape[0]
+    signs = joint_sign.to(reference.kappa)
+    if signs.ndim == 1:
+        signs = signs.unsqueeze(0).expand(batch_size, -1)
+    selectors = _batched_selector(joint_index, batch_size)
+    edge_sign = torch.gather(signs, 1, selectors)  # `[B,E]` 的对应坐标方向
+    density_weight = density_valid_mask.to(reference.density.dtype).unsqueeze(-1).expand_as(reference.density)
+    edge_weight = edge_valid_mask.to(reference.kappa.dtype)
+    density_error = rewritten.density - reference.density
+    kappa_error = rewritten.kappa - edge_sign * reference.kappa
+    return {
+        "density_invariance_mse": float(
+            (density_error.square() * density_weight).sum() / density_weight.sum().clamp_min(1.0)
+        ),
+        "kappa_sign_equivariance_mse": float(
+            (kappa_error.square() * edge_weight).sum() / edge_weight.sum().clamp_min(1.0)
+        ),
+    }
+
+
+def density_configuration_jvp(
+    model: GeometrySSLModel,
+    q: torch.Tensor,
+    evidence: StaticGeometryEvidence,
+    query_points_h: torch.Tensor,
+    bandwidths: torch.Tensor,
+    *,
+    owner_index: torch.Tensor,
+    query_index: torch.Tensor,
+    joint_index: torch.Tensor,
+    direction: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""手动计算真实网络 $\partial\hat\rho/\partial q\,v$，不进入 active training graph。
+
+    ``direction`` 与 $q$ 同形状、单位为 rad；返回 primal density 与沿该方向的 tangent。query、sigma、
+    selectors 和静态证据固定，因此该 JVP 只测 retained encoder 对 current configuration 的依赖。
+    """
+
+    if direction.shape != q.shape:
+        raise ValueError("density JVP direction must have the same shape as q")
+
+    def density_from_configuration(configuration: torch.Tensor) -> torch.Tensor:
+        return model(
+            configuration,
+            evidence,
+            query_points_h,
+            bandwidths,
+            owner_index,
+            query_index,
+            joint_index,
+        ).density
+
+    return torch.autograd.functional.jvp(
+        density_from_configuration,
+        q.detach(),
+        direction.detach(),
+        create_graph=False,
+        strict=True,
+    )
+
+
+def task_gradient_gram(
+    losses: Mapping[str, torch.Tensor],
+    parameters: Sequence[torch.nn.Parameter],
+    *,
+    baselines: Mapping[str, float],
+) -> dict[str, float]:
+    r"""对调用方指定参数层级计算 rho/kappa full-gradient Gram 统计。
+
+    调用方可传 unified representation frontend、最后一个 Transformer block 或完整 retained encoder
+    参数；本函数只返回 norm/dot/cosine/condition，不保存梯度向量，也不执行 optimizer update。
+    """
+
+    if set(losses) != {"density", "kappa"} or set(baselines) != {"density", "kappa"}:
+        raise ValueError("task gradient Gram requires density/kappa losses and baselines")
+    parameter_tuple = tuple(parameter for parameter in parameters if parameter.requires_grad)
+    if not parameter_tuple:
+        raise ValueError("task gradient Gram requires at least one trainable parameter")
+    gradients: dict[str, torch.Tensor] = {}
+    for index, name in enumerate(("density", "kappa")):
+        parts = torch.autograd.grad(
+            losses[name] / float(baselines[name]),
+            parameter_tuple,
+            retain_graph=index == 0,
+            allow_unused=True,
+        )
+        gradients[name] = torch.cat(
+            [
+                (torch.zeros_like(parameter) if gradient is None else gradient).reshape(-1)
+                for parameter, gradient in zip(parameter_tuple, parts)
+            ]
+        )
+    rho = gradients["density"]
+    kappa = gradients["kappa"]
+    rho_sq = float(rho.square().sum())
+    kappa_sq = float(kappa.square().sum())
+    dot = float((rho * kappa).sum())
+    determinant = max(rho_sq * kappa_sq - dot * dot, 0.0)
+    trace = rho_sq + kappa_sq
+    discriminant = max(trace * trace - 4.0 * determinant, 0.0)
+    largest = 0.5 * (trace + math.sqrt(discriminant))
+    smallest = 0.5 * (trace - math.sqrt(discriminant))
+    return {
+        "rho_norm": math.sqrt(max(rho_sq, 0.0)),
+        "kappa_norm": math.sqrt(max(kappa_sq, 0.0)),
+        "dot": dot,
+        "cosine": dot / math.sqrt(max(rho_sq * kappa_sq, 1.0e-30)),
+        "gram_determinant": determinant,
+        "gram_condition": largest / max(smallest, 1.0e-30),
+    }
+
+
 __all__ = [
     "GeometrySSLAblation",
     "cross_asset_permutation",
@@ -507,5 +632,8 @@ __all__ = [
     "geometry_ssl_reconstruction_metrics",
     "geometry_ssl_reconstruction_metrics_per_sample",
     "geometry_ssl_stratified_components_per_sample",
+    "density_configuration_jvp",
+    "joint_sign_observable_metrics",
     "same_asset_q_permutation",
+    "task_gradient_gram",
 ]  # 稳定诊断公开面

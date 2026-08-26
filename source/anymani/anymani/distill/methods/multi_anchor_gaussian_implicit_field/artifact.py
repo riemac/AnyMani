@@ -10,7 +10,7 @@ import torch
 
 from anymani.distill.models.input_adapters.geometry import ImplicitGeometryEncoder
 
-RETAINED_ARTIFACT_SCHEMA_VERSION = "4.0.0"
+RETAINED_ARTIFACT_SCHEMA_VERSION = "5.0.0"
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,15 @@ def load_retained_geometry_artifact(
     leaked = tuple(name for name in forbidden if name in payload)
     if leaked:
         raise ValueError(f"retained artifact contains disposable fields: {leaked}")
+    feature_spec = payload.get("feature_spec")
+    if not isinstance(feature_spec, Mapping) or set(feature_spec) != {
+        "entity_width",
+        "entity_axis",
+        "joint_view",
+        "frame_contract",
+        "coordinate_rewrite_contract",
+    }:
+        raise ValueError("retained artifact feature_spec is not the unified entity/JOINT-view contract")
     retained = payload.get("retained_state")
     if not isinstance(retained, Mapping):
         raise ValueError("retained artifact retained_state must be a mapping")

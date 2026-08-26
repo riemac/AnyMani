@@ -111,12 +111,9 @@ def test_canonical_retained_encoder_p95_is_at_most_40_ms() -> None:
         single_sample_reference = model(q[:1], evidence)
         reference = model(q, evidence)
         repeated = model(q, evidence)
-    assert reference.zero_order.shape == (4096, 21, 128)
-    assert reference.first_order.shape == (4096, 16, 64)
-    torch.testing.assert_close(repeated.zero_order, reference.zero_order, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(repeated.first_order, reference.first_order, atol=0.0, rtol=0.0)
-    torch.testing.assert_close(reference.zero_order[:1], single_sample_reference.zero_order, atol=2.0e-6, rtol=2.0e-6)
-    torch.testing.assert_close(reference.first_order[:1], single_sample_reference.first_order, atol=2.0e-6, rtol=2.0e-6)
+    assert reference.entities.shape == (4096, 21, 128)
+    torch.testing.assert_close(repeated.entities, reference.entities, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(reference.entities[:1], single_sample_reference.entities, atol=2.0e-6, rtol=2.0e-6)
 
     torch.cuda.reset_peak_memory_stats(device)
     stream = torch.cuda.current_stream(device)
@@ -154,7 +151,7 @@ def test_canonical_retained_encoder_p95_is_at_most_40_ms() -> None:
         }
     )
 
-    assert parameter_count == 350407
+    assert parameter_count == 317383
     assert p95_ms <= 40.0, f"retained encoder p95={p95_ms:.3f} ms exceeds 40 ms sub-budget"
 
 
@@ -169,10 +166,7 @@ def test_ssl_only_decoder_cost_is_reported_outside_retained_budget() -> None:
         pytest.skip(f"performance contract is bound to RTX 5070 Ti, found {device_name}")
 
     model = GeometrySSLModel(GeometrySSLModelCfg()).to(device).eval()
-    latents = GeometryLatents(
-        zero_order=torch.randn(4, 21, 128, device=device),
-        first_order=torch.randn(4, 16, 64, device=device),
-    )
+    latents = GeometryLatents(entities=torch.randn(4, 21, 128, device=device))
     query_features = torch.randn(4, 21, 64, 64, device=device)
     bandwidths = torch.tensor([0.004, 0.016, 0.064], device=device).expand(4, -1)
     owner_index = torch.arange(42, device=device) % 21
@@ -185,6 +179,7 @@ def test_ssl_only_decoder_cost_is_reported_outside_retained_budget() -> None:
             query_features,
             bandwidths=bandwidths,
             entity_valid_mask=torch.ones(4, 21, device=device, dtype=torch.bool),
+            joint_entity_index=torch.arange(1, 17, device=device),
             owner_index=owner_index,
             query_index=query_index,
             joint_index=joint_index,
@@ -221,5 +216,5 @@ def test_ssl_only_decoder_cost_is_reported_outside_retained_budget() -> None:
             "peak_memory_mib": torch.cuda.max_memory_allocated(device) / (1024.0**2),
         }
     )
-    assert decoder_parameter_count == 240449
+    assert decoder_parameter_count == 513154
     assert all(key.startswith("encoder.") for key in model.retained_state_dict())

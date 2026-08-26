@@ -1,4 +1,4 @@
-r"""三项主 objective：比较预测与 representation 真值，并按 $(asset,q)$ 等权归约。
+r"""rho/kappa 双主 objective：比较预测与 representation 真值，并按 $(asset,q)$ 等权归约。
 
 每个 term 只读取 method 组装好的 typed context，不重新采样 query，也不重新运行 encoder。
 一阶 active/zero 在样本内先分别平均，再按 1:1 合并，避免 active 被最近点 mask 后让 zero 主导。
@@ -6,13 +6,14 @@ r"""三项主 objective：比较预测与 representation 真值，并按 $(asset
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import torch
 
 from anymani.distill.methods.contracts import AdditiveStatistic, MethodStep, MethodUpdate, ObjectiveTermResult
 
 from .config import (
     DensityObjectiveCfg,
-    DerivedFieldObjectiveCfg,
     KappaObjectiveCfg,
     MultiAnchorGaussianObjectivesCfg,
 )
@@ -98,21 +99,151 @@ def kappa_objective(context: MultiAnchorObjectiveContext) -> ObjectiveTermResult
     return ObjectiveTermResult("kappa", (statistic,), {"loss": statistic.mean})
 
 
-def derived_field_objective(context: MultiAnchorObjectiveContext) -> ObjectiveTermResult:
-    r"""$\mathcal L_g^{(\kappa)}$：$\hat g^{(\kappa)}$ 对齐 teacher $g$。"""
+def teacher_baseline_sufficient_statistics(batch: object) -> dict[str, torch.Tensor]:
+    r"""从 teacher-only batch 累计 constant-density 与 zero-kappa baseline 的充分统计。
 
-    numerator, denominator = _split_active_zero_mean(
-        context.derived_field_sensitivity - context.field_sensitivity_target,
-        context.edge_valid_mask,
-        context.active_mask,
+    对 bandwidth slot $s$，每个有效样本先在 owner/query 轴求一阶矩 $m_{b,s}$ 与二阶矩
+    $v_{b,s}$。跨样本等权累加后，最优常数与 baseline MSE 为：
+
+    $$
+    c_s=\frac{\sum_bm_{b,s}}{N_s},\qquad
+    B_\rho=\frac{\sum_{b,s}(v_{b,s}-2c_sm_{b,s}+c_s^2)}{\sum_sN_s}.
+    $$
+
+    query stratum 只重复记录同类矩，不参与 $c_s$ 或 $B_\rho$ 的估计。$B_\kappa$ 令预测为零，
+    并直接调用正式 objective 的 active/zero 归约，确保 structural-zero 权重完全一致。
+    """
+
+    field = batch.field_targets  # concrete method batch；truth 不进入 model
+    sensitivity = batch.sensitivity_targets
+    density = field.density.detach()  # `[B,G,N_Q,N_sigma]`，teacher-only
+    valid = field.valid_mask.detach()  # `[B,G,N_Q]`
+    valid_weight = valid.to(density.dtype)
+    scalar_count = valid_weight.reshape(density.shape[0], -1).sum(dim=-1)  # 每行有效 owner/query 数
+    sample_valid = scalar_count > 0.0
+    normalized_weight = valid_weight / scalar_count.clamp_min(1.0)[:, None, None]
+    slot_mean = (density * normalized_weight.unsqueeze(-1)).sum(dim=(1, 2))  # `[B,N_sigma]`
+    slot_second = (density.square() * normalized_weight.unsqueeze(-1)).sum(dim=(1, 2))
+    slot_weight = sample_valid.to(density.dtype).unsqueeze(-1).expand_as(slot_mean)
+
+    # 三个 query strata 只作可重算诊断；它们不能改变 constant predictor 或训练分母。
+    stratum_mean_sum = torch.zeros(3, density.shape[-1], device=density.device, dtype=density.dtype)
+    stratum_second_sum = torch.zeros_like(stratum_mean_sum)
+    stratum_sample_count = torch.zeros_like(stratum_mean_sum)
+    for stratum in range(3):
+        stratum_valid = valid & (field.query_stratum == stratum)
+        stratum_weight = stratum_valid.to(density.dtype)
+        stratum_count = stratum_weight.reshape(density.shape[0], -1).sum(dim=-1)
+        row_valid = stratum_count > 0.0
+        row_weight = stratum_weight / stratum_count.clamp_min(1.0)[:, None, None]
+        row_mean = (density * row_weight.unsqueeze(-1)).sum(dim=(1, 2))
+        row_second = (density.square() * row_weight.unsqueeze(-1)).sum(dim=(1, 2))
+        stratum_mean_sum[stratum] = row_mean[row_valid].sum(dim=0)
+        stratum_second_sum[stratum] = row_second[row_valid].sum(dim=0)
+        stratum_sample_count[stratum] = row_valid.to(density.dtype).sum()
+
+    kappa_num, kappa_den = _split_active_zero_mean(
+        sensitivity.kappa.detach(),  # zero predictor error 为 $0-\kappa$，平方后符号无关
+        sensitivity.valid_mask.detach(),
+        sensitivity.active_mask.detach(),
     )
-    statistic = AdditiveStatistic("derived_field", numerator, denominator)
-    return ObjectiveTermResult("derived_field", (statistic,), {"loss": statistic.mean})
+    active_mask = sensitivity.active_mask.detach()
+    if active_mask.ndim == 1:
+        active_mask = active_mask.unsqueeze(0).expand_as(sensitivity.valid_mask)
+    kappa_stratum_sum = torch.zeros(2, device=density.device, dtype=density.dtype)
+    kappa_stratum_count = torch.zeros_like(kappa_stratum_sum)
+    for stratum, mask in enumerate(
+        (sensitivity.valid_mask & active_mask, sensitivity.valid_mask & ~active_mask)
+    ):
+        weight = mask.to(density.dtype)
+        row_count = weight.sum(dim=-1)
+        row_valid = row_count > 0.0
+        row_second = (sensitivity.kappa.detach().square() * weight).sum(dim=-1) / row_count.clamp_min(1.0)
+        kappa_stratum_sum[stratum] = row_second[row_valid].sum()
+        kappa_stratum_count[stratum] = row_valid.to(density.dtype).sum()
+    return {
+        "density_slot_mean_sum": (slot_mean * slot_weight).sum(dim=0),
+        "density_slot_second_sum": (slot_second * slot_weight).sum(dim=0),
+        "density_slot_sample_count": slot_weight.sum(dim=0),
+        "density_stratum_mean_sum": stratum_mean_sum,
+        "density_stratum_second_sum": stratum_second_sum,
+        "density_stratum_sample_count": stratum_sample_count,
+        "kappa_zero_numerator": kappa_num,
+        "kappa_zero_denominator": kappa_den,
+        "kappa_stratum_second_sum": kappa_stratum_sum,
+        "kappa_stratum_sample_count": kappa_stratum_count,
+    }
+
+
+def merge_teacher_baseline_statistics(
+    total: dict[str, torch.Tensor] | None,
+    block: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    r"""逐字段相加 teacher baseline 充分统计，不保留 batch 或 autograd 图。"""
+
+    if total is None:
+        return {name: value.detach().clone() for name, value in block.items()}
+    if total.keys() != block.keys():
+        raise ValueError("teacher baseline statistic fields changed within one catalog pass")
+    return {name: total[name] + block[name].detach() for name in total}
+
+
+def finalize_teacher_baselines(statistics: dict[str, torch.Tensor]) -> dict[str, object]:
+    r"""把单遍充分统计闭合为训练使用的 $B_\rho,B_\kappa$ 与诊断矩。"""
+
+    mean_sum = statistics["density_slot_mean_sum"].to(torch.float64)
+    second_sum = statistics["density_slot_second_sum"].to(torch.float64)
+    count = statistics["density_slot_sample_count"].to(torch.float64)
+    if torch.any(count <= 0.0):
+        raise ValueError("teacher density baseline has an empty bandwidth slot")
+    constant_mean = mean_sum / count  # 每个 bandwidth slot 的 teacher-only constant predictor
+    density_sse = second_sum - 2.0 * constant_mean * mean_sum + constant_mean.square() * count
+    density_baseline = density_sse.sum() / count.sum()  # 与正式 per-sample density reduction 同测度
+    kappa_den = statistics["kappa_zero_denominator"].to(torch.float64)
+    if float(kappa_den) <= 0.0:
+        raise ValueError("teacher kappa baseline has no valid active/zero samples")
+    kappa_baseline = statistics["kappa_zero_numerator"].to(torch.float64) / kappa_den
+    if float(density_baseline) <= 0.0 or float(kappa_baseline) <= 0.0:
+        raise ValueError("teacher baselines must be strictly positive normalization constants")
+
+    stratum_mean_sum = statistics["density_stratum_mean_sum"].to(torch.float64)
+    stratum_second_sum = statistics["density_stratum_second_sum"].to(torch.float64)
+    stratum_count = statistics["density_stratum_sample_count"].to(torch.float64)
+    stratum_mean = stratum_mean_sum / stratum_count.clamp_min(1.0)
+    stratum_second = stratum_second_sum / stratum_count.clamp_min(1.0)
+    kappa_stratum_count = statistics["kappa_stratum_sample_count"].to(torch.float64)
+    kappa_stratum_second = (
+        statistics["kappa_stratum_second_sum"].to(torch.float64) / kappa_stratum_count.clamp_min(1.0)
+    )
+    return {
+        "density": {
+            "predictor": "constant_teacher_mean_per_bandwidth_slot",
+            "constant_mean": constant_mean.tolist(),
+            "teacher_second_moment": (second_sum / count).tolist(),
+            "baseline_mse": float(density_baseline),
+            "sample_count_per_slot": count.tolist(),
+            "query_strata_diagnostic": {
+                "mean": stratum_mean.tolist(),
+                "second_moment": stratum_second.tolist(),
+                "sample_count": stratum_count.tolist(),
+            },
+        },
+        "kappa": {
+            "predictor": "zero",
+            "reduction": "per-sample active/structural-zero means combined 1:1",
+            "baseline_mse": float(kappa_baseline),
+            "sample_count": float(kappa_den),
+            "strata_diagnostic": {
+                "names": ["active", "structural_zero"],
+                "second_moment": kappa_stratum_second.tolist(),
+                "sample_count": kappa_stratum_count.tolist(),
+            },
+        },
+    }
 
 
 DensityObjectiveCfg.func = density_objective
 KappaObjectiveCfg.func = kappa_objective
-DerivedFieldObjectiveCfg.func = derived_field_objective
 
 
 def evaluate_objectives(
@@ -132,8 +263,9 @@ def evaluate_objectives(
 def reduce_method_steps(
     steps: tuple[MethodStep, ...],
     config: MultiAnchorGaussianObjectivesCfg,
+    baselines: Mapping[str, float],
 ) -> MethodUpdate:
-    r"""跨 accumulation 的 $(asset,q)$ 等权合并。"""
+    r"""跨 accumulation 合并 raw MSE，并用固定 teacher baseline 形成 vanilla 总损失。"""
 
     totals: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     sample_count = 0
@@ -148,12 +280,20 @@ def reduce_method_steps(
                     totals[component.name] = (previous[0] + component.numerator, previous[1] + component.denominator)
     loss: torch.Tensor | None = None
     terms: dict[str, float] = {}
+    normalized_terms: dict[str, float] = {}
+    skills: dict[str, float] = {}
     enabled = config.enabled()
     for name, term_cfg in enabled.items():
         numerator, denominator = totals[name]
         mean = numerator / denominator
         terms[name] = float(mean.detach())
-        weighted = float(term_cfg.weight) * mean
+        baseline = float(baselines[name])
+        if baseline <= 0.0:
+            raise ValueError(f"objective baseline must be positive for {name}")
+        normalized = mean / baseline
+        normalized_terms[name] = float(normalized.detach())
+        skills[name] = 1.0 - normalized_terms[name]
+        weighted = float(term_cfg.weight) * normalized
         loss = weighted if loss is None else loss + weighted
     if loss is None:
         raise ValueError("method update contains no enabled objectives")
@@ -162,13 +302,17 @@ def reduce_method_steps(
         terms=terms,
         sample_count=sample_count,
         denominators={name: float(totals[name][1].detach()) for name in enabled},
+        normalized_terms=normalized_terms,
+        skills=skills,
     )
 
 
 __all__ = [
     "density_objective",
-    "derived_field_objective",
     "evaluate_objectives",
+    "finalize_teacher_baselines",
     "kappa_objective",
+    "merge_teacher_baseline_statistics",
     "reduce_method_steps",
+    "teacher_baseline_sufficient_statistics",
 ]

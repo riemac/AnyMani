@@ -64,8 +64,8 @@ def test_resume_rejects_query_or_training_budget_drift(section: str) -> None:
         require_resume_scientific_config(current, resolved_config_dict(checkpoint_config))
 
 
-def test_resume_rejects_superseded_five_term_objective_config() -> None:
-    r"""旧完整检查点多出的损失字段改变科学身份，不能恢复到三项训练。"""
+def test_resume_rejects_superseded_extra_objective_config() -> None:
+    r"""旧完整检查点多出的损失字段改变科学身份，不能恢复到双目标训练。"""
 
     current = _config()
     checkpoint_resolved = resolved_config_dict(current)

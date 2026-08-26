@@ -1,9 +1,8 @@
-r"""前向预实验 artifact 合同：复用训练数据、统计三项、不更新参数或权重。"""
+r"""schema-7 teacher baseline artifact：完整 catalog 单遍、双基线与严格 identity。"""
 
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -12,30 +11,8 @@ from anymani.distill.ssl.runtime.lifecycle import _require_calibration_identity,
 from anymani.distill.ssl.runtime.sampling import OnlineMinibatchSchedule, OnlineSamplingCfg
 
 
-class _Term:
-    def __init__(self, value: float | tuple[torch.Tensor, float]) -> None:
-        if isinstance(value, tuple):
-            numerator, denominator_value = value
-            denominator = torch.tensor(denominator_value)
-            mean = numerator / denominator
-        else:
-            numerator = torch.tensor(value)
-            denominator = torch.tensor(1.0)
-            mean = numerator
-        self.metrics = {"loss": mean}
-        self.components = (SimpleNamespace(name="", numerator=numerator, denominator=denominator),)
-
-
-class _Step:
-    def __init__(self, terms: dict[str, float | tuple[torch.Tensor, float]]) -> None:
-        self.objectives = {name: _Term(value) for name, value in terms.items()}
-        for name, objective in self.objectives.items():
-            objective.components[0].name = name
-        self.sample_count = 1
-
-
 class _Session:
-    def __init__(self, batches: tuple[dict[str, float | tuple[torch.Tensor, float]], ...]) -> None:
+    def __init__(self, batches: tuple[dict[str, float | torch.Tensor], ...]) -> None:
         self.batches = batches
         self.index = 0
         self.asset_count = len(batches)
@@ -49,18 +26,33 @@ class _Session:
 
 class _Method:
     def declared_objective_weights(self) -> dict[str, float]:
-        return {"density": 1.0, "kappa": 1.0, "derived_field": 1.0}
+        return {"density": 1.0, "kappa": 1.0}
 
     def formula_identity(self) -> dict[str, str]:
         prefix = "anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives"
         return {name: f"{prefix}.{name}_objective" for name in self.declared_objective_weights()}
 
-    def train_mode(self) -> None:
-        return None
+    def teacher_baseline_statistics(self, batch):
+        return {
+            "density_sum": torch.as_tensor(batch["density"]).detach(),
+            "kappa_sum": torch.as_tensor(batch["kappa"]).detach(),
+            "count": torch.tensor(1.0),
+        }
 
-    def forward_objectives(self, batch, *, step: int, mode: str = "eval", microbatch_size: int | None = None):
-        del step, mode, microbatch_size
-        return _Step(batch)
+    def merge_teacher_baseline_statistics(self, total, block):
+        if total is None:
+            return {name: value.clone() for name, value in block.items()}
+        return {name: total[name] + block[name] for name in total}
+
+    def finalize_teacher_baselines(self, statistics):
+        count = float(statistics["count"])
+        return {
+            "density": {"predictor": "constant_teacher_mean_per_bandwidth_slot", "baseline_mse": float(statistics["density_sum"]) / count},
+            "kappa": {"predictor": "zero", "baseline_mse": float(statistics["kappa_sum"]) / count},
+        }
+
+    def set_teacher_baselines(self, payload) -> None:
+        self.configured = payload
 
 
 class _FailAfterOneForward(_Method):
@@ -69,22 +61,22 @@ class _FailAfterOneForward(_Method):
     def __init__(self) -> None:
         self.forward_count = 0
 
-    def forward_objectives(self, batch, *, step: int, mode: str = "eval", microbatch_size: int | None = None):
+    def teacher_baseline_statistics(self, batch):
         self.forward_count += 1
         if self.forward_count > 1:
             raise RuntimeError("synthetic interruption")
-        return super().forward_objectives(batch, step=step, mode=mode, microbatch_size=microbatch_size)
+        return super().teacher_baseline_statistics(batch)
 
 
 def _resolved(*, max_epochs: int = 1, num_minibatches: int = 2) -> dict[str, object]:
-    r"""构造只含 artifact 记录所需字段的最小 schema-6 配置。"""
+    r"""构造只含 artifact 记录所需字段的最小 schema-7 配置。"""
 
     return {
         "method": {
             "state_measure": {"kind": "scrambled_sobol_joint_limits"},
             "representation": {"field": {"bandwidth_centers_m": [0.004, 0.016, 0.064]}},
-            "model": {"encoder": {"heads": {"zero_order_width": 128}}},
-            "objectives": {"density": {"weight": 1.0}},
+            "model": {"encoder": {"backbone": {"hidden_width": 128}}},
+            "objectives": {"density": {"weight": 1.0}, "kappa": {"weight": 1.0}},
             "joint_sign_rewrite": {"probability": 0.2},
         },
         "trainer": {
@@ -113,11 +105,11 @@ def test_calibration_records_epoch_minibatches_without_reuse(tmp_path: Path) -> 
 
     method = _Method()
     batches = (
-        {"density": 0.4, "kappa": 0.2, "derived_field": 0.1},
-        {"density": 0.6, "kappa": 0.4, "derived_field": 0.3},
+        {"density": 0.4, "kappa": 0.2},
+        {"density": 0.6, "kappa": 0.4},
     )
     session = _Session(batches)
-    path = tmp_path / "loss_calibration.yaml"
+    path = tmp_path / "teacher_baselines.yaml"
     digest = _write_calibration_artifact(
         method,
         session,
@@ -131,29 +123,28 @@ def test_calibration_records_epoch_minibatches_without_reuse(tmp_path: Path) -> 
     )
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    assert payload["schema_version"] == "6.0.0"
+    assert payload["schema_version"] == "7.0.0"
     assert payload["status"] == "complete"
     assert payload["execution"]["global_minibatches"] == 2
     assert payload["execution"]["forward_count"] == 2
     assert payload["execution"]["new_pairs_realized"] == 2
     assert payload["execution"]["pair_uses"] == 2
     assert payload["execution"]["optimizer_updates"] == 0
-    assert payload["term_means"]["density"] == pytest.approx(0.5)
-    assert payload["term_traces"]["density"] == pytest.approx([0.4, 0.6])
-    assert set(payload["term_means"]) == {"density", "kappa", "derived_field"}
-    assert set(payload["term_traces"]) == {"density", "kappa", "derived_field"}
+    assert payload["teacher_baselines"]["density"]["baseline_mse"] == pytest.approx(0.5)
+    assert payload["teacher_baselines"]["kappa"]["baseline_mse"] == pytest.approx(0.3)
+    assert payload["random_model_preflight"] is None
     assert len(digest) == 64
     assert _require_calibration_identity(path, method=method, manifest_hash="abc") == digest
-    assert not (tmp_path / "loss_calibration.partial.yaml").exists()
+    assert not (tmp_path / "teacher_baselines.partial.yaml").exists()
 
 
 def test_calibration_interruption_keeps_only_the_last_complete_epoch(tmp_path: Path) -> None:
     r"""第二个 epoch forward 失败时，partial 只能包含首个完整 epoch。"""
 
     method = _FailAfterOneForward()
-    batch = {"density": 0.4, "kappa": 0.2, "derived_field": 0.1}
+    batch = {"density": 0.4, "kappa": 0.2}
     session = _Session((batch, batch))
-    output = tmp_path / "loss_calibration.yaml"
+    output = tmp_path / "teacher_baselines.yaml"
 
     with pytest.raises(RuntimeError, match="synthetic interruption"):
         _write_calibration_artifact(
@@ -168,12 +159,12 @@ def test_calibration_interruption_keeps_only_the_last_complete_epoch(tmp_path: P
             resolved_config=_resolved(max_epochs=2, num_minibatches=1),
         )
 
-    partial = yaml.safe_load((tmp_path / "loss_calibration.partial.yaml").read_text(encoding="utf-8"))
+    partial = yaml.safe_load((tmp_path / "teacher_baselines.partial.yaml").read_text(encoding="utf-8"))
     assert partial["status"] == "in_progress"
     assert partial["execution"]["completed_epochs"] == 1
     assert partial["execution"]["global_minibatches"] == 1
     assert partial["execution"]["forward_count"] == 1
-    assert partial["term_means"]["density"] == pytest.approx(0.4)
+    assert partial["teacher_baselines"]["density"]["baseline_mse"] == pytest.approx(0.4)
     assert not output.exists()  # 未完成 run 不得发布可供正式训练引用的最终 artifact
 
 
@@ -181,8 +172,8 @@ def test_calibration_reference_allows_preset_and_weight_changes_but_rejects_form
     r"""预实验只提供权重判断证据；正式 preset 可变，但损失公式身份必须可审计。"""
 
     method = _Method()
-    session = _Session(({"density": 0.4, "kappa": 0.2, "derived_field": 0.1},))
-    path = tmp_path / "loss_calibration.yaml"
+    session = _Session(({"density": 0.4, "kappa": 0.2},))
+    path = tmp_path / "teacher_baselines.yaml"
     _write_calibration_artifact(
         method,
         session,
@@ -197,7 +188,6 @@ def test_calibration_reference_allows_preset_and_weight_changes_but_rejects_form
     method.declared_objective_weights = lambda: {  # type: ignore[method-assign]
         "density": 0.2,
         "kappa": 1.0,
-        "derived_field": 1.0,
     }
     assert _require_calibration_identity(path, method=method, manifest_hash="abc")
 
@@ -210,12 +200,12 @@ def test_calibration_reference_allows_preset_and_weight_changes_but_rejects_form
         _require_calibration_identity(path, method=drifted, manifest_hash="abc")
 
 
-def test_calibration_rejects_superseded_five_term_formula_identity(tmp_path: Path) -> None:
-    r"""含额外损失身份的旧 artifact 不得被三项正式训练接受。"""
+def test_calibration_rejects_superseded_extra_term_formula_identity(tmp_path: Path) -> None:
+    r"""含额外损失身份的旧 artifact 不得被双目标正式训练接受。"""
 
     method = _Method()
-    session = _Session(({"density": 0.4, "kappa": 0.2, "derived_field": 0.1},))
-    path = tmp_path / "loss_calibration.yaml"
+    session = _Session(({"density": 0.4, "kappa": 0.2},))
+    path = tmp_path / "teacher_baselines.yaml"
     _write_calibration_artifact(
         method,
         session,
@@ -236,12 +226,12 @@ def test_calibration_rejects_superseded_five_term_formula_identity(tmp_path: Pat
         _require_calibration_identity(path, method=method, manifest_hash="abc")
 
 
-def test_calibration_rejects_schema_five_artifact(tmp_path: Path) -> None:
-    r"""schema-5 calibration 没有迁移路径，即使三项公式和 dataset hash 相同也必须拒绝。"""
+def test_calibration_rejects_schema_six_artifact(tmp_path: Path) -> None:
+    r"""schema-6 random-model calibration 没有迁移路径，即使公式和 dataset hash 相同也必须拒绝。"""
 
     method = _Method()
-    session = _Session(({"density": 0.4, "kappa": 0.2, "derived_field": 0.1},))
-    path = tmp_path / "loss_calibration.yaml"
+    session = _Session(({"density": 0.4, "kappa": 0.2},))
+    path = tmp_path / "teacher_baselines.yaml"
     _write_calibration_artifact(
         method,
         session,
@@ -254,26 +244,25 @@ def test_calibration_rejects_schema_five_artifact(tmp_path: Path) -> None:
         resolved_config=_resolved(num_minibatches=1),
     )
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    payload["schema_version"] = "5.0.0"
+    payload["schema_version"] = "6.0.0"
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="schema must be 6.0.0"):
+    with pytest.raises(ValueError, match="schema must be 7.0.0"):
         _require_calibration_identity(path, method=method, manifest_hash="abc")
 
 
-def test_calibration_uses_additive_statistics_and_never_builds_parameter_gradients(tmp_path: Path) -> None:
-    r"""不同 denominator 按充分统计合并；只 forward 不应写入参数 ``.grad``。"""
+def test_calibration_uses_teacher_statistics_and_never_builds_parameter_gradients(tmp_path: Path) -> None:
+    r"""teacher tensors 只被 detach 后累计，不能建立 learned parameter gradient。"""
 
     method = _Method()
     parameter = torch.nn.Parameter(torch.tensor(2.0))
-    shared = {"kappa": 1.0, "derived_field": 1.0}
     session = _Session(
         (
-            {"density": (parameter * 1.0, 1.0), **shared},
-            {"density": (parameter * 9.0, 3.0), **shared},
+            {"density": parameter * 1.0, "kappa": 1.0},
+            {"density": parameter * 3.0, "kappa": 1.0},
         )
     )
-    path = tmp_path / "loss_calibration.yaml"
+    path = tmp_path / "teacher_baselines.yaml"
     _write_calibration_artifact(
         method,
         session,
@@ -287,7 +276,6 @@ def test_calibration_uses_additive_statistics_and_never_builds_parameter_gradien
     )
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    assert payload["term_means"]["density"] == pytest.approx(5.0)
-    assert payload["term_traces"]["density"] == pytest.approx([2.0, 6.0])
+    assert payload["teacher_baselines"]["density"]["baseline_mse"] == pytest.approx(4.0)
     assert parameter.detach().item() == pytest.approx(2.0)
     assert parameter.grad is None

@@ -32,7 +32,8 @@ from anymani.distill.ssl.runtime.sampling import OnlineSamplingCfg
 
 pytestmark = [pytest.mark.contract, pytest.mark.skipif(not torch.cuda.is_available(), reason="fit requires CUDA")]
 
-_TERMS = ("density", "kappa", "derived_field")
+_TERMS = ("density", "kappa")
+_METRICS = ("density", "kappa", "derived_field")  # derived-field 只属于显式事后评估
 
 
 class _Dataset:
@@ -92,6 +93,8 @@ class _Method:
         self.training_trace: list[object] = []
         self.opened_roles: list[str] = []
         self.retained_export_count = 0
+        self.teacher_baselines: dict[str, float] | None = None
+        self.z_gradient_requests: list[bool] = []
 
     def prepare(self, catalog, *, device: torch.device, dtype: torch.dtype) -> None:
         del catalog, device, dtype
@@ -134,6 +137,29 @@ class _Method:
     def formula_identity(self) -> dict[str, str]:
         return {name: f"synthetic.{name}" for name in _TERMS}
 
+    def teacher_baseline_statistics(self, batch) -> dict[str, torch.Tensor]:
+        count = torch.tensor(float(batch.sample_count), device=self._parameter().device)
+        return {"density_sum": count, "kappa_sum": count, "count": count}
+
+    def merge_teacher_baseline_statistics(self, total, block):
+        if total is None:
+            return {name: value.clone() for name, value in block.items()}
+        return {name: total[name] + block[name] for name in total}
+
+    def finalize_teacher_baselines(self, statistics) -> dict[str, object]:
+        return {
+            "density": {"predictor": "constant_teacher_mean_per_bandwidth_slot", "baseline_mse": 1.0},
+            "kappa": {"predictor": "zero", "baseline_mse": 1.0},
+        }
+
+    def set_teacher_baselines(self, payload) -> None:
+        self.teacher_baselines = {name: float(payload[name]["baseline_mse"]) for name in _TERMS}
+
+    def require_teacher_baselines(self) -> dict[str, float]:
+        if self.teacher_baselines is None:
+            raise RuntimeError("synthetic method lacks teacher baselines")
+        return dict(self.teacher_baselines)
+
     def forward_objectives(
         self,
         batch,
@@ -164,16 +190,48 @@ class _Method:
                 loss = loss + step.objectives[name].components[0].numerator
         loss = loss / total_samples
         value = float(self._parameter().detach().square())
-        return MethodUpdate(loss=loss, terms={name: value for name in _TERMS}, sample_count=total_samples)
+        normalized = {name: value / self.require_teacher_baselines()[name] for name in _TERMS}
+        return MethodUpdate(
+            loss=loss,
+            terms={name: value for name in _TERMS},
+            sample_count=total_samples,
+            normalized_terms=normalized,
+            skills={name: 1.0 - term for name, term in normalized.items()},
+        )
+
+    def backward_update(
+        self,
+        batch,
+        *,
+        forward_step: int,
+        microbatch_size: int,
+        collect_z_gradients: bool = False,
+    ) -> MethodUpdate:
+        r"""模拟 concrete streaming backward，并记录 lifecycle 传入的 4-epoch cadence。"""
+
+        self.z_gradient_requests.append(collect_z_gradients)
+        step = self.forward_objectives(batch, step=forward_step, microbatch_size=microbatch_size)
+        update = self.reduce_update((step,))
+        update.loss.backward()
+        if not collect_z_gradients:
+            return update
+        return MethodUpdate(
+            loss=update.loss,
+            terms=update.terms,
+            sample_count=update.sample_count,
+            normalized_terms=update.normalized_terms,
+            skills=update.skills,
+            gradient_evidence={"normalized/cosine": 0.0, "vanilla/joint_norm": 1.0},
+        )
 
     def evaluate_session(self, session, schedule, *, include_ablations: bool = False) -> MethodEvaluationReport:
         while not schedule.complete:
             session.realize(schedule.next(), schedule=schedule, step=0)
         value = float(self._parameter().detach().square())
-        metrics = {name: value for name in ("density", "kappa", "derived_field")}
+        metrics = {name: value for name in _METRICS}
         ablations = None
         if include_ablations:
-            ablation_names = ("full", "query_only", "same_asset_q_shuffle", "cross_asset_shuffle", "first_order_zero", "first_order_joint_shuffle", "first_order_sign_flip")
+            ablation_names = ("full", "query_only", "same_asset_q_shuffle", "cross_asset_shuffle", "joint_token_shuffle")
             per_ablation = {name: {metric: value for metric in metrics} for name in ablation_names}
             ablations = {
                 "pairing_key": ["asset_id", "q_index"],
@@ -208,7 +266,7 @@ class _Method:
         return None
 
 
-def _trainer(*, mini_epochs: int) -> EmbodimentPretrainTrainer:
+def _trainer(*, mini_epochs: int, max_epochs: int = 2, num_minibatches: int = 2) -> EmbodimentPretrainTrainer:
     config = EmbodimentPretrainTrainerCfg(
         sampling=OnlineSamplingCfg(
             assets_per_minibatch=2,
@@ -216,8 +274,8 @@ def _trainer(*, mini_epochs: int) -> EmbodimentPretrainTrainer:
             shuffle_assets=False,
             seed=17,
         ),
-        max_epochs=2,
-        num_minibatches=2,
+        max_epochs=max_epochs,
+        num_minibatches=num_minibatches,
         mini_epochs=mini_epochs,
         microbatch_size=2,
         optimizer=AdamWCfg(learning_rate=0.1, weight_decay=0.0),
@@ -270,7 +328,7 @@ def test_calibration_pretrain_validation_and_evaluation_are_explicit_stages(
     from anymani.distill.ssl.runtime import lifecycle
 
     monkeypatch.setattr(lifecycle, "_worktree_fingerprint", lambda: (False, ""))
-    calibration_trainer = _trainer(mini_epochs=1)
+    calibration_trainer = _trainer(mini_epochs=1, max_epochs=1, num_minibatches=1)
     calibration_dir = tmp_path / "calibration"
     calibration_run = PretrainRun(
         PretrainRunCfg(seed=17, phase="calibrate_objectives", deterministic_algorithms=False)
@@ -284,13 +342,13 @@ def test_calibration_pretrain_validation_and_evaluation_are_explicit_stages(
         output_dir_override=calibration_dir,
         resolved_config=_resolved(calibration_trainer, "calibrate_objectives"),
     )
-    artifact = calibration_dir / "loss_calibration.yaml"
+    artifact = calibration_dir / "teacher_baselines.yaml"
     assert artifact.is_file()
     assert calibration_method._parameter().grad is None
     assert not (calibration_dir / "checkpoints").exists()
 
     pretrain_dir = tmp_path / "pretrain"
-    pretrain_trainer = _trainer(mini_epochs=2)
+    pretrain_trainer = _trainer(mini_epochs=1, max_epochs=4, num_minibatches=1)
     pretrain_run = PretrainRun(
         PretrainRunCfg(
             seed=17,
@@ -312,9 +370,10 @@ def test_calibration_pretrain_validation_and_evaluation_are_explicit_stages(
     assert (pretrain_dir / "checkpoints" / "epoch_000000.pt").is_file()
     assert (pretrain_dir / "checkpoints" / "epoch_000001.pt").is_file()
     assert (pretrain_dir / "checkpoints" / "epoch_000002.pt").is_file()
+    assert (pretrain_dir / "checkpoints" / "epoch_000004.pt").is_file()
     last = pretrain_dir / "checkpoints" / "last.pt"
     assert last.is_file()
-    assert last.stat().st_ino == (pretrain_dir / "checkpoints" / "epoch_000002.pt").stat().st_ino
+    assert last.stat().st_ino == (pretrain_dir / "checkpoints" / "epoch_000004.pt").stat().st_ino
     assert not (pretrain_dir / "checkpoints" / "best.pt").exists()
     assert not (pretrain_dir / "retained_artifact.pt").exists()
     assert not (pretrain_dir / "final_evaluation.yaml").exists()
@@ -322,9 +381,11 @@ def test_calibration_pretrain_validation_and_evaluation_are_explicit_stages(
     assert not (pretrain_dir / "asset_manifest.yaml").exists()
     assert pretrain_method.opened_roles == ["train"]
     assert pretrain_method.retained_export_count == 0
-    assert calibration_method.training_trace == pretrain_method.training_trace
-    assert calibration_method.forward_steps == [0, 1, 2, 3]
-    assert pretrain_method.forward_steps == list(range(8))
+    assert len(calibration_method.training_trace) == 1  # 完整 catalog 恰好一次 teacher pass
+    assert len(pretrain_method.training_trace) == 4  # 两 epoch、每 epoch 两个新 minibatches
+    assert calibration_method.forward_steps == []  # teacher baseline 阶段不运行 learned model
+    assert pretrain_method.forward_steps == list(range(4))
+    assert pretrain_method.z_gradient_requests == [False, False, False, True]
     assert calibration_method._parameter().grad is None
 
     source_files = tuple(sorted(path.relative_to(pretrain_dir) for path in pretrain_dir.rglob("*") if path.is_file()))

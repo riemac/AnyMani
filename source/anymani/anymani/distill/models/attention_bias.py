@@ -1,8 +1,9 @@
-r"""attention graph bias $b_{ij}$ 的接口契约。
+r"""Deferred attention graph-bias $b_{ij}$ 候选契约。
 
-本模块记录 teacher 第一版当前已裁定的 edge-bias 默认路线：
-`HybridGraphSE3Bias`。它只定义契约，不实现 PyTorch module，也不接入
-Transformer backbone。
+本模块保存早期 teacher Transformer 对 ``none / structural / se3 / hybrid_se3`` 的研究
+草稿，不再声明当前 backbone 默认路线，也不接入 representation SSL。当前网络架构尚未
+选择；geometry SSL adapter 若直接消费 current all-pairs dynamic $SE(3)$，会接近泄漏
+posed-field target。该候选只在未来网络/物体关系阶段重新核对 gauge、latency 与实证价值。
 
 == 基本公式 ==
 
@@ -12,11 +13,11 @@ $$
 a_{ij}^{(h)} = \frac{q_i^{(h)\top} k_j^{(h)}}{\sqrt{d_h}} + b_{ij}^{(h)}.
 $$
 
-本模块只负责把已经构造好的 edge feature 转成 $b_{ij}^{(h)}$。teacher 当前阶段
+本模块只描述把已经构造好的 edge feature 转成 $b_{ij}^{(h)}$ 的历史候选。该草稿
 不承担 sim2sim，因此默认可以使用当前 FK 下的 all-pairs dynamic SE(3) edge feature；
 student / 真实 URDF 部署阶段再单独处理 frame 语义对齐问题。
 
-== 消融矩阵（已裁定默认）==
+== 历史候选消融矩阵 ==
 
 1. **`none` / 无 bias**：$b_{ij}=0$。最稳，作为必要 baseline。
 2. **`structural` / 结构 bias**：Graphormer 风格的有向 edge type、kinematic
@@ -33,7 +34,7 @@ student / 真实 URDF 部署阶段再单独处理 frame 语义对齐问题。
    b_{ij}^{(h)} = f_{\theta}^{(h)}\!\left(\tilde E_{ij}^{t}\right).
    $$
    它检验连续几何是否足够，且不依赖离散图先验。
-4. **`hybrid_se3` / 默认主线**：结构 bias + 连续 SE(3) bias：
+4. **`hybrid_se3` / 历史增强候选**：结构 bias + 连续 SE(3) bias：
    $$
    b_{ij}^{(h)} =
    \beta_{\phi(i,j)}^{(h)}
@@ -41,7 +42,7 @@ student / 真实 URDF 部署阶段再单独处理 frame 语义对齐问题。
    +\delta_{\mathrm{same\_finger}(i,j)}^{(h)}
    + f_{\theta}^{(h)}\!\left(\tilde E_{ij}^{t}, m_{ij}\right).
    $$
-   这是 teacher 第一版推荐默认：离散结构帮助 PPO 早期快速识别近邻/同指关系，
+   历史 teacher 草稿曾将其作为推荐起点：离散结构帮助 PPO 早期快速识别近邻/同指关系，
    连续 $SE(3)$ 边保留 mount perturb、link scale、tip offset 与当前 FK 姿态。
 
 HGT 三元组 bias 与 TRO-style value injection 暂不进入第一版默认实现：
@@ -74,7 +75,7 @@ HGT 三元组 bias 与 TRO-style value injection 暂不进入第一版默认实�
    重算的 `E_RR` / `E_OR`。它可能很有用，但也更接近显式 FK 特征，sim2sim 时
    会暴露真实 URDF frame 语义不对齐问题。
 
-teacher 当前合意先使用 `current_all_pairs_se3`：
+历史 teacher 草稿曾选择 `current_all_pairs_se3`：
 
 $$
 E_{ij}^{t}=\log\left(T_i(q_t)^{-1}T_j(q_t)\right)\in\mathbb{R}^{6}.
@@ -135,9 +136,9 @@ edge feature / graph relation，chirality（所谓 left/right）由这些连续�
 不作为独立离散输入 embedding。
 
 TOAGENT:
-    这里是契约接口，teacher 阶段当前合意为：默认使用 `hybrid_se3` logits bias，
-    并保留 `none` / `structural` / `se3` 消融。不要在本文件实现 attention layer；
-    真实实现应等 backbone bias 注入路径确定后再落。
+    这里是 deferred candidate，不是当前默认。不要在本文件实现 attention layer；只有
+    backbone、partial-input、URDF gauge 与 target-leakage 边界重新裁定后，才决定是否把
+    ``none / structural / se3 / hybrid_se3`` 迁为可运行消融。
 """
 
 # TODO: 定义 `AttentionBiasProvider` 协议或基类，输入 type_ids、valid_mask、
@@ -152,8 +153,8 @@ TOAGENT:
 # TODO: 实现 `SE3EdgeBias`：用小 MLP 将 normalized `edge_feat: [B,T,T,F_e]` 映射到
 #       per-head logits bias `[B,H,T,T]`，要求最后一层零初始化或 gate 近零初始化。
 
-# TODO: 实现 `HybridGraphSE3Bias`：把 `StructuralGraphBias` 与 `SE3EdgeBias` 相加，
-#       作为 teacher 第一版默认 bias provider。
+# TODO: 若网络阶段重新启用该路线，实现 `HybridGraphSE3Bias`：把
+#       `StructuralGraphBias` 与 `SE3EdgeBias` 相加，作为历史 teacher 增强候选。
 
 # TODO: 若采用 PyTorch 标准 `TransformerEncoderLayer`，需要确认是否容易注入
 #       per-head bias；若不方便，可能需要自定义 attention layer。此为实现期问题，

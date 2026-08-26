@@ -9,15 +9,15 @@ methods/
 ├── contracts.py
 │   EmbodimentMethod、MethodSplitSession、MethodEvaluationReport
 └── multi_anchor_gaussian_implicit_field/
-    ├── __init__.py          绑定三项 ClassVar func
-    ├── config.py            方法装配、ObjectiveTermCfg、三项权重
+    ├── __init__.py          绑定 rho/kappa 两项 ClassVar func
+    ├── config.py            方法装配与固定双 objective
     ├── method.py            prepare / realize / forward / reduce / evaluate / export
     ├── evaluation.py        固定 bank digest 与配对 latent ablation
     ├── artifact.py          retained encoder 的严格下游 loader
     ├── provenance.py        physical realization 与 split-isolation 证据
     ├── batch.py             选 A^(k)、evidence、跨结构 padding、三块视图
-    ├── context.py           derived-field 解析组合只算一次
-    ├── objectives.py        density / kappa / derived-field
+    ├── context.py           density/kappa typed objective context
+    ├── objectives.py        双项公式、teacher baseline 与固定归一化
     ├── augmentation.py      20% 单 JOINT 符号改写
     └── state_measure.py     完整 joint-limit scrambled Sobol
 ```
@@ -46,11 +46,11 @@ batch 的三块信息流如下，模型前向只消费前两块，truth 进入 o
 
 `StaticGeometryEvidence` 留在 model。`build_static_geometry_evidence()`、padding 和选 `A^(k)` 属于 `batch.py`。
 
-### 三项损失与采样
+### 双项损失与采样
 
 每资产 8 套独立 anchor bank；同资产 q-block 共享并轮换；validation / independent q-bank / PPO 固定 `A^(0)`。`q` 来自完整 joint-limit Sobol，采样器保持原始构型测度。query 50/25/25；训练 sigma 4/16/64 mm ±10% jitter；validation 关闭 jitter。每有效 JOINT：train `1+1`，validation `4+4`。ancestor mask 只用于监督归约。
 
-主损失为 density、κ 与 derived-field；paired 只用于独立评估。joint-sign rewrite：每个 `(asset,q)` 以 0.20 概率恰好翻一个有效 JOINT；density/distance 不变，对应 `κ/g` 翻号。归约按 `(asset,q)` 等权；active/zero 先分别平均再 `1:1`。训练按 64 个样本建立普通参数梯度图，并用完整 512-pair optimizer minibatch denominator 做精确分块反向。
+active loss 固定为 $L=L_\rho/B_\rho+L_\kappa/B_\kappa$。$B_\rho$ 是完整训练 teacher distribution 上逐 bandwidth-slot constant predictor，$B_\kappa$ 是复用 active/zero 归约的 zero predictor；epoch-0 network 与 query-only 不得替代。derived-field/JVP 仅属于手动 diagnostics。joint-sign rewrite 每个 `(asset,q)` 以 0.20 概率翻一个有效 JOINT；density/distance 不变，对应 `κ/g` 翻号。训练按 64 个样本建立普通参数梯度图，并用完整 512-pair optimizer minibatch denominator 精确分块反向；每 4 epoch 最后一次 update 额外记录 unified-Z gradient proxy，但不改变 vanilla update。
 
 ## Common Operations And Tools
 

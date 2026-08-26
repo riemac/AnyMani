@@ -47,8 +47,18 @@ class PretrainRun:
 
     @staticmethod
     def package_version() -> str:
-        r"""读取 editable/installed AnyMani distribution version。"""
+        r"""优先读取当前仓库 ``VERSION``，安装态再退回 distribution metadata。
 
+        Editable install 的 ``anymani.egg-info`` 可能滞后于当前 release commit；训练 checkpoint 必须记录
+        源码树声明的版本，避免已发布 v0.7.2 仍写入旧 metadata 版本。
+        """
+
+        for parent in Path(__file__).resolve().parents:
+            version_path = parent / "VERSION"
+            if version_path.is_file():
+                declared = version_path.read_text(encoding="utf-8").strip()
+                if declared:
+                    return declared
         try:
             return version("anymani")
         except PackageNotFoundError:
@@ -62,6 +72,7 @@ class PretrainRun:
         resolved_config: Mapping[str, Any],
         declared_objective: Mapping[str, float],
         calibration_artifact_hash: str = "",
+        teacher_baselines: Mapping[str, float] | None = None,
         worktree_dirty: bool = False,
         worktree_fingerprint: str = "",
     ) -> Any:
@@ -77,6 +88,7 @@ class PretrainRun:
             resolved_config=resolved_config,
             declared_objective=declared_objective,
             calibration_artifact_hash=calibration_artifact_hash,
+            teacher_baselines=dict(teacher_baselines or {}),
             worktree_dirty=worktree_dirty,
             worktree_fingerprint=worktree_fingerprint,
         )
@@ -109,7 +121,7 @@ class PretrainRunCfg:
     seed: int = 0  # model 初始化及各 role 派生 seed 的唯一根
     deterministic_algorithms: bool = True
     phase: str = "pretrain"  # `calibrate_objectives` 或 `pretrain`
-    calibration_artifact: str = ""  # 可选预实验 YAML；只提供权重判断证据和 lineage
+    calibration_artifact: str = ""  # pretrain 必需的 schema-7 teacher baseline YAML
 
     def __post_init__(self) -> None:
         r"""拒绝空 experiment identity、负随机种子和未知 phase。"""

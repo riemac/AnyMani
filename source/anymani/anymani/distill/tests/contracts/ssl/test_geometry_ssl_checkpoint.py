@@ -23,7 +23,6 @@ from anymani.distill.models.decoders.representations.implicit_field import (
 from anymani.distill.models.geometry_ssl import GeometrySSLModelCfg
 from anymani.distill.models.input_adapters.geometry import (
     GeometryEncoderCfg,
-    GeometryLatentHeadsCfg,
     ImplicitGeometryEncoder,
     SO2AnchorFrontendCfg,
 )
@@ -54,11 +53,10 @@ def _config() -> GeometrySSLModelCfg:
                 feedforward_width=24,
                 dropout=0.0,
             ),
-            heads=GeometryLatentHeadsCfg(zero_order_width=12, first_order_width=8),
         ),
         ssl_decoders=GeometrySSLDecoderCfg(
             density=ScalarSigmaFiLMDensityDecoderCfg(hidden_width=16, residual_blocks=1),
-            sensitivity=DistanceSensitivityDecoderCfg(coefficient_hidden_width=16),
+            sensitivity=DistanceSensitivityDecoderCfg(hidden_width=16, residual_blocks=1),
         ),
     )
 
@@ -86,7 +84,7 @@ def test_checkpoint_resumes_full_state_and_transfers_only_encoder(tmp_path: Path
             "train_asset_axis_sha256": "abc",
         },
         resolved_config={"method": {"name": "multi_anchor"}},
-        declared_objective={"density": 1.0, "kappa": 1.0, "derived_field": 1.0},
+        declared_objective={"density": 1.0, "kappa": 1.0},
     )
     save_pretrain_checkpoint(
         path,
@@ -125,6 +123,7 @@ def test_checkpoint_resumes_full_state_and_transfers_only_encoder(tmp_path: Path
     assert report.missing_keys == ()
     assert report.unexpected_keys == ()
     artifact_payload = torch.load(artifact, map_location="cpu", weights_only=True)
+    assert artifact_payload["schema_version"] == "5.0.0"
     assert "optimizer_state" not in artifact_payload
     assert "trainer_state" not in artifact_payload
     assert "method_state" not in artifact_payload
@@ -155,7 +154,7 @@ def _post_training_payload() -> dict[str, object]:
                 "trainer": {"max_epochs": 32},
                 "run": {"seed": 17},
             },
-            "declared_objective": {"density": 1.0, "kappa": 20.0, "derived_field": 0.01},
+            "declared_objective": {"density": 1.0, "kappa": 1.0},
             "calibration_artifact_hash": "calibration",
             "code_revision": "revision-a",
             "package_version": "0.7.1",

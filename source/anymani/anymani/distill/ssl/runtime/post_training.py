@@ -22,8 +22,13 @@ from anymani.distill.ssl.runtime.scheduler import ResidentGeometryAssetWindow
 def selection_baseline(
     metrics: dict[str, dict[str, float]],
     selection_metrics: tuple[str, ...],
+    *,
+    teacher_baselines: Mapping[str, float] | None = None,
 ) -> dict[str, dict[str, float]]:
-    r"""按 validation suite 独立冻结三项重建指标的初始化尺度。"""
+    r"""为每条 validation suite 复制固定 teacher-only rho/kappa baseline。
+
+    ``metrics`` 只提供 suite 轴和字段完整性；epoch-0 网络仍可单独记录，但不定义 normalization。
+    """
 
     if not metrics:
         raise ValueError("validation selection requires at least one non-empty named suite")
@@ -32,7 +37,11 @@ def selection_baseline(
         missing = set(selection_metrics) - suite_metrics.keys()
         if missing:
             raise ValueError(f"validation suite {suite_name!r} lacks selection terms: {sorted(missing)}")
-        baseline[suite_name] = {name: float(suite_metrics[name]) for name in selection_metrics}
+        source = teacher_baselines if teacher_baselines is not None else suite_metrics
+        missing_baselines = set(selection_metrics) - source.keys()
+        if missing_baselines:
+            raise ValueError(f"teacher baseline lacks selection terms: {sorted(missing_baselines)}")
+        baseline[suite_name] = {name: float(source[name]) for name in selection_metrics}
     values = torch.tensor([value for suite in baseline.values() for value in suite.values()])
     if not bool(torch.isfinite(values).all()) or bool((values <= 0.0).any()):
         raise FloatingPointError("initial validation selection metrics must be finite and positive")
@@ -44,10 +53,10 @@ def normalized_validation_score(
     baseline: dict[str, dict[str, float]],
     selection_metrics: tuple[str, ...],
 ) -> float:
-    r"""先对三项初始化归一化误差等权，再对 validation suites 等权。"""
+    r"""先对 rho/kappa teacher-baseline-normalized error 等权，再对 validation suites 等权。"""
 
     if set(metrics) != set(baseline):
-        raise ValueError("validation metrics and initialization baseline suites do not match")
+        raise ValueError("validation metrics and teacher-baseline suites do not match")
     suite_scores = [
         sum(metrics[suite_name][name] / suite_baseline[name] for name in selection_metrics)
         / len(selection_metrics)
@@ -92,6 +101,7 @@ def _checkpoint_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
         "seed": run.get("seed"),
         "declared_objective": _plain(metadata.get("declared_objective")),
         "calibration_artifact_hash": metadata.get("calibration_artifact_hash"),
+        "teacher_baselines": _plain(metadata.get("teacher_baselines")),
         "code_revision": metadata.get("code_revision"),
         "package_version": metadata.get("package_version"),
         "geometry_semantics_schema": metadata.get("geometry_semantics_schema"),
@@ -304,7 +314,7 @@ def validate_checkpoints(
     output_dir_override: Path | None,
     resolved_config: dict[str, Any],
 ) -> Path:
-    r"""用显式 epoch-0 baseline 对候选 full checkpoints 做独立 validation selection。"""
+    r"""记录显式 epoch-0 证据，并用 checkpoint 内 teacher baselines 选择候选。"""
 
     run.config.validate_inputs()
     baseline_path = Path(run.config.baseline_checkpoint).expanduser().resolve()
@@ -330,6 +340,10 @@ def validate_checkpoints(
         if int(baseline_payload["epoch"]) != 0 or int(baseline_payload["optimizer_update"]) != 0:
             raise ValueError("validation baseline checkpoint must be the unupdated epoch_000000 state")
         baseline_identity = _checkpoint_identity(baseline_payload)
+        baseline_metadata = baseline_payload["metadata"]
+        teacher_baselines = baseline_metadata.get("teacher_baselines")
+        if not isinstance(teacher_baselines, Mapping):
+            raise ValueError("validation checkpoint lacks teacher baseline values")
         candidates: list[tuple[Path, int]] = []
         candidate_epochs: set[int] = set()
         for path in candidate_paths:
@@ -366,7 +380,11 @@ def validate_checkpoints(
         baseline_metrics = {
             name: dict(report.metrics) for name, report in baseline_reports.items() if hasattr(report, "metrics")
         }
-        baseline = selection_baseline(baseline_metrics, config.selection_metrics)
+        baseline = selection_baseline(
+            baseline_metrics,
+            config.selection_metrics,
+            teacher_baselines={str(name): float(value) for name, value in teacher_baselines.items()},
+        )
         _write_yaml(output_dir / "validation_baseline.yaml", baseline_reports)
 
         history: list[dict[str, Any]] = []
@@ -418,6 +436,7 @@ def validate_checkpoints(
                 "schema_version": "1.0.0",
                 "selection_metrics": config.selection_metrics,
                 "baseline_checkpoint": str(baseline_path),
+                "baseline_kind": "teacher_only_naive",
                 "baseline": baseline,
                 "history": history,
                 "best_source_checkpoint": str(source),

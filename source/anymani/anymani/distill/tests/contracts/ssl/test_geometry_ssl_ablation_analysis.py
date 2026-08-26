@@ -16,7 +16,7 @@ def _metrics(full: float, zero: float) -> dict[str, dict[str, float] | None]:
 
     return {
         "full": {"density": full, "kappa": full, "derived_field": full},
-        "first_order_zero": {"density": zero, "kappa": zero, "derived_field": zero},
+        "joint_token_shuffle": {"density": zero, "kappa": zero, "derived_field": zero},
         "cross_asset_shuffle": None,
     }
 
@@ -26,7 +26,7 @@ def test_ablation_analysis_balances_assets_and_bootstraps_paired_differences(tmp
 
     evidence = {
         "pairing_key": ["asset_id", "q_index"],
-        "ablations": ["full", "first_order_zero", "cross_asset_shuffle"],
+        "ablations": ["full", "joint_token_shuffle", "cross_asset_shuffle"],
         "records": [
             {"asset_id": "asset-a", "q_index": 0, "metrics": _metrics(1.0, 3.0)},
             {"asset_id": "asset-a", "q_index": 1, "metrics": _metrics(3.0, 5.0)},
@@ -40,7 +40,7 @@ def test_ablation_analysis_balances_assets_and_bootstraps_paired_differences(tmp
 
     # full 的 asset 均值分别为 2 和 10，morphology 等权均值应为 6，而不是逐 q 均值 14/3。
     assert analysis["metrics"]["full"]["density"]["asset_balanced_mean"] == pytest.approx(6.0)
-    paired = analysis["paired_differences"]["first_order_zero"]["density"]
+    paired = analysis["paired_differences"]["joint_token_shuffle"]["density"]
     assert paired["estimate"] == pytest.approx(3.0)  # asset A 差 2、asset B 差 4，再等权平均
     assert paired["ci95_low"] == pytest.approx(2.0)
     assert paired["ci95_high"] == pytest.approx(4.0)
@@ -64,7 +64,7 @@ def test_ablation_analysis_rejects_duplicate_asset_q_pair(tmp_path: Path) -> Non
         yaml.safe_dump(
             {
                 "pairing_key": ["asset_id", "q_index"],
-                "ablations": ["full", "first_order_zero", "cross_asset_shuffle"],
+                "ablations": ["full", "joint_token_shuffle", "cross_asset_shuffle"],
                 "records": [record, record],
             },
             sort_keys=False,

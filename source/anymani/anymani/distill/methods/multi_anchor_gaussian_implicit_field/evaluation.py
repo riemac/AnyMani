@@ -75,9 +75,7 @@ def fixed_evaluation_ablation_evidence(
         "query_only",
         "same_asset_q_shuffle",
         "cross_asset_shuffle",
-        "first_order_zero",
-        "first_order_joint_shuffle",
-        "first_order_sign_flip",
+        "joint_token_shuffle",
     )
     for block_index, batch in enumerate(batches):
         q = batch.q.detach()
@@ -127,16 +125,15 @@ def fixed_evaluation_ablation_evidence(
                 batch_permutation=cross_permutation,
                 **common,
             )
-        for name in ("first_order_zero", "first_order_joint_shuffle", "first_order_sign_flip"):
-            predictions[name] = geometry_ssl_ablation_forward(
-                model,
-                q,
-                batch.evidence,
-                batch.queries.query_points_h,
-                batch.field_targets.bandwidths,
-                ablation=name,
-                **common,
-            )
+        predictions["joint_token_shuffle"] = geometry_ssl_ablation_forward(
+            model,
+            q,
+            batch.evidence,
+            batch.queries.query_points_h,
+            batch.field_targets.bandwidths,
+            ablation="joint_token_shuffle",
+            **common,
+        )
         per_ablation = {
             name: geometry_ssl_reconstruction_metrics_per_sample(prediction, batch) if prediction is not None else None
             for name, prediction in predictions.items()

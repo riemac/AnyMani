@@ -1,9 +1,11 @@
-r"""三项独立 objective 的 $(asset,q)$ 等权与 active/zero 1:1 合同。"""
+r"""rho/kappa objective 的 $(asset,q)$ 等权、active/zero 1:1 与 baseline 归一化合同。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
+import pytest
 import torch
 from anymani.distill.methods.contracts import MethodStep
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import (
@@ -13,15 +15,17 @@ from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import 
 )
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives import (
     density_objective,
-    derived_field_objective,
+    finalize_teacher_baselines,
     kappa_objective,
+    merge_teacher_baseline_statistics,
     reduce_method_steps,
+    teacher_baseline_sufficient_statistics,
 )
 
 
 @dataclass
 class _Context:
-    """把三项 objective 需要的预测与真值暴露给无状态 callable。"""
+    """把 density/kappa 双 objective 需要的预测与真值暴露给无状态 callable。"""
 
     density_prediction: torch.Tensor
     density_target: torch.Tensor
@@ -29,12 +33,10 @@ class _Context:
     kappa_prediction: torch.Tensor
     kappa_target: torch.Tensor
     edge_valid_mask: torch.Tensor
-    field_sensitivity_target: torch.Tensor
-    derived_field_sensitivity: torch.Tensor
     active_mask: torch.Tensor
 
 
-def test_three_terms_reduce_by_asset_q_and_split_active_zero() -> None:
+def test_two_terms_reduce_by_asset_q_and_split_active_zero() -> None:
     r"""两个异构样本等权；active 全被 mask 时 kappa 退化为 zero 均值。"""
 
     dtype = torch.float64
@@ -51,7 +53,6 @@ def test_three_terms_reduce_by_asset_q_and_split_active_zero() -> None:
     kappa_target = torch.zeros_like(kappa_prediction)
     edge_valid = torch.tensor([[True, True], [False, True]])
     active_mask = torch.tensor([[True, False], [True, False]])
-    field_sensitivity = torch.zeros(2, 2, 1, dtype=dtype)
     context = _Context(
         density_prediction=density_prediction.expand(2, -1, -1, -1).clone(),
         density_target=density_target.expand(2, -1, -1, -1).clone(),
@@ -59,13 +60,10 @@ def test_three_terms_reduce_by_asset_q_and_split_active_zero() -> None:
         kappa_prediction=kappa_prediction,
         kappa_target=kappa_target,
         edge_valid_mask=edge_valid,
-        field_sensitivity_target=field_sensitivity,
-        derived_field_sensitivity=field_sensitivity.clone(),
         active_mask=active_mask,
     )
     density = density_objective(context)
     kappa = kappa_objective(context)
-    derived = derived_field_objective(context)
     assert density.name == "density"
     # density: 样本内先按有效元素取 MSE，再让两个 $(asset,q)$ 等权；不是把四个标量全局平均。
     assert float(density.components[0].denominator.detach()) == 2.0
@@ -83,7 +81,6 @@ def test_three_terms_reduce_by_asset_q_and_split_active_zero() -> None:
                 objectives={
                     "density": density,
                     "kappa": kappa,
-                    "derived_field": derived,
                 },
                 sample_count=2,
             ),
@@ -92,6 +89,71 @@ def test_three_terms_reduce_by_asset_q_and_split_active_zero() -> None:
             density=DensityObjectiveCfg(weight=1.0),
             kappa=KappaObjectiveCfg(weight=1.0),
         ),
+        {"density": float(density.metrics["loss"]), "kappa": 0.03},
     )
     assert update.sample_count == 2
-    assert set(update.terms) == {"density", "kappa", "derived_field"}
+    assert set(update.terms) == {"density", "kappa"}
+    assert update.normalized_terms["density"] == 1.0
+    assert update.normalized_terms["kappa"] == pytest.approx(2.0)
+    assert float(update.loss) == pytest.approx(3.0)
+
+
+def test_teacher_only_baselines_match_constant_density_and_zero_kappa_reductions() -> None:
+    r"""$B_\rho$ 使用逐 bandwidth constant mean；$B_\kappa$ 精确复用 active/zero 1:1 归约。"""
+
+    density = torch.tensor(
+        [
+            [[[0.0, 2.0], [2.0, 4.0]]],
+            [[[2.0, 4.0], [4.0, 6.0]]],
+        ],
+        dtype=torch.float64,
+    )
+    field_targets = SimpleNamespace(
+        density=density,
+        valid_mask=torch.ones(2, 1, 2, dtype=torch.bool),
+        query_stratum=torch.tensor([[[0, 1]], [[0, 1]]]),
+    )
+    sensitivity_targets = SimpleNamespace(
+        kappa=torch.tensor([[2.0, 4.0], [6.0, 8.0]], dtype=torch.float64),
+        valid_mask=torch.ones(2, 2, dtype=torch.bool),
+        active_mask=torch.tensor([[True, False], [True, False]]),
+    )
+    batch = SimpleNamespace(field_targets=field_targets, sensitivity_targets=sensitivity_targets)
+
+    full = teacher_baseline_sufficient_statistics(batch)
+    first = teacher_baseline_sufficient_statistics(
+        SimpleNamespace(
+            field_targets=SimpleNamespace(
+                density=density[:1],
+                valid_mask=field_targets.valid_mask[:1],
+                query_stratum=field_targets.query_stratum[:1],
+            ),
+            sensitivity_targets=SimpleNamespace(
+                kappa=sensitivity_targets.kappa[:1],
+                valid_mask=sensitivity_targets.valid_mask[:1],
+                active_mask=sensitivity_targets.active_mask[:1],
+            ),
+        )
+    )
+    second = teacher_baseline_sufficient_statistics(
+        SimpleNamespace(
+            field_targets=SimpleNamespace(
+                density=density[1:],
+                valid_mask=field_targets.valid_mask[1:],
+                query_stratum=field_targets.query_stratum[1:],
+            ),
+            sensitivity_targets=SimpleNamespace(
+                kappa=sensitivity_targets.kappa[1:],
+                valid_mask=sensitivity_targets.valid_mask[1:],
+                active_mask=sensitivity_targets.active_mask[1:],
+            ),
+        )
+    )
+    merged = merge_teacher_baseline_statistics(first, second)
+    for name in full:
+        torch.testing.assert_close(merged[name], full[name])
+
+    baselines = finalize_teacher_baselines(full)
+    assert baselines["density"]["constant_mean"] == pytest.approx([2.0, 4.0])
+    assert baselines["density"]["baseline_mse"] == pytest.approx(2.0)
+    assert baselines["kappa"]["baseline_mse"] == pytest.approx(30.0)
