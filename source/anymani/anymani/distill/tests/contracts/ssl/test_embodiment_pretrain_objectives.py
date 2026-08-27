@@ -1,4 +1,4 @@
-r"""rho/kappa objective 的 $(asset,q)$ 等权、active/zero 1:1 与 baseline 归一化合同。"""
+r"""rho/kappa objective 的 $(asset,q)$ 等权、active/zero 2:1 与固定物理尺度合同。"""
 
 from __future__ import annotations
 
@@ -73,8 +73,11 @@ def test_two_terms_reduce_by_asset_q_and_split_active_zero() -> None:
         atol=1.0e-12,
         rtol=0.0,
     )
-    # kappa 样本 0：0.5*(0.16+0)=0.08；样本 1：只有 zero=0.04；等权 0.06。
-    torch.testing.assert_close(kappa.metrics["loss"], torch.tensor(0.06, dtype=dtype), atol=1.0e-12, rtol=0.0)
+    # 先除以 0.1 m/rad：样本 0 为 2/3*16，样本 1 为 1/3*4；两行等权后为 6。
+    torch.testing.assert_close(kappa.metrics["loss"], torch.tensor(6.0, dtype=dtype), atol=1.0e-12, rtol=0.0)
+    torch.testing.assert_close(
+        kappa.metrics["physical_mse"], torch.tensor(0.06, dtype=dtype), atol=1.0e-12, rtol=0.0
+    )
     update = reduce_method_steps(
         (
             MethodStep(
@@ -86,20 +89,20 @@ def test_two_terms_reduce_by_asset_q_and_split_active_zero() -> None:
             ),
         ),
         MultiAnchorGaussianObjectivesCfg(
-            density=DensityObjectiveCfg(weight=1.0),
-            kappa=KappaObjectiveCfg(weight=1.0),
+            density=DensityObjectiveCfg(),
+            kappa=KappaObjectiveCfg(),
         ),
-        {"density": float(density.metrics["loss"]), "kappa": 0.03},
     )
     assert update.sample_count == 2
     assert set(update.terms) == {"density", "kappa"}
-    assert update.normalized_terms["density"] == 1.0
-    assert update.normalized_terms["kappa"] == pytest.approx(2.0)
-    assert float(update.loss) == pytest.approx(3.0)
+    assert update.terms["density"] == pytest.approx(float(density.metrics["loss"]))
+    assert update.terms["kappa"] == pytest.approx(6.0)
+    assert not hasattr(update, "loss")
+    assert not hasattr(update, "normalized_terms")
 
 
 def test_teacher_only_baselines_match_constant_density_and_zero_kappa_reductions() -> None:
-    r"""$B_\rho$ 使用逐 bandwidth constant mean；$B_\kappa$ 精确复用 active/zero 1:1 归约。"""
+    r"""$B_\rho$ 使用逐 bandwidth constant mean；$B_\kappa$ 精确复用 active/zero 2:1 归约。"""
 
     density = torch.tensor(
         [
@@ -156,4 +159,6 @@ def test_teacher_only_baselines_match_constant_density_and_zero_kappa_reductions
     baselines = finalize_teacher_baselines(full)
     assert baselines["density"]["constant_mean"] == pytest.approx([2.0, 4.0])
     assert baselines["density"]["baseline_mse"] == pytest.approx(2.0)
-    assert baselines["kappa"]["baseline_mse"] == pytest.approx(30.0)
+    assert baselines["kappa"]["baseline_mse"] == pytest.approx(8000.0 / 3.0)
+    assert baselines["kappa"]["objective_baseline_mse"] == pytest.approx(8000.0 / 3.0)
+    assert baselines["kappa"]["physical_baseline_mse"] == pytest.approx(80.0 / 3.0)

@@ -1,4 +1,4 @@
-r"""Geometry SSL calibration、pure pretrain、validation 与 evaluation 的解耦闭环。"""
+r"""Geometry SSL schema-8 pure pretrain、run-local baseline、validation 与 evaluation 闭环。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,12 @@ from typing import Any
 import pytest
 import torch
 import yaml
-from anymani.distill.methods.contracts import MethodEvaluationReport, MethodStep, MethodUpdate
+from anymani.distill.methods.contracts import (
+    MethodEvaluationReport,
+    MethodParameterGroup,
+    MethodStep,
+    MethodUpdate,
+)
 from anymani.distill.objectives.contracts import AdditiveStatistic, ObjectiveTermResult
 from anymani.distill.ssl.post_training import (
     EvaluationCfg,
@@ -93,7 +98,6 @@ class _Method:
         self.training_trace: list[object] = []
         self.opened_roles: list[str] = []
         self.retained_export_count = 0
-        self.teacher_baselines: dict[str, float] | None = None
         self.z_gradient_requests: list[bool] = []
 
     def prepare(self, catalog, *, device: torch.device, dtype: torch.dtype) -> None:
@@ -101,13 +105,15 @@ class _Method:
 
     def initialize_model(self, *, device: torch.device, dtype: torch.dtype) -> None:
         self.parameter = torch.nn.Parameter(torch.tensor(1.0, device=device, dtype=dtype))
+        self.density_private = torch.nn.Parameter(torch.tensor(0.0, device=device, dtype=dtype))
+        self.kappa_private = torch.nn.Parameter(torch.tensor(0.0, device=device, dtype=dtype))
 
     def _parameter(self) -> torch.nn.Parameter:
         assert self.parameter is not None
         return self.parameter
 
     def parameters(self):
-        return (self._parameter(),)
+        return (self._parameter(), self.density_private, self.kappa_private)
 
     def train_mode(self) -> None:
         return None
@@ -116,12 +122,17 @@ class _Method:
         return None
 
     def split_names(self, role: str) -> tuple[str, ...]:
-        return {"train": ("",), "validation": ("validation",), "evaluation": ("unseen", "official_zero_shot")}[role]
+        return {
+            "train": ("",),
+            "training_evaluation": ("",),
+            "validation": ("validation",),
+            "evaluation": ("unseen", "official_zero_shot"),
+        }[role]
 
     def split_asset_count(self, role: str, *, suite: str = "") -> int:
         if role == "evaluation" and suite == "official_zero_shot":
             return 0
-        return 2 if role == "train" else 1
+        return 2 if role in {"train", "training_evaluation"} else 1
 
     def open_session(self, role: str, *, suite: str = "", device: torch.device, **_kwargs):
         self.opened_roles.append(role)
@@ -137,6 +148,17 @@ class _Method:
     def formula_identity(self) -> dict[str, str]:
         return {name: f"synthetic.{name}" for name in _TERMS}
 
+    def optimization_identity(self) -> dict[str, object]:
+        return {"algorithm": "synthetic-fairgrad", "near_opposition_tolerance": 1.0e-6}
+
+    def optimizer_parameter_groups(self) -> tuple[MethodParameterGroup, ...]:
+        # synthetic lifecycle 只有一个 shared 参数；两个 private 组用零乘辅助参数保持三组合同。
+        return (
+            MethodParameterGroup("shared_encoder", (self._parameter(),)),
+            MethodParameterGroup("density_reader", (self.density_private,)),
+            MethodParameterGroup("kappa_reader", (self.kappa_private,)),
+        )
+
     def teacher_baseline_statistics(self, batch) -> dict[str, torch.Tensor]:
         count = torch.tensor(float(batch.sample_count), device=self._parameter().device)
         return {"density_sum": count, "kappa_sum": count, "count": count}
@@ -151,14 +173,6 @@ class _Method:
             "density": {"predictor": "constant_teacher_mean_per_bandwidth_slot", "baseline_mse": 1.0},
             "kappa": {"predictor": "zero", "baseline_mse": 1.0},
         }
-
-    def set_teacher_baselines(self, payload) -> None:
-        self.teacher_baselines = {name: float(payload[name]["baseline_mse"]) for name in _TERMS}
-
-    def require_teacher_baselines(self) -> dict[str, float]:
-        if self.teacher_baselines is None:
-            raise RuntimeError("synthetic method lacks teacher baselines")
-        return dict(self.teacher_baselines)
 
     def forward_objectives(
         self,
@@ -184,19 +198,11 @@ class _Method:
 
     def reduce_update(self, steps: tuple[MethodStep, ...]) -> MethodUpdate:
         total_samples = sum(step.sample_count for step in steps)
-        loss = torch.zeros((), device=self._parameter().device)
-        for step in steps:
-            for name in _TERMS:
-                loss = loss + step.objectives[name].components[0].numerator
-        loss = loss / total_samples
         value = float(self._parameter().detach().square())
-        normalized = {name: value / self.require_teacher_baselines()[name] for name in _TERMS}
         return MethodUpdate(
-            loss=loss,
             terms={name: value for name in _TERMS},
             sample_count=total_samples,
-            normalized_terms=normalized,
-            skills={name: 1.0 - term for name, term in normalized.items()},
+            denominators={name: float(total_samples) for name in _TERMS},
         )
 
     def backward_update(
@@ -212,16 +218,16 @@ class _Method:
         self.z_gradient_requests.append(collect_z_gradients)
         step = self.forward_objectives(batch, step=forward_step, microbatch_size=microbatch_size)
         update = self.reduce_update((step,))
-        update.loss.backward()
+        self._parameter().grad = torch.full_like(self._parameter(), 2.0**0.5)
+        self.density_private.grad = torch.zeros_like(self.density_private)
+        self.kappa_private.grad = torch.zeros_like(self.kappa_private)
         if not collect_z_gradients:
             return update
         return MethodUpdate(
-            loss=update.loss,
             terms=update.terms,
             sample_count=update.sample_count,
-            normalized_terms=update.normalized_terms,
-            skills=update.skills,
-            gradient_evidence={"normalized/cosine": 0.0, "vanilla/joint_norm": 1.0},
+            denominators=update.denominators,
+            gradient_evidence={"fairgrad/cosine": 0.0, "fairgrad/combined_norm": 2.0**0.5},
         )
 
     def evaluate_session(self, session, schedule, *, include_ablations: bool = False) -> MethodEvaluationReport:
@@ -241,6 +247,10 @@ class _Method:
         return MethodEvaluationReport(
             metrics=metrics,
             strata={"metric_scores": metrics, "bank_digest_sha256": f"fixed-{session.role}-{session.suite}"},
+            teacher_baselines={
+                "density": {"baseline_mse": 1.0},
+                "kappa": {"baseline_mse": 100.0, "physical_baseline_mse": 1.0},
+            },
             ablations=ablations,
         )
 
@@ -248,10 +258,16 @@ class _Method:
         return {"record_count": len(evidence["records"]), "bootstrap_replicates": bootstrap_replicates, "seed": seed}
 
     def training_state_dict(self) -> dict[str, torch.Tensor]:
-        return {"parameter": self._parameter().detach().clone()}
+        return {
+            "parameter": self._parameter().detach().clone(),
+            "density_private": self.density_private.detach().clone(),
+            "kappa_private": self.kappa_private.detach().clone(),
+        }
 
     def load_training_state_dict(self, state) -> None:
         self._parameter().data.copy_(state["parameter"])
+        self.density_private.data.copy_(state["density_private"])
+        self.kappa_private.data.copy_(state["kappa_private"])
 
     def retained_artifact_payload(self, *, metadata, source_checkpoint: Path) -> dict[str, object]:
         self.retained_export_count += 1
@@ -285,19 +301,25 @@ def _trainer(*, mini_epochs: int, max_epochs: int = 2, num_minibatches: int = 2)
     return EmbodimentPretrainTrainer(config)
 
 
-def _resolved(trainer: EmbodimentPretrainTrainer, phase: str) -> dict[str, object]:
+def _resolved(trainer: EmbodimentPretrainTrainer) -> dict[str, object]:
     return {
-        "schema_version": "7.0.0",
+        "schema_version": "8.0.0",
         "data": {"manifest": "synthetic-ssl.yaml"},
         "method": {
             "state_measure": {"kind": "synthetic"},
             "representation": {"kind": "synthetic"},
             "model": {"kind": "synthetic"},
-            "objectives": {name: {"weight": 1.0} for name in _TERMS},
+            "objectives": {name: {} for name in _TERMS},
+            "fairgrad": {"algorithm": "synthetic-fairgrad", "near_opposition_tolerance": 1.0e-6},
+            "entity_permutation": {"enabled": True, "seed_offset": 31_337},
             "joint_sign_rewrite": {"probability": 0.2},
         },
         "trainer": asdict(trainer.config),
-        "run": {"phase": phase, "seed": 17},
+        "run": {
+            "seed": 17,
+            "source_cache_root": "",
+            "source_cache_mode": "off",
+        },
     }
 
 
@@ -311,7 +333,9 @@ def _stage_resolved(*, role: str, stage_config: Any, run_config: Any) -> dict[st
             "state_measure": {"kind": "synthetic"},
             "representation": {"kind": "synthetic"},
             "model": {"kind": "synthetic"},
-            "objectives": {name: {"weight": 1.0} for name in _TERMS},
+            "objectives": {name: {} for name in _TERMS},
+            "fairgrad": {"algorithm": "synthetic-fairgrad", "near_opposition_tolerance": 1.0e-6},
+            "entity_permutation": {"enabled": True, "seed_offset": 31_337},
             "joint_sign_rewrite": {"probability": 0.2},
         },
         role: asdict(stage_config),
@@ -319,42 +343,22 @@ def _stage_resolved(*, role: str, stage_config: Any, run_config: Any) -> dict[st
     }
 
 
-def test_calibration_pretrain_validation_and_evaluation_are_explicit_stages(
+def test_pretrain_validation_and_evaluation_are_explicit_stages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """纯训练无评估副作用；事后阶段显式选择与评估同一组 schema-7 checkpoints。"""
+    """纯训练内闭合 baseline 且无评估副作用；事后阶段消费同一组 schema-8 checkpoints。"""
 
     from anymani.distill.ssl.runtime import lifecycle
 
     monkeypatch.setattr(lifecycle, "_worktree_fingerprint", lambda: (False, ""))
-    calibration_trainer = _trainer(mini_epochs=1, max_epochs=1, num_minibatches=1)
-    calibration_dir = tmp_path / "calibration"
-    calibration_run = PretrainRun(
-        PretrainRunCfg(seed=17, phase="calibrate_objectives", deterministic_algorithms=False)
-    )
-    calibration_method = _Method()
-    fit_embodiment_pretrain(
-        trainer=calibration_trainer,
-        data=_Data(),
-        method=calibration_method,
-        run=calibration_run,
-        output_dir_override=calibration_dir,
-        resolved_config=_resolved(calibration_trainer, "calibrate_objectives"),
-    )
-    artifact = calibration_dir / "teacher_baselines.yaml"
-    assert artifact.is_file()
-    assert calibration_method._parameter().grad is None
-    assert not (calibration_dir / "checkpoints").exists()
-
     pretrain_dir = tmp_path / "pretrain"
     pretrain_trainer = _trainer(mini_epochs=1, max_epochs=4, num_minibatches=1)
     pretrain_run = PretrainRun(
         PretrainRunCfg(
             seed=17,
-            phase="pretrain",
-            calibration_artifact=str(artifact),
             deterministic_algorithms=False,
+            source_cache_mode="off",
         )
     )
     pretrain_method = _Method()
@@ -364,7 +368,7 @@ def test_calibration_pretrain_validation_and_evaluation_are_explicit_stages(
         method=pretrain_method,
         run=pretrain_run,
         output_dir_override=pretrain_dir,
-        resolved_config=_resolved(pretrain_trainer, "pretrain"),
+        resolved_config=_resolved(pretrain_trainer),
     )
 
     assert (pretrain_dir / "checkpoints" / "epoch_000000.pt").is_file()
@@ -378,15 +382,15 @@ def test_calibration_pretrain_validation_and_evaluation_are_explicit_stages(
     assert not (pretrain_dir / "retained_artifact.pt").exists()
     assert not (pretrain_dir / "final_evaluation.yaml").exists()
     assert not (pretrain_dir / "training_morphology_q_bank.yaml").exists()
+    assert (pretrain_dir / "run_teacher_baselines.yaml").is_file()
+    assert (pretrain_dir / "metrics_finalized.jsonl").is_file()
+    assert (pretrain_dir / "training_summary.yaml").is_file()
     assert not (pretrain_dir / "asset_manifest.yaml").exists()
     assert pretrain_method.opened_roles == ["train"]
     assert pretrain_method.retained_export_count == 0
-    assert len(calibration_method.training_trace) == 1  # 完整 catalog 恰好一次 teacher pass
-    assert len(pretrain_method.training_trace) == 4  # 两 epoch、每 epoch 两个新 minibatches
-    assert calibration_method.forward_steps == []  # teacher baseline 阶段不运行 learned model
+    assert len(pretrain_method.training_trace) == 4
     assert pretrain_method.forward_steps == list(range(4))
     assert pretrain_method.z_gradient_requests == [False, False, False, True]
-    assert calibration_method._parameter().grad is None
 
     source_files = tuple(sorted(path.relative_to(pretrain_dir) for path in pretrain_dir.rglob("*") if path.is_file()))
     validation_config = ValidationCfg(

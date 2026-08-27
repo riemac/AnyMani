@@ -1,4 +1,4 @@
-r"""Schema 7 embodiment calibration 与 pure-pretraining 的普通命令行入口。
+r"""Schema 8 embodiment pure-pretraining 的普通命令行入口。
 
 Python preset 定义方法、表示、损失和默认训练数值；shell 使用 ``--flag value`` 声明本次运行。
 入口把显式 flags 转成内部 Hydra overrides，再恢复完整冻结配置。Hydra 字段路径不暴露给日常运行命令。
@@ -14,6 +14,7 @@ from pathlib import Path
 
 from anymani.distill.ssl.config_store import compose_pretrain_cfg
 from anymani.distill.ssl.experiment import EmbodimentPretrain
+from anymani.distill.ssl.experiments import DEFAULT_EXPERIMENT_NAME, load_experiment
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -24,12 +25,17 @@ def _build_parser() -> argparse.ArgumentParser:
     """
 
     parser = argparse.ArgumentParser(description="Run AnyMani embodiment geometry pretraining.")
-    # 运行身份与阶段决定产物位置和生命周期分支。
-    parser.add_argument("--phase", choices=("calibrate_objectives", "pretrain"), default=None)
-    parser.add_argument("--experiment_name", type=str, default=None)
+    parser.add_argument(
+        "--config",
+        default=DEFAULT_EXPERIMENT_NAME,
+        help="registered experiment name or path to a Python snapshot exporting EXPERIMENT",
+    )
+    # 运行身份决定产物位置；teacher baseline 在本次训练内累计，不再有 calibration phase。
+    parser.add_argument("--run_name", "--experiment_name", dest="experiment_name", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--resume_checkpoint", type=str, default=None)
-    parser.add_argument("--calibration_artifact", type=str, default=None)
+    parser.add_argument("--source_cache_root", type=str, default=None)
+    parser.add_argument("--source_cache_mode", choices=("auto", "readonly", "read-write", "off"), default=None)
     # 显式数据预算直接决定本次生成多少资产/q 样本以及循环利用几次。
     parser.add_argument("--max_epochs", type=int, default=None)
     parser.add_argument("--num_minibatches", type=int, default=None)
@@ -41,7 +47,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # optimizer 与运行 cadence 属于一次执行，可从 shell 明确覆盖 preset。
     parser.add_argument("--learning_rate", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=None)
-    parser.add_argument("--max_gradient_norm", type=float, default=None)
+    parser.add_argument("--max_gradient_norm_per_group", type=float, default=None)
     parser.add_argument("--checkpoint_every_epochs", type=int, default=None)
     # ``--seed`` 是用户看到的统一根 seed；sampling_seed 只服务显式消融。
     parser.add_argument("--seed", type=int, default=None)
@@ -49,6 +55,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--shuffle_assets", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--deterministic_algorithms", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--resource_profile", action=argparse.BooleanOptionalAction, default=None)
     return parser
 
 
@@ -61,11 +68,11 @@ def _config_overrides(args: argparse.Namespace) -> tuple[str, ...]:
     """
 
     field_paths = (
-        ("phase", "run.phase"),
         ("experiment_name", "run.experiment_name"),
         ("output_dir", "run.output_dir"),
         ("resume_checkpoint", "run.resume_checkpoint"),
-        ("calibration_artifact", "run.calibration_artifact"),
+        ("source_cache_root", "run.source_cache_root"),
+        ("source_cache_mode", "run.source_cache_mode"),
         ("max_epochs", "trainer.max_epochs"),
         ("num_minibatches", "trainer.num_minibatches"),
         ("assets_per_minibatch", "trainer.sampling.assets_per_minibatch"),
@@ -75,11 +82,12 @@ def _config_overrides(args: argparse.Namespace) -> tuple[str, ...]:
         ("max_resident_assets", "trainer.max_resident_assets"),
         ("learning_rate", "trainer.optimizer.learning_rate"),
         ("weight_decay", "trainer.optimizer.weight_decay"),
-        ("max_gradient_norm", "trainer.max_gradient_norm"),
+        ("max_gradient_norm_per_group", "trainer.max_gradient_norm_per_group"),
         ("checkpoint_every_epochs", "trainer.checkpoint_every_epochs"),
         ("device", "trainer.device"),
         ("shuffle_assets", "trainer.sampling.shuffle_assets"),
         ("deterministic_algorithms", "run.deterministic_algorithms"),
+        ("resource_profile", "trainer.resource_profile"),
     )
     overrides = [
         f"{path}={getattr(args, field)}"
@@ -105,9 +113,18 @@ def main(argv: Sequence[str] | None = None) -> Path:
     """
 
     args = _build_parser().parse_args(argv)
-    config = compose_pretrain_cfg(_config_overrides(args))
+    preset = load_experiment(args.config)
+    config = compose_pretrain_cfg(_config_overrides(args), config_ref=args.config)
     config.validate_composed()
-    output_dir = EmbodimentPretrain(config).run()
+    output_dir = EmbodimentPretrain(
+        config,
+        config_identity={
+            "name": preset.name,
+            "module": preset.module_name,
+            "path": str(preset.path),
+            "sha256": preset.config_sha256,
+        },
+    ).run()
     print(output_dir)  # shell/调度器唯一 stdout 结果：artifact root
     return output_dir
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Literal  # 只允许预注册 ablation，避免自由字符串改变实验含义
+from typing import Literal, cast  # 只允许预注册 ablation，避免自由字符串改变实验含义
 
 import torch  # latent、query 与 batch permutation 全部保持 PyTorch 计算图
 
@@ -52,6 +52,7 @@ def geometry_ssl_ablation_forward(
     joint_index: torch.Tensor,  # 与 owner selector 同形状
     ablation: GeometrySSLAblation,  # `query_only` 或 `latent_shuffle`
     batch_permutation: torch.Tensor | None = None,  # shuffle 时 `[B]` 双射
+    evidence_row_index: torch.Tensor | None = None,  # `[B]` q row -> unique static-evidence row
 ) -> GeometrySSLForward:
     r"""保持同一 decoder/query path，仅移除或错配 morphology latent。
 
@@ -73,12 +74,14 @@ def geometry_ssl_ablation_forward(
         ValueError: permutation 不是 ``[0,B)`` 双射或 ablation 名未知时抛出。
     """
 
-    latents = model.encoder(q, evidence)  # 原始 unified $Z:[B,G,D]$
+    latents = model.encoder(q, evidence, evidence_row_index)  # 原始 unified $Z:[B,G,D]$
     query_features = model.encoder.encode_points(  # 与完整模型完全相同的 point-anchor 前端
-        query_points_h.detach(), evidence
+        query_points_h.detach(), evidence, evidence_row_index
     )  # `[B,G,N_Q,D_q]`；固定 query 不接收 sampler 梯度
     entity_valid = evidence.entity_valid_mask  # `[B,G]` 或 None；padding 不是可学习实体
     if entity_valid is not None:  # 只在跨结构稠密容器中需要显式 owner mask
+        if evidence_row_index is not None and entity_valid.ndim == 2:
+            entity_valid = entity_valid[evidence_row_index]
         if entity_valid.ndim == 1:  # 单结构共享 mask 扩成 batch 视图，不复制物理证据
             entity_valid = entity_valid.unsqueeze(0).expand(q.shape[0], -1)  # `[B,G]`
         query_features = query_features * entity_valid.unsqueeze(-1).unsqueeze(-1)  # invalid owner 精确零
@@ -96,9 +99,13 @@ def geometry_ssl_ablation_forward(
         joint_valid = evidence.joint_valid_mask
         if joint_valid is None:
             joint_valid = torch.ones(q.shape, device=q.device, dtype=torch.bool)
+        if evidence_row_index is not None and joint_valid.ndim == 2:
+            joint_valid = joint_valid[evidence_row_index]
         if joint_valid.ndim == 1:
             joint_valid = joint_valid.unsqueeze(0).expand(q.shape[0], -1)
         joint_entities = evidence.joint_entity_index
+        if evidence_row_index is not None and joint_entities.ndim == 2:
+            joint_entities = joint_entities[evidence_row_index]
         if joint_entities.ndim == 1:
             joint_entities = joint_entities.unsqueeze(0).expand(q.shape[0], -1)
         shuffled = latents.entities.clone()  # PALM/TIP 和未选 entity 原样保留
@@ -116,7 +123,11 @@ def geometry_ssl_ablation_forward(
         query_features,  # 未打乱的本样本 query path
         bandwidths=bandwidths,  # 与完整 forward 相同的实际 sigma realization
         entity_valid_mask=entity_valid,  # invalid owner prediction 继续严格清零
-        joint_entity_index=evidence.joint_entity_index,  # 保持原 JOINT routing，故 shuffle 是故意错配
+        joint_entity_index=(
+            evidence.joint_entity_index[evidence_row_index]
+            if evidence_row_index is not None and evidence.joint_entity_index.ndim == 2
+            else evidence.joint_entity_index
+        ),  # 保持原 JOINT routing，故 shuffle 是故意错配
         owner_index=owner_index,  # 保留本样本 sampled owner
         query_index=query_index,  # 保留本样本 sampled query
         joint_index=joint_index,  # 保留本样本 sampled JOINT
@@ -360,9 +371,11 @@ def aggregate_geometry_ssl_stratified_components(
     bin_scores: dict[str, dict[str, dict[str, dict[str, float | int]]]] = {}
     axis_scores: dict[str, dict[str, float]] = {}
     metric_scores: dict[str, float] = {}
+    morphology_values: dict[str, dict[str, list[float]]] = {}
     for metric, axes in accumulated.items():
         bin_scores[metric] = {}
         axis_scores[metric] = {}
+        morphology_values[metric] = {}
         for axis, bins in axes.items():
             bin_scores[metric][axis] = {}
             nonempty_bin_scores: list[float] = []
@@ -380,6 +393,9 @@ def aggregate_geometry_ssl_stratified_components(
                     "morphology_count": len(morphology_scores),
                 }
                 nonempty_bin_scores.append(score)
+                for asset_id, (numerator, denominator) in by_asset.items():
+                    if denominator > 0.0:
+                        morphology_values[metric].setdefault(asset_id, []).append(numerator / denominator)
             if nonempty_bin_scores:
                 axis_scores[metric][axis] = sum(nonempty_bin_scores) / len(nonempty_bin_scores)  # bin 等权
         if not axis_scores[metric]:
@@ -388,7 +404,20 @@ def aggregate_geometry_ssl_stratified_components(
     expected_metrics = {"density", "kappa", "derived_field"}
     if set(metric_scores) != expected_metrics:
         raise ValueError("stratified validation must produce density, kappa and derived_field scores")
-    return {"metric_scores": metric_scores, "axis_scores": axis_scores, "bin_scores": bin_scores}
+    morphology_scores = {
+        metric: {
+            asset_id: sum(values) / len(values)
+            for asset_id, values in sorted(by_asset.items())
+            if values
+        }
+        for metric, by_asset in morphology_values.items()
+    }
+    return {
+        "metric_scores": metric_scores,
+        "axis_scores": axis_scores,
+        "bin_scores": bin_scores,
+        "morphology_scores": morphology_scores,
+    }
 
 
 def _per_sample_masked_mse(error: torch.Tensor, mask: torch.Tensor) -> tuple[float | None, ...]:
@@ -564,13 +593,14 @@ def density_configuration_jvp(
             joint_index,
         ).density
 
-    return torch.autograd.functional.jvp(
+    primal, tangent = torch.autograd.functional.jvp(
         density_from_configuration,
         q.detach(),
         direction.detach(),
         create_graph=False,
         strict=True,
     )
+    return cast(torch.Tensor, primal), cast(torch.Tensor, tangent)
 
 
 def task_gradient_gram(

@@ -7,6 +7,7 @@ import torch
 from anymani.distill.representations.sources.kinematics import (
     EmbodimentGeometrySpec,
     forward_owner_transforms,
+    forward_owner_transforms_and_spatial_screws,
     selected_point_jacobian,
     transform_owner_points,
 )
@@ -74,6 +75,32 @@ def test_poe_fk_and_selected_point_jacobian_match_finite_difference() -> None:
 
     assert torch.count_nonzero(jacobian[:, 2]) == 0, "PALM owner 对任意 finger JOINT 必须是结构零"
     assert points.shape == (1, 3, 3)
+
+
+def test_combined_fk_reuses_current_spatial_screws_without_changing_jacobian() -> None:
+    r"""Combined FK 的 owner pose 与 selected-point Jacobian 必须逐元素等于独立 reference path。"""
+
+    spec = _planar_two_joint_spec()
+    q = torch.tensor([[0.37, -0.52], [-0.19, 0.41]], dtype=torch.float64)
+    owner_index = torch.tensor([2, 1, 0], dtype=torch.long)
+    joint_index = torch.tensor([1, 0, 1], dtype=torch.long)
+    local_points = torch.tensor([[0.1, -0.2, 0.0], [0.0, 0.3, 0.0], [0.2, 0.0, 0.0]], dtype=torch.float64)
+
+    owner_transforms, current_screws = forward_owner_transforms_and_spatial_screws(spec, q)
+    reference_transforms = forward_owner_transforms(spec, q)
+    reference_jacobian = selected_point_jacobian(spec, q, owner_index, joint_index, local_points)
+    reused_jacobian = selected_point_jacobian(
+        spec,
+        q,
+        owner_index,
+        joint_index,
+        local_points,
+        owner_transforms=owner_transforms,
+        current_spatial_screws=current_screws,
+    )
+
+    torch.testing.assert_close(owner_transforms, reference_transforms, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(reused_jacobian, reference_jacobian, atol=0.0, rtol=0.0)
 
 
 def test_nonzero_home_configuration_is_subtracted_before_poe() -> None:

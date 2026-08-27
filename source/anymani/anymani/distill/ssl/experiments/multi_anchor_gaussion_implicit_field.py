@@ -8,6 +8,8 @@ r"""多锚点 Gaussian 隐式场实验的完整 Python 装配。
 
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field import (
     DensityObjectiveCfg,
+    EntityPermutationCfg,
+    FairGradCfg,
     JointConfigurationMeasureCfg,
     JointSignRewriteCfg,
     KappaObjectiveCfg,
@@ -92,7 +94,7 @@ REPRESENTATION_CFG = GeometryRepresentationCfg(
         adjacent_candidate_count=4,
     ),
     target=GeometryFieldTargetCfg(
-        train_active_per_joint=1,
+        train_active_per_joint=2,
         train_zero_per_joint=1,
         validation_active_per_joint=4,
         validation_zero_per_joint=4,
@@ -113,7 +115,7 @@ MODEL_CFG = GeometrySSLModelCfg(
         ),
         backbone=GraphBiasedTransformerCfg(
             hidden_width=128,
-            layers=2,
+            layers=4,
             attention_heads=4,
             feedforward_width=256,
             dropout=0.0,
@@ -123,24 +125,31 @@ MODEL_CFG = GeometrySSLModelCfg(
     ssl_decoders=GeometrySSLDecoderCfg(
         density=ScalarSigmaFiLMDensityDecoderCfg(
             hidden_width=128,
-            residual_blocks=3,
+            residual_blocks=2,
             sigma_reference_m=0.016,
         ),
         sensitivity=DistanceSensitivityDecoderCfg(
             hidden_width=128,
-            residual_blocks=3,
+            residual_blocks=2,
+            readout_rank=64,
+            physical_scale_m=0.1,
         ),
     ),
 )
 
 ## 目标配置
 OBJECTIVES_CFG = MultiAnchorGaussianObjectivesCfg(
-    density=DensityObjectiveCfg(weight=1.0),
-    kappa=KappaObjectiveCfg(weight=1.0),
+    density=DensityObjectiveCfg(),
+    kappa=KappaObjectiveCfg(),
 )
 
 ## 数据增强配置
 JOINT_SIGN_REWRITE_CFG = JointSignRewriteCfg(probability=0.20, seed_offset=17)
+ENTITY_PERMUTATION_CFG = EntityPermutationCfg(enabled=True, seed_offset=31_337)
+FAIRGRAD_CFG = FairGradCfg(
+    algorithm="fairgrad_alpha_1_two_task_analytic_v1",
+    near_opposition_tolerance=1.0e-6,
+)
 
 ## 方法聚合
 METHOD_CFG = MultiAnchorGaussianMethodCfg(
@@ -148,6 +157,8 @@ METHOD_CFG = MultiAnchorGaussianMethodCfg(
     representation=REPRESENTATION_CFG,
     model=MODEL_CFG,
     objectives=OBJECTIVES_CFG,
+    fairgrad=FAIRGRAD_CFG,
+    entity_permutation=ENTITY_PERMUTATION_CFG,
     joint_sign_rewrite=JOINT_SIGN_REWRITE_CFG,
 )
 
@@ -155,8 +166,7 @@ METHOD_CFG = MultiAnchorGaussianMethodCfg(
 #  训练器配置层：预实验与正式实验复用同一套显式 epoch/minibatch/microbatch 接口。
 ###
 ## 训练器聚合
-## preset：32 个 epoch，每轮生成 4 个 minibatch；每个 512-pair minibatch 独立更新一次。
-## 当前总预算恰好走完一个 catalog cycle，因此每项资产只 realization $A^{(0)}$；后续 bank 只在新 cycle 轮换。
+## 正式 preset：256 epochs × 4 minibatches = 1024 updates，覆盖 8 个完整 8192-asset catalog cycles。
 TRAINER_CFG = EmbodimentPretrainTrainerCfg(
     sampling=OnlineSamplingCfg(
         assets_per_minibatch=64,
@@ -164,12 +174,12 @@ TRAINER_CFG = EmbodimentPretrainTrainerCfg(
         shuffle_assets=True,
         seed=20260813,
     ),
-    max_epochs=32,
+    max_epochs=256,
     num_minibatches=4,
     mini_epochs=1,
     microbatch_size=64,
     max_resident_assets=64,
-    checkpoint_every_epochs=1,
+    checkpoint_every_epochs=4,
 )
 
 ## 独立 validation 使用相同固定测度，但不声明训练 cadence。
@@ -201,13 +211,14 @@ EVALUATION_CFG = EvaluationCfg(
 )
 
 ###
-#  运行配置层：输出目录、实验名、随机种子、阶段
+#  运行配置层：输出目录、实验名、随机种子与只读 source cache
 ###
 RUN_CFG = PretrainRunCfg(
     output_dir="logs/ssl",
-    experiment_name="canonical_multi_anchor_gaussian",
+    experiment_name="canonical_multi_anchor_gaussian_fairgrad_v0_7_3",
     seed=20260813,
-    phase="pretrain",
+    source_cache_root="logs/ssl/_cache/geometry_source/v1",
+    source_cache_mode="readonly",
 )
 
 ###

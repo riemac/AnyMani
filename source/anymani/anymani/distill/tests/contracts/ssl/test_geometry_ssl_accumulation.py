@@ -39,13 +39,11 @@ def test_update_reduction_weights_asset_q_equally() -> None:
     )
     update = reduce_method_steps(
         (first, second),
-        SimpleNamespace(enabled=lambda: {"density": DensityObjectiveCfg(weight=1.0)}),
-        {"density": 1.0},
+        SimpleNamespace(enabled=lambda: {"density": DensityObjectiveCfg()}),
     )
     # $(8+1)/(4+1)=1.8$，不是两个 minibatch 均值 $(2+1)/2=1.5$。
-    torch.testing.assert_close(update.loss, torch.tensor(1.8, dtype=dtype), atol=0.0, rtol=0.0)
-    update.loss.backward()
-    assert first.objectives["density"].components[0].numerator.grad is not None
+    assert update.terms["density"] == 1.8
+    assert not hasattr(update, "loss")  # 梯度由 FairGrad 流式入口形成，不由 reduction 重建统一图
 
 
 def test_microbatch_merge_sums_statistics_and_preserves_gradient() -> None:

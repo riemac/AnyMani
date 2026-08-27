@@ -95,6 +95,20 @@ def geometry_source_array_nbytes(source: GeometrySource | GeometrySourceCore) ->
     # retained home realization 与所有 $A^{(k)}$ bank 数组必须计入同一 source 生命周期。
     for field_info in fields(source.home_surface):
         add_array(getattr(source.home_surface, field_info.name))
+    sampling_arrays = source.surface_sampling_arrays
+    if sampling_arrays is not None:
+        for name in (
+            "triangles_owner_local_m",
+            "face_normals_owner_local",
+            "face_area_cdf",
+        ):
+            for value in getattr(sampling_arrays, name):
+                add_array(value)
+    warp_views = source.warp_surface_views
+    if warp_views is not None:
+        for view in warp_views:
+            for name in ("vertices", "faces", "source_face_indices", "face_altitudes_m"):
+                add_array(getattr(view, name))
     if isinstance(source, GeometrySource):
         for anchors in source.anchor_bank:
             for field_info in fields(anchors):

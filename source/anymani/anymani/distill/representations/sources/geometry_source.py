@@ -19,19 +19,27 @@ import torch
 
 from anymani.assets.bank import HandContainer
 
-from .collision_geometry import (
+from .anchor_sampling import (
     AnchorClassificationStats,
+    AnchorRealization,
     AnchorSamples,
+    sample_palm_anchor_bank_warp,
+    sample_palm_anchor_realization_warp,
+)
+from .collision_geometry import (
     GeometryIdentity,
     HomeSurfaceSamples,
     OwnerGeometryCache,
+    OwnerSurfaceSamplingArrays,
     WarpOwnerGeometryCache,
+    WarpSurfaceView,
     geometry_identity,
     materialize_owner_geometry_cache,
     materialize_warp_owner_geometry_cache,
+    prepare_owner_surface_sampling_arrays,
+    prepare_warp_surface_view,
     release_warp_owner_geometry_cache,
     sample_owner_home_surfaces,
-    sample_palm_anchor_bank_warp,
 )
 from .kinematics import EmbodimentGeometrySpec, lower_hand_geometry_semantics
 
@@ -121,6 +129,8 @@ class GeometrySourceCore:
     geometry_cache: OwnerGeometryCache  # owner-local strict surface/solid union
     home_surface: HomeSurfaceSamples  # `[G,M,3]` owner-local boundary realization
     identity: GeometryIdentity  # physical mapping 与 configuration-domain 双重身份
+    surface_sampling_arrays: OwnerSurfaceSamplingArrays | None = None  # query triangles/normals/CDF
+    warp_surface_views: tuple[WarpSurfaceView, ...] | None = None  # 实际 float32 BVH 输入与 face provenance
 
     @property
     def asset_id(self) -> str:
@@ -157,7 +167,20 @@ class GeometrySourceCore:
             sampling_seed=config.static_sampling_seed,
             oversample_factor=config.home_surface_oversample_factor,
         )
-        return cls(container, spec, geometry_cache, home_surface, identity)
+        surface_sampling_arrays = prepare_owner_surface_sampling_arrays(geometry_cache)
+        warp_surface_views = tuple(
+            prepare_warp_surface_view(record.surface_mesh, owner_id=record.owner_id)
+            for record in geometry_cache.records
+        )
+        return cls(
+            container,
+            spec,
+            geometry_cache,
+            home_surface,
+            identity,
+            surface_sampling_arrays,
+            warp_surface_views,
+        )
 
     def finalize_on_device(
         self,
@@ -180,7 +203,11 @@ class GeometrySourceCore:
 
         target_device = torch.device(device)  # 规范化 `cuda`/`cuda:0` 身份
         spec_device = self.spec_cpu.to(device=target_device, dtype=dtype)  # POE/graph 一次上传
-        warp_cache = materialize_warp_owner_geometry_cache(self.geometry_cache, device=str(target_device))
+        warp_cache = materialize_warp_owner_geometry_cache(
+            self.geometry_cache,
+            device=str(target_device),
+            surface_views=self.warp_surface_views,
+        )
         try:
             semantics = self.container.geometry_semantics
             if semantics is None:
@@ -203,6 +230,50 @@ class GeometrySourceCore:
             release_warp_owner_geometry_cache(warp_cache)  # finalization 失败不得泄漏 owner BVH lease
             raise
 
+    def finalize_selected_on_device(
+        self,
+        *,
+        config: GeometrySourceCfg,
+        bank_index: int,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> tuple[GeometrySource, DeviceGeometrySource, AnchorClassificationStats]:
+        r"""只完成当前 q-block 消费的 $A^{(k)}$，不构造其余七个 realization。"""
+
+        target_device = torch.device(device)
+        spec_device = self.spec_cpu.to(device=target_device, dtype=dtype)
+        warp_cache = materialize_warp_owner_geometry_cache(
+            self.geometry_cache,
+            device=str(target_device),
+            surface_views=self.warp_surface_views,
+        )
+        try:
+            semantics = self.container.geometry_semantics
+            if semantics is None:
+                raise ValueError("geometry source core lost typed semantics before selected anchor finalization")
+            realization, stats = sample_palm_anchor_realization_warp(
+                self.geometry_cache,
+                semantics,
+                self.spec_cpu,
+                warp_cache,
+                bank_index=bank_index,
+                bank_size=config.anchors.bank_size,
+                anchors_per_finger=config.anchors.anchors_per_finger,
+                static_sampling_seed=config.static_sampling_seed,
+                radial_support_radius_m=config.anchors.radius_m,
+                radial_decay_scale_m=config.anchors.radial_decay_scale_m,
+                surface_fraction=config.anchors.surface_fraction,
+            )
+            source = GeometrySource.from_core(
+                self,
+                anchor_bank=(realization.samples,),
+                anchor_realization=realization,
+            )
+            return source, DeviceGeometrySource(source, spec_device, warp_cache), stats
+        except Exception:
+            release_warp_owner_geometry_cache(warp_cache)
+            raise
+
 
 @dataclass(frozen=True)
 class GeometrySource:
@@ -220,6 +291,9 @@ class GeometrySource:
     anchors: AnchorSamples  # `[K,3]` canonical $A^{(0)}$，validation/PPO 固定使用
     anchor_bank: tuple[AnchorSamples, ...]  # 有限 Monte-Carlo realization $\{A^{(0)},\ldots,A^{(K-1)}\}$
     identity: GeometryIdentity  # physical mapping 与 configuration-domain 双重身份
+    anchor_realization: AnchorRealization | None = None  # selected hot path 的原 bank 身份
+    surface_sampling_arrays: OwnerSurfaceSamplingArrays | None = None  # artifact 恢复的 query sampler 输入
+    warp_surface_views: tuple[WarpSurfaceView, ...] | None = None  # artifact 恢复的 Warp float32 输入
 
     @property
     def asset_id(self) -> str:
@@ -255,7 +329,11 @@ class GeometrySource:
         if semantics is None:
             raise ValueError("geometry source core is missing typed semantics")
         # CPU reference/audit 与 CUDA runtime 共用 fast-winding inside 定义；仅执行设备不同。
-        warp_cache = materialize_warp_owner_geometry_cache(core.geometry_cache, device=anchor_device)
+        warp_cache = materialize_warp_owner_geometry_cache(
+            core.geometry_cache,
+            device=anchor_device,
+            surface_views=core.warp_surface_views,
+        )
         try:
             anchor_bank, _stats = sample_palm_anchor_bank_warp(
                 core.geometry_cache,
@@ -279,6 +357,7 @@ class GeometrySource:
         core: GeometrySourceCore,
         *,
         anchor_bank: tuple[AnchorSamples, ...],
+        anchor_realization: AnchorRealization | None = None,
     ) -> GeometrySource:
         r"""把已经分类完成的非空 anchor bank 附着到同一 CPU physical core。"""
 
@@ -292,6 +371,9 @@ class GeometrySource:
             anchor_bank[0],
             anchor_bank,
             core.identity,
+            anchor_realization,
+            core.surface_sampling_arrays,
+            core.warp_surface_views,
         )
 
     def to_device(
@@ -315,6 +397,7 @@ class GeometrySource:
         warp_cache = materialize_warp_owner_geometry_cache(  # 按 surface hash/version/device 取得 lease
             self.geometry_cache,
             device=str(target_device),
+            surface_views=self.warp_surface_views,
         )
         return DeviceGeometrySource(source=self, spec=spec, warp_cache=warp_cache)  # 物理 source device view
 

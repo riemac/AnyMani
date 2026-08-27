@@ -23,18 +23,25 @@ def test_logger_preserves_update_counters_and_new_pair_epoch_axis(tmp_path: Path
         microbatches_consumed=8,
         wall_time_seconds=1.25,
         split="train",
-        terms={"density": 2.0, "kappa": 0.5, "derived_field": 0.25},
-        denominators={"density": 512.0, "kappa": 512.0, "derived_field": 512.0},
+        terms={"density": 2.0, "kappa": 0.5},
+        denominators={"density": 512.0, "kappa": 512.0},
         asset_ids=("a",),
-        gradient_norm=3.0,
-        total=2.75,
+        gradient_groups={
+            "shared_encoder": {
+                "pre_clip_norm": 3.0,
+                "post_clip_norm": 3.0,
+                "clip_ratio": 1.0,
+                "hit": False,
+                "active_parameter_count": 7,
+            }
+        },
     )
     logger.log_epoch_terms(
         epoch=1,
         new_pairs_seen=2_048,
         pair_uses=2_048,
         optimizer_updates=4,
-        terms={"density": 1.5, "kappa": 0.4, "derived_field": 0.2},
+        terms={"density": 1.5, "kappa": 0.4},
     )
     logger.close()
 
@@ -45,6 +52,8 @@ def test_logger_preserves_update_counters_and_new_pair_epoch_axis(tmp_path: Path
     assert record["pair_uses"] == 512
     assert record["teacher_pairs_realized"] == 2_048
     assert record["denominators"]["density"] == 512.0
+    assert record["gradient_groups"]["shared_encoder"]["pre_clip_norm"] == 3.0
+    assert "normalized/density" not in record
     assert "step" not in record
 
     events = EventAccumulator(str(tmp_path / "tensorboard"))

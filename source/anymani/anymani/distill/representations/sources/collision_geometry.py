@@ -69,7 +69,6 @@ from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path, PurePosixPath
 from threading import RLock
-from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -123,37 +122,6 @@ class HomeSurfaceSamples:
 
 
 @dataclass(frozen=True)
-class AnchorSamples:
-    r"""每个资产固定一次的 palm 支持锚点 realization。"""
-
-    anchors_hand_m: np.ndarray  # `[K,3]`，统一 `{h}` 坐标，m
-    finger_names: tuple[str, ...]  # `[K]` provenance；不进入网络分组
-    seed_ids: tuple[str, ...]  # `[K]` provenance；只用于重现与审计
-    surface_mask: np.ndarray  # `[K]`，surface/interior 采样来源
-    radial_support_radius_m: float
-    radial_decay_scale_m: float  # 截断 Gaussian 的 $\tau_a$，m；只改变支持球内的候选测度
-    surface_fraction: float
-    sampling_seed: int
-    algorithm_version: str  # 修改 proposal/acceptance/selection 语义时必须显式升级
-
-
-@dataclass(frozen=True)
-class AnchorClassificationStats:
-    r"""一项资产完整 anchor bank 的 GPU inside-classification 证据。
-
-    体积候选保持 NumPy float64 生成；Warp 使用 teacher 相同的 float32 owner BVH 判定 sign。
-    距离 palm surface 不超过 $10^{-6}\,\mathrm m$ 的数值边界点由 CPU float64 ray parity
-    复核，因而 GPU 只负责稳定 interior/exterior 主体，不能静默裁定浮点边界。
-    """
-
-    query_point_count: int  # 全部 rejection rounds 送入 Warp 的候选点数
-    kernel_launch_count: int  # 每轮未完成 job 合并为一次 Warp launch
-    boundary_recheck_count: int  # $|d|\le 10^{-6}\,\mathrm m$ 的 CPU 复核点数
-    boundary_disagreement_count: int  # GPU sign 与 CPU float64 contains 不一致的复核点数
-    elapsed_seconds: float  # 候选生成、GPU query、CPU 复核与 scatter 的完整 wall time
-
-
-@dataclass(frozen=True)
 class WarpOwnerMeshHandle:
     r"""一个 owner 的 GPU-resident Warp BVH 及其底层数组强引用。"""
 
@@ -198,7 +166,17 @@ class WarpSurfaceView:
     vertices: np.ndarray  # `[V,3]` float32，m
     faces: np.ndarray  # `[F_valid,3]` int32
     source_face_indices: np.ndarray  # `[F_valid]`，指向 `surface_mesh.faces`
+    face_altitudes_m: np.ndarray  # `[F_valid,3]`，每个重心坐标对应的对边高，m
     audit: WarpSurfaceAudit  # 面积守恒和删除数量
+
+
+@dataclass(frozen=True)
+class OwnerSurfaceSamplingArrays:
+    r"""query sampler 的 owner-local CPU 真源；owner 间 face 数不同，保持 tuple。"""
+
+    triangles_owner_local_m: tuple[np.ndarray, ...]  # 每项 `[F_g,3,3]` float64，m
+    face_normals_owner_local: tuple[np.ndarray, ...]  # 每项 `[F_g,3]` float64
+    face_area_cdf: tuple[np.ndarray, ...]  # 每项 `[F_g]` float64，严格以 1 结尾
 
 
 @dataclass(frozen=True)
@@ -224,13 +202,6 @@ _WARP_OWNER_CACHE_LEASES: dict[_WarpCacheKey, int] = {}
 
 _WARP_OWNER_CACHE_LOCK = RLock()
 """保护训练主线程与 physical-audit worker 的 cache/lease 元数据；BVH 构造不持锁。"""
-
-_ANCHOR_BOUNDARY_RECHECK_M = 1.0e-6
-"""Warp float32 sign 的 CPU float64 复核壳层，单位 m；与 teacher distance epsilon 对齐。"""
-
-_ANCHOR_SAMPLING_VERSION = "palm-seed-radial-gaussian-fps-fast-winding-v2"
-"""bank-major 候选批处理后的 backend-neutral realization 版本；分类 backend 另记资源证据。"""
-
 
 def materialize_owner_geometry_cache(
     container: HandContainer,
@@ -316,6 +287,7 @@ def materialize_warp_owner_geometry_cache(
     cache: OwnerGeometryCache,
     *,
     device: str = "cuda:0",
+    surface_views: tuple[WarpSurfaceView, ...] | None = None,
 ) -> WarpOwnerGeometryCache:
     r"""把 CPU 上验证过的 owner union 一次性上传为 Warp BVH。
 
@@ -340,32 +312,23 @@ def materialize_warp_owner_geometry_cache(
     if resolved_device.is_cuda and not wp.is_cuda_available():
         raise RuntimeError(f"Warp CUDA device is unavailable: {device}")
 
+    if surface_views is not None and len(surface_views) != len(cache.records):
+        raise ValueError("precomputed Warp surface view count must match owner records")
     handles: list[WarpOwnerMeshHandle] = []
-    for record in cache.records:
-        surface_view = prepare_warp_surface_view(record.surface_mesh, owner_id=record.owner_id)
+    for owner_index, record in enumerate(cache.records):
+        surface_view = (
+            surface_views[owner_index]
+            if surface_views is not None
+            else prepare_warp_surface_view(record.surface_mesh, owner_id=record.owner_id)
+        )
         vertices = surface_view.vertices  # `[V,3]` float32，和 Warp 实际计算完全一致
         faces_2d = surface_view.faces  # `[F_valid,3]`，已删除 float32 退化面
         faces = faces_2d.reshape(-1)
         points = wp.array(vertices, dtype=wp.vec3, device=device)
         indices = wp.array(faces, dtype=wp.int32, device=device)
         source_face_indices = wp.array(surface_view.source_face_indices, dtype=wp.int32, device=device)
-        triangles = vertices[faces_2d]  # `[F_valid,3,3]`，float32 上传视图
-        doubled_area = np.linalg.norm(
-            np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
-            axis=-1,
-        )
-        opposite_edges = np.stack(
-            (
-                np.linalg.norm(triangles[:, 2] - triangles[:, 1], axis=-1),
-                np.linalg.norm(triangles[:, 0] - triangles[:, 2], axis=-1),
-                np.linalg.norm(triangles[:, 1] - triangles[:, 0], axis=-1),
-            ),
-            axis=-1,
-        )
-        if np.any(opposite_edges <= 0.0) or np.any(doubled_area <= 0.0):
-            raise RuntimeError(f"owner '{record.owner_id}' float32 surface filtering left a degenerate triangle")
         face_altitudes = wp.array(
-            (doubled_area[:, None] / opposite_edges).astype(np.float32),
+            surface_view.face_altitudes_m,
             dtype=wp.vec3,
             device=device,
         )  # $h_i=2A/|e_i|$，与重心坐标乘积得到到对边的物理距离
@@ -550,6 +513,18 @@ def prepare_warp_surface_view(
     if not np.any(valid):
         raise ValueError(f"owner '{owner_id}' has no valid float32 triangles after surface filtering")
 
+    valid_triangles32 = triangles32[valid]
+    valid_doubled_area32 = doubled_area32[valid]
+    opposite_edges32 = np.stack(
+        (
+            np.linalg.norm(valid_triangles32[:, 2] - valid_triangles32[:, 1], axis=-1),
+            np.linalg.norm(valid_triangles32[:, 0] - valid_triangles32[:, 2], axis=-1),
+            np.linalg.norm(valid_triangles32[:, 1] - valid_triangles32[:, 0], axis=-1),
+        ),
+        axis=-1,
+    )
+    if np.any(opposite_edges32 <= 0.0):
+        raise RuntimeError(f"owner '{owner_id}' float32 surface filtering left a zero opposite edge")
     audit = WarpSurfaceAudit(
         input_face_count=len(faces),
         output_face_count=int(valid.sum()),
@@ -562,8 +537,32 @@ def prepare_warp_surface_view(
         vertices=np.ascontiguousarray(vertices32),
         faces=np.ascontiguousarray(faces[valid]),
         source_face_indices=np.ascontiguousarray(np.flatnonzero(valid).astype(np.int32)),
+        face_altitudes_m=np.ascontiguousarray(
+            (valid_doubled_area32[:, None] / opposite_edges32).astype(np.float32)
+        ),
         audit=audit,
     )
+
+
+def prepare_owner_surface_sampling_arrays(cache: OwnerGeometryCache) -> OwnerSurfaceSamplingArrays:
+    r"""从 owner union 一次形成 query triangle/normal/area-CDF 的 float64 静态数组。"""
+
+    triangles: list[np.ndarray] = []
+    normals: list[np.ndarray] = []
+    cdfs: list[np.ndarray] = []
+    for record in cache.records:
+        surface = record.surface_mesh
+        triangle = np.ascontiguousarray(np.asarray(surface.triangles, dtype=np.float64))
+        normal = np.ascontiguousarray(np.asarray(surface.face_normals, dtype=np.float64))
+        area = np.asarray(surface.area_faces, dtype=np.float64)
+        if triangle.ndim != 3 or triangle.shape[1:] != (3, 3) or np.any(area <= 0.0):
+            raise ValueError(f"owner {record.owner_id!r} surface sampling arrays require positive triangles")
+        cdf = np.cumsum(area / area.sum(), dtype=np.float64)
+        cdf[-1] = 1.0
+        triangles.append(triangle)
+        normals.append(normal)
+        cdfs.append(np.ascontiguousarray(cdf))
+    return OwnerSurfaceSamplingArrays(tuple(triangles), tuple(normals), tuple(cdfs))
 
 
 def strict_owner_union(meshes: list[trimesh.Trimesh], *, owner_id: str) -> trimesh.Trimesh:
@@ -654,387 +653,6 @@ def sample_owner_home_surfaces(
         sampling_seed=sampling_seed,
         oversample_factor=oversample_factor,
     )
-
-
-def sample_palm_anchor_supports(
-    cache: OwnerGeometryCache,
-    semantics: HandGeometrySemanticsCfg,
-    spec: EmbodimentGeometrySpec,
-    *,
-    anchors_per_finger: int,
-    sampling_seed: int,
-    radial_support_radius_m: float = 0.05,
-    radial_decay_scale_m: float | None = None,
-    surface_fraction: float = 0.5,
-    _interior_proposals: tuple[np.ndarray, ...] | None = None,
-    _algorithm_version: str = "palm-seed-radial-gaussian-fps-v1",
-) -> AnchorSamples:
-    r"""从每根手指挂载 seed 的径向衰减 PALM 支持域采 surface/interior anchors。
-
-    对 seed-local 距离 $r=\|p-p_{seed}\|_2$，支持域限制为 $r\le R_a$，候选接受权重为：
-
-    $$
-    w_a(r)=\exp\left(-\frac{r^2}{2\tau_a^2}\right).
-    $$
-
-    surface proposal 按 PALM union 的真实三角形面积采样，interior proposal 在
-    ``sphere(seed,R_a) ∩ palm solid`` 内按体积采样；径向接受后继续用确定性最远点选择，兼顾
-    挂载点附近的概率偏好与有限 $K$ 下的点间分离。seed/finger 只属于采样 provenance，不进入网络。
-
-    数值锚点：$R_a=0.05\,\mathrm m$、$\tau_a=R_a/2=0.025\,\mathrm m$、每指 10 点、
-    surface/interior 各半。它们是首个可运行主线配置，不是已经由消融接受的算法常数。
-    """
-
-    if anchors_per_finger < 1:
-        raise ValueError("anchors_per_finger must be positive")
-    radial_decay_scale_m = (  # 独立调用覆盖 $R_a$ 时，未声明的 $\tau_a$ 始终保持 $R_a/2$ 关系
-        0.5 * radial_support_radius_m if radial_decay_scale_m is None else radial_decay_scale_m
-    )
-    if radial_support_radius_m <= 0.0 or not 0.0 < radial_decay_scale_m <= radial_support_radius_m:
-        raise ValueError("anchor support radius and radial decay scale must satisfy 0 < tau_a <= R_a")
-    if not 0.0 <= surface_fraction <= 1.0:
-        raise ValueError("surface_fraction must lie in [0,1]")
-    if spec.owner_ids != tuple(owner.owner_id for owner in semantics.owners):
-        raise ValueError("anchor semantics/spec owner axes do not match")
-    if _interior_proposals is not None and len(_interior_proposals) != len(semantics.anchor_seeds):
-        raise ValueError("preclassified interior proposals must align with the anchor seed axis")
-    palm_index = next(owner.owner_index for owner in semantics.owners if owner.owner_id == "palm")
-    palm_record = cache.records[palm_index]
-    palm_transform = spec.owner_home_transforms[palm_index].detach().cpu().numpy()
-    hand_rotation = np.asarray(semantics.asset_to_hand_rotation, dtype=np.float64).reshape(3, 3)
-    hand_translation = np.asarray(semantics.asset_to_hand_translation_m, dtype=np.float64)
-    inverse_palm = np.linalg.inv(palm_transform)
-
-    all_points: list[np.ndarray] = []
-    all_finger_names: list[str] = []
-    all_seed_ids: list[str] = []
-    all_surface_mask: list[bool] = []
-    surface_count = int(round(anchors_per_finger * surface_fraction))
-    interior_count = anchors_per_finger - surface_count
-    for seed_index, seed in enumerate(semantics.anchor_seeds):
-        seed_hand = hand_rotation @ np.asarray(seed.position_a_m) + hand_translation
-        seed_homogeneous = np.append(seed_hand, 1.0)
-        seed_local = (inverse_palm @ seed_homogeneous)[:3]
-        sampled_surface = trimesh.sample.sample_surface(
-            palm_record.surface_mesh,
-            max(anchors_per_finger * 64, 256),
-            seed=_stable_owner_seed(sampling_seed, seed.seed_id),
-        )
-        local_surface = sampled_surface[0]  # 可选第三返回值不属于 anchor 几何合同
-        local_surface = _within_radius(local_surface, seed_local, radial_support_radius_m)
-        local_surface = _radial_decay_candidates(  # 面积 proposal 经 $w_a(r)$ 接受后偏向真实挂载 seed
-            local_surface,
-            seed_local,
-            radial_decay_scale_m,
-            seed=_stable_owner_seed(sampling_seed + 2, seed.seed_id),
-        )
-        if len(local_surface) < surface_count:
-            raise ValueError(
-                f"anchor seed '{seed.seed_id}' has only {len(local_surface)} palm surface candidates "
-                f"after radial decay within radius {radial_support_radius_m} m; need {surface_count}"
-            )
-        selected_surface = (
-            local_surface[_farthest_point_indices(local_surface, surface_count)] if surface_count else np.empty((0, 3))
-        )
-
-        if interior_count and palm_record.solid_mesh is None:
-            raise ValueError(
-                "palm interior anchors require OwnerSurfaceRecord.solid_mesh; "
-                "an open surface cannot define inside support"
-            )
-        interior_candidates = max(anchors_per_finger * 64, 256)  # 大候选池使径向接受后仍可做覆盖选择
-        local_interior = (
-            _interior_proposals[seed_index]
-            if _interior_proposals is not None
-            else _sample_interior_support(
-                palm_record.solid_mesh,
-                seed_local,
-                radial_support_radius_m,
-                interior_candidates if interior_count else 0,
-                seed=_stable_owner_seed(sampling_seed + 1, seed.seed_id),
-            )
-            if palm_record.solid_mesh is not None
-            else np.empty((0, 3))
-        )
-        local_interior = _radial_decay_candidates(  # 体积 proposal 使用与 surface 相同的物理衰减尺度
-            local_interior,
-            seed_local,
-            radial_decay_scale_m,
-            seed=_stable_owner_seed(sampling_seed + 3, seed.seed_id),
-        )
-        if len(local_interior) < interior_count:
-            raise ValueError(
-                f"anchor seed '{seed.seed_id}' has only {len(local_interior)} palm interior candidates "
-                f"after radial decay within radius {radial_support_radius_m} m; need {interior_count}"
-            )
-        selected_interior = (
-            local_interior[_farthest_point_indices(local_interior, interior_count)]
-            if interior_count
-            else np.empty((0, 3))
-        )
-        local_points = np.concatenate((selected_surface, selected_interior), axis=0)
-        hand_points = (palm_transform @ np.concatenate((local_points, np.ones((len(local_points), 1))), axis=1).T).T[:, :3]
-        all_points.append(hand_points)
-        all_finger_names.extend([seed.finger_name] * anchors_per_finger)
-        all_seed_ids.extend([seed.seed_id] * anchors_per_finger)
-        all_surface_mask.extend([True] * surface_count + [False] * interior_count)
-
-    return AnchorSamples(
-        anchors_hand_m=np.concatenate(all_points, axis=0),
-        finger_names=tuple(all_finger_names),
-        seed_ids=tuple(all_seed_ids),
-        surface_mask=np.asarray(all_surface_mask, dtype=bool),
-        radial_support_radius_m=float(radial_support_radius_m),
-        radial_decay_scale_m=float(radial_decay_scale_m),
-        surface_fraction=float(surface_fraction),
-        sampling_seed=int(sampling_seed),
-        algorithm_version=_algorithm_version,
-    )
-
-
-def sample_palm_anchor_bank_warp(
-    cache: OwnerGeometryCache,
-    semantics: HandGeometrySemanticsCfg,
-    spec: EmbodimentGeometrySpec,
-    warp_cache: WarpOwnerGeometryCache,
-    *,
-    bank_size: int,
-    anchors_per_finger: int,
-    static_sampling_seed: int,
-    radial_support_radius_m: float = 0.05,
-    radial_decay_scale_m: float | None = None,
-    surface_fraction: float = 0.5,
-    boundary_recheck_m: float = _ANCHOR_BOUNDARY_RECHECK_M,
-) -> tuple[tuple[AnchorSamples, ...], AnchorClassificationStats]:
-    r"""在已有 palm Warp BVH 上批量生成完整 anchor constellation bank。
-
-    设 bank 数为 $K_b$、finger mount seed 数为 $K_f$。旧路径逐个执行
-    $K_bK_f$ 次 ``trimesh.contains``；本路径保持每个 job 的 NumPy RNG、proposal batch size、
-    截断球、径向接受和 FPS 顺序不变，只把同一 rejection round 的候选拼成一个数组并执行
-    一次 Warp signed-distance kernel。对 $|d|\le\epsilon_b$ 的点重新调用 CPU float64
-    ``contains``，其中 $\epsilon_b=10^{-6}\,\mathrm m$。
-
-    Args:
-        cache (OwnerGeometryCache): CPU float64 strict owner union，提供 palm solid reference。
-        semantics (HandGeometrySemanticsCfg): anchor mount seeds 与 `{a}->{h}` 变换真源。
-        spec (EmbodimentGeometrySpec): owner home transforms 与规范 owner 轴。
-        warp_cache (WarpOwnerGeometryCache): 同一 source 已上传、后续 teacher 继续复用的 BVH。
-        bank_size (int): 独立 anchor realization 数，正式数值锚点为 8。
-        anchors_per_finger (int): 每根手指最终 anchor 数，正式数值锚点为 10。
-        static_sampling_seed (int): bank 0 的固定根 seed。
-        radial_support_radius_m (float): mount-centered 支持球半径 $R_a$，单位 m。
-        radial_decay_scale_m (float | None): 截断 Gaussian 尺度 $\tau_a$，单位 m。
-        surface_fraction (float): 每指 surface anchor 比例。
-        boundary_recheck_m (float): GPU sign 的 CPU float64 复核半宽，单位 m。
-
-    Returns:
-        tuple[tuple[AnchorSamples, ...], AnchorClassificationStats]: bank-major anchors 与分类证据。
-
-    Raises:
-        ValueError: bank/seed/palm solid/BVH 轴不闭合或采样预算非法。
-        RuntimeError: Warp query 未返回有限 signed distance。
-    """
-
-    if bank_size < 1 or anchors_per_finger < 1 or boundary_recheck_m < 0.0:
-        raise ValueError("anchor bank, per-finger budget and boundary tolerance must be valid")
-    if cache.asset_content_hash != warp_cache.asset_content_hash:
-        raise ValueError("CPU owner geometry and Warp cache content hashes differ")
-    palm_index = next(owner.owner_index for owner in semantics.owners if owner.owner_id == "palm")
-    palm_record = cache.records[palm_index]  # PALM union 是 interior proposal 的唯一实体支持
-    if warp_cache.handles[palm_index].owner_id != palm_record.owner_id:
-        raise ValueError("palm CPU/Warp owner axes differ")
-
-    surface_count = int(round(anchors_per_finger * surface_fraction))  # 每指 boundary anchor 数
-    interior_count = anchors_per_finger - surface_count  # 每指 solid-interior anchor 数
-    interior_candidate_count = max(anchors_per_finger * 64, 256) if interior_count else 0
-    palm_solid = palm_record.solid_mesh  # closed union；GPU sign 的 CPU float64 边界 reference
-    if interior_count and palm_solid is None:
-        raise ValueError("palm interior anchors require a closed solid mesh")
-
-    # 先把每个 mount seed 变到 palm reference-link 坐标；所有 bank 共享 center，仅 RNG seed 不同。
-    palm_transform = spec.owner_home_transforms[palm_index].detach().cpu().numpy()  # $T_{hp}$，float64
-    inverse_palm = np.linalg.inv(palm_transform)  # $T_{ph}$，anchor sphere 在 palm local 中定义
-    hand_rotation = np.asarray(semantics.asset_to_hand_rotation, dtype=np.float64).reshape(3, 3)
-    hand_translation = np.asarray(semantics.asset_to_hand_translation_m, dtype=np.float64)
-    centers: list[np.ndarray] = []  # `[K_f][3]` palm-local mount centers，单位 m
-    for seed in semantics.anchor_seeds:
-        seed_hand = hand_rotation @ np.asarray(seed.position_a_m) + hand_translation  # `{a}` -> `{h}`
-        centers.append((inverse_palm @ np.append(seed_hand, 1.0))[:3])  # `{h}` -> palm local
-
-    # bank-major job 顺序与原 tuple comprehension 完全一致，保证 seed 与输出 bank index 不漂移。
-    jobs: list[tuple[np.ndarray, int]] = []
-    for bank_index in range(bank_size):
-        sampling_seed = static_sampling_seed + bank_index * 1_000_003  # 独立有限 Monte-Carlo realization
-        jobs.extend(
-            (center, _stable_owner_seed(sampling_seed + 1, seed.seed_id))
-            for center, seed in zip(centers, semantics.anchor_seeds)
-        )
-
-    started = perf_counter()  # 证据覆盖候选生成、GPU query、CPU 边界复核与最终 anchor assembly
-    if interior_candidate_count:
-        assert palm_solid is not None  # interior budget 已在上方证明 PALM 为 closed solid
-        proposals, query_count, launch_count, recheck_count, disagreement_count = _sample_interior_support_jobs_warp(
-            palm_solid,
-            warp_cache.handles[palm_index],
-            jobs,
-            radius=radial_support_radius_m,
-            count=interior_candidate_count,
-            device=warp_cache.device,
-            boundary_recheck_m=boundary_recheck_m,
-        )
-    else:
-        proposals = tuple(np.empty((0, 3), dtype=np.float64) for _ in jobs)
-        query_count = launch_count = recheck_count = disagreement_count = 0
-
-    seed_count = len(semantics.anchor_seeds)  # 每个 bank 恰好含一项/手指的 interior proposal
-    anchor_bank = tuple(
-        sample_palm_anchor_supports(
-            cache,
-            semantics,
-            spec,
-            anchors_per_finger=anchors_per_finger,
-            sampling_seed=static_sampling_seed + bank_index * 1_000_003,
-            radial_support_radius_m=radial_support_radius_m,
-            radial_decay_scale_m=radial_decay_scale_m,
-            surface_fraction=surface_fraction,
-            _interior_proposals=proposals[bank_index * seed_count : (bank_index + 1) * seed_count],
-            _algorithm_version=f"{_ANCHOR_SAMPLING_VERSION}:{warp_cache.device}",
-        )
-        for bank_index in range(bank_size)
-    )
-    stats = AnchorClassificationStats(
-        query_point_count=query_count,
-        kernel_launch_count=launch_count,
-        boundary_recheck_count=recheck_count,
-        boundary_disagreement_count=disagreement_count,
-        elapsed_seconds=perf_counter() - started,
-    )
-    return anchor_bank, stats
-
-
-def _sample_interior_support_jobs_warp(
-    mesh: trimesh.Trimesh,
-    warp_handle: WarpOwnerMeshHandle,
-    jobs: list[tuple[np.ndarray, int]],
-    *,
-    radius: float,
-    count: int,
-    device: str,
-    boundary_recheck_m: float,
-) -> tuple[tuple[np.ndarray, ...], int, int, int, int]:
-    r"""按 rejection round 合并全部 bank/finger jobs，并用一项 palm BVH 判定 inside。"""
-
-    if count == 0:
-        return tuple(np.empty((0, 3), dtype=np.float64) for _ in jobs), 0, 0, 0, 0
-    states = [
-        {"rng": np.random.default_rng(seed), "accepted": [], "attempts": 0}
-        for _center, seed in jobs
-    ]  # 每个 job 保持独立 RNG/cursor，线程或 GPU 完成顺序不能改变 proposal
-    query_point_count = 0
-    kernel_launch_count = 0
-    boundary_recheck_count = 0
-    boundary_disagreement_count = 0
-    max_attempts = max(10000, count * 10000)  # 与 CPU reference 的 fail-hard 上界一致
-
-    while True:
-        active: list[tuple[int, np.ndarray]] = []  # 当前 round 的 `(job_index,candidates)` ragged blocks
-        for job_index, ((center, _seed), state) in enumerate(zip(jobs, states)):
-            accepted = state["accepted"]
-            accepted_count = sum(len(batch) for batch in accepted)
-            if accepted_count >= count:
-                continue
-            if int(state["attempts"]) >= max_attempts:
-                raise ValueError(f"palm solid has fewer than {count} interior candidates for job {job_index}")
-            batch_size = max(256, (count - accepted_count) * 32)  # 保持原 rejection 自适应批大小
-            rng = state["rng"]
-            candidate = rng.uniform(-radius, radius, size=(batch_size, 3)) + center[None, :]
-            candidate = candidate[np.linalg.norm(candidate - center[None, :], axis=-1) <= radius]
-            state["attempts"] = int(state["attempts"]) + batch_size
-            if len(candidate):
-                active.append((job_index, candidate))
-        if not active:
-            break
-
-        merged = np.concatenate(tuple(candidate for _job, candidate in active), axis=0)  # `[N_round,3]`
-        inside, rechecked, disagreements = _classify_inside_warp(
-            mesh,
-            warp_handle,
-            merged,
-            device=device,
-            boundary_recheck_m=boundary_recheck_m,
-        )
-        query_point_count += len(merged)
-        kernel_launch_count += 1
-        boundary_recheck_count += rechecked
-        boundary_disagreement_count += disagreements
-        offset = 0
-        for job_index, candidate in active:
-            stop = offset + len(candidate)
-            states[job_index]["accepted"].append(candidate[inside[offset:stop]])
-            offset = stop
-
-    results: list[np.ndarray] = []
-    for job_index, state in enumerate(states):
-        accepted_batches = state["accepted"]
-        result = np.concatenate(accepted_batches, axis=0) if accepted_batches else np.empty((0, 3), dtype=np.float64)
-        if len(result) < count:
-            raise ValueError(f"palm solid has only {len(result)} interior candidates for job {job_index}; need {count}")
-        results.append(result[:count])  # 保持每个独立 RNG stream 的首 `count` 个 accepted proposals
-    return tuple(results), query_point_count, kernel_launch_count, boundary_recheck_count, boundary_disagreement_count
-
-
-def _classify_inside_warp(
-    mesh: trimesh.Trimesh,
-    warp_handle: WarpOwnerMeshHandle,
-    points: np.ndarray,
-    *,
-    device: str,
-    boundary_recheck_m: float,
-) -> tuple[np.ndarray, int, int]:
-    r"""用 Warp signed distance 批量分类，并让 CPU float64 裁定近表面候选。"""
-
-    if _warp_anchor_signed_distance_kernel is None:
-        raise RuntimeError("Warp anchor signed-distance kernel is unavailable")
-    import warp as wp
-
-    query_points = wp.array(np.asarray(points, dtype=np.float32), dtype=wp.vec3, device=device)  # `[N]` vec3
-    signed_distance = wp.zeros(len(points), dtype=wp.float32, device=device)  # `[N]`，inside 为负
-    wp.launch(
-        _warp_anchor_signed_distance_kernel,
-        dim=len(points),
-        inputs=[  # pyright: ignore[reportAttributeAccessIssue]
-            warp_handle.mesh.id,  # pyright: ignore[reportAttributeAccessIssue]
-            query_points,
-            signed_distance,
-        ],
-        device=device,
-    )
-    wp.synchronize_device(device)  # CPU 复核和 ragged scatter 前必须完成 sign buffer
-    distance = np.asarray(signed_distance.numpy(), dtype=np.float32)  # `[N]`，单位 m
-    if np.any(~np.isfinite(distance)) or np.any(distance >= 0.5 * np.finfo(np.float32).max):
-        raise RuntimeError("Warp anchor query failed to find a closest palm surface")
-    inside = distance < 0.0  # Warp convention：negative sign 表示 watertight solid interior
-    boundary = np.abs(distance) <= boundary_recheck_m  # float32 surface 壳层由固定 CPU ray 裁定
-    disagreement_count = 0
-    if np.any(boundary):
-        cpu_inside = _contains_points_fixed_ray(mesh, np.asarray(points[boundary], dtype=np.float64))
-        disagreement_count = int(np.count_nonzero(inside[boundary] != cpu_inside))
-        inside[boundary] = cpu_inside
-    return inside, int(np.count_nonzero(boundary)), disagreement_count
-
-
-def _contains_points_fixed_ray(mesh: trimesh.Trimesh, points: np.ndarray) -> np.ndarray:
-    r"""用 Trimesh triangle intersector 的固定方向裁定近表面点，不消费全局 NumPy RNG。"""
-
-    from trimesh.ray.ray_triangle import RayMeshIntersector
-    from trimesh.ray.ray_util import contains_points
-
-    direction = np.asarray([0.4395064455, 0.617598629942, 0.652231566745], dtype=np.float64)
-    return contains_points(
-        RayMeshIntersector(mesh),
-        np.asarray(points, dtype=np.float64),
-        check_direction=direction,
-    )  # 显式 direction 禁用 Trimesh 对 broken rays 的随机递归 fallback
 
 
 def _component_mesh(
@@ -1226,73 +844,6 @@ def _stable_owner_seed(seed: int, owner_id: str) -> int:
     return (int(seed) ^ owner_hash) & 0xFFFFFFFF
 
 
-def _within_radius(points: np.ndarray, center: np.ndarray, radius: float) -> np.ndarray:
-    """返回球形支持邻域内的候选点。"""
-
-    return points[np.linalg.norm(points - center[None, :], axis=-1) <= radius]
-
-
-def _radial_decay_candidates(
-    points: np.ndarray,
-    center: np.ndarray,
-    scale: float,
-    *,
-    seed: int,
-) -> np.ndarray:
-    r"""按截断 Gaussian 径向权重接受 PALM surface/volume proposal。
-
-    输入 proposal 已经由 ``_within_radius`` 或 ``_sample_interior_support`` 限制在支持球内；本函数
-    只实施 $w_a(r)=\exp(-r^2/(2\tau_a^2))$。由于 $w_a(0)=1$，可直接把权重作为接受概率，
-    无需未知归一化常数。后续最远点选择负责有限 anchor 数下的点间分离。
-
-    Args:
-        points (np.ndarray): ``[N,3]`` PALM-local surface 或 interior proposal，单位 m。
-        center (np.ndarray): ``[3]`` first-active mount seed，PALM-local，单位 m。
-        scale (float): 截断 Gaussian 衰减尺度 $\tau_a>0$，单位 m。
-        seed (int): 独立、可复现的候选接受随机种子。
-
-    Returns:
-        np.ndarray: 保持原 proposal 顺序的接受点，形状 ``[N_{accept},3]``。
-    """
-
-    if len(points) == 0:  # 空 surface/solid proposal 原样返回，由 caller 给出带 seed 的失败信息
-        return points
-    squared_radius = np.sum((points - center[None, :]) ** 2, axis=-1)  # $r^2$，单位 $\mathrm m^2$
-    acceptance = np.exp(-squared_radius / (2.0 * scale * scale))  # $w_a(r)\in(0,1]$，无量纲
-    rng = np.random.default_rng(seed)  # 每个 seed/source 独立，修改一类候选不扰动另一类
-    return points[rng.random(len(points)) < acceptance]  # rejection sampling 保留原始面积/体积基测度
-
-
-def _sample_interior_support(
-    mesh: trimesh.Trimesh,
-    center: np.ndarray,
-    radius: float,
-    count: int,
-    *,
-    seed: int,
-) -> np.ndarray:
-    """在 sphere∩solid 中 rejection sample 固定数量的内部点。"""
-
-    if count == 0:
-        return np.empty((0, 3), dtype=np.float64)
-    rng = np.random.default_rng(seed)
-    accepted: list[np.ndarray] = []
-    attempts = 0
-    max_attempts = max(10000, count * 10000)
-    while sum(len(batch) for batch in accepted) < count and attempts < max_attempts:
-        batch_size = max(256, (count - sum(len(batch) for batch in accepted)) * 32)
-        candidate = rng.uniform(-radius, radius, size=(batch_size, 3)) + center[None, :]
-        candidate = candidate[np.linalg.norm(candidate - center[None, :], axis=-1) <= radius]
-        if len(candidate):
-            inside = mesh.contains(candidate)
-            accepted.append(candidate[inside])
-        attempts += batch_size
-    result = np.concatenate(accepted, axis=0) if accepted else np.empty((0, 3), dtype=np.float64)
-    if len(result) < count:
-        raise ValueError(f"palm solid has only {len(result)} interior support candidates; need {count}")
-    return result[:count]
-
-
 def _farthest_point_indices(points: np.ndarray, count: int) -> np.ndarray:
     """在面积候选池中做确定性欧氏最远点子采样。"""
 
@@ -1311,43 +862,19 @@ def _farthest_point_indices(points: np.ndarray, count: int) -> np.ndarray:
     return selected
 
 
-try:
-    import warp as wp
-
-    @wp.kernel
-    def _warp_anchor_signed_distance_kernel(
-        mesh: wp.uint64,  # pyright: ignore[reportInvalidTypeForm]
-        points: wp.array(dtype=wp.vec3),  # pyright: ignore[reportInvalidTypeForm]
-        signed_distance: wp.array(dtype=float),  # pyright: ignore[reportInvalidTypeForm]
-    ):
-        r"""对 flatten interior proposals 批量求 palm signed distance，单位 m。"""
-
-        thread = wp.tid()  # 每个 CUDA thread 独立处理一个 palm-local candidate
-        point = points[thread]  # palm reference-link 中的 float32 query point，m
-        query = wp.mesh_query_point_sign_winding_number(  # pyright: ignore[reportArgumentType]
-            mesh,
-            point,
-            wp.float32(1.0e8),  # pyright: ignore[reportArgumentType] - Warp stub 把 kernel scalar 构造误标为 int-only
-            wp.float32(2.0),  # pyright: ignore[reportArgumentType]
-            wp.float32(0.5),  # pyright: ignore[reportArgumentType]
-        )  # fast winding number；watertight PALM 的 inside threshold 固定为 0.5
-        if not query.result:  # pyright: ignore[reportAttributeAccessIssue]
-            signed_distance[thread] = 3.4028234663852886e38  # host 侧 fail-hard，不把 query failure 当 outside
-            return
-        closest = wp.mesh_eval_position(  # pyright: ignore[reportAttributeAccessIssue]
-            mesh,
-            query.face,  # pyright: ignore[reportAttributeAccessIssue]
-            query.u,  # pyright: ignore[reportAttributeAccessIssue]
-            query.v,  # pyright: ignore[reportAttributeAccessIssue]
-        )
-        signed_distance[thread] = wp.length(closest - point) * query.sign  # pyright: ignore[reportAttributeAccessIssue]
-
-except Exception:
-    _warp_anchor_signed_distance_kernel = None  # pyright: ignore[reportAssignmentType]
+from .anchor_sampling import (  # noqa: E402, I001 - imported after collision cache types to avoid a cycle
+    AnchorClassificationStats,
+    AnchorRealization,
+    AnchorSamples,
+    sample_palm_anchor_bank_warp,
+    sample_palm_anchor_realization_warp,
+    sample_palm_anchor_supports,
+)
 
 
 __all__ = [
     "AnchorClassificationStats",
+    "AnchorRealization",
     "HomeSurfaceSamples",
     "AnchorSamples",
     "GeometryIdentity",
@@ -1357,13 +884,16 @@ __all__ = [
     "WarpOwnerMeshHandle",
     "WarpSurfaceAudit",
     "WarpSurfaceView",
+    "OwnerSurfaceSamplingArrays",
     "materialize_owner_geometry_cache",
     "materialize_warp_owner_geometry_cache",
     "prepare_warp_surface_view",
+    "prepare_owner_surface_sampling_arrays",
     "geometry_identity",
     "release_warp_owner_geometry_cache",
     "sample_owner_home_surfaces",
     "sample_palm_anchor_bank_warp",
+    "sample_palm_anchor_realization_warp",
     "sample_palm_anchor_supports",
     "strict_owner_union",
     "warp_owner_geometry_cache_stats",

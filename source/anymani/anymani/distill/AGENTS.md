@@ -19,7 +19,9 @@ distill/
 │       ├── batch.py                选 A^(k)、evidence、padding、三块视图
 │       └── objectives.py           rho/kappa、teacher baseline 与归一化
 ├── models/
-│   ├── input_adapters/geometry.py  StaticGeometryEvidence 与 retained encoder
+│   ├── input_adapters/evidence.py  StaticGeometryEvidence、routing、padding
+│   ├── input_adapters/encoder.py   retained SO(2)-aware geometry encoder
+│   ├── input_adapters/geometry.py  compatibility exports
 │   ├── backbones/                  graph-biased Transformer
 │   ├── decoders/representations/   SSL-only density/κ readers
 │   └── geometry_ssl.py             retained/disposable 组装
@@ -45,7 +47,7 @@ distill/
 | `ssl/` `rl/` `il/` | 各阶段数据流、入口、checkpoint | 共享 trunk 的重复实现 |
 | `diagnostics/` | 记录、固定 evaluation、只读分析 | 训练选择或物理真值 |
 
-移动内容时同步 TODO、docstring 和 tests。采用明确的 role 与浅层组合，让科研依赖保持可见。
+移动内容时同步 TODO、docstring、tests 与所属模块的 AGENTS。采用明确的 role 与浅层组合，让科研依赖保持可见。
 
 ## Development Style And Conventions
 
@@ -69,9 +71,9 @@ retained encoder 的输入是当前物理 `q` 与静态证据；distance、最�
 
 ### 几何 SSL 合同
 
-主线是多锚点条件 Gaussian 场与 unified owner-token $Z$。active loss 固定为 teacher-baseline-normalized density/κ；derived-field、density JVP 与 full-gradient 只作显式事后诊断。schema 7 根配置为 `data / method / trainer / run`，训练层级是 epoch → mini-epoch → minibatch → microbatch；每个 minibatch 独立更新，microbatch 只解决显存切分。Trainer 只调 Method/session 封闭接口；full checkpoint 只服务 SSL resume，RL/IL 只消费 schema-5 standalone retained artifact。
+主线是多锚点条件 Gaussian 场与 unified owner-token $Z$。active loss 固定为 run-local teacher-baseline-normalized density/κ；derived-field、density JVP 与 full-gradient 只作显式事后诊断。schema 8 根配置为 `data / method / trainer / run`，训练层级是 epoch → mini-epoch → minibatch → microbatch；每个 minibatch 独立更新，microbatch 只解决显存切分。Trainer 只调 Method/session 封闭接口；full checkpoint 只服务 SSL resume，RL/IL 只消费 schema-5 standalone retained artifact。
 
-official LEAP/Allegro 不参与 train、calibration 或 checkpoint selection。split 按 `physical_geometry_hash` 隔离；路径、asset ID 或 `content_hash` 不足以识别 limit-only 重复。
+official LEAP/Allegro 不参与 train 或 checkpoint selection。split 按 `physical_geometry_hash` 隔离；路径、asset ID 或 `content_hash` 不足以识别 limit-only 重复。
 
 ### 性能门槛
 

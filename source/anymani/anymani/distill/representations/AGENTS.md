@@ -44,7 +44,7 @@ PALM/JOINT/TIP owner 的条件 Gaussian 邻近场。`q` 单位 rad，长度 m，
 
 ### 采样与边
 
-query 50/25/25；workspace 在 q-block 内共享，shell/adjacent 随 `q` 重采；一阶边只从 shell 抽。训练 sigma 中心 4/16/64 mm；validation 关闭 jitter 后仍用同一组。joint-first：train `1+1`，validation `4+4`。active 受最近点光滑 mask；zero 不因最近面不光滑而丢弃。不要把 ancestor mask 当作模型输入。
+query 50/25/25；workspace 在 q-block 内共享，shell/adjacent 随 `q` 重采；训练 sigma 中心 4/16/64 mm，validation 关闭 jitter 后仍用同一组。每个有效 JOINT、每个 q 固定 `2 active + 1 structural-zero`；active A 使用 owner shell，active B 在 adjacent/workspace 轮换，zero 在三类 stratum 轮换。active 受最近点光滑 mask；zero 不因最近面不光滑而丢弃。不要把 ancestor mask 当作模型输入。
 
 ## Common Operations And Tools
 

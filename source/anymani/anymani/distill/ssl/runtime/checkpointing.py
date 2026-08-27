@@ -6,6 +6,7 @@ minibatch/Sobol/RNG 状态，并拒绝当前 CLI 与 checkpoint 之间的科学�
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path  # immutable epoch checkpoint 与 mutable alias 发布路径
 
 from anymani.distill.ssl.experiment import EmbodimentPretrainCfg, resolved_config_dict
@@ -31,8 +32,8 @@ def require_resume_scientific_config(
     r"""拒绝当前 CLI 与 checkpoint 的任一 scientific config 漂移。"""
 
     schema = checkpoint_resolved.get("schema_version")
-    if schema != "7.0.0":
-        raise ValueError("resume checkpoint must contain schema 7 resolved configuration")
+    if schema != "8.0.0":
+        raise ValueError("resume checkpoint must contain schema 8 resolved configuration")
     expected = resume_scientific_config(checkpoint_resolved)
     actual = resume_scientific_config(current)
     if actual != expected:
@@ -40,14 +41,27 @@ def require_resume_scientific_config(
         raise ValueError(f"resume scientific config mismatch in sections={changed_sections}")
 
 
-def require_resume_calibration_hash(current_hash: str, checkpoint_metadata: dict[str, object]) -> None:
-    r"""拒绝同一路径内容变化或 CLI calibration artifact 漂移。"""
+def require_resume_metadata_identity(
+    current: Mapping[str, object],
+    checkpoint: Mapping[str, object],
+) -> None:
+    r"""拒绝配置无法表达的代码、公式、参数分区、source producer 或 worktree 漂移。"""
 
-    recorded_hash = checkpoint_metadata.get("calibration_artifact_hash")
-    if not isinstance(recorded_hash, str):
-        raise ValueError("resume checkpoint lacks calibration artifact hash lineage")
-    if current_hash != recorded_hash:
-        raise ValueError("resume calibration artifact hash does not match checkpoint lineage")
+    fields = (
+        "code_revision",
+        "package_version",
+        "geometry_semantics_schema",
+        "declared_objective",
+        "objective_formula",
+        "fairgrad_formula",
+        "parameter_partition",
+        "source_artifact",
+        "worktree_dirty",
+        "worktree_fingerprint",
+    )
+    changed = tuple(name for name in fields if current.get(name) != checkpoint.get(name))
+    if changed:
+        raise ValueError(f"resume checkpoint metadata identity mismatch in fields={changed}")
 
 
 def publish_checkpoint_alias(alias_path: Path, immutable_path: Path) -> None:
@@ -64,6 +78,6 @@ def publish_checkpoint_alias(alias_path: Path, immutable_path: Path) -> None:
 
 __all__ = [
     "publish_checkpoint_alias",
-    "require_resume_calibration_hash",
+    "require_resume_metadata_identity",
     "require_resume_scientific_config",
 ]

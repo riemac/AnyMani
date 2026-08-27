@@ -7,11 +7,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from anymani.distill.representations.queries.spatial_sampling import SURFACE_QUERY_SAMPLING_VERSION
-from anymani.distill.representations.sources.collision_geometry import (
-    AnchorSamples,
-    HomeSurfaceSamples,
-    OwnerGeometryCache,
-)
+from anymani.distill.representations.sources.anchor_sampling import AnchorSamples
+from anymani.distill.representations.sources.collision_geometry import HomeSurfaceSamples, OwnerGeometryCache
 
 
 def validate_asset_manifest_isolation(manifest: Mapping[str, Any]) -> None:

@@ -81,8 +81,11 @@ bandwidth；只缩放 geometry 而保持米制 bandwidth 是有意改变物理�
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass, replace
+from time import perf_counter
+from typing import TypedDict
 
 import torch
 
@@ -95,8 +98,24 @@ from anymani.distill.representations.sources.kinematics import (
 
 from ..fields.density import field_sensitivity_from_distance, gaussian_density_from_distance
 from ..queries.spatial_sampling import SpatialQueryBatch
-from .field_samples import FieldTargetBatch, QueryStratum, SensitivityTargetBatch
+from .field_samples import (
+    FieldTargetBatch,
+    QueryStratum,
+    SensitivityOwnerCategory,
+    SensitivitySamplingRole,
+    SensitivityTargetBatch,
+)
 from .warp_surface import query_owner_surfaces_warp
+
+
+class _CentralDifferenceAudit(TypedDict):
+    """中心差分审计字段的精确 kwargs 类型，避免 Tensor/float union 污染 target dataclass。"""
+
+    central_difference: torch.Tensor
+    central_difference_valid_mask: torch.Tensor
+    central_difference_plus_face: torch.Tensor
+    central_difference_minus_face: torch.Tensor
+    central_difference_elapsed_seconds: float
 
 
 @dataclass(frozen=True)
@@ -208,6 +227,9 @@ def generate_geometry_field_targets(
     target_config: GeometryFieldTargetCfg = GeometryFieldTargetCfg(),
     edge_sampling_seed: int = 0,
     supervision_split: str = "train",
+    owner_transforms: torch.Tensor | None = None,
+    current_spatial_screws: torch.Tensor | None = None,
+    q_index: torch.Tensor | None = None,
 ) -> tuple[FieldTargetBatch, SensitivityTargetBatch]:
     r"""生成多带宽零阶目标与 sampled-edge 一阶目标。
 
@@ -228,7 +250,25 @@ def generate_geometry_field_targets(
 
     if queries.query_points_h.device != q.device or queries.query_points_h.dtype != q.dtype:
         raise ValueError("q and query points must share CUDA device and float dtype")
-    owner_transforms = forward_owner_transforms(spec, q.detach())  # teacher/query 路径停止 q 梯度
+    if owner_transforms is None:
+        owner_transforms = forward_owner_transforms(spec, q.detach())  # 独立 target 调用保留旧行为
+    expected_transform_shape = (q.shape[0], spec.owner_home_transforms.shape[0], 4, 4)
+    if (
+        owner_transforms.shape != expected_transform_shape
+        or owner_transforms.device != q.device
+        or owner_transforms.dtype != q.dtype
+        or owner_transforms.requires_grad
+    ):
+        raise ValueError("owner_transforms must be detached [B,G,4,4] matching q/spec")
+    if current_spatial_screws is not None:
+        expected_screw_shape = (q.shape[0], spec.space_screws.shape[0], 6)
+        if (
+            current_spatial_screws.shape != expected_screw_shape
+            or current_spatial_screws.device != q.device
+            or current_spatial_screws.dtype != q.dtype
+            or current_spatial_screws.requires_grad
+        ):
+            raise ValueError("current_spatial_screws must be detached [B,N_J,6] matching q/spec")
     surface = query_owner_surfaces_warp(queries.query_points_h, owner_transforms, warp_cache)
     bandwidths = sample_geometry_bandwidths(  # `[B,N_σ]` 实际 sigma，不是固定输出 channel identity
         field_config,
@@ -270,19 +310,38 @@ def generate_geometry_field_targets(
         zero_per_joint = target_config.train_zero_per_joint
     else:
         raise ValueError(f"unknown supervision_split={supervision_split!r}")
-    owner_index, query_index, joint_index, active_mask = _sample_sensitivity_edges(
+    (
+        owner_index,
+        query_index,
+        joint_index,
+        active_mask,
+        owner_category,
+        selected_query_stratum,
+        fallback_category,
+        sampling_role,
+    ) = _sample_sensitivity_edges(
         spec,
         queries,
         active_per_joint=active_per_joint,
         zero_per_joint=zero_per_joint,
         sampling_seed=edge_sampling_seed,
+        q_index=q_index,
     )
-    closest_h = surface.closest_point_h_m[:, owner_index, query_index]
-    selected_query_h = queries.query_points_h[:, owner_index, query_index]
-    selected_distance = surface.distance_m[:, owner_index, query_index]
-    selected_feature_margin = surface.feature_margin_m[:, owner_index, query_index]
-    selected_face = surface.face_index[:, owner_index, query_index]
-    selected_transform = owner_transforms.index_select(1, owner_index)
+    if owner_index.ndim == 1:
+        closest_h = surface.closest_point_h_m[:, owner_index, query_index]
+        selected_query_h = queries.query_points_h[:, owner_index, query_index]
+        selected_distance = surface.distance_m[:, owner_index, query_index]
+        selected_feature_margin = surface.feature_margin_m[:, owner_index, query_index]
+        selected_face = surface.face_index[:, owner_index, query_index]
+        selected_transform = owner_transforms.index_select(1, owner_index)
+    else:
+        batch_index = torch.arange(q.shape[0], device=q.device).unsqueeze(1)
+        closest_h = surface.closest_point_h_m[batch_index, owner_index, query_index]
+        selected_query_h = queries.query_points_h[batch_index, owner_index, query_index]
+        selected_distance = surface.distance_m[batch_index, owner_index, query_index]
+        selected_feature_margin = surface.feature_margin_m[batch_index, owner_index, query_index]
+        selected_face = surface.face_index[batch_index, owner_index, query_index]
+        selected_transform = owner_transforms[batch_index, owner_index]
     closest_local = torch.matmul(
         selected_transform[..., :3, :3].transpose(-1, -2),
         (closest_h - selected_transform[..., :3, 3]).unsqueeze(-1),
@@ -293,30 +352,50 @@ def generate_geometry_field_targets(
         owner_index,
         joint_index,
         closest_local,
+        owner_transforms=owner_transforms,
+        current_spatial_screws=current_spatial_screws,
     )  # `[B,E,3]`，m/rad；非祖先严格为零
     radial_direction = (selected_query_h - closest_h) / selected_distance.clamp_min(
         target_config.distance_epsilon_m
     ).unsqueeze(-1)
     kappa = -(radial_direction * point_jacobian).sum(dim=-1)  # $-n^TJ$，m/rad
     ancestor_mask = spec.owner_ancestor_mask[owner_index, joint_index]
-    kappa = torch.where(ancestor_mask.unsqueeze(0), kappa, torch.zeros_like(kappa))
-    selected_density = gaussian_density_from_distance(selected_distance, bandwidths)
+    ancestor_for_batch = ancestor_mask if ancestor_mask.ndim == 2 else ancestor_mask.unsqueeze(0)
+    kappa = torch.where(ancestor_for_batch, kappa, torch.zeros_like(kappa))
+    selected_density = (
+        density[:, owner_index, query_index]
+        if owner_index.ndim == 1
+        else density[torch.arange(q.shape[0], device=q.device).unsqueeze(1), owner_index, query_index]
+    )  # 从完整 $\rho[B,G,N_Q,L]$ gather，避免重复同一 Gaussian 公式
     field_sensitivity = field_sensitivity_from_distance(
         selected_distance,
         selected_density,
         bandwidths,
         kappa.unsqueeze(-1),
     ).squeeze(-1)  # `[B,E,L]`，1/rad
-    selected_shell = queries.query_stratum[:, owner_index, query_index] == int(QueryStratum.OWNER_SHELL)
-    selected_face_valid = field_valid[:, owner_index, query_index] & selected_shell
+    if owner_index.ndim == 1:
+        selected_stratum = queries.query_stratum[:, owner_index, query_index]
+        selected_face_valid = field_valid[:, owner_index, query_index]
+        active_for_batch = active_mask.unsqueeze(0)
+        closest_owner = owner_index.to(torch.int64).view(1, -1)
+    else:
+        batch_index = torch.arange(q.shape[0], device=q.device).unsqueeze(1)
+        selected_stratum = queries.query_stratum[batch_index, owner_index, query_index]
+        selected_face_valid = field_valid[batch_index, owner_index, query_index]
+        active_for_batch = active_mask
+        closest_owner = owner_index.to(torch.int64)
+    if not torch.equal(selected_stratum, selected_query_stratum):
+        raise RuntimeError("sensitivity selector query stratum disagrees with sampled query provenance")
+    # Active-context 的 adjacent/workspace query 仍要求有效最近面；局部 feature margin 继续控制 UDF 可微性。
+    selected_face_valid = selected_face_valid & torch.isfinite(selected_distance)
     active_smooth = (
         selected_face_valid
         & (selected_distance > target_config.distance_epsilon_m)
         & (selected_feature_margin >= target_config.feature_margin_min_m)
     )
-    selected_valid = torch.where(active_mask.unsqueeze(0), active_smooth, selected_face_valid)
+    selected_valid = torch.where(active_for_batch, active_smooth, selected_face_valid)
     closest_source = (
-        owner_index.to(torch.int64).view(1, -1).bitwise_left_shift(32)
+        closest_owner.bitwise_left_shift(32)
         | selected_face.to(torch.int64)
     )  # 高 32 位 owner、低 32 位 union face，随 asset hash 一起解释
     sensitivity_targets = SensitivityTargetBatch(
@@ -331,6 +410,22 @@ def generate_geometry_field_targets(
         kappa=kappa.detach(),
         field_sensitivity=field_sensitivity.detach(),
         valid_mask=selected_valid.detach(),
+        owner_category=owner_category,
+        query_stratum=selected_query_stratum,
+        fallback_category=fallback_category,
+        sampling_role=sampling_role,
+        **_central_difference_source_audit(
+            asset_id=geometry_cache.asset_id,
+            q=q,
+            q_index=q_index,
+            spec=spec,
+            warp_cache=warp_cache,
+            queries=queries,
+            owner_index=owner_index,
+            query_index=query_index,
+            joint_index=joint_index,
+            active_mask=active_mask,
+        ),
         provenance={
             "frame": "h",
             "distance_unit": "m",
@@ -343,6 +438,86 @@ def generate_geometry_field_targets(
     return field_targets, sensitivity_targets
 
 
+def _central_difference_source_audit(
+    *,
+    asset_id: str,
+    q: torch.Tensor,
+    q_index: torch.Tensor | None,
+    spec: EmbodimentGeometrySpec,
+    warp_cache: WarpOwnerGeometryCache,
+    queries: SpatialQueryBatch,
+    owner_index: torch.Tensor,
+    query_index: torch.Tensor,
+    joint_index: torch.Tensor,
+    active_mask: torch.Tensor,
+    delta_rad: float = 1.0e-3,
+) -> _CentralDifferenceAudit:
+    r"""对稳定选中的约 1% q 行审计全部合法 active edges，不改变正式 teacher。"""
+
+    batch_size, edge_count = owner_index.shape if owner_index.ndim == 2 else (q.shape[0], owner_index.shape[0])
+    difference = torch.zeros(batch_size, edge_count, device=q.device, dtype=q.dtype)
+    valid = torch.zeros(batch_size, edge_count, device=q.device, dtype=torch.bool)
+    plus_face = torch.full((batch_size, edge_count), -1, device=q.device, dtype=torch.long)
+    minus_face = torch.full_like(plus_face, -1)
+    elapsed_seconds = 0.0  # 未命中稳定 1% q-row 时保持严格零开销证据
+    if q_index is None or spec.joint_limits is None:
+        return {
+            "central_difference": difference,
+            "central_difference_valid_mask": valid,
+            "central_difference_plus_face": plus_face,
+            "central_difference_minus_face": minus_face,
+            "central_difference_elapsed_seconds": elapsed_seconds,
+        }
+    for batch_index, absolute_q_index in enumerate(q_index.detach().cpu().tolist()):
+        digest = hashlib.sha256(f"source-audit-v1\0{asset_id}\0{int(absolute_q_index)}".encode()).digest()
+        if int.from_bytes(digest[:8], "little") % 100 != 0:
+            continue
+        row_owner = owner_index[batch_index] if owner_index.ndim == 2 else owner_index
+        row_query = query_index[batch_index] if query_index.ndim == 2 else query_index
+        row_joint = joint_index[batch_index] if joint_index.ndim == 2 else joint_index
+        row_active = active_mask[batch_index] if active_mask.ndim == 2 else active_mask
+        limits = spec.joint_limits.index_select(0, row_joint)
+        current = q[batch_index].index_select(0, row_joint)
+        legal = row_active & (current - delta_rad >= limits[:, 0]) & (current + delta_rad <= limits[:, 1])
+        edge_slots = torch.where(legal)[0]
+        if edge_slots.numel() == 0:
+            continue
+        selected_joint = row_joint.index_select(0, edge_slots)
+        q_plus = q[batch_index].unsqueeze(0).expand(edge_slots.numel(), -1).clone()
+        q_minus = q_plus.clone()
+        row_axis = torch.arange(edge_slots.numel(), device=q.device)
+        q_plus[row_axis, selected_joint] += delta_rad
+        q_minus[row_axis, selected_joint] -= delta_rad
+        fixed_queries = queries.query_points_h[batch_index].unsqueeze(0).expand(edge_slots.numel(), -1, -1, -1)
+        audit_started = perf_counter()  # 只覆盖该 q 行的两次 perturbed FK 与 Warp surface query
+        plus = query_owner_surfaces_warp(
+            fixed_queries,
+            forward_owner_transforms(spec, q_plus),
+            warp_cache,
+        )
+        minus = query_owner_surfaces_warp(
+            fixed_queries,
+            forward_owner_transforms(spec, q_minus),
+            warp_cache,
+        )
+        elapsed_seconds += perf_counter() - audit_started
+        selected_owner = row_owner.index_select(0, edge_slots)
+        selected_query = row_query.index_select(0, edge_slots)
+        plus_distance = plus.distance_m[row_axis, selected_owner, selected_query]
+        minus_distance = minus.distance_m[row_axis, selected_owner, selected_query]
+        difference[batch_index, edge_slots] = (plus_distance - minus_distance) / (2.0 * delta_rad)
+        plus_face[batch_index, edge_slots] = plus.face_index[row_axis, selected_owner, selected_query].to(torch.long)
+        minus_face[batch_index, edge_slots] = minus.face_index[row_axis, selected_owner, selected_query].to(torch.long)
+        valid[batch_index, edge_slots] = torch.isfinite(plus_distance) & torch.isfinite(minus_distance)
+    return {
+        "central_difference": difference.detach(),
+        "central_difference_valid_mask": valid.detach(),
+        "central_difference_plus_face": plus_face.detach(),
+        "central_difference_minus_face": minus_face.detach(),
+        "central_difference_elapsed_seconds": elapsed_seconds,
+    }
+
+
 def _sample_sensitivity_edges(
     spec: EmbodimentGeometrySpec,
     queries: SpatialQueryBatch,
@@ -350,61 +525,171 @@ def _sample_sensitivity_edges(
     active_per_joint: int,
     zero_per_joint: int,
     sampling_seed: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    r"""按 JOINT 列覆盖从 owner-shell query 抽取 active descendant 与 structure-zero 边。"""
+    q_index: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, ...]:
+    r"""逐 q、逐 JOINT 采 2+1 edges，并显式记录 owner/query/fallback 类别。
+
+    绝对 ``q_index`` 决定类别轮换；随机 generator 只在同一类别候选与同一 stratum query 槽内部抽样。
+    因而改变 microbatch 切法不会改变 selector，resume 后同一 `(asset,q)` 也可逐元素复现。
+    """
 
     device = queries.query_stratum.device
-    generator = torch.Generator(device=device)
-    generator.manual_seed(int(sampling_seed))
-    owner_axis: list[int] = []
-    query_axis: list[int] = []
-    joint_axis: list[int] = []
-    active_axis: list[bool] = []
+    batch_size = queries.query_stratum.shape[0]
+    if q_index is None:
+        q_identities = tuple(range(batch_size))
+    else:
+        if q_index.shape != (batch_size,):
+            raise ValueError("q_index must have shape [B] for q-specific sensitivity sampling")
+        q_identities = tuple(int(value) for value in q_index.detach().cpu().tolist())
+    rows: list[tuple[list[int], list[int], list[int], list[bool], list[int], list[int], list[int], list[int]]] = []
     owner_count = spec.owner_ancestor_mask.shape[0]
     joint_count = spec.owner_ancestor_mask.shape[1]
     roles = spec.owner_roles or tuple("joint" for _ in range(owner_count))
     fingers = spec.owner_finger_names or tuple(None for _ in range(owner_count))
     owner_joint_indices = spec.owner_joint_indices or tuple(-1 for _ in range(owner_count))
-    for joint_index in range(joint_count):
-        descendant_owners = torch.where(spec.owner_ancestor_mask[:, joint_index])[0]
-        zero_owners = torch.where(~spec.owner_ancestor_mask[:, joint_index])[0]
-        self_owners = [
-            owner_index
-            for owner_index, mapped_joint in enumerate(owner_joint_indices)
-            if mapped_joint == joint_index
-        ]
-        self_finger = fingers[self_owners[0]] if self_owners else None
-        tip_owners = [
-            int(owner_index)
-            for owner_index in descendant_owners.tolist()
-            if roles[int(owner_index)] == "tip" and fingers[int(owner_index)] == self_finger
-        ]
-        other_descendants = [
-            int(owner_index)
-            for owner_index in descendant_owners.tolist()
-            if int(owner_index) not in self_owners and int(owner_index) not in tip_owners
-        ]
-        active_pool = _cycle_owner_pool(self_owners, tip_owners, other_descendants, descendant_owners.tolist())
-        zero_pool = _cycle_zero_owner_pool(zero_owners.tolist(), roles, fingers, self_finger)
-        for edge_offset in range(active_per_joint):
-            owner_choice = active_pool[edge_offset % len(active_pool)]
-            query_choice = _choose_shell_query(queries, owner_choice, generator=generator)
-            owner_axis.append(owner_choice)
-            query_axis.append(query_choice)
-            joint_axis.append(joint_index)
-            active_axis.append(True)
-        for edge_offset in range(zero_per_joint):
-            owner_choice = zero_pool[edge_offset % len(zero_pool)]
-            query_choice = _choose_shell_query(queries, owner_choice, generator=generator)
-            owner_axis.append(owner_choice)
-            query_axis.append(query_choice)
-            joint_axis.append(joint_index)
-            active_axis.append(False)
+    active_cycle = (
+        SensitivityOwnerCategory.SELF,
+        SensitivityOwnerCategory.SAME_FINGER_TIP,
+        SensitivityOwnerCategory.OTHER_DESCENDANT,
+        SensitivityOwnerCategory.OTHER_DESCENDANT,
+    )
+    zero_cycle = (
+        SensitivityOwnerCategory.PALM,
+        SensitivityOwnerCategory.SAME_FINGER_UPSTREAM,
+        SensitivityOwnerCategory.OTHER_FINGER_JOINT,
+        SensitivityOwnerCategory.OTHER_FINGER_TIP,
+    )
+    zero_strata = (QueryStratum.OWNER_SHELL, QueryStratum.ADJACENT, QueryStratum.WORKSPACE)
+    for batch_index, q_identity in enumerate(q_identities):
+        generator = torch.Generator(device=device)
+        generator.manual_seed((int(sampling_seed) + q_identity * 1_000_003) % (2**63 - 1))
+        owner_axis: list[int] = []
+        query_axis: list[int] = []
+        joint_axis: list[int] = []
+        active_axis: list[bool] = []
+        category_axis: list[int] = []
+        stratum_axis: list[int] = []
+        fallback_axis: list[int] = []
+        role_axis: list[int] = []
+        for joint_index in range(joint_count):
+            descendant_owners = [int(value) for value in torch.where(spec.owner_ancestor_mask[:, joint_index])[0].tolist()]
+            zero_owners = [int(value) for value in torch.where(~spec.owner_ancestor_mask[:, joint_index])[0].tolist()]
+            self_owners = [
+                owner for owner, mapped_joint in enumerate(owner_joint_indices) if mapped_joint == joint_index
+            ]
+            self_finger = fingers[self_owners[0]] if self_owners else None
+            tip_owners = [
+                owner
+                for owner in descendant_owners
+                if roles[owner] == "tip" and fingers[owner] == self_finger
+            ]
+            other_descendants = [
+                owner for owner in descendant_owners if owner not in self_owners and owner not in tip_owners
+            ]
+            active_candidates = {
+                SensitivityOwnerCategory.SELF: self_owners,
+                SensitivityOwnerCategory.SAME_FINGER_TIP: tip_owners,
+                SensitivityOwnerCategory.OTHER_DESCENDANT: other_descendants,
+            }
+            zero_candidates = {
+                SensitivityOwnerCategory.PALM: [owner for owner in zero_owners if roles[owner] == "palm"],
+                SensitivityOwnerCategory.SAME_FINGER_UPSTREAM: [
+                    owner for owner in zero_owners if fingers[owner] == self_finger and roles[owner] != "palm"
+                ],
+                SensitivityOwnerCategory.OTHER_FINGER_JOINT: [
+                    owner for owner in zero_owners if roles[owner] == "joint" and fingers[owner] != self_finger
+                ],
+                SensitivityOwnerCategory.OTHER_FINGER_TIP: [
+                    owner for owner in zero_owners if roles[owner] == "tip" and fingers[owner] != self_finger
+                ],
+            }
+            for edge_offset in range(active_per_joint):
+                requested = active_cycle[(q_identity + joint_index + edge_offset) % len(active_cycle)]
+                candidates = active_candidates[requested]
+                fallback = -1
+                if not candidates:
+                    candidates = descendant_owners
+                    fallback = int(requested)
+                owner_choice = _choose_candidate(candidates, generator=generator, device=device)
+                stratum = (
+                    QueryStratum.OWNER_SHELL
+                    if edge_offset == 0
+                    else (QueryStratum.ADJACENT if (q_identity + joint_index) % 2 == 0 else QueryStratum.WORKSPACE)
+                )
+                query_choice = _choose_query(
+                    queries,
+                    batch_index,
+                    owner_choice,
+                    stratum,
+                    generator=generator,
+                )
+                owner_axis.append(owner_choice)
+                query_axis.append(query_choice)
+                joint_axis.append(joint_index)
+                active_axis.append(True)
+                category_axis.append(int(_actual_owner_category(
+                    owner_choice,
+                    joint_index=joint_index,
+                    self_owners=self_owners,
+                    tip_owners=tip_owners,
+                    descendant_owners=descendant_owners,
+                    zero_owners=zero_owners,
+                    roles=roles,
+                    fingers=fingers,
+                    self_finger=self_finger,
+                )))
+                stratum_axis.append(int(stratum))
+                fallback_axis.append(fallback)
+                role_axis.append(int(
+                    SensitivitySamplingRole.ACTIVE_OWNER_SHELL
+                    if edge_offset == 0
+                    else SensitivitySamplingRole.ACTIVE_CONTEXT
+                ))
+            for edge_offset in range(zero_per_joint):
+                requested = zero_cycle[(q_identity + joint_index + edge_offset) % len(zero_cycle)]
+                candidates = zero_candidates[requested]
+                fallback = -1
+                if not candidates:
+                    candidates = zero_owners
+                    fallback = int(requested)
+                owner_choice = _choose_candidate(candidates, generator=generator, device=device)
+                stratum = zero_strata[(q_identity + joint_index + edge_offset) % len(zero_strata)]
+                query_choice = _choose_query(
+                    queries,
+                    batch_index,
+                    owner_choice,
+                    stratum,
+                    generator=generator,
+                )
+                owner_axis.append(owner_choice)
+                query_axis.append(query_choice)
+                joint_axis.append(joint_index)
+                active_axis.append(False)
+                category_axis.append(int(_actual_owner_category(
+                    owner_choice,
+                    joint_index=joint_index,
+                    self_owners=self_owners,
+                    tip_owners=tip_owners,
+                    descendant_owners=descendant_owners,
+                    zero_owners=zero_owners,
+                    roles=roles,
+                    fingers=fingers,
+                    self_finger=self_finger,
+                )))
+                stratum_axis.append(int(stratum))
+                fallback_axis.append(fallback)
+                role_axis.append(int(SensitivitySamplingRole.STRUCTURAL_ZERO))
+        rows.append((owner_axis, query_axis, joint_axis, active_axis, category_axis, stratum_axis, fallback_axis, role_axis))
+    columns = tuple(zip(*rows, strict=True))
     return (
-        torch.tensor(owner_axis, device=device, dtype=torch.long),
-        torch.tensor(query_axis, device=device, dtype=torch.long),
-        torch.tensor(joint_axis, device=device, dtype=torch.long),
-        torch.tensor(active_axis, device=device, dtype=torch.bool),
+        torch.tensor(columns[0], device=device, dtype=torch.long),
+        torch.tensor(columns[1], device=device, dtype=torch.long),
+        torch.tensor(columns[2], device=device, dtype=torch.long),
+        torch.tensor(columns[3], device=device, dtype=torch.bool),
+        torch.tensor(columns[4], device=device, dtype=torch.long),
+        torch.tensor(columns[5], device=device, dtype=torch.long),
+        torch.tensor(columns[6], device=device, dtype=torch.long),
+        torch.tensor(columns[7], device=device, dtype=torch.long),
     )
 
 
@@ -450,18 +735,68 @@ def _cycle_zero_owner_pool(
     return ordered
 
 
-def _choose_shell_query(
-    queries: SpatialQueryBatch,
+def _choose_candidate(
+    candidates: list[int],
+    *,
+    generator: torch.Generator,
+    device: torch.device,
+) -> int:
+    """从稳定有序候选集合中抽一项；调用方负责记录类别 fallback。"""
+
+    if not candidates:
+        raise ValueError("sensitivity edge owner candidate set must be non-empty")
+    cursor = torch.randint(len(candidates), (), generator=generator, device=device)
+    return int(candidates[int(cursor)])
+
+
+def _actual_owner_category(
     owner_index: int,
+    *,
+    joint_index: int,
+    self_owners: list[int],
+    tip_owners: list[int],
+    descendant_owners: list[int],
+    zero_owners: list[int],
+    roles: tuple[str, ...],
+    fingers: tuple[str | None, ...],
+    self_finger: str | None,
+) -> SensitivityOwnerCategory:
+    """按实际被选 owner 与当前 JOINT 的关系恢复可审计类别。"""
+
+    del joint_index  # 关系集合已经由当前 JOINT 构造，保留具名参数便于调用点核对语义
+    if owner_index in self_owners:
+        return SensitivityOwnerCategory.SELF
+    if owner_index in tip_owners:
+        return SensitivityOwnerCategory.SAME_FINGER_TIP
+    if owner_index in descendant_owners:
+        return SensitivityOwnerCategory.OTHER_DESCENDANT
+    if owner_index not in zero_owners:
+        return SensitivityOwnerCategory.FALLBACK
+    if roles[owner_index] == "palm":
+        return SensitivityOwnerCategory.PALM
+    if fingers[owner_index] == self_finger:
+        return SensitivityOwnerCategory.SAME_FINGER_UPSTREAM
+    if roles[owner_index] == "joint":
+        return SensitivityOwnerCategory.OTHER_FINGER_JOINT
+    if roles[owner_index] == "tip":
+        return SensitivityOwnerCategory.OTHER_FINGER_TIP
+    return SensitivityOwnerCategory.FALLBACK
+
+
+def _choose_query(
+    queries: SpatialQueryBatch,
+    batch_index: int,
+    owner_index: int,
+    stratum: QueryStratum,
     *,
     generator: torch.Generator,
 ) -> int:
-    r"""从指定 owner 的 owner-shell query 中确定性抽取一个槽。"""
+    r"""从当前 q/owner 的指定物理 stratum 中确定性抽取一个 query 槽。"""
 
-    shell_queries = torch.where(queries.query_stratum[0, owner_index] == int(QueryStratum.OWNER_SHELL))[0]
-    if len(shell_queries) == 0:
-        raise ValueError(f"owner {owner_index} has no owner-shell queries for first-order edges")
-    choice = shell_queries[torch.randint(len(shell_queries), (), generator=generator, device=shell_queries.device)]
+    candidates = torch.where(queries.query_stratum[batch_index, owner_index] == int(stratum))[0]
+    if len(candidates) == 0:
+        raise ValueError(f"owner {owner_index} has no {stratum.name} query for first-order edges")
+    choice = candidates[torch.randint(len(candidates), (), generator=generator, device=candidates.device)]
     return int(choice)
 
 

@@ -40,6 +40,24 @@ class FeatureSpec:
 
 
 @dataclass(frozen=True)
+class MethodParameterGroup:
+    r"""Method 显式声明给 optimizer 的稳定参数分区。
+
+    Trainer 只消费该类型，不从参数名称猜测 shared/private 归属。三个 Geometry SSL 分组分别代表
+    retained encoder、density reader 和 $\kappa$ reader；同一参数不得出现在多个组。
+    """
+
+    name: str
+    parameters: tuple[torch.nn.Parameter, ...]
+
+    def __post_init__(self) -> None:
+        """拒绝无名或空参数组，避免 AdamW 静默创建无意义状态。"""
+
+        if not self.name or not self.parameters:
+            raise ValueError("method parameter groups require a name and at least one parameter")
+
+
+@dataclass(frozen=True)
 class MethodStep:
     r"""一次 method forward 的预测与独立 objective 结果。"""
 
@@ -49,14 +67,15 @@ class MethodStep:
 
 @dataclass(frozen=True)
 class MethodUpdate:
-    r"""一个 optimizer update 的 normalized 标量损失与可记录 raw/normalized 均值。"""
+    r"""一个 optimizer update 的分任务统计与 shared/private 梯度证据。
 
-    loss: torch.Tensor  # $L_\rho/B_\rho+L_\kappa/B_\kappa$，训练时保留计算图
-    terms: dict[str, float]  # 各 term 的 raw $(asset,q)$ 等权 MSE
+    FairGrad 不存在可反传的统一 scalar loss；每项 objective 在完整 minibatch denominator 下独立形成
+    shared task gradient 与 private reader gradient。run-end baseline 只用于事后 skill，不回写训练轨迹。
+    """
+
+    terms: dict[str, float]  # density raw MSE；kappa 为除以 $0.1$ 后的无量纲 MSE
     sample_count: int
     denominators: dict[str, float] = field(default_factory=dict)  # 完整 minibatch 的有效 pair 计数
-    normalized_terms: dict[str, float] = field(default_factory=dict)  # $L_j/B_j$
-    skills: dict[str, float] = field(default_factory=dict)  # $1-L_j/B_j$，正值表示超过 naive baseline
     gradient_evidence: dict[str, float] = field(default_factory=dict)  # 稀疏 unified-Z task-gradient proxy
     diagnostics: dict[str, float] = field(default_factory=dict)  # RMS、active/zero error 与 valid ratio
 
@@ -72,6 +91,7 @@ class MethodEvaluationReport:
 
     metrics: dict[str, float]
     strata: dict[str, object]
+    teacher_baselines: dict[str, object] = field(default_factory=dict)
     ablations: dict[str, object] | None = None
 
 
@@ -98,6 +118,10 @@ class MethodSplitSession(Protocol):
 
     def close(self) -> None:
         r"""释放 resident device state 与底层 lease。"""
+        ...
+
+    def drain_runtime_events(self) -> tuple[dict[str, object], ...]:
+        r"""返回尚未写入 runtime artifact 的 source/resident 事件。"""
         ...
 
 
@@ -131,6 +155,7 @@ class EmbodimentMethod(Protocol):
         dtype: torch.dtype,
         max_resident_assets: int,
         window_factory: Any,
+        resource_profile: bool = False,
     ) -> MethodSplitSession:
         r"""打开封装 source/sampler/resident state 的 split session。"""
         ...
@@ -206,13 +231,13 @@ class EmbodimentMethod(Protocol):
         r"""释放 method 持有的可回收资源。"""
         ...
 
-
 __all__ = [
     "AdditiveStatistic",
     "EmbodimentMethod",
     "FeatureSpec",
     "MethodStep",
     "MethodEvaluationReport",
+    "MethodParameterGroup",
     "MethodSplitSession",
     "MethodUpdate",
     "ObjectiveTermResult",

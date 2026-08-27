@@ -4,13 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from anymani.distill.methods.contracts import MethodStep
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import MultiAnchorGaussianObjectivesCfg
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.context import MultiAnchorObjectiveContext
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives import (
     evaluate_objectives,
-    reduce_method_steps,
 )
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.training import combine_fairgrad
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.decoders.representations.implicit_field import (
     ConditionalDensityDecoder,
@@ -150,16 +149,37 @@ def test_synthetic_geometry_ssl_forward_two_objectives_and_backward() -> None:
         batch=SimpleNamespace(field_targets=field_targets, sensitivity_targets=sensitivity_targets),
     )
     objectives_cfg = MultiAnchorGaussianObjectivesCfg()
-    update = reduce_method_steps(
-        (MethodStep(objectives=evaluate_objectives(context, objectives_cfg), sample_count=batch_size),),
-        objectives_cfg,
-        {"density": 1.0, "kappa": 1.0},
+    objectives = evaluate_objectives(context, objectives_cfg)
+    shared_parameters = tuple(encoder.parameters())
+    density_parameters = tuple(density_decoder.parameters())
+    kappa_parameters = tuple(sensitivity_decoder.parameters())
+    density_gradients = torch.autograd.grad(
+        objectives["density"].components[0].mean,
+        (*shared_parameters, *density_parameters),
+        retain_graph=True,
+        allow_unused=True,
     )
-    update.loss.backward()
+    kappa_gradients = torch.autograd.grad(
+        objectives["kappa"].components[0].mean,
+        (*shared_parameters, *kappa_parameters),
+        allow_unused=True,
+    )
+    shared = combine_fairgrad(
+        density_gradients[: len(shared_parameters)],
+        kappa_gradients[: len(shared_parameters)],
+    )
+    for parameter, gradient in zip(shared_parameters, shared.combined, strict=True):
+        parameter.grad = gradient
+    for parameter, gradient in zip(density_parameters, density_gradients[len(shared_parameters) :], strict=True):
+        parameter.grad = gradient
+    for parameter, gradient in zip(kappa_parameters, kappa_gradients[len(shared_parameters) :], strict=True):
+        parameter.grad = gradient
 
     assert density_prediction.shape == (batch_size, owner_count, query_count, 2)
     assert kappa_prediction.shape == (batch_size, 2)
-    assert torch.isfinite(update.loss)
+    assert all(torch.isfinite(result.components[0].mean) for result in objectives.values())
     assert q.grad is None
     trainable_gradients = [parameter.grad for parameter in encoder.parameters() if parameter.requires_grad]
     assert any(gradient is not None and torch.isfinite(gradient).all() for gradient in trainable_gradients)
+    assert all(parameter.grad is not None for parameter in density_decoder.parameters())
+    assert all(parameter.grad is not None for parameter in sensitivity_decoder.parameters())

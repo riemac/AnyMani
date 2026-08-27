@@ -636,15 +636,23 @@ def _revolute_twist_exp(space_screw: torch.Tensor, theta: torch.Tensor) -> torch
     return transform
 
 
-def forward_owner_transforms(spec: EmbodimentGeometrySpec, q: torch.Tensor) -> torch.Tensor:
-    r"""按归属体祖先掩码计算批量指数积刚体位姿。
+def forward_owner_transforms_and_spatial_screws(
+    spec: EmbodimentGeometrySpec,
+    q: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""一次计算当前 owner pose 与全部当前空间旋量。
+
+    owner pose 与 sampled-edge Jacobian 都依赖同一组 $e^{[\mathcal S_i]\Delta q_i}$。这里先物化每根
+    JOINT 的单一 `[B,4,4]` 指数项，再分别沿 owner ancestor mask 和 joint ancestor mask 复用；因此
+    主在线 q-block 不会在 ``forward_owner_transforms`` 与 ``selected_point_jacobian`` 中重复计算
+    同一指数映射。返回的两个张量都 detached 的约束由调用方保证，函数本身只执行纯运动学。
 
     Args:
         spec (EmbodimentGeometrySpec): 当前同构结构模式的静态运动学事实。
         q (torch.Tensor): 当前物理关节构型，形状 `[B,N_J]`，单位 rad。
 
     Returns:
-        torch.Tensor: 归属体局部坐标到 `{h}` 的变换，形状 `[B,G,4,4]`。
+        tuple[torch.Tensor, torch.Tensor]: owner pose `[B,G,4,4]` 与当前 screw `[B,N_J,6]`。
     """
 
     joint_count = spec.space_screws.shape[0]  # 活动关节数 $N_J$
@@ -656,17 +664,53 @@ def forward_owner_transforms(spec: EmbodimentGeometrySpec, q: torch.Tensor) -> t
 
     delta_q = q - spec.q_home  # $\Delta q=q-q_{home}$，形状 `[B,N_J]`，单位 rad
     batch_size = q.shape[0]  # 同结构模式微批次大小 $B$
-    transform = torch.eye(4, device=q.device, dtype=q.dtype).expand(batch_size, owner_count, 4, 4).clone()
+    identity = torch.eye(4, device=q.device, dtype=q.dtype).view(1, 1, 4, 4)
+    transform = identity.expand(batch_size, owner_count, 4, 4).clone()
 
-    # 每个规范 JOINT 依次左乘；非祖先通过 $\theta=0$ 产生严格单位变换。
+    joint_exponentials = tuple(
+        _revolute_twist_exp(spec.space_screws[joint_index], delta_q[:, joint_index])
+        for joint_index in range(joint_count)
+    )  # 每根 JOINT 只算一次 `[B,4,4]` 指数项
+
+    # 每个规范 JOINT 依次左乘；非祖先直接选 identity，不再为每个 owner 重算一次指数映射。
     for joint_index in range(joint_count):
-        owner_theta = delta_q[:, joint_index : joint_index + 1] * spec.owner_ancestor_mask[
-            :, joint_index
-        ].to(q.dtype).unsqueeze(0)  # `[B,G]`，非祖先严格为 0
-        joint_transform = _revolute_twist_exp(spec.space_screws[joint_index], owner_theta)  # `[B,G,4,4]`
+        is_ancestor = spec.owner_ancestor_mask[:, joint_index].view(1, owner_count, 1, 1)
+        joint_transform = torch.where(
+            is_ancestor,
+            joint_exponentials[joint_index].unsqueeze(1),
+            identity,
+        )  # `[B,G,4,4]`，同一 JOINT 指数项按拓扑 mask 广播
         transform = transform @ joint_transform  # 按规范链顺序复合指数积
 
-    return transform @ spec.owner_home_transforms.unsqueeze(0)  # $T_{hg}(q)=\prod e^{S_i\Delta q_i}M_g$
+    current_screws = _current_spatial_screws_from_exponentials(spec, joint_exponentials, q)
+    owner_transforms = transform @ spec.owner_home_transforms.unsqueeze(0)
+    return owner_transforms, current_screws
+
+
+def forward_owner_transforms(spec: EmbodimentGeometrySpec, q: torch.Tensor) -> torch.Tensor:
+    r"""按归属体祖先掩码计算批量指数积刚体位姿。"""
+
+    joint_count = spec.space_screws.shape[0]
+    owner_count = spec.owner_home_transforms.shape[0]
+    if q.ndim != 2 or q.shape[1] != joint_count:
+        raise ValueError(f"q must have shape [B,{joint_count}], got {tuple(q.shape)}")
+    if q.device != spec.space_screws.device:
+        raise ValueError("q and EmbodimentGeometrySpec tensors must be on the same device")
+    delta_q = q - spec.q_home
+    joint_exponentials = tuple(
+        _revolute_twist_exp(spec.space_screws[joint_index], delta_q[:, joint_index])
+        for joint_index in range(joint_count)
+    )
+    identity = torch.eye(4, device=q.device, dtype=q.dtype).view(1, 1, 4, 4)
+    transform = identity.expand(q.shape[0], owner_count, 4, 4).clone()
+    for joint_index in range(joint_count):
+        is_ancestor = spec.owner_ancestor_mask[:, joint_index].view(1, owner_count, 1, 1)
+        transform = transform @ torch.where(
+            is_ancestor,
+            joint_exponentials[joint_index].unsqueeze(1),
+            identity,
+        )
+    return transform @ spec.owner_home_transforms.unsqueeze(0)
 
 
 def transform_owner_points(
@@ -678,20 +722,28 @@ def transform_owner_points(
 
     Args:
         owner_transforms (torch.Tensor): 形状 `[B,G,4,4]` 的当前归属体位姿。
-        owner_index (torch.Tensor): 形状 `[E]` 的归属体选择索引。
+        owner_index (torch.Tensor): 形状 `[E]` 或 `[B,E]` 的归属体选择索引。
         local_points (torch.Tensor): 形状 `[E,3]` 或 `[B,E,3]` 的归属体局部点，单位 m。
 
     Returns:
         torch.Tensor: 形状 `[B,E,3]` 的 `{h}` 点，单位 m。
     """
 
-    edge_count = owner_index.numel()
-    if owner_index.ndim != 1 or local_points.shape not in {
+    if owner_index.ndim not in {1, 2}:
+        raise ValueError("owner_index must have shape [E] or [B,E]")
+    edge_count = owner_index.shape[-1]
+    if local_points.shape not in {
         (edge_count, 3),
         (owner_transforms.shape[0], edge_count, 3),
     }:
-        raise ValueError("owner_index/local_points must have shapes [E] and [E,3] or [B,E,3]")
-    selected = owner_transforms.index_select(1, owner_index)  # `[B,E,4,4]`，选中归属体位姿
+        raise ValueError("local_points must have shape [E,3] or [B,E,3]")
+    if owner_index.ndim == 1:
+        selected = owner_transforms.index_select(1, owner_index)  # `[B,E,4,4]`
+    else:
+        if owner_index.shape[0] != owner_transforms.shape[0]:
+            raise ValueError("batched owner_index must share B with owner_transforms")
+        batch_index = torch.arange(owner_transforms.shape[0], device=owner_transforms.device).unsqueeze(1)
+        selected = owner_transforms[batch_index, owner_index]
     rotation = selected[..., :3, :3]  # `[B,E,3,3]`，归属体局部坐标 -> `{h}`
     translation = selected[..., :3, 3]  # `[B,E,3]`，归属体原点在 `{h}` 中的位置，单位 m
     if local_points.ndim == 2:
@@ -702,30 +754,42 @@ def transform_owner_points(
 def _current_spatial_screws(spec: EmbodimentGeometrySpec, q: torch.Tensor) -> torch.Tensor:
     r"""把每个基准空间旋量经其严格祖先变换到当前 `{h}`。"""
 
-    batch_size, joint_count = q.shape  # 同结构模式批次与 JOINT 轴
-    delta_q = q - spec.q_home  # 当前相对基准的物理角度，单位 rad
-    current = torch.empty(batch_size, joint_count, 6, device=q.device, dtype=q.dtype)  # `[B,N_J,6]`
+    joint_count = spec.space_screws.shape[0]
+    if q.ndim != 2 or q.shape[1] != joint_count:
+        raise ValueError(f"q must have shape [B,{joint_count}], got {tuple(q.shape)}")
+    if q.device != spec.space_screws.device:
+        raise ValueError("q and EmbodimentGeometrySpec tensors must be on the same device")
+    delta_q = q - spec.q_home
+    joint_exponentials = tuple(
+        _revolute_twist_exp(spec.space_screws[joint_index], delta_q[:, joint_index])
+        for joint_index in range(joint_count)
+    )
+    return _current_spatial_screws_from_exponentials(spec, joint_exponentials, q)
 
-    # 每个 JOINT 只复合自身严格祖先；其他手指即使在规范顺序中更早也不参与。
+
+def _current_spatial_screws_from_exponentials(
+    spec: EmbodimentGeometrySpec,
+    joint_exponentials: tuple[torch.Tensor, ...],
+    q: torch.Tensor,
+) -> torch.Tensor:
+    r"""由已物化的 JOINT 指数项恢复当前 screw；供 combined FK 路径复用。"""
+
+    joint_count = spec.space_screws.shape[0]
+    current = torch.empty(q.shape[0], joint_count, 6, device=q.device, dtype=q.dtype)
     for target_joint in range(joint_count):
-        prefix = torch.eye(4, device=q.device, dtype=q.dtype).expand(batch_size, 4, 4).clone()  # $T_{prefix}$
+        prefix = torch.eye(4, device=q.device, dtype=q.dtype).expand(q.shape[0], 4, 4).clone()
         for source_joint in range(joint_count):
-            if not bool(spec.joint_ancestor_mask[target_joint, source_joint]):
-                continue
-            prefix = prefix @ _revolute_twist_exp(
-                spec.space_screws[source_joint], delta_q[:, source_joint]
-            )  # 只复合目标 JOINT 的严格祖先
-
-        rotation = prefix[:, :3, :3]  # $R_{prefix}$，形状 `[B,3,3]`
-        translation = prefix[:, :3, 3]  # $p_{prefix}$，形状 `[B,3]`，单位 m
-        omega_home = spec.space_screws[target_joint, :3]  # 基准角轴 $\omega_i$
-        linear_home = spec.space_screws[target_joint, 3:]  # 基准线分量 $v_i$
-        omega_current = torch.matmul(rotation, omega_home[:, None]).squeeze(-1)  # $R\omega_i$
-        linear_current = (
-            torch.cross(translation, omega_current, dim=-1)
-            + torch.matmul(rotation, linear_home[:, None]).squeeze(-1)
-        )  # $v_i'=p\times R\omega_i+Rv_i$
-        current[:, target_joint] = torch.cat((omega_current, linear_current), dim=-1)  # 当前空间旋量
+            if bool(spec.joint_ancestor_mask[target_joint, source_joint]):
+                prefix = prefix @ joint_exponentials[source_joint]
+        rotation = prefix[:, :3, :3]
+        translation = prefix[:, :3, 3]
+        omega_home = spec.space_screws[target_joint, :3]
+        linear_home = spec.space_screws[target_joint, 3:]
+        omega_current = torch.matmul(rotation, omega_home[:, None]).squeeze(-1)
+        linear_current = torch.cross(translation, omega_current, dim=-1) + torch.matmul(
+            rotation, linear_home[:, None]
+        ).squeeze(-1)
+        current[:, target_joint] = torch.cat((omega_current, linear_current), dim=-1)
     return current
 
 
@@ -735,6 +799,9 @@ def selected_point_jacobian(
     owner_index: torch.Tensor,
     joint_index: torch.Tensor,
     local_points: torch.Tensor,
+    *,
+    owner_transforms: torch.Tensor | None = None,
+    current_spatial_screws: torch.Tensor | None = None,
 ) -> torch.Tensor:
     r"""计算抽样归属体—JOINT 边上的解析物质点 Jacobian。
 
@@ -750,21 +817,50 @@ def selected_point_jacobian(
     非祖先边由拓扑掩码乘成精确零，不用“未采样”替代结构零监督。
     """
 
-    if joint_index.shape != owner_index.shape:
-        raise ValueError("owner_index and joint_index must have identical [E] shape")
-    owner_transforms = forward_owner_transforms(spec, q)  # `[B,G,4,4]` 当前归属体位姿
+    if joint_index.shape != owner_index.shape or owner_index.ndim not in {1, 2}:
+        raise ValueError("owner_index and joint_index must have identical [E] or [B,E] shape")
+    if owner_transforms is None:
+        owner_transforms = forward_owner_transforms(spec, q)  # 独立调用保留旧行为
+    expected_shape = (q.shape[0], spec.owner_home_transforms.shape[0], 4, 4)
+    if (
+        owner_transforms.shape != expected_shape
+        or owner_transforms.device != q.device
+        or owner_transforms.dtype != q.dtype
+        or owner_transforms.requires_grad
+    ):
+        raise ValueError("owner_transforms must be detached [B,G,4,4] matching q/spec")
     hand_points = transform_owner_points(owner_transforms, owner_index, local_points)  # `[B,E,3]`，单位 m
-    current_screws = _current_spatial_screws(spec, q).index_select(1, joint_index)  # `[B,E,6]`
+    if current_spatial_screws is None:
+        current_all = _current_spatial_screws(spec, q)
+    else:
+        expected_screw_shape = (q.shape[0], spec.space_screws.shape[0], 6)
+        if (
+            current_spatial_screws.shape != expected_screw_shape
+            or current_spatial_screws.device != q.device
+            or current_spatial_screws.dtype != q.dtype
+            or current_spatial_screws.requires_grad
+        ):
+            raise ValueError("current_spatial_screws must be detached [B,N_J,6] matching q/spec")
+        current_all = current_spatial_screws
+    if joint_index.ndim == 1:
+        current_screws = current_all.index_select(1, joint_index)
+        ancestor = spec.owner_ancestor_mask[owner_index, joint_index].to(q.dtype).unsqueeze(0)
+    else:
+        if joint_index.shape[0] != q.shape[0]:
+            raise ValueError("batched joint_index must share B with q")
+        batch_index = torch.arange(q.shape[0], device=q.device).unsqueeze(1)
+        current_screws = current_all[batch_index, joint_index]
+        ancestor = spec.owner_ancestor_mask[owner_index, joint_index].to(q.dtype)
     omega = current_screws[..., :3]  # `[B,E,3]` 当前单位关节轴
     linear = current_screws[..., 3:]  # `[B,E,3]` 当前空间旋量线分量，单位 m
     jacobian = torch.cross(omega, hand_points, dim=-1) + linear  # $\partial y/\partial q_i$，单位 m/rad
-    ancestor = spec.owner_ancestor_mask[owner_index, joint_index].to(q.dtype)  # `[E]` 结构祖先指示量
-    return jacobian * ancestor[None, :, None]  # 非祖先列严格为零
+    return jacobian * ancestor.unsqueeze(-1)  # 非祖先列严格为零
 
 
 __all__ = [
     "EmbodimentGeometrySpec",
     "forward_owner_transforms",
+    "forward_owner_transforms_and_spatial_screws",
     "lower_hand_geometry_semantics",
     "selected_point_jacobian",
     "transform_owner_points",

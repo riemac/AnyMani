@@ -1,3 +1,16 @@
+0.7.3 - 2026-08-27
+==================
+
+- Geometry SSL 升级为 checkpoint schema 8：retained encoder 固定为 4-layer、128-width unified PALM/JOINT/TIP $Z$，density/κ 使用两层轻量 readers，κ 采用 rank-64 无 bias 双线性读取与固定 $0.1\,\mathrm{m/rad}$ 物理尺度。
+- 每个有效 JOINT、每个 q 固定采样 `2 active + 1 structural-zero`，记录 owner category、query stratum、sampling role 与 fallback；同一 8-q block 共享确定性 entity permutation，并保持 q、screw 与 JOINT 坐标轴不变。
+- Shared encoder 使用精确两任务 FairGrad，density/kappa readers 使用各自 private gradients；三个具名 AdamW 参数组分别裁剪，近完全反向时只跳过 shared update。
+- 删除外部 calibration phase，训练期仅累计不反传的 run-local teacher baseline；训练结束生成 finalized normalized curves。Validation/evaluation 使用各 suite 自己的物理 teacher baseline，并新增 32/64/96/128 统一 PCA 压缩诊断。
+- 新增 `.npy + canonical JSON` source artifact：key 覆盖 URDF/mesh bytes、算法与 producer backend，base 显式保存 POE、owner union、home surface、query sampler arrays 与实际 Warp float32 views，selected anchor bank 独立分片；readonly miss/corruption fail-closed，写入采用锁、fsync 与原子 rename。
+- SSL 实验配置集中到显式 registry；版本化 Python 快照同时保存训练与可选事后阶段语义，训练 CLI 使用 IsaacLab `-p -m` 入口。`source_cache_mode=auto` 在训练 runtime 内部完成 source artifact 的存在性/identity 检查、缺失补建与 readonly 复用，`backup.sh` 保持为一条可直接运行的训练命令。
+- entity permutation 增加完整 typed transform 校验与反例合同：若 graph、routing、query 或 target 未与 entity token 使用同一双射，校验会报告具体错误轴并 fail closed。
+- Teacher q-block 以一次 FK 生成 query/field/Jacobian，并按资产 block 连续写入 512-pair padded batch；1% 稳定 `(asset_id,q_index)` 行执行 $\delta=10^{-3}\,\mathrm{rad}$ 中心差分 source audit，不改变训练 mask/loss。
+- RTX 5070 Ti、$B=4096$、20 warmups + 50 CUDA Events 复测 retained encoder 为 582,343 parameters、p95 36.03 ms、peak allocated 812.43 MiB，通过 40 ms 门槛；未启用 `torch.compile`。正式 256-epoch run 尚未执行。
+
 0.7.2 - 2026-08-27
 ==================
 

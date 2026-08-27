@@ -1,4 +1,4 @@
-"""Schema 7 Hydra composition、纯训练预算与 physical realization fingerprint 合同。"""
+"""Schema 8 Hydra composition、完整单 seed 预算与 physical realization fingerprint 合同。"""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from anymani.distill.ssl.data import HandAssetCatalogCfg
 from anymani.distill.ssl.data import hand_assets as hand_assets_module
 from anymani.distill.ssl.data.hand_assets import EmbodimentCatalog, HandAssetCatalog, _prune_catalog_cache
 from anymani.distill.ssl.experiment import EmbodimentPretrain, EmbodimentPretrainCfg, resolved_config_dict
+from anymani.distill.ssl.experiments import available_experiments, load_experiment
 from anymani.distill.ssl.pretrain import _build_parser, _config_overrides
 from anymani.distill.ssl.runtime.post_training import normalized_validation_score, selection_baseline
 from anymani.distill.ssl.runtime.pretrainer import EmbodimentPretrainTrainerCfg
@@ -36,6 +37,57 @@ def _compose() -> EmbodimentPretrainCfg:
     """从 ConfigStore 恢复正式 Python 实验，不调用训练副作用。"""
 
     return compose_pretrain_cfg()
+
+
+def test_experiment_registry_exposes_versioned_and_legacy_snapshots() -> None:
+    """registry 必须显式公开当前版本和保留的 legacy 快照。"""
+
+    assert available_experiments() == (
+        "geometry_ssl_multitask_representation_v0_7_3",
+        "multi_anchor_gaussian_implicit_field",
+    )
+    current = load_experiment("geometry_ssl_multitask_representation_v0_7_3")
+    legacy = load_experiment("multi_anchor_gaussian_implicit_field")
+    assert current.path.name == "geometry_ssl_multitask_representation_v0_7_3.py"
+    assert legacy.path.name == "multi_anchor_gaussion_implicit_field.py"
+    assert len(current.config_sha256) == 64
+    assert current.validation is not None
+    assert current.evaluation is not None
+
+
+def test_experiment_python_path_composes_the_same_snapshot() -> None:
+    """CLI 传入快照路径时，pretrain/validation/evaluation 必须来自同一文件。"""
+
+    path = Path(__file__).parents[3] / "ssl" / "experiments" / "geometry_ssl_multitask_representation_v0_7_3.py"
+    named = compose_pretrain_cfg(config_ref="geometry_ssl_multitask_representation_v0_7_3")
+    from_path = compose_pretrain_cfg(config_ref=path)
+    validation = compose_validation_cfg(config_ref=path)
+    evaluation = compose_evaluation_cfg(config_ref=path)
+
+    assert from_path == named
+    assert validation.run.experiment_name == "geometry_ssl_multitask_representation_v0_7_3_validation"
+    assert evaluation.run.experiment_name == "geometry_ssl_multitask_representation_v0_7_3_evaluation"
+
+
+def test_training_cli_selects_snapshot_separately_from_run_name() -> None:
+    """配置 identity 与本次输出 run name 必须是两个不同的 CLI 概念。"""
+
+    args = _build_parser().parse_args(("--config", "multi_anchor_gaussian_implicit_field", "--run_name", "probe"))
+    assert args.config == "multi_anchor_gaussian_implicit_field"
+    assert args.experiment_name == "probe"
+
+
+def test_backup_script_is_a_direct_training_wrapper() -> None:
+    """backup.sh 只保存一条训练命令，不恢复统一 workflow 子命令。"""
+
+    script = Path(__file__).parents[3] / "ssl" / "backup.sh"
+    text = script.read_text(encoding="utf-8")
+    assert "anymani.distill.ssl.pretrain" in text
+    assert "geometry_ssl_multitask_representation_v0_7_3" in text
+    assert "anymani.distill.ssl.workflow" not in text
+    assert "case " not in text
+    assert "if [[" not in text
+    assert "anymani.distill.ssl.prepare_sources" not in text
 
 
 def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
@@ -51,13 +103,13 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
     assert type(config.method).__name__ == "MultiAnchorGaussianMethodCfg"
     assert type(config.trainer).__name__ == "EmbodimentPretrainTrainerCfg"
     assert not hasattr(config, "evaluation")
-    assert config.trainer.max_epochs == 32
+    assert config.trainer.max_epochs == 256
     assert config.trainer.num_minibatches == 4
     assert config.trainer.mini_epochs == 1
     assert config.trainer.microbatch_size == 64
     assert not hasattr(config.trainer, "validation")
     assert not hasattr(config.trainer, "final_evaluation")
-    assert config.trainer.checkpoint_every_epochs == 1
+    assert config.trainer.checkpoint_every_epochs == 4
     assert not hasattr(config.trainer, "gradient_accumulation_steps")
     assert config.trainer.sampling.assets_per_minibatch == 64
     assert config.trainer.sampling.q_per_asset_per_minibatch == 8
@@ -67,12 +119,21 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
         "density",
         "kappa",
     }
-    assert config.method.objectives.density.weight == pytest.approx(1.0)
-    assert config.method.objectives.kappa.weight == pytest.approx(1.0)
+    assert not hasattr(config.method.objectives.density, "weight")
+    assert not hasattr(config.method.objectives.kappa, "weight")
     assert not hasattr(config.method.objectives, "derived_field")
     assert not hasattr(config.method.objectives, "sobolev")
     assert not hasattr(config.method.objectives, "chain")
     assert config.method.representation.source.anchors.bank_size == 8
+    assert config.method.representation.target.train_active_per_joint == 2
+    assert config.method.representation.target.train_zero_per_joint == 1
+    assert config.method.model.encoder.backbone.layers == 4
+    assert config.method.model.ssl_decoders.density.residual_blocks == 2
+    assert config.method.model.ssl_decoders.sensitivity.residual_blocks == 2
+    assert config.method.model.ssl_decoders.sensitivity.readout_rank == 64
+    assert config.method.model.ssl_decoders.sensitivity.physical_scale_m == pytest.approx(0.1)
+    assert config.method.entity_permutation.enabled
+    assert config.run.source_cache_mode == "auto"
     assert tuple(config.method.representation.field.validation_bandwidths_m) == (0.004, 0.016, 0.064)
     assert not hasattr(config.method.representation, "layout")
     assert "paired" not in config.method.objectives.enabled()
@@ -84,7 +145,7 @@ def test_hydra_cli_override_changes_local_cfg_without_central_parser() -> None:
 
     config = compose_pretrain_cfg(["trainer.optimizer.learning_rate=0.0007"])
     assert config.trainer.optimizer.learning_rate == pytest.approx(7.0e-4)
-    assert resolved_config_dict(config)["schema_version"] == "7.0.0"
+    assert resolved_config_dict(config)["schema_version"] == "8.0.0"
 
 
 def test_post_training_configs_are_independent_from_trainer() -> None:
@@ -108,8 +169,6 @@ def test_flat_cli_flags_compose_one_run_without_exposing_config_paths() -> None:
 
     args = _build_parser().parse_args(
         (
-            "--phase",
-            "calibrate_objectives",
             "--max_epochs",
             "8",
             "--num_minibatches",
@@ -130,7 +189,7 @@ def test_flat_cli_flags_compose_one_run_without_exposing_config_paths() -> None:
     )
     config = compose_pretrain_cfg(_config_overrides(args))
 
-    assert config.run.phase == "calibrate_objectives"
+    assert not hasattr(config.run, "phase")
     assert config.run.experiment_name == "objective_probe_seed42"
     assert config.run.seed == config.trainer.sampling.seed == 42
     assert config.trainer.max_epochs == 8
@@ -147,17 +206,17 @@ def test_experiment_constructor_has_no_filesystem_or_cuda_side_effect(tmp_path) 
     output_dir = tmp_path / "not-created-until-run"
     experiment = EmbodimentPretrain(_compose(), output_dir=output_dir)
 
-    assert experiment.config.schema_version == "7.0.0"
+    assert experiment.config.schema_version == "8.0.0"
     assert experiment.output_dir == output_dir
     assert not output_dir.exists()
 
 
 def test_old_schemas_are_fail_closed() -> None:
-    """旧配置不通过 alias 或 parser 猜测进入 schema 7。"""
+    """旧配置不通过 alias 或 parser 猜测进入 schema 8。"""
 
     config = _compose()
-    for version in ("1.0.0", "2.0.0", "6.0.0"):
-        with pytest.raises(ValueError, match="schema must be exactly 7.0.0"):
+    for version in ("1.0.0", "2.0.0", "6.0.0", "7.0.0"):
+        with pytest.raises(ValueError, match="schema must be exactly 8.0.0"):
             replace(config, schema_version=version).validate_composed()
 
 
@@ -182,12 +241,12 @@ def test_trainer_exposes_epoch_minibatch_and_microbatch_contract() -> None:
     """Trainer 显式声明训练回合、每回合新批数、复用遍数与显存切片。"""
 
     trainer = _compose().trainer
-    assert trainer.max_epochs == 32
+    assert trainer.max_epochs == 256
     assert trainer.num_minibatches == 4
     assert trainer.mini_epochs == 1
     assert trainer.microbatch_size == 64
-    assert trainer.max_epochs * trainer.num_minibatches * 64 * 8 == 65_536
-    assert trainer.max_epochs * trainer.mini_epochs * trainer.num_minibatches == 128
+    assert trainer.max_epochs * trainer.num_minibatches * 64 * 8 == 524_288
+    assert trainer.max_epochs * trainer.mini_epochs * trainer.num_minibatches == 1024
     assert not hasattr(trainer, "calibration_epochs")
     assert not hasattr(trainer, "pretrain_epochs")
     assert not hasattr(trainer, "gradient_accumulation_steps")
@@ -318,7 +377,10 @@ def test_validation_selection_weights_named_suites_equally() -> None:
             "unseen_mother": {"density": 9.0, "kappa": 9.0},
         },
         metrics,
-        teacher_baselines={"density": 1.0, "kappa": 2.0},
+        teacher_baselines={
+            "unseen_variant_set": {"density": 1.0, "kappa": 2.0},
+            "unseen_mother": {"density": 1.0, "kappa": 2.0},
+        },
     )
     score = normalized_validation_score(
         {

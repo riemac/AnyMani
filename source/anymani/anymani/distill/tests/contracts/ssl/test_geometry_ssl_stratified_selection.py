@@ -35,6 +35,7 @@ def test_stratified_selection_balances_q_morphologies_bins_and_axes() -> None:
     assert density_bins["bin-1"]["mse"] == pytest.approx(5.5)  # asset-a=(3+5)/2=4，asset-b=7
     assert evidence["axis_scores"]["density"]["axis-0"] == pytest.approx(6.5)  # 两个 bin 等权
     assert evidence["metric_scores"]["density"] == pytest.approx(6.5)  # 当前只有一个 axis
+    assert evidence["morphology_scores"]["density"] == {"asset-a": 4.5, "asset-b": 8.5}
 
 
 def test_stratified_selection_ignores_empty_bins_without_calling_them_zero() -> None:

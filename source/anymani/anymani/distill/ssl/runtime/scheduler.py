@@ -33,6 +33,7 @@ class ResidentGeometryAssetWindow:
         releaser: Callable[[GeometryRepresentationState], bool] | None = None,
         catalog_ids: tuple[str, ...] | None = None,
         source_provider: object | None = None,
+        resource_profile: bool = False,
     ) -> None:
         if not runtimes:
             raise ValueError("resident window requires a non-empty CPU catalog")
@@ -56,7 +57,9 @@ class ResidentGeometryAssetWindow:
         self.max_resident_assets = max_resident_assets
         self.loader = loader
         self.releaser = releaser or (lambda state: state.device_source.release())
+        self.resource_profile = bool(resource_profile)
         self._resident: dict[str, GeometryRepresentationState] = {}
+        self._resident_bank_index: int | None = None
         self._telemetry_events: list[dict[str, object]] = []  # 窗口/BVH 生命周期的 append-only 事件
 
     @property
@@ -69,6 +72,7 @@ class ResidentGeometryAssetWindow:
         *,
         prefetch_sources: bool = True,
         prepared_sources: Mapping[str, GeometrySource | GeometrySourceCore] | None = None,
+        bank_index: int | None = None,
     ) -> tuple[GeometryRepresentationState, ...]:
         r"""确保一个完整 resident window 已驻留，并记录 lease/BVH/memory 生命周期证据。
 
@@ -87,15 +91,15 @@ class ResidentGeometryAssetWindow:
                 raise KeyError(f"unknown geometry asset ID={asset_id!r}")
         if prepared_sources is not None and set(prepared_sources) != set(requested):
             raise ValueError("prepared source IDs must exactly match the requested device subwindow")
-        if tuple(self._resident) == requested:
+        if tuple(self._resident) == requested and self._resident_bank_index == bank_index:
             return tuple(self._resident[asset_id] for asset_id in requested)  # 稳态 minibatch 不同步 CUDA
-        before_memory = self._memory_snapshot()  # 切窗前设备 free/allocator 状态
+        before_memory = self._memory_snapshot() if self.resource_profile else None
         started = perf_counter()  # 同一进程内的 wall-clock 生命周期起点
         released_asset_ids: list[str] = []  # 本次切窗实际释放的资产
         loaded_asset_ids: list[str] = []  # 本次切窗实际新加载的资产
         release_started = perf_counter()  # release 子阶段起点
         for asset_id in tuple(self._resident):
-            if asset_id not in requested:
+            if asset_id not in requested or self._resident_bank_index != bank_index:
                 self._evict(asset_id)
                 released_asset_ids.append(asset_id)
         release_seconds = perf_counter() - release_started  # lease 释放和 registry eviction 时间
@@ -106,17 +110,18 @@ class ResidentGeometryAssetWindow:
                 prefetch_fn(requested)
         for asset_id in requested:
             if asset_id not in self._resident:
-                self._resident[asset_id] = self.loader(
-                    prepared_sources[asset_id] if prepared_sources is not None else self._source_for_asset(asset_id),
-                    device=self.device,
-                    dtype=self.dtype,
-                )
+                source = prepared_sources[asset_id] if prepared_sources is not None else self._source_for_asset(asset_id)
+                loader_kwargs = {"device": self.device, "dtype": self.dtype}
+                if bank_index is not None:
+                    loader_kwargs["bank_index"] = bank_index
+                self._resident[asset_id] = self.loader(source, **loader_kwargs)
                 loaded_asset_ids.append(asset_id)
+        self._resident_bank_index = bank_index
         if len(self._resident) > self.max_resident_assets:
             raise RuntimeError("resident asset window exceeded configured cap")
         load_seconds = perf_counter() - load_started  # CPU->GPU evidence/Warp BVH 构造时间
         if loaded_asset_ids or released_asset_ids:
-            after_memory = self._memory_snapshot()  # 切窗后设备状态；同步后才读取 allocator
+            after_memory = self._memory_snapshot() if self.resource_profile else None
             self._telemetry_events.append(
                 {
                     "event": "resident_window",
@@ -125,6 +130,7 @@ class ResidentGeometryAssetWindow:
                     "released_asset_ids": released_asset_ids,
                     "resident_asset_ids": list(self.resident_asset_ids),
                     "resident_asset_count": len(self._resident),
+                    "anchor_bank_index": bank_index,
                     "resident_owner_bvh_count": self._resident_owner_bvh_count(),
                     "resident_triangle_count": self._resident_triangle_count(),
                     "load_seconds": load_seconds,
@@ -148,10 +154,10 @@ class ResidentGeometryAssetWindow:
 
         if asset_id not in self._resident:
             raise KeyError(f"asset is not resident: {asset_id!r}")
-        before_memory = self._memory_snapshot()  # eviction 前 device 状态
+        before_memory = self._memory_snapshot() if self.resource_profile else None
         started = perf_counter()  # 单项 release wall-clock 起点
         self._evict(asset_id)  # registry lease 归零后丢弃 device-state 强引用
-        after_memory = self._memory_snapshot()  # eviction 后 device 状态
+        after_memory = self._memory_snapshot() if self.resource_profile else None
         self._telemetry_events.append(
             {
                 "event": "resident_eviction",
@@ -182,12 +188,13 @@ class ResidentGeometryAssetWindow:
 
         if not self._resident:
             return
-        before_memory = self._memory_snapshot()  # 全量释放前 device 状态
+        before_memory = self._memory_snapshot() if self.resource_profile else None
         started = perf_counter()  # 全量 release wall-clock 起点
         released_asset_ids = tuple(self._resident)
         for asset_id in released_asset_ids:
             self._evict(asset_id)  # 不为每项制造重复事件，聚合事件保存同一切窗边界
-        after_memory = self._memory_snapshot()  # 全量释放后 device 状态
+        self._resident_bank_index = None
+        after_memory = self._memory_snapshot() if self.resource_profile else None
         self._telemetry_events.append(
             {
                 "event": "resident_window_release_all",
@@ -277,11 +284,13 @@ class ResidentGeometryAssetWindow:
 
 
 def _memory_used_delta(
-    before: dict[str, int | None],
-    after: dict[str, int | None],
+    before: dict[str, int | None] | None,
+    after: dict[str, int | None] | None,
 ) -> int | None:
     r"""由 CUDA free-memory 差得到本次窗口转换的设备已用字节增量。"""
 
+    if before is None or after is None:
+        return None
     before_free = before["cuda_free_bytes"]  # driver 口径，包含 Warp 与 PyTorch
     after_free = after["cuda_free_bytes"]  # 同一同步边界后的 driver free bytes
     if before_free is None or after_free is None:
@@ -290,13 +299,15 @@ def _memory_used_delta(
 
 
 def _memory_allocator_delta(
-    before: dict[str, int | None],
-    after: dict[str, int | None],
+    before: dict[str, int | None] | None,
+    after: dict[str, int | None] | None,
     *,
     key: str,
 ) -> int | None:
     r"""计算 PyTorch caching allocator 指定字段的窗口转换增量。"""
 
+    if before is None or after is None:
+        return None
     before_value = before[key]
     after_value = after[key]
     if before_value is None or after_value is None:

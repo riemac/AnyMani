@@ -5,8 +5,8 @@ $$
 \mathcal M=\left(\mu_q,\mathcal R,f_\theta,\mathcal L,\mathcal A\right):
 $$
 `state_measure` 定义 $q$ 的测度，`representation` 定义物理真值体系，`model` 是可学习映射，
-`objectives` 定义 rho/kappa 两项训练约束，`joint_sign_rewrite` 是方法专属坐标增强。Trainer 预算、
-resident window 和 `calibrate_objectives` 阶段不属于本配置。
+`objectives` 定义 rho/kappa 两项训练约束，`entity_permutation` 与 `joint_sign_rewrite` 是两个独立
+增强随机域。Trainer 预算和 resident window 不属于本配置。
 """
 
 from __future__ import annotations
@@ -56,20 +56,49 @@ class JointSignRewriteCfg:
 
 
 @dataclass(frozen=True)
+class EntityPermutationCfg:
+    r"""每个资产 q-block 的真实 PALM/JOINT/TIP entity 轴随机重标号。
+
+    同一资产连续 8 个 q 共用一个双射 $P$；padding slot、JOINT coordinate axis、anchor axis 与 token
+    通道轴都不参与置换。``seed_offset`` 与 joint-sign 随机域分离，resume 只需恢复绝对 block 身份。
+    """
+
+    enabled: bool = True
+    seed_offset: int = 31_337
+
+    def __post_init__(self) -> None:
+        """拒绝负 seed domain，避免不同语言的无符号转换产生不一致身份。"""
+
+        if self.seed_offset < 0:
+            raise ValueError("entity permutation seed_offset must be non-negative")
+
+
+@dataclass(frozen=True)
+class FairGradCfg:
+    r"""两任务 shared encoder 的解析 $\alpha=1$ FairGrad 身份与反向冲突边界。"""
+
+    algorithm: str = "fairgrad_alpha_1_two_task_analytic_v1"
+    near_opposition_tolerance: float = 1.0e-6  # 当 $1+\cos(g_\rho,g_\kappa)$ 不超过此值时阻塞 shared
+
+    def __post_init__(self) -> None:
+        """只接受当前已验证的解析公式与开区间数值容差。"""
+
+        if self.algorithm != "fairgrad_alpha_1_two_task_analytic_v1":
+            raise ValueError("unsupported shared-gradient aggregation algorithm")
+        if not 0.0 < self.near_opposition_tolerance < 1.0:
+            raise ValueError("FairGrad near-opposition tolerance must lie in (0,1)")
+
+
+@dataclass(frozen=True)
 class ObjectiveTermCfg:
-    r"""无 term-specific 超参的 objective 声明：只有显式无量纲权重。
+    r"""无 term-specific 超参的 objective 声明。
 
     `func` 用 ClassVar 绑定模块级 callable，不进入 OmegaConf structured config。
+    density 与 $\kappa$ 不再携带固定 scalar task weight；shared 优先级由 FairGrad 梯度几何决定，
+    private reader 各自只接收本任务梯度。
     """
 
     func: ClassVar[Callable[..., ObjectiveTermResult] | None] = None
-    weight: float = 1.0  # $\lambda$；calibration 只记录，不自动改写
-
-    def __post_init__(self) -> None:
-        r"""允许权重为零做消融，但拒绝负权重。"""
-
-        if self.weight < 0.0:
-            raise ValueError("objective term weight must be non-negative")
 
     def qualified_func_name(self) -> str:
         r"""返回 artifact 记录用的完整限定名。"""
@@ -111,12 +140,10 @@ class MultiAnchorGaussianObjectivesCfg:
         return {name: config for name, config in terms.items() if config is not None}
 
     def __post_init__(self) -> None:
-        r"""固定 rho/kappa 双主任务与 1:1 normalized vanilla aggregation。"""
+        r"""固定 rho/kappa 双主任务；任务间不再通过 scalar loss 求和。"""
 
         if self.density is None or self.kappa is None:
             raise ValueError("unified multi-anchor method requires both density and kappa objectives")
-        if self.density.weight != 1.0 or self.kappa.weight != 1.0:
-            raise ValueError("unified multi-anchor method fixes density/kappa normalized weights to 1.0")
 
 
 @dataclass(frozen=True)
@@ -128,6 +155,8 @@ class MultiAnchorGaussianMethodCfg:
     representation: GeometryRepresentationCfg = field(default_factory=GeometryRepresentationCfg)
     model: GeometrySSLModelCfg = field(default_factory=GeometrySSLModelCfg)
     objectives: MultiAnchorGaussianObjectivesCfg = field(default_factory=MultiAnchorGaussianObjectivesCfg)
+    fairgrad: FairGradCfg = field(default_factory=FairGradCfg)
+    entity_permutation: EntityPermutationCfg = field(default_factory=EntityPermutationCfg)
     joint_sign_rewrite: JointSignRewriteCfg = field(default_factory=JointSignRewriteCfg)
 
     def __post_init__(self) -> None:
@@ -147,6 +176,8 @@ class MultiAnchorGaussianMethodCfg:
 
 __all__ = [
     "DensityObjectiveCfg",
+    "EntityPermutationCfg",
+    "FairGradCfg",
     "JointConfigurationMeasureCfg",
     "JointSignRewriteCfg",
     "KappaObjectiveCfg",

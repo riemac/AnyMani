@@ -4,6 +4,8 @@ from . import objectives as _objectives  # noqa: F401  # 绑定 rho/kappa 两项
 from .artifact import RetainedLoadReport, load_retained_geometry_artifact
 from .config import (
     DensityObjectiveCfg,
+    EntityPermutationCfg,
+    FairGradCfg,
     JointConfigurationMeasureCfg,
     JointSignRewriteCfg,
     KappaObjectiveCfg,
@@ -14,6 +16,8 @@ from .method import MultiAnchorGaussianMethod
 
 __all__ = [
     "DensityObjectiveCfg",
+    "EntityPermutationCfg",
+    "FairGradCfg",
     "JointConfigurationMeasureCfg",
     "JointSignRewriteCfg",
     "KappaObjectiveCfg",

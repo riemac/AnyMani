@@ -3,8 +3,9 @@ r"""多锚点 Gaussian Method 的 standalone retained artifact loader。"""
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -19,6 +20,41 @@ class RetainedLoadReport:
 
     missing_keys: tuple[str, ...]
     unexpected_keys: tuple[str, ...]
+
+
+def build_retained_geometry_artifact(
+    method: Any,
+    *,
+    metadata: Mapping[str, Any],
+    source_checkpoint: Path,
+) -> dict[str, Any]:
+    r"""构造 schema-5 encoder-only transfer artifact，不泄漏 SSL readers/optimizer。"""
+
+    if not source_checkpoint.is_file():
+        raise FileNotFoundError(f"retained artifact source checkpoint does not exist: {source_checkpoint}")
+    retained = method.retained_state_dict()
+    if not retained or any(not key.startswith("encoder.") for key in retained):
+        raise ValueError("retained artifact requires a non-empty encoder-only state")
+    return {
+        "schema_version": RETAINED_ARTIFACT_SCHEMA_VERSION,
+        "artifact_type": "retained_geometry_encoder",
+        "retained_state": retained,
+        "retained_model_config": {"encoder": asdict(method.config.model.encoder)},
+        "feature_spec": asdict(method.feature_spec()),
+        "input_contract": {
+            "frame": "query/closest/surface in hand frame {h}",
+            "units": "length=m,joint=rad,density=dimensionless,kappa=m/rad",
+            "retained_inputs": "physical q + static geometry evidence",
+        },
+        "lineage": {
+            "source_checkpoint": str(source_checkpoint),
+            "code_revision": metadata.get("code_revision", "unknown"),
+            "package_version": metadata.get("package_version", "unknown"),
+            "geometry_semantics_schema": metadata.get("geometry_semantics_schema", "unknown"),
+            "asset_manifest": dict(metadata.get("asset_manifest", {})),
+            "dataset_identity": dict(metadata.get("dataset_identity", {})),
+        },
+    }
 
 
 def load_retained_geometry_artifact(
@@ -71,4 +107,9 @@ def load_retained_geometry_artifact(
     return report
 
 
-__all__ = ["RETAINED_ARTIFACT_SCHEMA_VERSION", "RetainedLoadReport", "load_retained_geometry_artifact"]
+__all__ = [
+    "RETAINED_ARTIFACT_SCHEMA_VERSION",
+    "RetainedLoadReport",
+    "build_retained_geometry_artifact",
+    "load_retained_geometry_artifact",
+]

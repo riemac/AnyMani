@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,19 +11,22 @@ import pytest
 import torch
 import trimesh
 from anymani.assets.bank import HandContainer, HandContainerCfg
+from anymani.distill.representations.sources.anchor_sampling import (
+    _radial_decay_candidates,
+    sample_palm_anchor_realization_warp,
+    sample_palm_anchor_supports,
+)
 from anymani.distill.representations.sources.cache import GeometrySourceArena
 from anymani.distill.representations.sources.collision_geometry import (
     GeometryIdentity,
     OwnerGeometryCache,
     OwnerSurfaceRecord,
-    _radial_decay_candidates,
     geometry_identity,
     materialize_owner_geometry_cache,
     materialize_warp_owner_geometry_cache,
     prepare_warp_surface_view,
     release_warp_owner_geometry_cache,
     sample_owner_home_surfaces,
-    sample_palm_anchor_supports,
     strict_owner_union,
     warp_owner_geometry_cache_stats,
 )
@@ -188,6 +192,55 @@ def test_gpu_anchor_finalization_matches_cpu_reference_and_releases_teacher_bvh(
         assert stats.query_point_count > 0
         assert stats.kernel_launch_count > 0
         assert stats.boundary_disagreement_count <= stats.boundary_recheck_count
+        selected, selected_stats = sample_palm_anchor_realization_warp(
+            core.geometry_cache,
+            container.geometry_semantics,
+            core.spec_cpu,
+            device_source.warp_cache,
+            bank_index=1,
+            bank_size=2,
+            anchors_per_finger=2,
+            static_sampling_seed=17,
+            radial_support_radius_m=config.anchors.radius_m,
+            radial_decay_scale_m=config.anchors.radial_decay_scale_m,
+            surface_fraction=config.anchors.surface_fraction,
+        )
+        reference = gpu_source.anchor_bank[1]
+        assert selected.samples.anchors_hand_m.tobytes(order="C") == reference.anchors_hand_m.tobytes(order="C")
+        assert selected.samples.anchors_hand_m.shape == reference.anchors_hand_m.shape
+        assert selected.samples.anchors_hand_m.dtype == reference.anchors_hand_m.dtype
+        assert selected.samples.surface_mask.tobytes(order="C") == reference.surface_mask.tobytes(order="C")
+        assert selected.samples.finger_names == reference.finger_names
+        assert selected.samples.seed_ids == reference.seed_ids
+        assert selected.samples.sampling_seed == reference.sampling_seed == 1_000_020
+        assert selected.samples.algorithm_version == reference.algorithm_version
+        assert selected.bank_index == 1 and selected.bank_size == 2
+        assert selected.derived_seed == 1_000_020 and len(selected.realization_hash) == 64
+        assert selected_stats.query_point_count > 0
+        limit_only_cache = replace(core.geometry_cache, asset_content_hash="limit-only-variant-content")
+        shared_warp_cache = materialize_warp_owner_geometry_cache(
+            limit_only_cache,
+            device="cuda:0",
+            surface_views=core.warp_surface_views,
+        )
+        try:
+            assert shared_warp_cache is device_source.warp_cache
+            reused, _reused_stats = sample_palm_anchor_realization_warp(
+                limit_only_cache,
+                container.geometry_semantics,
+                core.spec_cpu,
+                shared_warp_cache,
+                bank_index=1,
+                bank_size=2,
+                anchors_per_finger=2,
+                static_sampling_seed=17,
+                radial_support_radius_m=config.anchors.radius_m,
+                radial_decay_scale_m=config.anchors.radial_decay_scale_m,
+                surface_fraction=config.anchors.surface_fraction,
+            )
+            assert reused.realization_hash == selected.realization_hash
+        finally:
+            assert not release_warp_owner_geometry_cache(shared_warp_cache)  # 原 device_source lease 仍存活
         assert warp_owner_geometry_cache_stats()["lease_count"] == baseline["lease_count"] + 1
     finally:
         assert device_source.release()  # 最后一项 lease 归零并驱逐全局 cache

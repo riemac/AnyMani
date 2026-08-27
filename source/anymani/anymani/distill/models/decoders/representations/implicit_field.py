@@ -20,9 +20,10 @@ D_\kappa\left(z_g,z_i,u(x)\right)
 \quad[\mathrm{m/rad}].
 $$
 
-两个解码器都使用 FiLM（特征线性调制）残差块，使 retained token 在每层持续调制查询主路径。
-$D_\kappa$ 每层由拼接条件 $[z_g\Vert z_i]$ 独立生成 $\gamma,\beta$，最后用带偏置线性层输出
-无界 signed scalar。joint-sign 是完整物理坐标改写下的可观测测试合同，不由 latent parity 硬编码。
+两个解码器都使用 FiLM（特征线性调制）残差块，使 owner token 在每层持续调制查询主路径。
+$D_\kappa$ 把 owner--query 特征视为 Jacobian 行，把 JOINT token 视为 Jacobian 列，并用 rank-64
+双线性读取输出无界 signed scalar。joint-sign 是完整物理坐标改写下的可观测测试合同，不由 latent
+parity 硬编码。
 
 解码器只在 SSL 期间存在。查询点来源、最近点、距离标签、Jacobian 与场标签都不进入
 解码器输入；SSL 完成后整个模块删除，不迁入 PPO。
@@ -68,7 +69,7 @@ class ScalarSigmaFiLMDensityDecoderCfg:
     r"""逐 `(owner,query,sigma)` 标量密度 reader 的 FiLM 容量与尺度条件。"""
 
     hidden_width: int = 128
-    residual_blocks: int = 3
+    residual_blocks: int = 2
     sigma_reference_m: float = 0.016  # 16 mm；只定义无量纲 $\log(\sigma/\sigma_{ref})$
 
     def __post_init__(self) -> None:
@@ -82,16 +83,23 @@ class ScalarSigmaFiLMDensityDecoderCfg:
 
 @dataclass(frozen=True)
 class DistanceSensitivityDecoderCfg:
-    r"""query-main、owner/JOINT-conditioned 的距离灵敏度 FiLM reader 容量。"""
+    r"""owner-query 行特征与 JOINT 列特征的低秩距离灵敏度 reader 配置。"""
 
-    hidden_width: int = 128  # 查询主路径与三个残差块的统一宽度
-    residual_blocks: int = 3  # 每块独立从 $[z_o\Vert z_i]$ 生成 FiLM 参数
+    hidden_width: int = 128  # owner-conditioned query 主路径宽度
+    residual_blocks: int = 2  # 每块只从 $z_o$ 生成 FiLM 参数
+    readout_rank: int = 64  # owner-query 行与 JOINT 列相交的低秩宽度 $r$
+    physical_scale_m: float = 0.1  # 固定全手参考长度 $L_{ref}$，输出单位 m/rad
+    initialization_version: str = "symmetric_nonzero_r_minus_quarter_v1"
 
     def __post_init__(self) -> None:
         r"""拒绝空主路径或没有条件更新的退化 reader。"""
 
-        if self.hidden_width < 1 or self.residual_blocks < 1:
+        if min(self.hidden_width, self.residual_blocks, self.readout_rank) < 1:
             raise ValueError("sensitivity decoder hidden width and residual blocks must be positive")
+        if self.physical_scale_m <= 0.0:
+            raise ValueError("sensitivity decoder physical_scale_m must be strictly positive")
+        if self.initialization_version != "symmetric_nonzero_r_minus_quarter_v1":
+            raise ValueError("unsupported sensitivity decoder initialization version")
 
 
 @dataclass(frozen=True)
@@ -233,15 +241,16 @@ class DistanceSensitivityDecoder(nn.Module):
     r"""在 sampled owner—query—JOINT edges 上解码无界 signed $\hat\kappa$。
 
     model assembly 先从统一 $Z$ 路由 $z_o,z_i$ 与查询特征 $u(x)$。reader 以查询为主路径，
-    每个残差块独立使用拼接条件 $c_{o,i}=[z_o\Vert z_i]$：
+    每个残差块只用 owner token 调制，因此先形成 Jacobian 的行特征：
 
     $$
     h_0=W_qu(x),\qquad
-    h_{l+1}=h_l+F_l\!\left((1+\gamma_l(c_{o,i}))\operatorname{LN}_l(h_l)+\beta_l(c_{o,i})\right),
-    \qquad \hat\kappa=w^Th_3+b.
+    h_{l+1}=h_l+F_l\!\left((1+\gamma_l(z_o))\operatorname{LN}_l(h_l)+\beta_l(z_o)\right),
+    \qquad \hat\kappa=L_{ref}\frac{a(\operatorname{LN}(h_2))^Tb(z_i)}{\sqrt r}.
     $$
 
-    canonical 数值锚点为 3 个 residual blocks、hidden width 128。输出层不使用 sigmoid/tanh，
+    canonical 数值锚点为 2 个 residual blocks、hidden width 128、$r=64$、$L_{ref}=0.1$ m。双侧投影
+    都无 bias，且不存在最终 scalar bias；输出不使用 sigmoid/tanh，
     因为距离 Jacobian 元素 $\partial d_o(x;q)/\partial q_i$ 可正、可负且不具固定数值界。
     """
 
@@ -252,7 +261,7 @@ class DistanceSensitivityDecoder(nn.Module):
         entity_width: int,
         query_width: int,
     ) -> None:
-        r"""构造 query projection、逐层双-token FiLM 与 signed scalar readout。
+        r"""构造 owner-conditioned query 行分支与 JOINT token 列分支。
 
         Args:
             config (DistanceSensitivityDecoderCfg): 隐藏宽度与 FiLM residual block 数。
@@ -268,10 +277,34 @@ class DistanceSensitivityDecoder(nn.Module):
         self.query_width = query_width  # $u(x)$ 不携带 sigma 或 query-stratum identity
         self.query_projection = nn.Linear(query_width, config.hidden_width)  # $u(x)\mapsto h_0\in\mathbb R^{128}$
         self.blocks = nn.ModuleList(
-            _FiLMResidualBlock(config.hidden_width, 2 * entity_width)
+            _FiLMResidualBlock(config.hidden_width, entity_width)
             for _ in range(config.residual_blocks)
-        )  # 每个 block 拥有独立 $\gamma_l,\beta_l,F_l$
-        self.output = nn.Linear(config.hidden_width, 1)  # 无界 signed scalar，允许零点与正负响应
+        )  # 每个 block 只读取 owner token；JOINT 不得绕过末端双线性列分支
+        self.row_normalization = nn.LayerNorm(config.hidden_width)  # 行投影前按通道规范化 $h_{o,x}$
+        self.row_projection = nn.Linear(config.hidden_width, config.readout_rank, bias=False)
+        self.joint_projection = nn.Linear(entity_width, config.readout_rank, bias=False)
+        self._reset_bilinear_parameters()
+
+    def _reset_bilinear_parameters(self) -> None:
+        r"""按 $r^{-1/4}$ 投影后标准差初始化双侧，保证首步两条梯度路径都非零。
+
+        若输入每通道方差约为 1，则 fan-in 为 $d$ 的线性投影使用
+        $\operatorname{std}(W)=r^{-1/4}/\sqrt d$，使每个投影分量的标准差约为 $r^{-1/4}$。
+        两侧点积除以 $\sqrt r$ 后，其标准差约为 $1/\sqrt r$；乘 $L_{ref}=0.1$ m 后，
+        canonical $r=64$ 的初始 RMS 约为 0.0125 m/rad。
+        """
+
+        projected_std = self.config.readout_rank ** (-0.25)
+        nn.init.normal_(
+            self.row_projection.weight,
+            mean=0.0,
+            std=projected_std / self.config.hidden_width**0.5,
+        )
+        nn.init.normal_(
+            self.joint_projection.weight,
+            mean=0.0,
+            std=projected_std / self.entity_width**0.5,
+        )
 
     def forward(
         self,
@@ -293,10 +326,15 @@ class DistanceSensitivityDecoder(nn.Module):
         if selected_query.shape != (*owner_latent.shape[:2], self.query_width):
             raise ValueError("selected_query must have shape [B,E,D_q]")
         hidden = self.query_projection(selected_query)  # `[B,E,128]` 的 query-main 初始状态
-        condition = torch.cat((owner_latent, joint_latent), dim=-1)  # `[B,E,2D]` 的双-token 条件
         for block in self.blocks:
-            hidden = block(hidden, condition)  # 独立 FiLM 后的两层 MLP residual update
-        return self.output(hidden).squeeze(-1)  # `[B,E]`，不施加数值范围压缩
+            hidden = block(hidden, owner_latent)  # owner 决定 Jacobian 行；JOINT 不进入 FiLM
+        row = self.row_projection(self.row_normalization(hidden))  # `[B,E,r]`，owner-query 行坐标
+        column = self.joint_projection(joint_latent)  # `[B,E,r]`，JOINT 列坐标
+        return (
+            self.config.physical_scale_m
+            * (row * column).sum(dim=-1)
+            / self.config.readout_rank**0.5
+        )  # `[B,E]`，m/rad；无 scalar bias、激活或裁剪
 
 
 __all__ = [

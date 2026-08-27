@@ -11,8 +11,10 @@ methods/
 └── multi_anchor_gaussian_implicit_field/
     ├── __init__.py          绑定 rho/kappa 两项 ClassVar func
     ├── config.py            方法装配与固定双 objective
-    ├── method.py            prepare / realize / forward / reduce / evaluate / export
-    ├── evaluation.py        固定 bank digest 与配对 latent ablation
+    ├── method.py            stable method façade 与 prepare/realize/forward/export
+    ├── source_runtime.py    lazy sources、artifact/preflight、session 与 physical audit
+    ├── training.py          microbatch backward、FairGrad、private gradients、diagnostics
+    ├── evaluation.py        fixed evaluation、bank digest、ablation、PCA replay
     ├── artifact.py          retained encoder 的严格下游 loader
     ├── provenance.py        physical realization 与 split-isolation 证据
     ├── batch.py             选 A^(k)、evidence、跨结构 padding、三块视图
@@ -44,13 +46,14 @@ batch 的三块信息流如下，模型前向只消费前两块，truth 进入 o
 - `readout_condition`：query、sigma、edge selectors
 - `truth`：distance/density/`κ`/`g`、物理有效、active/zero、provenance
 
-`StaticGeometryEvidence` 留在 model。`build_static_geometry_evidence()`、padding 和选 `A^(k)` 属于 `batch.py`。
+`StaticGeometryEvidence` 留在 model 的 `input_adapters/evidence.py`。`build_static_geometry_evidence()`、padding 和选
+`A^(k)` 属于 `batch.py`；method 通过 façade 调用，不把这些实现复制到 Trainer。
 
 ### 双项损失与采样
 
-每资产 8 套独立 anchor bank；同资产 q-block 共享并轮换；validation / independent q-bank / PPO 固定 `A^(0)`。`q` 来自完整 joint-limit Sobol，采样器保持原始构型测度。query 50/25/25；训练 sigma 4/16/64 mm ±10% jitter；validation 关闭 jitter。每有效 JOINT：train `1+1`，validation `4+4`。ancestor mask 只用于监督归约。
+每资产 8 套独立 anchor bank；同资产 q-block 共享并轮换；validation / independent q-bank / PPO 固定 `A^(0)`。`q` 来自完整 joint-limit Sobol，采样器保持原始构型测度。query 50/25/25；训练 sigma 4/16/64 mm ±10% jitter，validation 关闭 jitter。每个有效 JOINT、每个 q 固定 `2 active + 1 structural-zero`。ancestor mask 只用于监督归约。
 
-active loss 固定为 $L=L_\rho/B_\rho+L_\kappa/B_\kappa$。$B_\rho$ 是完整训练 teacher distribution 上逐 bandwidth-slot constant predictor，$B_\kappa$ 是复用 active/zero 归约的 zero predictor；epoch-0 network 与 query-only 不得替代。derived-field/JVP 仅属于手动 diagnostics。joint-sign rewrite 每个 `(asset,q)` 以 0.20 概率翻一个有效 JOINT；density/distance 不变，对应 `κ/g` 翻号。训练按 64 个样本建立普通参数梯度图，并用完整 512-pair optimizer minibatch denominator 精确分块反向；每 4 epoch 最后一次 update 额外记录 unified-Z gradient proxy，但不改变 vanilla update。
+run-local teacher baseline 只负责训练后归一化曲线，不进入 optimizer。density 使用 raw MSE，κ 使用固定 `0.1 m/rad` 无量纲残差；每个有效 JOINT、每个 q 固定 `2 active + 1 structural-zero`，active/zero 按 2:1 归约。joint-sign rewrite 每个 `(asset,q)` 以 0.20 概率翻一个有效 JOINT；density/distance 不变，对应 `κ/g` 翻号。训练按 64 个样本建立梯度图，以完整 512-pair denominator 分块反向；shared encoder 使用精确两任务 FairGrad，density/kappa readers 各自使用 private gradient，三个参数组分别裁剪。
 
 ## Common Operations And Tools
 

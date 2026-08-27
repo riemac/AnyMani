@@ -71,12 +71,14 @@ class PretrainRun:
         dataset_identity: Mapping[str, Any],
         resolved_config: Mapping[str, Any],
         declared_objective: Mapping[str, float],
-        calibration_artifact_hash: str = "",
-        teacher_baselines: Mapping[str, float] | None = None,
+        objective_formula: Mapping[str, str] | None = None,
+        fairgrad_formula: Mapping[str, Any] | None = None,
+        parameter_partition: Mapping[str, Any] | None = None,
+        source_artifact: Mapping[str, Any] | None = None,
         worktree_dirty: bool = False,
         worktree_fingerprint: str = "",
     ) -> Any:
-        r"""构造一次 pure-pretrain run 共用的 schema 7 checkpoint lineage。"""
+        r"""构造一次 pure-pretrain run 共用的 schema 8 checkpoint lineage。"""
 
         from anymani.distill.ssl.checkpoint import PretrainCheckpointMetadata
 
@@ -87,8 +89,10 @@ class PretrainRun:
             dataset_identity=dataset_identity,
             resolved_config=resolved_config,
             declared_objective=declared_objective,
-            calibration_artifact_hash=calibration_artifact_hash,
-            teacher_baselines=dict(teacher_baselines or {}),
+            objective_formula=dict(objective_formula or {}),
+            fairgrad_formula=dict(fairgrad_formula or {}),
+            parameter_partition=dict(parameter_partition or {}),
+            source_artifact=dict(source_artifact or {}),
             worktree_dirty=worktree_dirty,
             worktree_fingerprint=worktree_fingerprint,
         )
@@ -120,18 +124,20 @@ class PretrainRunCfg:
     resume_checkpoint: str = ""
     seed: int = 0  # model 初始化及各 role 派生 seed 的唯一根
     deterministic_algorithms: bool = True
-    phase: str = "pretrain"  # `calibrate_objectives` 或 `pretrain`
-    calibration_artifact: str = ""  # pretrain 必需的 schema-7 teacher baseline YAML
+    source_cache_root: str = "logs/ssl/_cache/geometry_source/v1"
+    source_cache_mode: str = "readonly"  # auto 先校验/补建 source，再以 readonly 训练
 
     def __post_init__(self) -> None:
-        r"""拒绝空 experiment identity、负随机种子和未知 phase。"""
+        r"""拒绝空 experiment identity、负随机种子和未知 source cache 模式。"""
 
         if not self.output_dir or not self.experiment_name:
             raise ValueError("pretraining run requires output_dir and experiment_name")
         if self.seed < 0:
             raise ValueError("pretraining run seed must be non-negative")
-        if self.phase not in {"calibrate_objectives", "pretrain"}:
-            raise ValueError("run.phase must be 'calibrate_objectives' or 'pretrain'")
+        if self.source_cache_mode not in {"auto", "readonly", "read-write", "off"}:
+            raise ValueError("source_cache_mode must be 'auto', 'readonly', 'read-write', or 'off'")
+        if self.source_cache_mode != "off" and not self.source_cache_root:
+            raise ValueError("source_cache_root is required unless source cache mode is off")
 
 
 __all__ = ["PretrainRun", "PretrainRunCfg"]

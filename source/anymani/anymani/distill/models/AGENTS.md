@@ -8,7 +8,9 @@
 models/
 ├── geometry_ssl.py                  retained encoder + SSL-only readers 组装
 ├── input_adapters/
-│   ├── geometry.py                  StaticGeometryEvidence、padding、build/pad evidence
+│   ├── geometry.py                  legacy compatibility exports
+│   ├── evidence.py                  StaticGeometryEvidence、routing、build/stack/pad evidence
+│   ├── encoder.py                   SO(2) anchor frontend 与 retained geometry encoder
 │   └── grouped_tokens.py            策略侧 grouped token adapter
 ├── backbones/
 │   ├── geometry_transformer.py      graph-biased encoder-only Transformer
@@ -21,7 +23,8 @@ models/
 └── temporal_encoder.py              tactile history；不属于 SSL geometry encoder
 ```
 
-`build_static_geometry_evidence()` 与跨结构 padding 的调用权在 `methods/.../batch.py`。本目录只定义 encoder 输入类型和实现。
+`build_static_geometry_evidence()` 与跨结构 padding 的调用权在 `methods/.../batch.py`。`evidence.py` 定义输入类型和静态
+routing/padding，`encoder.py` 定义可学习 frontend/backbone；`geometry.py` 只维持历史 import path，不新增实现。
 
 ## Development Style And Conventions
 

@@ -1,4 +1,4 @@
-r"""Schema-7 full checkpoint 的独立 held-out evaluation 命令行入口。
+r"""Schema-8 full checkpoint 的独立 held-out evaluation 命令行入口。
 
 运行入口：``python -m anymani.distill.ssl.evaluate``。只有显式提供 ``--baseline_checkpoint``
 时才执行训练形态 q-bank 前后对比。
@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .config_store import compose_evaluation_cfg
+from .experiments import DEFAULT_EXPERIMENT_NAME
 from .post_training import EmbodimentEvaluation
 
 
@@ -19,6 +20,7 @@ def _build_parser() -> argparse.ArgumentParser:
     r"""构造目标 checkpoint、可选 baseline 和固定评估资源的平坦 CLI。"""
 
     parser = argparse.ArgumentParser(description="Evaluate one AnyMani Geometry SSL checkpoint.")
+    parser.add_argument("--config", default=DEFAULT_EXPERIMENT_NAME)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--baseline_checkpoint", default="")
     parser.add_argument("--output_dir", default=None)
@@ -28,6 +30,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--q_per_asset_per_minibatch", type=int, default=None)
     parser.add_argument("--bootstrap_replicates", type=int, default=None)
     parser.add_argument("--max_resident_assets", type=int, default=None)
+    parser.add_argument("--source_cache_root", default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--deterministic_algorithms", action=argparse.BooleanOptionalAction, default=None)
@@ -38,7 +41,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
     r"""组合 canonical method/data，执行一次显式 held-out evaluation。"""
 
     args = _build_parser().parse_args(argv)
-    config = compose_evaluation_cfg()
+    config = compose_evaluation_cfg(config_ref=args.config)
     evaluation_updates = {
         name: getattr(args, name)
         for name in (
@@ -47,6 +50,7 @@ def main(argv: Sequence[str] | None = None) -> Path:
             "q_per_asset_per_minibatch",
             "bootstrap_replicates",
             "max_resident_assets",
+            "source_cache_root",
             "device",
         )
         if getattr(args, name) is not None

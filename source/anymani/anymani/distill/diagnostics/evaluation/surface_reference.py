@@ -73,8 +73,11 @@ def compare_warp_and_kaolin_distances(
         raise ValueError("owner_transforms_hg must align with [B,G] query axes")  # 不广播 owner pose
     if warmup_iterations < 0 or measured_iterations < 1:  # timing 离散域
         raise ValueError("reference timing iterations are invalid")  # 至少一个正式样本
-    if owner_cache.asset_content_hash != warp_cache.asset_content_hash:  # CPU/GPU 必须同资产
-        raise ValueError("CPU owner cache and Warp cache content hashes differ")  # 防止串 cache
+    if (
+        owner_cache.surface_geometry_hash != warp_cache.surface_geometry_hash
+        or owner_cache.surface_processing_version != warp_cache.surface_processing_version
+    ):  # limit-only variants 可共享同一 surface BVH，但不能跨物理 surface
+        raise ValueError("CPU owner cache and Warp cache surface identities differ")
     if len(owner_cache.records) != query_points_h.shape[1]:  # owner 数 $G$
         raise ValueError("owner cache axis does not match query owner axis")  # 不截断/重复
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -13,10 +14,13 @@ from anymani.distill.representations.fields.density import (
 from anymani.distill.representations.targets.field_samples import (
     FieldTargetBatch,
     QueryStratum,
+    SensitivityOwnerCategory,
+    SensitivitySamplingRole,
     SensitivityTargetBatch,
 )
 from anymani.distill.representations.targets.geometry_field import (
     GaussianProximityFieldCfg,
+    _sample_sensitivity_edges,
     fixed_validation_gaussian_field_config,
     sample_geometry_bandwidths,
 )
@@ -152,3 +156,75 @@ def test_field_target_batch_keeps_query_and_sampled_edge_axes_distinct() -> None
     assert targets.density.shape == (batch_size, owner_count, query_count, bandwidth_count)
     assert sensitivity.kappa.shape == (batch_size, 2)
     assert sensitivity.field_sensitivity.shape == (batch_size, 2, bandwidth_count)
+
+
+def test_q_specific_sensitivity_sampling_produces_two_active_and_one_zero_per_joint() -> None:
+    r"""绝对 q-index 驱动 owner/query 周期，每个 JOINT 每行必须恰有 2 active + 1 structural-zero。"""
+
+    batch_size, owner_count, query_count, joint_count = 8, 7, 6, 3
+    query_stratum = torch.tensor(
+        [QueryStratum.WORKSPACE] * 2 + [QueryStratum.OWNER_SHELL] * 2 + [QueryStratum.ADJACENT] * 2,
+        dtype=torch.long,
+    ).view(1, 1, query_count).expand(batch_size, owner_count, -1).clone()
+    queries = SimpleNamespace(query_stratum=query_stratum)
+    owner_ancestor_mask = torch.tensor(
+        [
+            [False, False, False],  # PALM
+            [True, False, False],  # finger-a JOINT 0 self
+            [True, True, False],  # finger-a JOINT 1，亦为 JOINT 0 other-descendant
+            [True, True, False],  # finger-a TIP
+            [False, False, True],  # finger-b JOINT 2 self
+            [False, False, True],  # finger-b TIP
+            [False, False, False],  # 另一非后代 owner，提供稳定 fallback
+        ]
+    )
+    spec = SimpleNamespace(
+        owner_ancestor_mask=owner_ancestor_mask,
+        owner_roles=("palm", "joint", "joint", "tip", "joint", "tip", "tip"),
+        owner_finger_names=(None, "a", "a", "a", "b", "b", "c"),
+        owner_joint_indices=(-1, 0, 1, -1, 2, -1, -1),
+    )
+
+    first = _sample_sensitivity_edges(
+        spec,
+        queries,
+        active_per_joint=2,
+        zero_per_joint=1,
+        sampling_seed=73,
+        q_index=torch.arange(batch_size),
+    )
+    repeated = _sample_sensitivity_edges(
+        spec,
+        queries,
+        active_per_joint=2,
+        zero_per_joint=1,
+        sampling_seed=73,
+        q_index=torch.arange(batch_size),
+    )
+    for actual, expected in zip(first, repeated, strict=True):
+        torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
+
+    owner, _query, joint, active, category, stratum, _fallback, role = first
+    assert owner.shape == joint.shape == active.shape == (batch_size, joint_count * 3)
+    ancestor = owner_ancestor_mask[owner, joint]
+    assert torch.equal(active, ancestor)
+    for joint_index in range(joint_count):
+        selected = joint == joint_index
+        assert torch.all((active & selected).sum(dim=1) == 2)
+        assert torch.all((~active & selected).sum(dim=1) == 1)
+    assert torch.all(role[:, 0::3] == int(SensitivitySamplingRole.ACTIVE_OWNER_SHELL))
+    assert torch.all(role[:, 1::3] == int(SensitivitySamplingRole.ACTIVE_CONTEXT))
+    assert torch.all(role[:, 2::3] == int(SensitivitySamplingRole.STRUCTURAL_ZERO))
+    assert torch.all(stratum[:, 0::3] == int(QueryStratum.OWNER_SHELL))
+    assert set(stratum[:, 1::3].reshape(-1).tolist()) == {
+        int(QueryStratum.ADJACENT),
+        int(QueryStratum.WORKSPACE),
+    }
+    assert set(stratum[:, 2::3].reshape(-1).tolist()) == {
+        int(QueryStratum.OWNER_SHELL),
+        int(QueryStratum.ADJACENT),
+        int(QueryStratum.WORKSPACE),
+    }
+    assert int(SensitivityOwnerCategory.SELF) in category
+    assert int(SensitivityOwnerCategory.SAME_FINGER_TIP) in category
+    assert int(SensitivityOwnerCategory.OTHER_DESCENDANT) in category

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,21 @@ def test_warp_geometry_targets_close_density_chain_and_kappa_finite_difference()
         warp_cache,
         queries,
         edge_sampling_seed=43,
+        q_index=torch.tensor(
+            [
+                next(
+                    index
+                    for index in range(10_000)
+                    if int.from_bytes(
+                        hashlib.sha256(f"source-audit-v1\0{geometry_cache.asset_id}\0{index}".encode()).digest()[:8],
+                        "little",
+                    )
+                    % 100
+                    == 0
+                )
+            ],
+            device=q.device,
+        ),
     )
     torch.cuda.synchronize()
 
@@ -87,16 +103,26 @@ def test_warp_geometry_targets_close_density_chain_and_kappa_finite_difference()
     assert field.density.shape == (1, 21, 64, 3)
     assert sensitivity.kappa.shape == (1, 32)
     assert sensitivity.field_sensitivity.shape == (1, 32, 3)
-    assert torch.count_nonzero(sensitivity.kappa[:, ~sensitivity.ancestor_mask]) == 0
-    assert torch.count_nonzero(sensitivity.field_sensitivity[:, ~sensitivity.ancestor_mask]) == 0
+    assert torch.count_nonzero(sensitivity.kappa[~sensitivity.ancestor_mask]) == 0
+    assert torch.count_nonzero(sensitivity.field_sensitivity[~sensitivity.ancestor_mask]) == 0
     assert sensitivity.provenance["global_second_nearest_margin"] == "not_materialized"
+    assert sensitivity.central_difference_valid_mask is not None
+    assert sensitivity.central_difference is not None
+    assert torch.count_nonzero(sensitivity.central_difference_valid_mask) > 0
+    audited = sensitivity.central_difference_valid_mask
+    torch.testing.assert_close(
+        sensitivity.central_difference[audited],
+        sensitivity.kappa[audited],
+        atol=3.0e-3,
+        rtol=3.0e-2,
+    )
 
     candidate = torch.where(sensitivity.valid_mask[0] & sensitivity.ancestor_mask)[0]
     assert len(candidate) > 0, "mother owner-shell queries should provide at least one locally smooth ancestor edge"
     edge = int(candidate[0])
-    owner_index = int(sensitivity.owner_index[edge])
-    query_index = int(sensitivity.query_index[edge])
-    joint_index = int(sensitivity.joint_index[edge])
+    owner_index = int(sensitivity.owner_index[0, edge])
+    query_index = int(sensitivity.query_index[0, edge])
+    joint_index = int(sensitivity.joint_index[0, edge])
     epsilon = 1.0e-4
     q_plus = q.clone()
     q_minus = q.clone()

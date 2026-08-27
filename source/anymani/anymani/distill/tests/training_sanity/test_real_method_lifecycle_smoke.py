@@ -5,8 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
+import yaml
 from anymani.assets.bank import HandContainer, HandContainerCfg
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field import (
     MultiAnchorGaussianMethod,
@@ -149,10 +151,10 @@ def _method_cfg() -> MultiAnchorGaussianMethodCfg:
             encoder=GeometryEncoderCfg(
                 frontend=SO2AnchorFrontendCfg(relation_width=16, home_width=16, screw_width=12),
                 backbone=GraphBiasedTransformerCfg(
-                    hidden_width=32,
+                    hidden_width=128,  # 事后 PCA smoke 需要 canonical Z width 与 32/64/96/128 ranks
                     layers=1,
                     attention_heads=4,
-                    feedforward_width=64,
+                    feedforward_width=128,
                     dropout=0.0,
                 ),
             ),
@@ -184,11 +186,11 @@ def _trainer_cfg() -> EmbodimentPretrainTrainerCfg:
 
 @_requires_assets
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="real Method lifecycle requires CUDA/Warp")
-def test_real_method_calibration_pretrain_validation_and_evaluation(
+def test_real_method_pretrain_validation_and_evaluation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """真实 teacher 分别完成 calibration、pure update、事后 selection 与 unseen evaluation。"""
+    """真实 teacher 完成 run-local baseline、FairGrad update、事后 selection 与 unseen evaluation。"""
 
     from anymani.distill.ssl.runtime import lifecycle
 
@@ -197,29 +199,29 @@ def test_real_method_calibration_pretrain_validation_and_evaluation(
     data_cfg = HandAssetCatalogCfg(manifest="real-method-lifecycle-smoke.yaml")
     method_cfg = _method_cfg()
     trainer_cfg = _trainer_cfg()
-    calibration_run_cfg = PretrainRunCfg(seed=71, phase="calibrate_objectives", deterministic_algorithms=False)
-    calibration_root = EmbodimentPretrainCfg(
-        data=data_cfg,
-        method=method_cfg,
-        trainer=trainer_cfg,
-        run=calibration_run_cfg,
+    source_cache_root = tmp_path / "source-cache"
+    preparer = MultiAnchorGaussianMethod(method_cfg)
+    preparer.configure_source_artifacts(
+        root=str(source_cache_root),
+        mode="read-write",
+        dataset_manifest_sha256=str(catalog.dataset.source_sha256),
+        producer_device="cuda:0",
     )
-    calibration_dir = tmp_path / "calibration"
-    fit_embodiment_pretrain(
-        trainer=EmbodimentPretrainTrainer(trainer_cfg),
-        data=_Data(catalog),
-        method=MultiAnchorGaussianMethod(method_cfg),
-        run=PretrainRun(calibration_run_cfg),
-        output_dir_override=calibration_dir,
-        resolved_config=resolved_config_dict(calibration_root),
-    )
-
-    artifact = calibration_dir / "teacher_baselines.yaml"
+    try:
+        preparer.prepare(catalog, device=torch.device("cuda:0"), dtype=torch.float32)
+        source_summary = preparer.prepare_source_artifacts(
+            device=torch.device("cuda:0"),
+            dtype=torch.float32,
+        )
+    finally:
+        preparer.close()
+    assert source_summary["base_count"] == 6
+    assert source_summary["anchor_shard_count"] == 6
     pretrain_run_cfg = PretrainRunCfg(
         seed=71,
-        phase="pretrain",
-        calibration_artifact=str(artifact),
         deterministic_algorithms=False,
+        source_cache_root=str(source_cache_root),
+        source_cache_mode="readonly",
     )
     pretrain_root = EmbodimentPretrainCfg(
         data=data_cfg,
@@ -237,7 +239,9 @@ def test_real_method_calibration_pretrain_validation_and_evaluation(
         resolved_config=resolved_config_dict(pretrain_root),
     )
 
-    assert artifact.is_file()
+    assert (pretrain_dir / "run_teacher_baselines.yaml").is_file()
+    assert (pretrain_dir / "metrics_finalized.jsonl").is_file()
+    assert (pretrain_dir / "train_dense_update_00000001.npz").is_file()
     assert (pretrain_dir / "checkpoints" / "epoch_000000.pt").is_file()
     assert (pretrain_dir / "checkpoints" / "epoch_000001.pt").is_file()
     assert (pretrain_dir / "checkpoints" / "last.pt").is_file()
@@ -249,6 +253,8 @@ def test_real_method_calibration_pretrain_validation_and_evaluation(
         assets_per_minibatch=1,
         q_per_asset_per_minibatch=1,
         max_resident_assets=2,
+        source_cache_root=str(source_cache_root),
+        source_cache_mode="readonly",
     )
     validation_run_cfg = ValidationRunCfg(
         baseline_checkpoint=str(pretrain_dir / "checkpoints" / "epoch_000000.pt"),
@@ -279,6 +285,8 @@ def test_real_method_calibration_pretrain_validation_and_evaluation(
         q_per_asset_per_minibatch=1,
         bootstrap_replicates=2,
         max_resident_assets=2,
+        source_cache_root=str(source_cache_root),
+        source_cache_mode="readonly",
     )
     evaluation_run_cfg = EvaluationRunCfg(
         checkpoint=str(validation_dir / "checkpoints" / "best.pt"),
@@ -301,5 +309,28 @@ def test_real_method_calibration_pretrain_validation_and_evaluation(
         resolved_config=resolved_post_training_config_dict(evaluation_root),
     )
     assert (evaluation_dir / "evaluation.yaml").is_file()
+    assert (evaluation_dir / "z_compression.yaml").is_file()
+    assert (evaluation_dir / "z_compression_basis.npz").is_file()
+    compression = yaml.safe_load((evaluation_dir / "z_compression.yaml").read_text(encoding="utf-8"))
+    assert compression["ranks"] == [32, 64, 96, 128]
+    assert len(compression["basis"]["basis_sha256"]) == 64
+    with np.load(evaluation_dir / compression["basis"]["artifact"], allow_pickle=False) as basis:
+        assert basis["mean"].shape == (128,)
+        assert basis["components"].shape == (128, 128)
+        assert basis["eigenvalues"].shape == (128,)
+    for suite in compression["suites"].values():
+        assert set(suite["ranks"]) == {"32", "64", "96", "128"}
+        assert suite["ranks"]["128"]["normalized_metric_scores"].keys() == {"density", "kappa"}
+    evaluation = yaml.safe_load((evaluation_dir / "evaluation.yaml").read_text(encoding="utf-8"))
+    audited_suites = 0
+    for suite in evaluation["suites"].values():
+        if "strata" not in suite:  # official_zero_shot 可显式为空
+            continue
+        audited_suites += 1
+        assert suite["strata"]["joint_sign_observable_audit"].keys() == {
+            "density_invariance_mse",
+            "kappa_sign_equivariance_mse",
+        }
+    assert audited_suites == 2
     assert not (evaluation_dir / "training_morphology_q_bank.yaml").exists()
     assert not (evaluation_dir / "retained_artifact.pt").exists()

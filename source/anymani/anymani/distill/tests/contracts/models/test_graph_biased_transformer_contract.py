@@ -21,10 +21,12 @@ def test_canonical_model_parameter_and_state_key_identity_is_frozen() -> None:
     model = GeometrySSLModel(GeometrySSLModelCfg())
     state_key_digest = hashlib.sha256("\n".join(model.state_dict()).encode()).hexdigest()
 
-    assert sum(parameter.numel() for parameter in model.parameters()) == 830537
-    assert sum(parameter.numel() for parameter in model.encoder.parameters()) == 317383
-    assert len(model.state_dict()) == 110
-    assert state_key_digest == "caae587745027a478656e5f060bfb3eb52ccee32847f68d69c95156558003350"
+    assert sum(parameter.numel() for parameter in model.parameters()) == 881096
+    assert sum(parameter.numel() for parameter in model.encoder.parameters()) == 582343
+    assert sum(parameter.numel() for parameter in model.density_decoder.parameters()) == 141185
+    assert sum(parameter.numel() for parameter in model.sensitivity_decoder.parameters()) == 157568
+    assert len(model.state_dict()) == 120
+    assert state_key_digest == "db7c376dedcc191eeff7c0290169e3e4cd60e458a3e34285190aa286bd2fe707"
     assert all(key.startswith("encoder.") for key in model.retained_state_dict())
 
 

@@ -8,6 +8,7 @@ r"""几何 SSL 的 TensorBoard、JSONL 与 dense NPZ 同步记录器。
 from __future__ import annotations
 
 import json  # JSONL 使用标准 JSON，保证每行可独立审计
+from collections.abc import Mapping
 from pathlib import Path  # 运行目录由 trainer 显式传入
 from typing import Any  # 标量记录包含字符串、列表与 float
 
@@ -83,31 +84,29 @@ class GeometrySSLRunLogger:
         terms: dict[str, float],  # 当前 update 的 rho/kappa raw $(asset,q)$ 等权 MSE
         denominators: dict[str, float],
         asset_ids: tuple[str, ...],  # `[B]` 路由身份
-        gradient_norm: float | None = None,  # train-only clip 前总范数
+        gradient_groups: dict[str, dict[str, Any]] | None = None,  # 三组独立 clip 前/后范数
         batch: PaddedOnlineGeometryBatch | None = None,  # q cursor provenance
-        total: float | None = None,  # baseline-normalized vanilla 总损失
-        normalized_terms: dict[str, float] | None = None,  # $L_j/B_j$
-        skills: dict[str, float] | None = None,  # $1-L_j/B_j$
-        baselines: dict[str, float] | None = None,  # 固定 $B_\rho,B_\kappa$
-        gradient_evidence: dict[str, float] | None = None,  # 每 4 epochs 的 unified-Z proxy
+        gradient_evidence: dict[str, float] | None = None,  # FairGrad 与每 4 epochs unified-Z proxy
         diagnostic_seconds: float = 0.0,  # 当前 update 的 proxy wall time；非 cadence 为 0
         diagnostics: dict[str, float] | None = None,  # active/zero、RMS 与 valid ratio
     ) -> None:
-        r"""记录 raw/normalized 双项损失、skill、资产路由和可选共享参数梯度范数。
+        r"""记录训练时可知的分任务 objective、资产路由、FairGrad 与分组裁剪事实。
 
-        ``density`` raw MSE 无量纲；``kappa`` raw MSE 单位为 $(m/rad)^2$。normalized loss 与 skill
-        无量纲，分母来自 run 固定的 teacher-only naive baseline，不是 epoch-0 网络。
+        ``density`` 是原始无量纲 MSE；``kappa`` 是物理残差除以 0.1 m/rad 后的无量纲 MSE。完整
+        teacher baseline 尚未闭合，因此本函数不写 normalized loss 或 skill；这些字段只进入独立的
+        ``metrics_finalized.jsonl``。
         """
 
         scalars = {f"raw/{name}": value for name, value in terms.items()}
-        scalars.update({f"normalized/{name}": value for name, value in (normalized_terms or {}).items()})
-        scalars.update({f"skill/{name}": value for name, value in (skills or {}).items()})
-        if total is not None:
-            scalars = {"normalized/total": float(total), **scalars}
         for name, value in scalars.items():  # TensorBoard 命名与 JSONL 字段保持同构
             self.writer.add_scalar(f"{split}_update/{name}", value, optimizer_update)
-        if gradient_norm is not None:  # validation 不反向，因此该字段为空
-            self.writer.add_scalar(f"{split}_update/gradient_norm", gradient_norm, optimizer_update)
+        for group_name, group in (gradient_groups or {}).items():
+            for field_name in ("pre_clip_norm", "post_clip_norm", "clip_ratio"):
+                self.writer.add_scalar(
+                    f"{split}_gradient/{group_name}/{field_name}",
+                    float(group[field_name]),
+                    optimizer_update,
+                )
         for name, value in (gradient_evidence or {}).items():
             self.writer.add_scalar(f"{split}_z_gradient/{name}", value, optimizer_update)
         for name, value in (diagnostics or {}).items():
@@ -127,7 +126,6 @@ class GeometrySSLRunLogger:
             "microbatches_consumed": microbatches_consumed,
             "wall_time_seconds": wall_time_seconds,
             "denominators": dict(denominators),
-            "baselines": dict(baselines or {}),
             "split": split,
             "asset_ids": list(asset_ids),
             "q_index": (
@@ -135,8 +133,8 @@ class GeometrySSLRunLogger:
             ),
             **scalars,
         }
-        if gradient_norm is not None:  # train record 才写入梯度证据
-            record["gradient_norm"] = gradient_norm  # 与 TensorBoard 数值相同
+        if gradient_groups:
+            record["gradient_groups"] = gradient_groups
         if gradient_evidence:
             record["z_gradient_evidence"] = dict(gradient_evidence)  # JSONL 保存与 TensorBoard 同源值
             record["z_gradient_diagnostic_seconds"] = diagnostic_seconds
@@ -144,6 +142,76 @@ class GeometrySSLRunLogger:
             record["diagnostics"] = dict(diagnostics)
         with self.jsonl_path.open("a", encoding="utf-8") as stream:  # 不覆盖此前 update
             stream.write(json.dumps(record, sort_keys=True) + "\n")  # 每条记录单行、可流式恢复
+
+    def finalize_training_metrics(
+        self,
+        *,
+        teacher_baselines: Mapping[str, object],
+        expected_optimizer_updates: int,
+        lineage_metrics_path: Path | None = None,
+    ) -> Path:
+        r"""用完整 run teacher distribution 重算固定 normalized error 与 skill。
+
+        原始 ``metrics.jsonl`` 保持字节不变。resume 时可把前序 run 的 JSONL 作为 lineage prefix；相同
+        update 重复、缺失或超出 ``1..expected_optimizer_updates`` 都 fail closed。
+        """
+
+        baselines: dict[str, float] = {}
+        for name in ("density", "kappa"):
+            record = teacher_baselines.get(name)
+            if not isinstance(record, Mapping):
+                raise ValueError(f"final teacher baseline lacks mapping for {name}")
+            value = record.get("baseline_mse")
+            if not isinstance(value, (float, int)) or float(value) <= 0.0:
+                raise ValueError(f"final teacher baseline {name}.baseline_mse must be positive")
+            baselines[name] = float(value)
+
+        sources = []
+        if lineage_metrics_path is not None and lineage_metrics_path.resolve() != self.jsonl_path.resolve():
+            sources.append(lineage_metrics_path)
+        sources.append(self.jsonl_path)
+        by_update: dict[int, dict[str, Any]] = {}
+        for source in sources:
+            if not source.is_file():
+                raise ValueError(f"training metric lineage file does not exist: {source}")
+            for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1):
+                record = json.loads(line)
+                update = record.get("optimizer_update")
+                if not isinstance(update, int):
+                    raise ValueError(f"metric record {source}:{line_number} lacks integer optimizer_update")
+                if update in by_update:
+                    raise ValueError(f"duplicate optimizer_update={update} in training metric lineage")
+                by_update[update] = record
+        expected = set(range(1, expected_optimizer_updates + 1))
+        if set(by_update) != expected:
+            missing = sorted(expected - set(by_update))
+            unexpected = sorted(set(by_update) - expected)
+            raise ValueError(
+                f"training metric lineage is not a complete update prefix: missing={missing[:8]}, "
+                f"unexpected={unexpected[:8]}"
+            )
+
+        output = self.output_dir / "metrics_finalized.jsonl"
+        temporary = output.with_suffix(output.suffix + ".tmp")
+        with temporary.open("w", encoding="utf-8") as stream:
+            for update in range(1, expected_optimizer_updates + 1):
+                raw = by_update[update]
+                normalized = {
+                    name: float(raw[f"raw/{name}"]) / baselines[name]
+                    for name in baselines
+                }
+                finalized = {
+                    **raw,
+                    "final_teacher_baselines": dict(baselines),
+                    **{f"normalized/{name}": value for name, value in normalized.items()},
+                    **{f"skill/{name}": 1.0 - value for name, value in normalized.items()},
+                }
+                stream.write(json.dumps(finalized, sort_keys=True) + "\n")
+                for name, value in normalized.items():
+                    self.writer.add_scalar(f"train_finalized/normalized/{name}", value, update)
+                    self.writer.add_scalar(f"train_finalized/skill/{name}", 1.0 - value, update)
+        temporary.replace(output)
+        return output
 
     def log_epoch_terms(
         self,
@@ -197,6 +265,13 @@ class GeometrySSLRunLogger:
         joint_valid = batch.evidence.joint_valid_mask  # `[B,20]`，真实 JOINT 槽
         if entity_valid is None or joint_valid is None:  # 本记录 schema 明确要求跨结构 mask
             raise ValueError("dense SSL snapshot requires padded entity/joint validity masks")
+        evidence_row_index = batch.evidence_row_index
+        if evidence_row_index is not None:
+            entity_valid = entity_valid[evidence_row_index]
+            joint_valid = joint_valid[evidence_row_index]
+            joint_entity_index = batch.evidence.joint_entity_index[evidence_row_index]
+        else:
+            joint_entity_index = batch.evidence.joint_entity_index
         path = self.output_dir / f"{split}_dense_update_{optimizer_update:08d}.npz"
         np.savez_compressed(  # dense arrays 较大，使用无损压缩保留逐元素误差
             path,  # 输出文件
@@ -216,6 +291,16 @@ class GeometrySSLRunLogger:
             entities=prediction.latents.entities.detach().cpu().numpy(),  # `[B,26,D]` unified $Z$
             entity_valid_mask=entity_valid.detach().cpu().numpy(),  # `[B,26]` bool
             joint_valid_mask=joint_valid.detach().cpu().numpy(),  # `[B,20]` bool
+            evidence_row_index=(
+                evidence_row_index.detach().cpu().numpy()
+                if evidence_row_index is not None
+                else np.arange(len(batch.asset_ids), dtype=np.int64)
+            ),
+            anchor_index=(
+                batch.anchor_index.detach().cpu().numpy()
+                if batch.anchor_index is not None
+                else np.zeros(len(batch.asset_ids), dtype=np.int64)
+            ),
             field_valid_mask=batch.field_targets.valid_mask.detach().cpu().numpy(),  # `[B,26,N_Q]`
             edge_valid_mask=batch.sensitivity_targets.valid_mask.detach().cpu().numpy(),  # `[B,E]`
             ancestor_mask=batch.sensitivity_targets.ancestor_mask.detach().cpu().numpy(),  # 祖先/非祖先
@@ -223,7 +308,7 @@ class GeometrySSLRunLogger:
             edge_owner_index=batch.sensitivity_targets.owner_index.detach().cpu().numpy(),  # sampled owner
             edge_query_index=batch.sensitivity_targets.query_index.detach().cpu().numpy(),  # sampled query
             edge_joint_index=batch.sensitivity_targets.joint_index.detach().cpu().numpy(),  # sampled JOINT
-            joint_entity_index=batch.evidence.joint_entity_index.detach().cpu().numpy(),  # JOINT view routing
+            joint_entity_index=joint_entity_index.detach().cpu().numpy(),  # `[B,N_J]` JOINT view routing
             closest_point_h_m=batch.sensitivity_targets.closest_point.detach().cpu().numpy(),  # `[B,E,3]`
             closest_source=batch.sensitivity_targets.closest_source.detach().cpu().numpy(),  # owner/face provenance
             uniqueness_margin_m=batch.sensitivity_targets.uniqueness_margin.detach().cpu().numpy(),  # smooth mask 证据
@@ -234,6 +319,26 @@ class GeometrySSLRunLogger:
             kappa_target=batch.sensitivity_targets.kappa.detach().cpu().numpy(),  # teacher κ，m/rad
             density_error=(prediction.density - batch.field_targets.density).detach().cpu().numpy(),  # 无量纲
             kappa_error=(prediction.kappa - batch.sensitivity_targets.kappa).detach().cpu().numpy(),  # m/rad
+            central_difference=(
+                batch.sensitivity_targets.central_difference.detach().cpu().numpy()
+                if batch.sensitivity_targets.central_difference is not None
+                else np.zeros_like(batch.sensitivity_targets.kappa.detach().cpu().numpy())
+            ),
+            central_difference_valid_mask=(
+                batch.sensitivity_targets.central_difference_valid_mask.detach().cpu().numpy()
+                if batch.sensitivity_targets.central_difference_valid_mask is not None
+                else np.zeros_like(batch.sensitivity_targets.valid_mask.detach().cpu().numpy())
+            ),
+            central_difference_plus_face=(
+                batch.sensitivity_targets.central_difference_plus_face.detach().cpu().numpy()
+                if batch.sensitivity_targets.central_difference_plus_face is not None
+                else np.full_like(batch.sensitivity_targets.closest_source.detach().cpu().numpy(), -1)
+            ),
+            central_difference_minus_face=(
+                batch.sensitivity_targets.central_difference_minus_face.detach().cpu().numpy()
+                if batch.sensitivity_targets.central_difference_minus_face is not None
+                else np.full_like(batch.sensitivity_targets.closest_source.detach().cpu().numpy(), -1)
+            ),
         )
         return path  # 调用者可记录或检查该 artifact
 

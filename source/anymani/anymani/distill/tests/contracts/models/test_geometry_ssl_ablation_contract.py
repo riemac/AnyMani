@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
 import torch
 from anymani.distill.diagnostics.evaluation.geometry_ssl import (
     cross_asset_permutation,
@@ -14,6 +17,7 @@ from anymani.distill.diagnostics.evaluation.geometry_ssl import (
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.decoders.representations.implicit_field import (
     ConditionalDensityDecoder,
+    DistanceSensitivityDecoder,
     DistanceSensitivityDecoderCfg,
     GeometrySSLDecoderCfg,
     ScalarSigmaFiLMDensityDecoderCfg,
@@ -22,8 +26,10 @@ from anymani.distill.models.geometry_ssl import GeometrySSLForward, GeometrySSLM
 from anymani.distill.models.input_adapters.geometry import (
     GeometryEncoderCfg,
     GeometryLatents,
+    GeometryPaddingCfg,
     SO2AnchorFrontendCfg,
     StaticGeometryEvidence,
+    pad_static_geometry_evidence,
 )
 
 
@@ -70,7 +76,12 @@ def _model() -> GeometrySSLModel:
             ),
             ssl_decoders=GeometrySSLDecoderCfg(
                 density=ScalarSigmaFiLMDensityDecoderCfg(hidden_width=16, residual_blocks=1),
-                sensitivity=DistanceSensitivityDecoderCfg(hidden_width=16, residual_blocks=3),
+                sensitivity=DistanceSensitivityDecoderCfg(
+                    hidden_width=16,
+                    residual_blocks=2,
+                    readout_rank=8,
+                    physical_scale_m=0.1,
+                ),
             ),
         )
     ).to(dtype=torch.float64)
@@ -210,31 +221,98 @@ def test_density_decoder_treats_sigma_as_a_variable_data_axis() -> None:
     assert repeated_sigma.grad is None
 
 
+def test_model_unique_evidence_rows_match_fully_expanded_reference() -> None:
+    r"""q-row routing必须同时覆盖 encoder、query anchors、mask 与 JOINT entity selector。"""
+
+    model = _model().eval()
+    first = _evidence()
+    second = replace(first, anchors=first.anchors + torch.tensor([0.004, -0.002, 0.001], dtype=torch.float64))
+    padding = GeometryPaddingCfg(max_joint_count=1, max_tip_count=1, max_graph_distance=8)
+    unique = pad_static_geometry_evidence((first, second), config=padding)
+    expanded = pad_static_geometry_evidence((first, first, second, second), config=padding)
+    row_index = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+    q = torch.tensor([[0.2], [-0.3], [0.1], [0.4]], dtype=torch.float64)
+    queries = torch.randn(4, 3, 4, 3, dtype=torch.float64) * 0.02
+    kwargs = {
+        "bandwidths": torch.tensor([0.004, 0.016], dtype=torch.float64),
+        "owner_index": torch.tensor([1]),
+        "query_index": torch.tensor([0]),
+        "joint_index": torch.tensor([0]),
+    }
+
+    routed = model(q, unique, queries, evidence_row_index=row_index, **kwargs)
+    reference = model(q, expanded, queries, **kwargs)
+
+    torch.testing.assert_close(routed.latents.entities, reference.latents.entities, atol=1.0e-12, rtol=1.0e-12)
+    torch.testing.assert_close(routed.query_features, reference.query_features, atol=1.0e-12, rtol=1.0e-12)
+    torch.testing.assert_close(routed.density, reference.density, atol=1.0e-12, rtol=1.0e-12)
+    torch.testing.assert_close(routed.kappa, reference.kappa, atol=1.0e-12, rtol=1.0e-12)
+
+
+def test_ablation_unique_evidence_rows_match_expanded_reference() -> None:
+    r"""默认 fixed-bank 的 B q-rows/A unique-assets routing 必须贯穿 ablation 全路径。"""
+
+    model = _model().eval()
+    first = _evidence()
+    second = replace(first, anchors=first.anchors + torch.tensor([0.004, -0.002, 0.001], dtype=torch.float64))
+    padding = GeometryPaddingCfg(max_joint_count=1, max_tip_count=1, max_graph_distance=8)
+    unique = pad_static_geometry_evidence((first, second), config=padding)
+    expanded = pad_static_geometry_evidence((first, first, second, second), config=padding)
+    row_index = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+    q = torch.tensor([[0.2], [-0.3], [0.1], [0.4]], dtype=torch.float64)
+    queries = torch.randn(4, 3, 4, 3, dtype=torch.float64) * 0.02
+    kwargs = {
+        "bandwidths": torch.tensor([0.004, 0.016], dtype=torch.float64),
+        "owner_index": torch.tensor([1]),
+        "query_index": torch.tensor([0]),
+        "joint_index": torch.tensor([0]),
+        "ablation": "query_only",
+    }
+
+    routed = geometry_ssl_ablation_forward(
+        model,
+        q,
+        unique,
+        queries,
+        evidence_row_index=row_index,
+        **kwargs,
+    )
+    reference = geometry_ssl_ablation_forward(model, q, expanded, queries, **kwargs)
+
+    torch.testing.assert_close(routed.query_features, reference.query_features, atol=1.0e-12, rtol=1.0e-12)
+    torch.testing.assert_close(routed.density, reference.density, atol=1.0e-12, rtol=1.0e-12)
+    torch.testing.assert_close(routed.kappa, reference.kappa, atol=1.0e-12, rtol=1.0e-12)
+
+
 def test_every_density_residual_block_reads_owner_latent_through_film() -> None:
-    r"""三层 canonical FiLM 路径必须各自拥有 $z_g^{(0)}\to(\gamma,\beta)$ 投影。"""
+    r"""两层 canonical FiLM 路径必须各自拥有 $z_g\to(\gamma,\beta)$ 投影。"""
 
     decoder = ConditionalDensityDecoder(
-        ScalarSigmaFiLMDensityDecoderCfg(hidden_width=16, residual_blocks=3),
+        ScalarSigmaFiLMDensityDecoderCfg(hidden_width=16, residual_blocks=2),
         entity_width=12,
         query_width=8,
     )
 
-    assert len(decoder.blocks) == 3
+    assert len(decoder.blocks) == 2
     assert all(block.modulation.in_features == 12 for block in decoder.blocks)
     assert all(block.modulation.out_features == 32 for block in decoder.blocks)
     assert {
         name for name in decoder.state_dict() if name.endswith("modulation.weight")
-    } == {f"blocks.{index}.modulation.weight" for index in range(3)}
+    } == {f"blocks.{index}.modulation.weight" for index in range(2)}
 
 
-def test_kappa_decoder_uses_query_main_and_owner_joint_film_without_sigma_or_screw() -> None:
-    r"""三个独立 FiLM blocks 必须同时依赖 $z_o,z_i$，并输出可正可负的无界 scalar。"""
+def test_kappa_decoder_uses_owner_query_row_and_joint_column_without_label_leakage() -> None:
+    r"""两层 owner-FiLM 与低秩 JOINT 列读取必须共同决定有物理单位的 signed scalar。"""
 
     model = _model()
     decoder = model.sensitivity_decoder
-    assert len(decoder.blocks) == 3
-    assert all(block.modulation.in_features == 32 for block in decoder.blocks)  # $2D=2\times16$
-    assert decoder.output.out_features == 1
+    assert len(decoder.blocks) == 2
+    assert all(block.modulation.in_features == 16 for block in decoder.blocks)
+    assert decoder.row_projection.out_features == 8
+    assert decoder.joint_projection.out_features == 8
+    assert decoder.row_projection.bias is None
+    assert decoder.joint_projection.bias is None
+    assert not hasattr(decoder, "output")
     assert not any("sigma" in name or "screw" in name for name, _module in decoder.named_modules())
 
     owner = torch.randn(2, 4, 16, dtype=torch.float64, requires_grad=True)
@@ -247,6 +325,31 @@ def test_kappa_decoder_uses_query_main_and_owner_joint_film_without_sigma_or_scr
     assert owner.grad is not None and torch.count_nonzero(owner.grad) > 0
     assert joint.grad is not None and torch.count_nonzero(joint.grad) > 0
     assert query.grad is not None and torch.count_nonzero(query.grad) > 0
+
+
+@pytest.mark.parametrize("seed", [3, 17, 101])
+def test_kappa_decoder_initial_output_has_declared_physical_rms(seed: int) -> None:
+    r"""低秩双侧小非零初始化应把初始 $\hat\kappa$ RMS 锚定在 0.0125 m/rad 附近。"""
+
+    torch.manual_seed(seed)
+    decoder = DistanceSensitivityDecoder(
+        DistanceSensitivityDecoderCfg(
+            hidden_width=128,
+            residual_blocks=2,
+            readout_rank=64,
+            physical_scale_m=0.1,
+        ),
+        entity_width=128,
+        query_width=64,
+    )
+    owner = torch.randn(32, 96, 128)
+    joint = torch.randn(32, 96, 128)
+    query = torch.randn(32, 96, 64)
+
+    prediction = decoder(owner, joint, query)
+    rms = float(prediction.square().mean().sqrt())
+
+    assert 0.00625 <= rms <= 0.025, f"initial kappa RMS={rms:.6g} m/rad is outside declared range"
 
 
 def test_manual_observable_rewrite_jvp_and_parameter_gradient_probes() -> None:

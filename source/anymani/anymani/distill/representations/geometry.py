@@ -22,14 +22,17 @@ from anymani.distill.representations.queries.spatial_sampling import (
     materialize_owner_surface_sampling_cache,
     sample_spatial_queries,
 )
-from anymani.distill.representations.sources.collision_geometry import AnchorClassificationStats
+from anymani.distill.representations.sources.anchor_sampling import AnchorClassificationStats
 from anymani.distill.representations.sources.geometry_source import (
     DeviceGeometrySource,
     GeometrySource,
     GeometrySourceCfg,
     GeometrySourceCore,
 )
-from anymani.distill.representations.sources.kinematics import EmbodimentGeometrySpec
+from anymani.distill.representations.sources.kinematics import (
+    EmbodimentGeometrySpec,
+    forward_owner_transforms_and_spatial_screws,
+)
 from anymani.distill.representations.targets.field_samples import (  # 类型化 $d/\\rho/\\kappa/g$ targets
     FieldTargetBatch,
     SensitivityTargetBatch,
@@ -62,6 +65,12 @@ class GeometryRepresentationState:
     device_source: DeviceGeometrySource  # GPU POE 与 Warp BVH lease
     surface_sampling: OwnerSurfaceSamplingCache  # owner triangle/normal/area proposal tables
     anchor_classification: AnchorClassificationStats | None = None  # CUDA finalization 证据；CPU source 为 None
+
+    @property
+    def anchor_realization(self):
+        r"""返回 selected hot-path realization；legacy full source 为 ``None``。"""
+
+        return self.source.anchor_realization
 
     @property
     def spec(self) -> EmbodimentGeometrySpec:
@@ -104,12 +113,14 @@ class GeometryRepresentation:
         *,
         device: torch.device | str,
         dtype: torch.dtype,
+        bank_index: int = 0,
     ) -> GeometryRepresentationState:
         r"""构造一项资产的 device source 与 surface proposal；core 输入同时完成 GPU anchors。"""
 
         if isinstance(source, GeometrySourceCore):
-            finalized, device_source, anchor_stats = source.finalize_on_device(
+            finalized, device_source, anchor_stats = source.finalize_selected_on_device(
                 config=self.config.source,
+                bank_index=bank_index,
                 device=device,
                 dtype=dtype,
             )
@@ -117,14 +128,33 @@ class GeometryRepresentation:
             finalized = source
             device_source = source.to_device(device=device, dtype=dtype)
             anchor_stats = None
+        return self.assemble_device_state(
+            finalized,
+            device_source,
+            anchor_stats=anchor_stats,
+            device=device,
+            dtype=dtype,
+        )
+
+    @staticmethod
+    def assemble_device_state(
+        source: GeometrySource,
+        device_source: DeviceGeometrySource,
+        *,
+        anchor_stats: AnchorClassificationStats | None,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> GeometryRepresentationState:
+        r"""把已解析 anchor/source/device lease 组装为 query/teacher state。"""
+
         try:
-            target_device = torch.device(device)
             surface_sampling = materialize_owner_surface_sampling_cache(
-                finalized.geometry_cache,
-                device=target_device,
+                source.geometry_cache,
+                device=torch.device(device),
                 dtype=dtype,
+                arrays=source.surface_sampling_arrays,
             )
-            return GeometryRepresentationState(finalized, device_source, surface_sampling, anchor_stats)
+            return GeometryRepresentationState(source, device_source, surface_sampling, anchor_stats)
         except Exception:
             device_source.release()
             raise
@@ -190,14 +220,27 @@ def sample_online_geometry(
         raise ValueError("q_index must have shape [Q] matching the asset q block")
     bank = state.source.anchor_bank
     if not bank:
-        raise ValueError("geometry source is missing its physical anchor bank")
-    if not 0 <= int(anchor_index) < len(bank):
-        raise IndexError(f"anchor_index={anchor_index} is outside bank size {len(bank)}")
+        raise ValueError("geometry source is missing its physical anchor realization")
+    realization = state.anchor_realization
+    if realization is not None:
+        if int(anchor_index) != realization.bank_index:
+            raise IndexError(
+                f"requested anchor_index={anchor_index} does not match resident bank={realization.bank_index}"
+            )
+        selected_anchors = realization.samples
+    else:
+        if not 0 <= int(anchor_index) < len(bank):
+            raise IndexError(f"anchor_index={anchor_index} is outside bank size {len(bank)}")
+        selected_anchors = bank[int(anchor_index)]
     anchors = torch.as_tensor(
-        bank[int(anchor_index)].anchors_hand_m,
+        selected_anchors.anchors_hand_m,
         device=q.device,
         dtype=q.dtype,
     )  # `[K,3]`，`{h}`，m；$A^{(k)}$ 只改变 workspace 测度
+    owner_transforms, current_spatial_screws = forward_owner_transforms_and_spatial_screws(
+        state.spec,
+        q.detach(),
+    )  # 主路径一次 q-block FK，同时得到 Jacobian 所需当前 screw
     queries = sample_spatial_queries(
         q,
         state.spec,
@@ -205,6 +248,7 @@ def sample_online_geometry(
         anchors,
         config=query_config,
         sampling_seed=sampling_seed,
+        owner_transforms=owner_transforms,
     )
     field_targets, sensitivity_targets = generate_geometry_field_targets(  # GPU Warp teacher
         q,  # 当前 owner transforms/Jacobian；同一资产一次处理 Q 个构型
@@ -216,6 +260,9 @@ def sample_online_geometry(
         target_config=target_config,  # sampled edges/margins
         edge_sampling_seed=sampling_seed,  # sampled `(g,r,i)` realization
         supervision_split=supervision_split,  # train 1+1 / validation 4+4
+        owner_transforms=owner_transforms,
+        current_spatial_screws=current_spatial_screws,
+        q_index=q_index,
     )
     return PhysicalOnlineGeometrySample(
         asset_id=state.source.asset_id,

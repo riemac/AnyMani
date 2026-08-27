@@ -13,7 +13,7 @@ from typing import Any
 
 import torch
 
-CHECKPOINT_SCHEMA_VERSION = "7.0.0"
+CHECKPOINT_SCHEMA_VERSION = "8.0.0"
 
 
 @dataclass(frozen=True)
@@ -26,8 +26,10 @@ class PretrainCheckpointMetadata:
     dataset_identity: Mapping[str, Any]
     resolved_config: Mapping[str, Any]
     declared_objective: Mapping[str, float]
-    calibration_artifact_hash: str = ""
-    teacher_baselines: Mapping[str, float] = field(default_factory=dict)
+    objective_formula: Mapping[str, str] = field(default_factory=dict)
+    fairgrad_formula: Mapping[str, Any] = field(default_factory=dict)
+    parameter_partition: Mapping[str, Any] = field(default_factory=dict)
+    source_artifact: Mapping[str, Any] = field(default_factory=dict)
     worktree_dirty: bool = False
     worktree_fingerprint: str = ""
 

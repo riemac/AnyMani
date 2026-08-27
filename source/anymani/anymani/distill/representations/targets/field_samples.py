@@ -44,6 +44,27 @@ class QueryStratum(IntEnum):
     ADJACENT = 2  # 同指邻接归属体表面或刚体间隙
 
 
+class SensitivityOwnerCategory(IntEnum):
+    r"""一阶 edge owner 相对当前 JOINT 的运动学/手指类别。"""
+
+    SELF = 0
+    SAME_FINGER_TIP = 1
+    OTHER_DESCENDANT = 2
+    PALM = 3
+    SAME_FINGER_UPSTREAM = 4
+    OTHER_FINGER_JOINT = 5
+    OTHER_FINGER_TIP = 6
+    FALLBACK = 7
+
+
+class SensitivitySamplingRole(IntEnum):
+    """三条训练 edge 的固定语义槽。"""
+
+    ACTIVE_OWNER_SHELL = 0
+    ACTIVE_CONTEXT = 1
+    STRUCTURAL_ZERO = 2
+
+
 @dataclass(frozen=True)
 class FieldTargetBatch:
     r"""逐归属体多带宽零阶监督。
@@ -116,6 +137,15 @@ class SensitivityTargetBatch:
     kappa: torch.Tensor  # `[B,E]`，m/rad
     field_sensitivity: torch.Tensor  # `[B,E,N_sigma]`，1/rad
     valid_mask: torch.Tensor  # `[B,E]`
+    owner_category: torch.Tensor | None = None  # `[E]`/`[B,E]`，实际 owner 类别
+    query_stratum: torch.Tensor | None = None  # `[E]`/`[B,E]`，该 edge 读取的物理 query 来源
+    fallback_category: torch.Tensor | None = None  # `-1` 表示未 fallback，否则为请求类别
+    sampling_role: torch.Tensor | None = None  # active-shell / active-context / structural-zero
+    central_difference: torch.Tensor | None = None  # `[B,E]`，固定 `{h}` query 的 q± 数值导数，m/rad
+    central_difference_valid_mask: torch.Tensor | None = None  # `[B,E]`，1% row 且 q± 均在 limits 内
+    central_difference_plus_face: torch.Tensor | None = None  # `[B,E]`，q+ 最近 union face
+    central_difference_minus_face: torch.Tensor | None = None  # `[B,E]`，q- 最近 union face
+    central_difference_elapsed_seconds: float = 0.0  # 当前 q-block 的 q± FK + Warp query host wall time
     provenance: Mapping[str, str] = field(default_factory=dict)  # 最近点、mask、frame 与单位定义
 
     def __post_init__(self) -> None:
@@ -138,6 +168,14 @@ class SensitivityTargetBatch:
         ):
             if selector.shape != selector_shape:
                 raise ValueError(f"{name} must share selector shape {selector_shape}, got {tuple(selector.shape)}")
+        for name, label in (
+            ("owner_category", self.owner_category),
+            ("query_stratum", self.query_stratum),
+            ("fallback_category", self.fallback_category),
+            ("sampling_role", self.sampling_role),
+        ):
+            if label is not None and (label.shape != selector_shape or label.dtype != torch.long):
+                raise ValueError(f"{name} must have long selector shape {selector_shape}")
         if self.closest_point.ndim != 3 or self.closest_point.shape[1:] != (edge_count, 3):
             raise ValueError("closest_point must have shape [B,E,3]")
         batch_size = self.closest_point.shape[0]  # minibatch 大小 $B$
@@ -152,6 +190,18 @@ class SensitivityTargetBatch:
         ):
             if value.shape != edge_shape:
                 raise ValueError(f"{name} must have shape [B,E]={edge_shape}, got {tuple(value.shape)}")
+        for name, value in (
+            ("central_difference", self.central_difference),
+            ("central_difference_valid_mask", self.central_difference_valid_mask),
+            ("central_difference_plus_face", self.central_difference_plus_face),
+            ("central_difference_minus_face", self.central_difference_minus_face),
+        ):
+            if value is not None and value.shape != edge_shape:
+                raise ValueError(f"{name} must have shape [B,E]={edge_shape}")
+        if self.central_difference_valid_mask is not None and self.central_difference_valid_mask.dtype != torch.bool:
+            raise TypeError("central_difference_valid_mask must use torch.bool")
+        if self.central_difference_elapsed_seconds < 0.0:
+            raise ValueError("central_difference_elapsed_seconds must be non-negative")
         if self.field_sensitivity.ndim != 3 or self.field_sensitivity.shape[:2] != edge_shape:
             raise ValueError("field_sensitivity must have shape [B,E,L]")
         if self.ancestor_mask.dtype != torch.bool or self.active_mask.dtype != torch.bool or self.valid_mask.dtype != torch.bool:
@@ -176,4 +226,10 @@ class SensitivityTargetBatch:
             raise ValueError("SensitivityTargetBatch provenance must declare frame='h', distance_unit='m', joint_unit='rad'")
 
 
-__all__ = ["FieldTargetBatch", "QueryStratum", "SensitivityTargetBatch"]
+__all__ = [
+    "FieldTargetBatch",
+    "QueryStratum",
+    "SensitivityOwnerCategory",
+    "SensitivitySamplingRole",
+    "SensitivityTargetBatch",
+]

@@ -151,12 +151,12 @@ def test_canonical_retained_encoder_p95_is_at_most_40_ms() -> None:
         }
     )
 
-    assert parameter_count == 317383
+    assert parameter_count == 582343
     assert p95_ms <= 40.0, f"retained encoder p95={p95_ms:.3f} ms exceeds 40 ms sub-budget"
 
 
 def test_ssl_only_decoder_cost_is_reported_outside_retained_budget() -> None:
-    r"""按正式 $B=4,G=21,N_Q=64,N_\sigma=3,E=42$ 报告 disposable readers 前向成本。"""
+    r"""按正式 $B=4,G=21,N_Q=64,N_\sigma=3,E=48$ 报告 disposable readers 前向成本。"""
 
     if not torch.cuda.is_available():
         pytest.skip("SSL-only decoder profile requires CUDA")
@@ -169,9 +169,9 @@ def test_ssl_only_decoder_cost_is_reported_outside_retained_budget() -> None:
     latents = GeometryLatents(entities=torch.randn(4, 21, 128, device=device))
     query_features = torch.randn(4, 21, 64, 64, device=device)
     bandwidths = torch.tensor([0.004, 0.016, 0.064], device=device).expand(4, -1)
-    owner_index = torch.arange(42, device=device) % 21
-    query_index = torch.arange(42, device=device) % 64
-    joint_index = torch.arange(42, device=device) % 16
+    owner_index = torch.arange(48, device=device) % 21
+    query_index = torch.arange(48, device=device) % 64
+    joint_index = torch.arange(48, device=device) % 16
 
     def forward_decoders() -> None:
         model.decode_latents(
@@ -216,5 +216,5 @@ def test_ssl_only_decoder_cost_is_reported_outside_retained_budget() -> None:
             "peak_memory_mib": torch.cuda.max_memory_allocated(device) / (1024.0**2),
         }
     )
-    assert decoder_parameter_count == 513154
+    assert decoder_parameter_count == 298753
     assert all(key.startswith("encoder.") for key in model.retained_state_dict())

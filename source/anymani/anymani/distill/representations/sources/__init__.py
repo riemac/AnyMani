@@ -13,10 +13,16 @@ source 的最小输入。它们可能属于下游 policy observation，但不能
 泄漏进 SSL partial input。
 """
 
+from .anchor_sampling import (
+    AnchorClassificationStats,
+    AnchorRealization,
+    AnchorSamples,
+    sample_palm_anchor_bank_warp,
+    sample_palm_anchor_realization_warp,
+    sample_palm_anchor_supports,
+)
 from .cache import GeometrySourceArena, geometry_source_array_nbytes
 from .collision_geometry import (
-    AnchorClassificationStats,
-    AnchorSamples,
     GeometryIdentity,
     HomeSurfaceSamples,
     OwnerGeometryCache,
@@ -27,13 +33,12 @@ from .collision_geometry import (
     materialize_warp_owner_geometry_cache,
     release_warp_owner_geometry_cache,
     sample_owner_home_surfaces,
-    sample_palm_anchor_bank_warp,
-    sample_palm_anchor_supports,
 )
 from .geometry_source import DeviceGeometrySource, GeometrySource, GeometrySourceCfg, GeometrySourceCore
 from .kinematics import (
     EmbodimentGeometrySpec,
     forward_owner_transforms,
+    forward_owner_transforms_and_spatial_screws,
     lower_hand_geometry_semantics,
     selected_point_jacobian,
     transform_owner_points,
@@ -41,6 +46,7 @@ from .kinematics import (
 
 __all__ = [
     "AnchorClassificationStats",
+    "AnchorRealization",
     "AnchorSamples",
     "EmbodimentGeometrySpec",
     "DeviceGeometrySource",
@@ -54,6 +60,7 @@ __all__ = [
     "OwnerSurfaceRecord",
     "WarpOwnerGeometryCache",
     "forward_owner_transforms",
+    "forward_owner_transforms_and_spatial_screws",
     "geometry_identity",
     "geometry_source_array_nbytes",
     "lower_hand_geometry_semantics",
@@ -62,6 +69,7 @@ __all__ = [
     "release_warp_owner_geometry_cache",
     "sample_owner_home_surfaces",
     "sample_palm_anchor_bank_warp",
+    "sample_palm_anchor_realization_warp",
     "sample_palm_anchor_supports",
     "selected_point_jacobian",
     "transform_owner_points",

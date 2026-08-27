@@ -104,6 +104,7 @@ class GeometrySSLModel(nn.Module):
         owner_index: torch.Tensor,  # `[E]`/`[B,E]`
         query_index: torch.Tensor,  # `[E]`/`[B,E]`
         joint_index: torch.Tensor,  # `[E]`/`[B,E]`
+        evidence_row_index: torch.Tensor | None = None,  # `[B]` q 行到 unique evidence table
     ) -> GeometrySSLForward:
         r"""完成 retained 编码和两个 training-only 预测头。
 
@@ -123,10 +124,14 @@ class GeometrySSLModel(nn.Module):
         owner_count = evidence.entity_role.shape[-1]  # $G$；batched/unbatched role 都读尾轴
         if query_points_h.ndim != 4 or query_points_h.shape[:2] != (q.shape[0], owner_count):  # `[B,G]`
             raise ValueError("query_points_h must have shape [B,G,N_Q,3] matching q/evidence")  # 不广播
-        latents = self.encoder(q, evidence)  # retained path；q/π 链式因子保留在计算图
-        query_features = self.encoder.encode_points(query_points_h.detach(), evidence)  # 不反传到 sampler
+        latents = self.encoder(q, evidence, evidence_row_index)  # retained path；静态 evidence 可按资产去重
+        query_features = self.encoder.encode_points(
+            query_points_h.detach(), evidence, evidence_row_index
+        )  # query 点已有 q-row 轴，anchors/normal 通过同一 row index 路由
         entity_valid = evidence.entity_valid_mask  # `[B,G]`/`[G]` 或原生可变长时 None
         if entity_valid is not None:  # padding container 才需要显式零化
+            if evidence_row_index is not None and entity_valid.ndim == 2:
+                entity_valid = entity_valid[evidence_row_index]
             if entity_valid.ndim == 1:  # 同结构 batch 共享实体 mask
                 entity_valid = entity_valid.unsqueeze(0).expand(q.shape[0], -1)  # `[B,G]` view
             query_features = query_features * entity_valid.unsqueeze(-1).unsqueeze(-1)  # invalid owner 精确零
@@ -135,7 +140,11 @@ class GeometrySSLModel(nn.Module):
             query_features,  # `[B,G,N_Q,D_q]`
             bandwidths=bandwidths,  # 显式 sigma 数据轴
             entity_valid_mask=entity_valid,  # padding owner mask
-            joint_entity_index=evidence.joint_entity_index,  # JOINT 坐标到统一 entity 轴的静态路由
+            joint_entity_index=(
+                evidence.joint_entity_index[evidence_row_index]
+                if evidence_row_index is not None and evidence.joint_entity_index.ndim == 2
+                else evidence.joint_entity_index
+            ),  # JOINT 坐标到 unified entity 轴的 q-row 路由
             owner_index=owner_index,  # sampled owner
             query_index=query_index,  # sampled query
             joint_index=joint_index,  # sampled JOINT
@@ -167,11 +176,16 @@ class GeometrySSLModel(nn.Module):
         if owner_index.ndim not in {1, 2} or query_index.shape != owner_index.shape or joint_index.shape != owner_index.shape:
             raise ValueError("owner/query/joint selectors must share [E] or [B,E] shape")
         if owner_index.ndim == 1:
-            if joint_entity_index.ndim != 1:
-                raise ValueError("shared selectors require shared joint_entity_index")
             owner_latent = entities.index_select(1, owner_index)  # `[B,E,D]` 的 $z_o$
-            joint_entities = joint_entity_index.index_select(0, joint_index)  # edge JOINT -> entity slot
-            joint_latent = entities.index_select(1, joint_entities)  # `[B,E,D]` 的 $z_i$
+            if joint_entity_index.ndim == 1:
+                joint_entities = joint_entity_index.index_select(0, joint_index)  # edge JOINT -> entity slot
+                joint_latent = entities.index_select(1, joint_entities)  # `[B,E,D]` 的 $z_i$
+            elif joint_entity_index.ndim == 2 and joint_entity_index.shape[0] == entities.shape[0]:
+                batch_index = torch.arange(entities.shape[0], device=entities.device).unsqueeze(1)
+                joint_entities = joint_entity_index[:, joint_index]
+                joint_latent = entities[batch_index, joint_entities]
+            else:
+                raise ValueError("joint_entity_index must have shape [N_J] or [B,N_J]")
             selected_query = query_features[:, owner_index, query_index]  # `[B,E,D_q]`
         else:
             if owner_index.shape[0] != entities.shape[0] or joint_entity_index.ndim != 2:

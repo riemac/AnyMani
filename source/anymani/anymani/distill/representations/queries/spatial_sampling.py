@@ -69,7 +69,11 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from anymani.distill.representations.sources.collision_geometry import OwnerGeometryCache
+from anymani.distill.representations.sources.collision_geometry import (
+    OwnerGeometryCache,
+    OwnerSurfaceSamplingArrays,
+    prepare_owner_surface_sampling_arrays,
+)
 from anymani.distill.representations.sources.kinematics import EmbodimentGeometrySpec, forward_owner_transforms
 
 from ..targets.field_samples import QueryStratum
@@ -157,6 +161,7 @@ def materialize_owner_surface_sampling_cache(
     *,
     device: torch.device | str,
     dtype: torch.dtype,
+    arrays: OwnerSurfaceSamplingArrays | None = None,
 ) -> OwnerSurfaceSamplingCache:
     r"""把 CPU owner union surface 物化为 GPU 在线采样所需的最小静态测度。
 
@@ -169,17 +174,18 @@ def materialize_owner_surface_sampling_cache(
         OwnerSurfaceSamplingCache: owner-local triangle、normal 与 area CDF tuples。
     """
 
+    source_arrays = arrays if arrays is not None else prepare_owner_surface_sampling_arrays(cache)
+    if len(source_arrays.triangles_owner_local_m) != len(cache.records):
+        raise ValueError("owner surface sampling array count must match geometry cache")
     triangles: list[torch.Tensor] = []  # owner 之间 face 数可变，不能伪 padding 后再采样
     normals: list[torch.Tensor] = []  # face normal 与 triangle 轴逐项同序
     cdfs: list[torch.Tensor] = []  # 面积 categorical 的逆 CDF 路径
-    for record in cache.records:
-        surface = record.surface_mesh  # CPU float64 真值，只在 device materialization 边界读取
-        triangle = torch.as_tensor(np.array(surface.triangles, copy=True), device=device, dtype=dtype)
-        normal = torch.as_tensor(np.array(surface.face_normals, copy=True), device=device, dtype=dtype)
-        area = torch.as_tensor(np.array(surface.area_faces, copy=True), device=device, dtype=dtype)
-        if triangle.ndim != 3 or triangle.shape[1:] != (3, 3) or torch.any(area <= 0.0):
+    for owner_index, record in enumerate(cache.records):
+        triangle = torch.tensor(source_arrays.triangles_owner_local_m[owner_index], device=device, dtype=dtype)
+        normal = torch.tensor(source_arrays.face_normals_owner_local[owner_index], device=device, dtype=dtype)
+        cdf = torch.tensor(source_arrays.face_area_cdf[owner_index], device=device, dtype=dtype)
+        if triangle.ndim != 3 or triangle.shape[1:] != (3, 3) or cdf.ndim != 1:
             raise ValueError(f"owner {record.owner_id!r} surface sampling cache requires positive triangles")
-        cdf = torch.cumsum(area / area.sum(), dim=0)  # $P(f\le j)=\sum_{i\le j}A_i/\sum_iA_i$
         cdf[-1] = 1.0  # 消除浮点累计误差，保证 $u<1$ 总能映射到最后一个 face
         triangles.append(triangle.contiguous())  # `[F_g,3,3]` owner-local，m
         normals.append(normal.contiguous())  # `[F_g,3]` owner-local 单位向量
@@ -195,6 +201,7 @@ def sample_spatial_queries(
     *,
     config: SpatialQuerySamplerCfg = SpatialQuerySamplerCfg(),
     sampling_seed: int = 0,
+    owner_transforms: torch.Tensor | None = None,
 ) -> SpatialQueryBatch:
     r"""为一个同资产 q 子批次生成在线 anchor/surface/adjacent query。
 
@@ -226,7 +233,18 @@ def sample_spatial_queries(
     workspace_count, shell_count, adjacent_count = config.stratum_counts
     generator = torch.Generator(device=q.device)
     generator.manual_seed(int(sampling_seed))
-    owner_transforms = forward_owner_transforms(spec, q.detach())  # query sampling不保留q梯度
+    if owner_transforms is None:
+        owner_transforms = forward_owner_transforms(spec, q.detach())  # 独立调用保留旧行为
+    expected_transform_shape = (batch_size, owner_count, 4, 4)
+    if (
+        owner_transforms.shape != expected_transform_shape
+        or owner_transforms.device != q.device
+        or owner_transforms.dtype != q.dtype
+        or owner_transforms.requires_grad
+    ):
+        raise ValueError(
+            "owner_transforms must be detached [B,G,4,4] on the same device/dtype as q"
+        )
     workspace, workspace_anchor = _sample_anchor_workspace_queries(
         anchors_hand_m.to(device=q.device, dtype=q.dtype),
         batch_size=batch_size,

@@ -1,6 +1,6 @@
 r"""Geometry SSL 事后 validation/evaluation 的独立声明配置与 façade。
 
-训练配置不包含本模块的任何字段。两个阶段只消费已经完成的 schema-7 full checkpoint，
+训练配置不包含本模块的任何字段。两个阶段只消费已经完成的 schema-8 full checkpoint，
 不会创建 optimizer、改变参数或回写源训练目录。
 """
 
@@ -34,6 +34,8 @@ class ValidationCfg:
     max_resident_assets: int = 64
     device: str = "cuda:0"
     dtype: str = "float32"
+    source_cache_root: str = "logs/ssl/_cache/geometry_source/v1"
+    source_cache_mode: str = "readonly"
 
     def __post_init__(self) -> None:
         r"""验证固定 q-bank、selection 指标和资源上限。"""
@@ -51,6 +53,7 @@ class ValidationCfg:
         if self.max_resident_assets < self.assets_per_minibatch:
             raise ValueError("validation max_resident_assets must cover one asset minibatch")
         _validate_cuda_float32(self.device, self.dtype, role="validation")
+        _validate_source_cache(self.source_cache_root, self.source_cache_mode, role="validation")
 
 
 @dataclass(frozen=True)
@@ -74,12 +77,16 @@ class EvaluationCfg:
     max_resident_assets: int = 64
     device: str = "cuda:0"
     dtype: str = "float32"
+    source_cache_root: str = "logs/ssl/_cache/geometry_source/v1"
+    source_cache_mode: str = "readonly"
+    z_compression_ranks: tuple[int, ...] = (32, 64, 96, 128)
 
     def __post_init__(self) -> None:
         r"""验证固定测度预算、消融集合与互不重叠的随机域。"""
 
         object.__setattr__(self, "final_ablations", tuple(self.final_ablations))
         object.__setattr__(self, "selection_metrics", tuple(self.selection_metrics))
+        object.__setattr__(self, "z_compression_ranks", tuple(self.z_compression_ranks))
         counts = (
             self.q_per_asset,
             self.assets_per_minibatch,
@@ -94,11 +101,14 @@ class EvaluationCfg:
         )
         if min(counts) < 1 or not self.final_ablations or not self.selection_metrics:
             raise ValueError("evaluation q/batch/bootstrap/resource budgets and metric sets must be non-empty")
+        if self.z_compression_ranks not in {(), (32, 64, 96, 128)}:
+            raise ValueError("Z compression ranks must be disabled or exactly 32/64/96/128")
         if min(offsets) < 1 or len(set(offsets)) != len(offsets):
             raise ValueError("evaluation seed offsets must be positive and distinct")
         if self.max_resident_assets < self.assets_per_minibatch:
             raise ValueError("evaluation max_resident_assets must cover one asset minibatch")
         _validate_cuda_float32(self.device, self.dtype, role="evaluation")
+        _validate_source_cache(self.source_cache_root, self.source_cache_mode, role="evaluation")
 
 
 def _validate_cuda_float32(device: str, dtype: str, *, role: str) -> None:
@@ -108,6 +118,15 @@ def _validate_cuda_float32(device: str, dtype: str, *, role: str) -> None:
         raise ValueError(f"{role} device must be 'cuda' or 'cuda:<index>'")
     if dtype != "float32":
         raise ValueError(f"current Warp {role} path requires dtype='float32'")
+
+
+def _validate_source_cache(root: str, mode: str, *, role: str) -> None:
+    """事后固定测度默认只读预构建 source，不允许 silent cache fallback。"""
+
+    if mode not in {"readonly", "read-write", "off"}:
+        raise ValueError(f"{role} source_cache_mode is invalid")
+    if mode != "off" and not root:
+        raise ValueError(f"{role} source_cache_root is required unless cache mode is off")
 
 
 class ValidationRun:

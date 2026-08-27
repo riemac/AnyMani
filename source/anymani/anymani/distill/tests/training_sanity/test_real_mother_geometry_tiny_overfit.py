@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 import torch
 from anymani.assets.bank.hand_bank import HandBank, HandBankCfg
-from anymani.distill.methods.contracts import MethodStep
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import (
     attach_static_evidence,
     pad_online_geometry_samples,
@@ -16,7 +15,6 @@ from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import 
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.context import MultiAnchorObjectiveContext
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.objectives import (
     evaluate_objectives,
-    reduce_method_steps,
 )
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.state_measure import SobolJointSampler
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
@@ -42,9 +40,9 @@ MOTHER = (
     Path(__file__).resolve().parents[3]
     / "assets"
     / "generated"
-    / "2026-08-12_18-16-48"
-    / "single_palm_leap"
-    / "right_t4_i4_m4_r4"
+    / "2026-08-19_15-10-48"
+    / "single_palm_allegro"
+    / "left_t3_i3_m2_r2"
 )
 _requires_local_mother = pytest.mark.skipif(
     not MOTHER.is_dir(),
@@ -52,8 +50,8 @@ _requires_local_mother = pytest.mark.skipif(
 )
 
 
-def _loss(model: GeometrySSLModel, batch) -> torch.Tensor:
-    """对固定 teacher batch 重新计算 rho/kappa baseline-normalized 监督目标。"""
+def _prediction_and_losses(model: GeometrySSLModel, batch):
+    """对固定 teacher batch 返回当前 raw density 与 scaled-kappa 训练目标。"""
 
     q = batch.q.detach()
     prediction = model(
@@ -65,13 +63,28 @@ def _loss(model: GeometrySSLModel, batch) -> torch.Tensor:
         query_index=batch.sensitivity_targets.query_index,
         joint_index=batch.sensitivity_targets.joint_index,
     )
-    context = MultiAnchorObjectiveContext(prediction=prediction, batch=batch)
-    step = MethodStep(objectives=evaluate_objectives(context, MultiAnchorGaussianObjectivesCfg()), sample_count=1)
-    return reduce_method_steps(
-        (step,),
+    objectives = evaluate_objectives(
+        MultiAnchorObjectiveContext(prediction=prediction, batch=batch),
         MultiAnchorGaussianObjectivesCfg(),
-        {"density": 1.0, "kappa": 1.0},
-    ).loss
+    )
+    density = objectives["density"].metrics["loss"]
+    kappa = objectives["kappa"].metrics["loss"]
+    return prediction, density, kappa
+
+
+def _diagnostic_values(model: GeometrySSLModel, batch) -> dict[str, float]:
+    """分别观察 density、active κ 与 structural-zero false positive。"""
+
+    prediction, density, kappa = _prediction_and_losses(model, batch)
+    targets = batch.sensitivity_targets
+    active = targets.valid_mask & targets.active_mask
+    structural_zero = targets.valid_mask & ~targets.active_mask
+    return {
+        "density": float(density.detach()),
+        "kappa": float(kappa.detach()),
+        "active_kappa": float((prediction.kappa[active] - targets.kappa[active]).square().mean().detach()),
+        "zero_false_positive": float(prediction.kappa[structural_zero].square().mean().detach()),
+    }
 
 
 @_requires_local_mother
@@ -97,7 +110,7 @@ def test_real_mother_fixed_batch_loss_decreases() -> None:
                 anchors=AnchorBankCfg(bank_size=1, anchors_per_finger=2),
             ),
             query=query_config,
-            target=GeometryFieldTargetCfg(train_active_per_joint=1, train_zero_per_joint=1),
+            target=GeometryFieldTargetCfg(train_active_per_joint=2, train_zero_per_joint=1),
         )
     )
     source = representation.materialize_source(container)
@@ -136,14 +149,23 @@ def test_real_mother_fixed_batch_loss_decreases() -> None:
         )
     ).cuda()
     optimizer = torch.optim.AdamW(model.parameters(), lr=2.0e-3)
-    initial = float(_loss(model, batch).detach())
+    initial = _diagnostic_values(model, batch)
+    joint_projection_received_gradient = False
 
     for _ in range(100):
         optimizer.zero_grad(set_to_none=True)
-        loss = _loss(model, batch)
+        _, density_loss, kappa_loss = _prediction_and_losses(model, batch)
+        loss = density_loss + kappa_loss
         loss.backward()
+        joint_gradient = model.sensitivity_decoder.joint_projection.weight.grad
+        joint_projection_received_gradient |= bool(
+            joint_gradient is not None and torch.count_nonzero(joint_gradient).detach().cpu() > 0
+        )
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
-    final = float(_loss(model, batch).detach())
+    final = _diagnostic_values(model, batch)
 
-    assert final < 0.75 * initial, f"fixed-batch SSL loss did not decrease enough: initial={initial}, final={final}"
+    assert joint_projection_received_gradient, "kappa JOINT projection never received a non-zero gradient"
+    assert final["density"] < 0.5 * initial["density"], (initial, final)
+    assert final["active_kappa"] < 0.5 * initial["active_kappa"], (initial, final)
+    assert final["zero_false_positive"] < 0.5 * initial["zero_false_positive"], (initial, final)

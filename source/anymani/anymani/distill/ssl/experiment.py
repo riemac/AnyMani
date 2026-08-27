@@ -1,7 +1,8 @@
-r"""Schema 7 pure embodiment pretraining 的最高声明配置与唯一副作用入口。"""
+r"""Schema 8 pure embodiment pretraining 的最高声明配置与唯一副作用入口。"""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -10,18 +11,25 @@ from omegaconf import MISSING, OmegaConf
 
 from .contracts import build_runtime
 
-EMBODIMENT_PRETRAIN_SCHEMA_VERSION = "7.0.0"
+EMBODIMENT_PRETRAIN_SCHEMA_VERSION = "8.0.0"
 """训练与事后 validation/evaluation 生命周期相互独立的实验合同。"""
 
 
 class EmbodimentPretrain:
     r"""装配 data/method/trainer/run runtimes，并把完整实验生命周期交给 Trainer。"""
 
-    def __init__(self, config: EmbodimentPretrainCfg, *, output_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        config: EmbodimentPretrainCfg,
+        *,
+        output_dir: Path | None = None,
+        config_identity: Mapping[str, str] | None = None,
+    ) -> None:
         r"""只保存完整配置和可选测试输出目录；不解析资产、不初始化 CUDA。"""
 
         self.config = config
         self.output_dir = output_dir
+        self.config_identity = dict(config_identity or {})
 
     def run(self) -> Path:
         r"""构造四个 role runtime，并执行一次完整 pretraining 生命周期。"""
@@ -36,12 +44,15 @@ class EmbodimentPretrain:
         print("[SSL] Building run configuration...")
         run = build_runtime(self.config.run)
         print("[SSL] Starting training lifecycle...")
+        resolved_config = resolved_config_dict(self.config)
+        if self.config_identity:
+            resolved_config["experiment_identity"] = dict(self.config_identity)
         return trainer.fit(
             data=data,
             method=method,
             run=run,
             output_dir_override=self.output_dir,
-            resolved_config=resolved_config_dict(self.config),
+            resolved_config=resolved_config,
         )
 
 
@@ -82,13 +93,18 @@ class EmbodimentPretrainCfg:
             raise TypeError(f"embodiment pretraining roles lack runtime_type bindings: {invalid}")
 
 
-def resolved_config_dict(config: EmbodimentPretrainCfg) -> dict[str, Any]:
+def resolved_config_dict(
+    config: EmbodimentPretrainCfg, *, config_identity: Mapping[str, str] | None = None
+) -> dict[str, Any]:
     r"""把 concrete structured config 解析为 checkpoint/YAML 使用的基础 mapping。"""
 
     container = OmegaConf.to_container(OmegaConf.structured(config), resolve=True)
     if not isinstance(container, dict):
         raise TypeError("resolved embodiment pretraining config must be a mapping")
-    return {str(key): value for key, value in container.items()}
+    resolved = {str(key): value for key, value in container.items()}
+    if config_identity:
+        resolved["experiment_identity"] = dict(config_identity)
+    return resolved
 
 
 __all__ = [

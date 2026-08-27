@@ -1,12 +1,13 @@
 r"""rho/kappa 双主 objective：比较预测与 representation 真值，并按 $(asset,q)$ 等权归约。
 
 每个 term 只读取 method 组装好的 typed context，不重新采样 query，也不重新运行 encoder。
-一阶 active/zero 在样本内先分别平均，再按 1:1 合并，避免 active 被最近点 mask 后让 zero 主导。
+一阶 active/zero 在样本内先分别平均，再按固定 2:1 合并；任一类缺失时其固定质量为零，不把另一类
+重归一化到 1。训练残差除以固定 $L_{ref}=0.1$ m，使 $\kappa$ objective 无量纲。
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from typing import Any
 
 import torch
 
@@ -18,6 +19,15 @@ from .config import (
     MultiAnchorGaussianObjectivesCfg,
 )
 from .context import MultiAnchorObjectiveContext
+
+KAPPA_PHYSICAL_SCALE_M = 0.1
+"""距离 Jacobian 残差的全手固定参考尺度，单位 m/rad。"""
+
+KAPPA_ACTIVE_FRACTION = 2.0 / 3.0
+"""每个 $(asset,q)$ 的 active Jacobian 监督质量。"""
+
+KAPPA_STRUCTURAL_ZERO_FRACTION = 1.0 / 3.0
+"""每个 $(asset,q)$ 的 non-ancestor structural-zero 监督质量。"""
 
 
 def _per_sample_square_mean(error: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -46,7 +56,7 @@ def _split_active_zero_mean(
     valid_mask: torch.Tensor,
     active_mask: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    r"""每个 $(asset,q)$ 先分别平均 active 与 zero，再 1:1 合并。"""
+    r"""每个 $(asset,q)$ 先分别平均 active 与 zero，再按固定 2:1 合并。"""
 
     if active_mask.ndim == 1:
         active_mask = active_mask.unsqueeze(0).expand(error.shape[0], -1)
@@ -64,13 +74,12 @@ def _split_active_zero_mean(
     zero_num = (zero_weight * error.square()).reshape(error.shape[0], -1).sum(dim=-1)
     sample_value = torch.zeros(error.shape[0], device=error.device, dtype=error.dtype)
     sample_count = torch.zeros(error.shape[0], device=error.device, dtype=error.dtype)
-    both = (active_den > 0.0) & (zero_den > 0.0)
-    only_active = (active_den > 0.0) & (zero_den <= 0.0)
-    only_zero = (zero_den > 0.0) & (active_den <= 0.0)
-    sample_value = torch.where(both, 0.5 * (active_num / active_den.clamp_min(1.0) + zero_num / zero_den.clamp_min(1.0)), sample_value)
-    sample_value = torch.where(only_active, active_num / active_den.clamp_min(1.0), sample_value)
-    sample_value = torch.where(only_zero, zero_num / zero_den.clamp_min(1.0), sample_value)
-    sample_count = torch.where(both | only_active | only_zero, torch.ones_like(sample_count), sample_count)
+    active_present = active_den > 0.0
+    zero_present = zero_den > 0.0
+    active_mean = torch.where(active_present, active_num / active_den.clamp_min(1.0), 0.0)
+    zero_mean = torch.where(zero_present, zero_num / zero_den.clamp_min(1.0), 0.0)
+    sample_value = KAPPA_ACTIVE_FRACTION * active_mean + KAPPA_STRUCTURAL_ZERO_FRACTION * zero_mean
+    sample_count = torch.where(active_present | zero_present, torch.ones_like(sample_count), sample_count)
     if float(sample_count.sum().detach()) <= 0.0:
         raise ValueError("kappa/g term received no valid active or zero edges")
     return (sample_value * sample_count).sum(), sample_count.sum()
@@ -88,18 +97,35 @@ def density_objective(context: MultiAnchorObjectiveContext) -> ObjectiveTermResu
 
 
 def kappa_objective(context: MultiAnchorObjectiveContext) -> ObjectiveTermResult:
-    r"""$\mathcal L_\kappa$：active/zero 先分别平均，再 1:1 合并。"""
+    r"""$\mathcal L_\kappa$：残差除以 0.1 m/rad 后按 active/zero 2:1 合并。"""
 
+    physical_error = context.kappa_prediction - context.kappa_target
     numerator, denominator = _split_active_zero_mean(
-        context.kappa_prediction - context.kappa_target,
+        physical_error / KAPPA_PHYSICAL_SCALE_M,
         context.edge_valid_mask,
         context.active_mask,
     )
+    physical_numerator, physical_denominator = _split_active_zero_mean(
+        physical_error,
+        context.edge_valid_mask,
+        context.active_mask,
+    )
+    if not torch.equal(denominator, physical_denominator):
+        raise RuntimeError("normalized and physical kappa reductions disagree on valid sample count")
     statistic = AdditiveStatistic("kappa", numerator, denominator)
-    return ObjectiveTermResult("kappa", (statistic,), {"loss": statistic.mean})
+    physical_mse = physical_numerator / physical_denominator
+    return ObjectiveTermResult(
+        "kappa",
+        (statistic,),
+        {
+            "loss": statistic.mean,
+            "physical_mse": physical_mse,
+            "physical_rms": physical_mse.clamp_min(0.0).sqrt(),
+        },
+    )
 
 
-def teacher_baseline_sufficient_statistics(batch: object) -> dict[str, torch.Tensor]:
+def teacher_baseline_sufficient_statistics(batch: Any) -> dict[str, torch.Tensor]:
     r"""从 teacher-only batch 累计 constant-density 与 zero-kappa baseline 的充分统计。
 
     对 bandwidth slot $s$，每个有效样本先在 owner/query 轴求一阶矩 $m_{b,s}$ 与二阶矩
@@ -111,7 +137,7 @@ def teacher_baseline_sufficient_statistics(batch: object) -> dict[str, torch.Ten
     $$
 
     query stratum 只重复记录同类矩，不参与 $c_s$ 或 $B_\rho$ 的估计。$B_\kappa$ 令预测为零，
-    并直接调用正式 objective 的 active/zero 归约，确保 structural-zero 权重完全一致。
+    并直接调用正式 objective 的无量纲 active/zero 归约，确保 structural-zero 权重完全一致。
     """
 
     field = batch.field_targets  # concrete method batch；truth 不进入 model
@@ -143,7 +169,7 @@ def teacher_baseline_sufficient_statistics(batch: object) -> dict[str, torch.Ten
         stratum_sample_count[stratum] = row_valid.to(density.dtype).sum()
 
     kappa_num, kappa_den = _split_active_zero_mean(
-        sensitivity.kappa.detach(),  # zero predictor error 为 $0-\kappa$，平方后符号无关
+        sensitivity.kappa.detach() / KAPPA_PHYSICAL_SCALE_M,
         sensitivity.valid_mask.detach(),
         sensitivity.active_mask.detach(),
     )
@@ -230,8 +256,11 @@ def finalize_teacher_baselines(statistics: dict[str, torch.Tensor]) -> dict[str,
         },
         "kappa": {
             "predictor": "zero",
-            "reduction": "per-sample active/structural-zero means combined 1:1",
-            "baseline_mse": float(kappa_baseline),
+            "reduction": "per-sample active/structural-zero means combined 2:1",
+            "physical_scale_m": KAPPA_PHYSICAL_SCALE_M,
+            "baseline_mse": float(kappa_baseline),  # 训练 objective 口径，残差已除以 0.1 m/rad
+            "objective_baseline_mse": float(kappa_baseline),
+            "physical_baseline_mse": float(kappa_baseline * KAPPA_PHYSICAL_SCALE_M**2),
             "sample_count": float(kappa_den),
             "strata_diagnostic": {
                 "names": ["active", "structural_zero"],
@@ -263,9 +292,8 @@ def evaluate_objectives(
 def reduce_method_steps(
     steps: tuple[MethodStep, ...],
     config: MultiAnchorGaussianObjectivesCfg,
-    baselines: Mapping[str, float],
 ) -> MethodUpdate:
-    r"""跨 accumulation 合并 raw MSE，并用固定 teacher baseline 形成 vanilla 总损失。"""
+    r"""跨 accumulation 合并分任务 MSE；不构造可反传统一总损失。"""
 
     totals: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     sample_count = 0
@@ -278,32 +306,18 @@ def reduce_method_steps(
                     totals[component.name] = (component.numerator, component.denominator)
                 else:
                     totals[component.name] = (previous[0] + component.numerator, previous[1] + component.denominator)
-    loss: torch.Tensor | None = None
     terms: dict[str, float] = {}
-    normalized_terms: dict[str, float] = {}
-    skills: dict[str, float] = {}
     enabled = config.enabled()
-    for name, term_cfg in enabled.items():
+    for name in enabled:
         numerator, denominator = totals[name]
         mean = numerator / denominator
         terms[name] = float(mean.detach())
-        baseline = float(baselines[name])
-        if baseline <= 0.0:
-            raise ValueError(f"objective baseline must be positive for {name}")
-        normalized = mean / baseline
-        normalized_terms[name] = float(normalized.detach())
-        skills[name] = 1.0 - normalized_terms[name]
-        weighted = float(term_cfg.weight) * normalized
-        loss = weighted if loss is None else loss + weighted
-    if loss is None:
+    if not terms:
         raise ValueError("method update contains no enabled objectives")
     return MethodUpdate(
-        loss=loss,
         terms=terms,
         sample_count=sample_count,
         denominators={name: float(totals[name][1].detach()) for name in enabled},
-        normalized_terms=normalized_terms,
-        skills=skills,
     )
 
 

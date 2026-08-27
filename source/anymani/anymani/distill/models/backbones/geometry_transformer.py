@@ -57,13 +57,13 @@ from torch import nn
 class GraphBiasedTransformerCfg:
     r"""全连接整手 Transformer 的容量与离散运动学图偏置配置。
 
-    canonical 数值锚点为 $D=128$、2 个 Pre-LN blocks、4 heads、FFN width 256、dropout 0，
+    canonical 数值锚点为 $D=128$、4 个 Pre-LN blocks、4 heads、FFN width 256、dropout 0，
     图距离统一截断到 8。层数和宽度是待消融容量，不是物理常数；最短路径、parent 与 child
     三种 bias 则属于当前 backbone 的结构定义。
     """
 
     hidden_width: int = 128  # 实体 token 宽度 $D$
-    layers: int = 2  # Pre-LN attention/FFN residual blocks 数
+    layers: int = 4  # 四次关系加工；每层保持 Pre-LN attention/FFN residual 结构
     attention_heads: int = 4  # 多头数 $H$，每头宽度 $D_h=D/H$
     feedforward_width: int = 256  # 每层逐实体 FFN 中间宽度
     dropout: float = 0.0  # retained geometry contract 默认确定性前向

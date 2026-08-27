@@ -143,7 +143,7 @@ def test_legacy_checkpoint_is_rejected_without_compatibility_guessing(tmp_path: 
 
 
 def _post_training_payload() -> dict[str, object]:
-    r"""构造只覆盖事后 lineage gate 的最小 schema-7 payload。"""
+    r"""构造只覆盖事后 lineage gate 的最小 schema-8 payload。"""
 
     return {
         "metadata": {
@@ -155,12 +155,12 @@ def _post_training_payload() -> dict[str, object]:
                 "run": {"seed": 17},
             },
             "declared_objective": {"density": 1.0, "kappa": 1.0},
-            "calibration_artifact_hash": "calibration",
             "code_revision": "revision-a",
             "package_version": "0.7.1",
             "geometry_semantics_schema": SEMANTICS_SCHEMA_VERSION,
             "worktree_dirty": True,
             "worktree_fingerprint": "worktree-a",
+            "source_artifact": {"schema_version": "1.0.0", "mode": "readonly", "dataset": "dataset"},
         },
         "method_state": {"parameter": torch.tensor(1.0)},
         "optimizer_state": {"state": {}},
@@ -224,7 +224,29 @@ def test_post_training_checkpoint_preflight_keeps_full_state_on_cpu(
         current_data={"manifest": "ssl.yaml"},
         current_method={"name": "multi_anchor"},
         seed=17,
+        current_source_artifact={"schema_version": "1.0.0", "mode": "readonly", "dataset": "dataset"},
     )
 
     assert loaded is payload
     assert locations == ["cpu"]
+
+
+def test_post_training_rejects_source_artifact_lineage_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """相同 dataset/method 也不能用 off 或不同 producer source 评估 readonly checkpoint。"""
+
+    checkpoint = tmp_path / "epoch_000004.pt"
+    checkpoint.write_bytes(b"synthetic")
+    payload = _post_training_payload()
+    monkeypatch.setattr(post_training_runtime, "load_pretrain_checkpoint", lambda *_args, **_kwargs: payload)
+    with pytest.raises(ValueError, match="source artifact identity"):
+        _require_checkpoint_for_stage(
+            checkpoint,
+            dataset_identity=payload["metadata"]["dataset_identity"],  # type: ignore[index]
+            current_data={"manifest": "ssl.yaml"},
+            current_method={"name": "multi_anchor"},
+            seed=17,
+            current_source_artifact={"schema_version": "1.0.0", "mode": "off"},
+        )
