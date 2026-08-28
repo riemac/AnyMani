@@ -2,10 +2,10 @@ r"""真实 generated assets 上的正式 Method lifecycle 最小 smoke。"""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 import yaml
@@ -33,17 +33,13 @@ from anymani.distill.ssl.data import HandAssetCatalogCfg
 from anymani.distill.ssl.experiment import EmbodimentPretrainCfg, resolved_config_dict
 from anymani.distill.ssl.post_training import (
     EmbodimentEvaluationCfg,
-    EmbodimentValidationCfg,
     EvaluationCfg,
     EvaluationRun,
     EvaluationRunCfg,
-    ValidationCfg,
-    ValidationRun,
-    ValidationRunCfg,
     resolved_post_training_config_dict,
 )
 from anymani.distill.ssl.runtime.lifecycle import fit_embodiment_pretrain
-from anymani.distill.ssl.runtime.post_training import evaluate_checkpoint, validate_checkpoints
+from anymani.distill.ssl.runtime.post_training import evaluate_checkpoint
 from anymani.distill.ssl.runtime.pretrainer import (
     AdamWCfg,
     EmbodimentPretrainTrainer,
@@ -58,10 +54,6 @@ _ROOT = Path(__file__).resolve().parents[3] / "assets" / "generated" / "2026-08-
 _PATHS = {
     "train-a": _ROOT / "single_palm_allegro" / "left_t3_i3_m2_r2",
     "train-b": _ROOT / "single_palm_allegro" / "left_t3_i3_m3_r2",
-    "validation-variant": (
-        _ROOT / "single_palm_allegro" / "left_t3_i3_m3_r2" / "2026-08-20_04-46-25" / "4cbf4162"
-    ),
-    "validation-mother": _ROOT / "single_palm_allegro" / "left_t3_i4_m2_r2",
     "evaluation-variant": (
         _ROOT / "single_palm_allegro" / "left_t3_i3_m2_r2" / "2026-08-20_05-01-58" / "018e25d8"
     ),
@@ -77,12 +69,8 @@ class _Dataset:
     source_path = Path("real-method-lifecycle-smoke.yaml")
     source_sha256 = "real-method-lifecycle-smoke"
 
-    def __init__(self, train, validation, evaluation) -> None:
+    def __init__(self, train, evaluation) -> None:
         self.train = SimpleNamespace(records=tuple(SimpleNamespace(container=item, provenance={}) for item in train))
-        self.validation = {
-            name: SimpleNamespace(records=tuple(SimpleNamespace(container=item, provenance={}) for item in assets))
-            for name, assets in validation.items()
-        }
         self.evaluation = {
             name: SimpleNamespace(records=tuple(SimpleNamespace(container=item, provenance={}) for item in assets))
             for name, assets in evaluation.items()
@@ -97,7 +85,10 @@ class _Data:
     def __init__(self, catalog) -> None:
         self.catalog = catalog
 
-    def resolve(self):
+    def resolve_train(self):
+        return self.catalog
+
+    def resolve_evaluation(self):
         return self.catalog
 
 
@@ -108,19 +99,14 @@ def _container(path: Path) -> HandContainer:
 def _catalog():
     containers = {name: _container(path) for name, path in _PATHS.items()}
     train = (containers["train-a"], containers["train-b"])
-    validation = {
-        "unseen_variant_set": (containers["validation-variant"],),
-        "unseen_mother": (containers["validation-mother"],),
-    }
     evaluation = {
         "unseen_variant_set": (containers["evaluation-variant"],),
         "unseen_mother": (containers["evaluation-mother"],),
         "official_zero_shot": (),
     }
     return SimpleNamespace(
-        dataset=_Dataset(train, validation, evaluation),
+        dataset=_Dataset(train, evaluation),
         train=train,
-        validation=validation,
         evaluation=evaluation,
         training_dataset_identity=lambda: {
             "schema_version": "1.0.0",
@@ -143,8 +129,8 @@ def _method_cfg() -> MultiAnchorGaussianMethodCfg:
             target=GeometryFieldTargetCfg(
                 train_active_per_joint=1,
                 train_zero_per_joint=1,
-                validation_active_per_joint=4,
-                validation_zero_per_joint=4,
+                fixed_active_per_joint=4,
+                fixed_zero_per_joint=4,
             ),
         ),
         model=GeometrySSLModelCfg(
@@ -166,7 +152,7 @@ def _method_cfg() -> MultiAnchorGaussianMethodCfg:
     )
 
 
-def _trainer_cfg() -> EmbodimentPretrainTrainerCfg:
+def _trainer_cfg(*, max_epochs: int = 1, checkpoint_every_epochs: int = 1) -> EmbodimentPretrainTrainerCfg:
     return EmbodimentPretrainTrainerCfg(
         sampling=OnlineSamplingCfg(
             assets_per_minibatch=2,
@@ -174,23 +160,22 @@ def _trainer_cfg() -> EmbodimentPretrainTrainerCfg:
             shuffle_assets=False,
             seed=71,
         ),
-        max_epochs=1,
+        max_epochs=max_epochs,
         num_minibatches=1,
         mini_epochs=1,
         microbatch_size=2,
         optimizer=AdamWCfg(learning_rate=1.0e-3, weight_decay=0.0),
-        max_resident_assets=2,
-        checkpoint_every_epochs=1,
+        checkpoint_every_epochs=checkpoint_every_epochs,
     )
 
 
 @_requires_assets
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="real Method lifecycle requires CUDA/Warp")
-def test_real_method_pretrain_validation_and_evaluation(
+def test_real_method_pretrain_and_evaluation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """真实 teacher 完成 run-local baseline、FairGrad update、事后 selection 与 unseen evaluation。"""
+    """真实 teacher 完成 run-local baseline、FairGrad update 与显式 held-out evaluation。"""
 
     from anymani.distill.ssl.runtime import lifecycle
 
@@ -208,15 +193,15 @@ def test_real_method_pretrain_validation_and_evaluation(
         producer_device="cuda:0",
     )
     try:
-        preparer.prepare(catalog, device=torch.device("cuda:0"), dtype=torch.float32)
+        preparer.prepare(catalog, role="train", device=torch.device("cuda:0"), dtype=torch.float32)
         source_summary = preparer.prepare_source_artifacts(
             device=torch.device("cuda:0"),
             dtype=torch.float32,
         )
     finally:
         preparer.close()
-    assert source_summary["base_count"] == 6
-    assert source_summary["anchor_shard_count"] == 6
+    assert source_summary["base_count"] == 2
+    assert source_summary["anchor_shard_count"] == 2
     pretrain_run_cfg = PretrainRunCfg(
         seed=71,
         deterministic_algorithms=False,
@@ -245,39 +230,8 @@ def test_real_method_pretrain_validation_and_evaluation(
     assert (pretrain_dir / "checkpoints" / "epoch_000000.pt").is_file()
     assert (pretrain_dir / "checkpoints" / "epoch_000001.pt").is_file()
     assert (pretrain_dir / "checkpoints" / "last.pt").is_file()
+    assert (pretrain_dir / "retained_encoder.pt").is_file()
     assert not (pretrain_dir / "checkpoints" / "best.pt").exists()
-    assert not (pretrain_dir / "retained_artifact.pt").exists()
-
-    validation_cfg = ValidationCfg(
-        q_per_asset=1,
-        assets_per_minibatch=1,
-        q_per_asset_per_minibatch=1,
-        max_resident_assets=2,
-        source_cache_root=str(source_cache_root),
-        source_cache_mode="readonly",
-    )
-    validation_run_cfg = ValidationRunCfg(
-        baseline_checkpoint=str(pretrain_dir / "checkpoints" / "epoch_000000.pt"),
-        checkpoints=(str(pretrain_dir / "checkpoints" / "epoch_000001.pt"),),
-        seed=71,
-        deterministic_algorithms=False,
-    )
-    validation_root = EmbodimentValidationCfg(
-        data=data_cfg,
-        method=method_cfg,
-        validation=validation_cfg,
-        run=validation_run_cfg,
-    )
-    validation_dir = tmp_path / "validation"
-    validate_checkpoints(
-        data=_Data(catalog),
-        method=MultiAnchorGaussianMethod(method_cfg),
-        config=validation_cfg,
-        run=ValidationRun(validation_run_cfg),
-        output_dir_override=validation_dir,
-        resolved_config=resolved_post_training_config_dict(validation_root),
-    )
-    assert (validation_dir / "checkpoints" / "best.pt").is_file()
 
     evaluation_cfg = EvaluationCfg(
         q_per_asset=1,
@@ -286,10 +240,10 @@ def test_real_method_pretrain_validation_and_evaluation(
         bootstrap_replicates=2,
         max_resident_assets=2,
         source_cache_root=str(source_cache_root),
-        source_cache_mode="readonly",
+        source_cache_mode="read-write",  # 首次 held-out evaluation 只补建自己的 role index/objects
     )
     evaluation_run_cfg = EvaluationRunCfg(
-        checkpoint=str(validation_dir / "checkpoints" / "best.pt"),
+        checkpoint=str(pretrain_dir / "checkpoints" / "last.pt"),
         seed=71,
         deterministic_algorithms=False,
     )
@@ -309,28 +263,95 @@ def test_real_method_pretrain_validation_and_evaluation(
         resolved_config=resolved_post_training_config_dict(evaluation_root),
     )
     assert (evaluation_dir / "evaluation.yaml").is_file()
-    assert (evaluation_dir / "z_compression.yaml").is_file()
-    assert (evaluation_dir / "z_compression_basis.npz").is_file()
-    compression = yaml.safe_load((evaluation_dir / "z_compression.yaml").read_text(encoding="utf-8"))
-    assert compression["ranks"] == [32, 64, 96, 128]
-    assert len(compression["basis"]["basis_sha256"]) == 64
-    with np.load(evaluation_dir / compression["basis"]["artifact"], allow_pickle=False) as basis:
-        assert basis["mean"].shape == (128,)
-        assert basis["components"].shape == (128, 128)
-        assert basis["eigenvalues"].shape == (128,)
-    for suite in compression["suites"].values():
-        assert set(suite["ranks"]) == {"32", "64", "96", "128"}
-        assert suite["ranks"]["128"]["normalized_metric_scores"].keys() == {"density", "kappa"}
     evaluation = yaml.safe_load((evaluation_dir / "evaluation.yaml").read_text(encoding="utf-8"))
-    audited_suites = 0
+    assert evaluation["analyses"] == []  # 默认 explicit evaluation 只运行 core，不偷跑昂贵 ablation
+    core_suites = 0
     for suite in evaluation["suites"].values():
         if "strata" not in suite:  # official_zero_shot 可显式为空
             continue
-        audited_suites += 1
-        assert suite["strata"]["joint_sign_observable_audit"].keys() == {
-            "density_invariance_mse",
-            "kappa_sign_equivariance_mse",
-        }
-    assert audited_suites == 2
+        core_suites += 1
+        assert "joint_sign_observable_audit" not in suite["strata"]  # joint-sign 双前向只属于显式 ablations
+        assert suite["ablations"] is None
+    assert core_suites == 2
     assert not (evaluation_dir / "training_morphology_q_bank.yaml").exists()
-    assert not (evaluation_dir / "retained_artifact.pt").exists()
+    assert not (evaluation_dir / "retained_encoder.pt").exists()
+
+
+@_requires_assets
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="compiled latent diagnostic requires CUDA/Warp")
+def test_real_method_compiled_latent_diagnostic_at_epoch_four(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""真实 BF16/compile 生命周期必须在第 4 个 epoch 闭合 unified-$Z$ 诊断分支。
+
+    该测试使用与真实 Method lifecycle 相同的 generated assets、source artifact 生产和 compiled
+    learned model，但把训练预算压缩为 4 epochs × 1 minibatch。第 4 个 epoch 的最后一个 update
+    会触发 `collect_z_gradients=True`，从而覆盖正式 256-epoch run 中之前未被 1-epoch smoke 覆盖的
+    latent diagnostic backward 路径。该诊断只检查 $\partial L/\partial Z$ 证据，不改变参数 update。
+    """
+
+    from anymani.distill.ssl.runtime import lifecycle
+
+    monkeypatch.setattr(lifecycle, "_worktree_fingerprint", lambda: (False, ""))
+    catalog = _catalog()
+    data_cfg = HandAssetCatalogCfg(manifest="real-method-lifecycle-smoke.yaml")
+    method_cfg = _method_cfg()
+    trainer_cfg = _trainer_cfg(max_epochs=4, checkpoint_every_epochs=4)
+    source_cache_root = tmp_path / "source-cache"
+
+    # 先在同一 source root 发布 tiny generated-assets smoke 所需的 canonical base 与 anchor shard，
+    # 再以 readonly 身份交给 lifecycle；这复现正式 run 的 auto-prepare -> readonly ownership 边界。
+    preparer = MultiAnchorGaussianMethod(method_cfg)
+    preparer.configure_source_artifacts(
+        root=str(source_cache_root),
+        mode="read-write",
+        dataset_manifest_sha256=str(catalog.dataset.source_sha256),
+        producer_device="cuda:0",
+    )
+    try:
+        preparer.prepare(catalog, role="train", device=torch.device("cuda:0"), dtype=torch.float32)
+        source_summary = preparer.prepare_source_artifacts(device=torch.device("cuda:0"), dtype=torch.float32)
+    finally:
+        preparer.close()
+    assert source_summary["base_count"] == 2
+    assert source_summary["anchor_shard_count"] == 2
+
+    # lifecycle 从 epoch 0 开始执行四个真实 optimizer updates，第 4 个 update 产生 Z-gradient evidence。
+    pretrain_run_cfg = PretrainRunCfg(
+        seed=71,
+        deterministic_algorithms=False,
+        source_cache_root=str(source_cache_root),
+        source_cache_mode="readonly",
+    )
+    pretrain_root = EmbodimentPretrainCfg(
+        data=data_cfg,
+        method=method_cfg,
+        trainer=trainer_cfg,
+        run=pretrain_run_cfg,
+    )
+    pretrain_dir = tmp_path / "compiled-latent-diagnostic"
+    fit_embodiment_pretrain(
+        trainer=EmbodimentPretrainTrainer(trainer_cfg),
+        data=_Data(catalog),
+        method=MultiAnchorGaussianMethod(method_cfg),
+        run=PretrainRun(pretrain_run_cfg),
+        output_dir_override=pretrain_dir,
+        resolved_config=resolved_config_dict(pretrain_root),
+    )
+
+    metrics = [
+        json.loads(line)
+        for line in (pretrain_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    diagnostic_updates = [
+        entry
+        for entry in metrics
+        if entry["epoch"] == 4 and "raw/rho_norm" in entry["z_gradient_evidence"]
+    ]
+    assert len(diagnostic_updates) == 1
+    assert diagnostic_updates[0]["z_gradient_evidence"]["raw/rho_norm"] > 0.0
+    assert diagnostic_updates[0]["z_gradient_evidence"]["raw/kappa_norm"] > 0.0
+    assert (pretrain_dir / "checkpoints" / "epoch_000004.pt").is_file()
+    assert (pretrain_dir / "COMPLETE").is_file()

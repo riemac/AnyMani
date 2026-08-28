@@ -16,7 +16,7 @@ $$
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -80,6 +80,59 @@ def _validate_gradient_layout(
         for task_name, gradient in (("density", density), ("kappa", kappa)):
             if gradient is not None and not bool(torch.isfinite(gradient).all().item()):
                 raise FloatingPointError(f"non-finite {task_name} shared gradient at parameter {index}")
+
+
+def _collect_latent_gradients(
+    method: Any,
+    batch: PaddedOnlineGeometryBatch,
+    prediction: Any,
+    denominators: Mapping[str, torch.Tensor],
+    *,
+    normalize: bool,
+) -> dict[str, torch.Tensor]:
+    r"""在独立 leaf $Z$ 上提取 density/$\kappa$ objective 的 latent gradients。
+
+    AOTAutograd 对 compiled forward 的参数反向是稳定的，但 compiled function 返回的中间 $Z$ 不保证
+    仍是 readers 输出图中的可微输入节点。因此 concrete Method 使用已返回的数值 $Z$ 重算 readers，
+    这里负责读取该独立图的两个 objective 梯度。完整 batch 路径传入 ``normalize=True``，直接使用
+    完整 $D_j$；streaming 路径传入 ``normalize=False``，跨 unit 累计 raw numerator gradient，并在
+    所有 unit 完成后只除以一次完整 $D_j$。若任一 objective 没有连接到 $Z$，直接抛出错误；将断图
+    误记为零梯度会污染统一表示的 gradient Gram 诊断。
+
+    Args:
+        method (Any): 拥有具体 model/reader 结构的 MultiAnchorGaussianMethod。
+        batch (PaddedOnlineGeometryBatch): 当前 unit 的 truth mask 与 objective 条件。
+        prediction (Any): 主 forward 返回的 compiled prediction，提供数值 unified $Z$。
+        denominators (Mapping[str, torch.Tensor]): 完整 logical minibatch 的 task denominator $D_j$。
+        normalize (bool): 是否在本 unit 内按完整 denominator 形成 normalized objective gradient。
+
+    Returns:
+        dict[str, torch.Tensor]: density 与 κ 对 `[B,G,D]` latent $Z$ 的 detached FP64 梯度。
+
+    Raises:
+        RuntimeError: objective 结构不是单一 additive component，或 objective 与 $Z$ 断开时抛出。
+    """
+
+    diagnostic_step, diagnostic_prediction = method._forward_latent_diagnostic(batch, prediction)
+    gradients: dict[str, torch.Tensor] = {}  # 两项 objective 的 $\partial L_j/\partial Z$，后续用 FP64 统计
+    entities = diagnostic_prediction.latents.entities  # 独立 leaf unified $Z$，形状 `[B,G,D]`
+    for task_name in ("density", "kappa"):
+        result = diagnostic_step.objectives.get(task_name)
+        if result is None or len(result.components) != 1 or result.components[0].name != task_name:
+            raise RuntimeError(f"latent diagnostic requires one same-name additive component for {task_name}")
+        term = (
+            result.components[0].numerator / denominators[task_name]
+            if normalize
+            else result.components[0].numerator
+        )  # 完整路径除以 $D_j$；streaming 路径保留 raw numerator
+        try:
+            gradient = torch.autograd.grad(term, entities, retain_graph=True, allow_unused=False)[0]
+        except RuntimeError as error:
+            raise RuntimeError(f"{task_name} latent diagnostic objective is disconnected from unified Z") from error
+        if gradient is None:
+            raise RuntimeError(f"{task_name} latent diagnostic objective returned no unified-Z gradient")
+        gradients[task_name] = gradient.detach().to(torch.float64)  # Gram 统计的统一 FP64 累计输入
+    return gradients
 
 
 def _norm_squared(gradients: Sequence[torch.Tensor | None]) -> torch.Tensor:
@@ -522,8 +575,10 @@ def backward_method_update(
     density_private: list[torch.Tensor | None] = [None for _parameter in density_parameters]
     kappa_private: list[torch.Tensor | None] = [None for _parameter in kappa_parameters]
     sample_count = 0
-    z_gradient_squares = {name: batch.q.new_zeros(()) for name in enabled}
-    z_gradient_dot = batch.q.new_zeros(())
+    z_gradient_squares = {
+        name: torch.zeros((), device=batch.q.device, dtype=torch.float64) for name in enabled
+    }  # latent Gram 对角项，FP64 标量
+    z_gradient_dot = torch.zeros((), device=batch.q.device, dtype=torch.float64)  # $\langle\nabla_ZL_\rho,\nabla_ZL_\kappa\rangle$
     diagnostic_totals: dict[str, list[torch.Tensor]] = {}
 
     rewritten = rewrite_batch_fn(
@@ -552,10 +607,13 @@ def backward_method_update(
             raise ValueError("streaming backward microbatch must contain density and kappa")
 
         if collect_z_gradients:
-            z_gradients = {
-                name: torch.autograd.grad(term, prediction.latents.entities, retain_graph=True)[0].detach()
-                for name, term in raw_terms.items()
-            }
+            z_gradients = _collect_latent_gradients(
+                method,
+                microbatch,
+                prediction,
+                denominators,
+                normalize=True,
+            )
             rho_gradient = z_gradients["density"]
             kappa_gradient = z_gradients["kappa"]
             z_gradient_squares["density"] = z_gradient_squares["density"] + rho_gradient.square().sum().detach()
@@ -652,11 +710,200 @@ def backward_method_update(
     )
 
 
+def backward_method_update_units(
+    method: Any,
+    units: Iterable[PaddedOnlineGeometryBatch],
+    *,
+    forward_step: int,
+    logical_sample_count: int,
+    microbatch_size: int,
+    collect_z_gradients: bool = False,
+    rewrite_batch_fn: Any = maybe_rewrite_batch,
+) -> MethodUpdate:
+    r"""从有界 64-pair units 闭合一个数学上仍为 512-pair 的 FairGrad update。
+
+    每个任务先对 unit numerator $N_{j,u}$ 求参数梯度，全部 unit 完成后才除以完整 denominator
+    $D_j=\sum_uD_{j,u}$：
+    $$
+    \nabla_\theta\mathcal L_j=\frac{\sum_u\nabla_\theta N_{j,u}}{\sum_uD_{j,u}}.
+    $$
+    这与完整 batch 归约严格等价，但每次只保留一个 8-assets × 8-q unit 的 activation。
+    """
+
+    if logical_sample_count < 1 or microbatch_size < 1:
+        raise ValueError("streamed update sample and microbatch sizes must be positive")
+    enabled = method.config.objectives.enabled()
+    parameter_groups = method.optimizer_parameter_groups()
+    shared_parameters = parameter_groups[0].parameters
+    density_parameters = parameter_groups[1].parameters
+    kappa_parameters = parameter_groups[2].parameters
+    shared_buffers: dict[str, list[torch.Tensor | None]] = {
+        name: [None for _parameter in shared_parameters] for name in enabled
+    }
+    density_private: list[torch.Tensor | None] = [None for _parameter in density_parameters]
+    kappa_private: list[torch.Tensor | None] = [None for _parameter in kappa_parameters]
+    numerators: dict[str, torch.Tensor] = {}
+    denominators: dict[str, torch.Tensor] = {}
+    diagnostic_totals: dict[str, list[torch.Tensor]] = {}
+    z_gradient_squares: dict[str, torch.Tensor] = {}  # 只在 collect_z_gradients 时按 FP64 累计 latent Gram
+    z_gradient_dot: torch.Tensor | None = None
+    sample_count = 0
+
+    # 每个 unit 独立 realization/forward/backward，参数级 detached buffers 是唯一跨 unit GPU state。
+    for unit in units:
+        unit_size = int(unit.q.shape[0])
+        q_per_asset = _q_per_asset_block(unit)
+        if unit_size > microbatch_size or unit_size % microbatch_size != 0:
+            raise ValueError("stream unit must be no larger than and exactly divisible by microbatch_size")
+        if microbatch_size % q_per_asset != 0:
+            raise ValueError("microbatch_size must preserve complete per-asset q blocks")
+        rewritten = rewrite_batch_fn(
+            unit,
+            config=method.config.joint_sign_rewrite,
+            step=int(forward_step),
+            seed=int(forward_step),
+            row_offset=sample_count,
+            logical_batch_size=logical_sample_count,
+        )
+        for microbatch in split_padded_online_geometry_batch(rewritten, microbatch_size=microbatch_size):
+            micro_step, prediction = method._forward_with_prediction(
+                microbatch,
+                step=int(forward_step),
+                mode="train",
+                apply_augmentation=False,
+            )
+            _accumulate_prediction_diagnostics(method, microbatch, prediction, diagnostic_totals)
+            raw_terms: dict[str, torch.Tensor] = {}
+            for term_name, result in micro_step.objectives.items():
+                if len(result.components) != 1 or result.components[0].name != term_name:
+                    raise ValueError("streaming backward requires one same-name additive component per term")
+                component = result.components[0]
+                raw_terms[term_name] = component.numerator
+                numerators[term_name] = numerators.get(term_name, torch.zeros_like(component.numerator)) + component.numerator.detach()
+                denominators[term_name] = denominators.get(
+                    term_name, torch.zeros_like(component.denominator)
+                ) + component.denominator.detach()
+            if set(raw_terms) != {"density", "kappa"}:
+                raise ValueError("streaming backward microbatch must contain density and kappa")
+
+            if collect_z_gradients:
+                z_gradients = _collect_latent_gradients(
+                    method,
+                    microbatch,
+                    prediction,
+                    denominators,
+                    normalize=False,
+                )
+                rho_gradient = z_gradients["density"]
+                kappa_gradient = z_gradients["kappa"]
+                z_gradient_squares["density"] = z_gradient_squares.get(
+                    "density", rho_gradient.new_zeros(())
+                ) + rho_gradient.square().sum()
+                z_gradient_squares["kappa"] = z_gradient_squares.get(
+                    "kappa", kappa_gradient.new_zeros(())
+                ) + kappa_gradient.square().sum()
+                z_gradient_dot = (
+                    rho_gradient.new_zeros(()) if z_gradient_dot is None else z_gradient_dot
+                ) + (rho_gradient * kappa_gradient).sum()
+
+            density_gradients = torch.autograd.grad(
+                raw_terms["density"],
+                (*shared_parameters, *density_parameters),
+                retain_graph=True,
+                allow_unused=True,
+            )
+            shared_count = len(shared_parameters)
+            _accumulate_gradients(shared_buffers["density"], tuple(density_gradients[:shared_count]))
+            _accumulate_gradients(density_private, tuple(density_gradients[shared_count:]))
+            kappa_gradients = torch.autograd.grad(
+                raw_terms["kappa"],
+                (*shared_parameters, *kappa_parameters),
+                retain_graph=False,
+                allow_unused=True,
+            )
+            _accumulate_gradients(shared_buffers["kappa"], tuple(kappa_gradients[:shared_count]))
+            _accumulate_gradients(kappa_private, tuple(kappa_gradients[shared_count:]))
+            sample_count += micro_step.sample_count
+            del microbatch, micro_step, prediction, raw_terms, density_gradients, kappa_gradients
+        del rewritten, unit  # pinned replay 在恢复下一 unit 前释放当前 CUDA tensors
+
+    if sample_count != logical_sample_count:
+        raise RuntimeError(f"streamed update sample count mismatch: observed={sample_count}, expected={logical_sample_count}")
+    if set(denominators) != {"density", "kappa"} or any(float(value) <= 0.0 for value in denominators.values()):
+        raise ValueError("streamed update requires positive density and kappa denominators")
+
+    # Numerator gradients只有在完整 $D_j$ 已知后归一化；private 与 shared 使用相同 task denominator。
+    normalized_shared = {
+        name: tuple(None if gradient is None else gradient / denominators[name] for gradient in gradients)
+        for name, gradients in shared_buffers.items()
+    }
+    density_private = [None if gradient is None else gradient / denominators["density"] for gradient in density_private]
+    kappa_private = [None if gradient is None else gradient / denominators["kappa"] for gradient in kappa_private]
+    fairgrad = combine_fairgrad(
+        normalized_shared["density"],
+        normalized_shared["kappa"],
+        near_opposition_tolerance=method.config.fairgrad.near_opposition_tolerance,
+    )
+    for parameter, gradient in zip(shared_parameters, fairgrad.combined, strict=True):
+        parameter.grad = gradient
+    for parameter, gradient in zip(density_parameters, density_private, strict=True):
+        parameter.grad = gradient
+    for parameter, gradient in zip(kappa_parameters, kappa_private, strict=True):
+        parameter.grad = gradient
+
+    terms = {name: float(numerators[name] / denominators[name]) for name in denominators}
+    gradient_evidence: dict[str, float] = {
+        "fairgrad/density_norm": fairgrad.evidence.density_norm,
+        "fairgrad/kappa_norm": fairgrad.evidence.kappa_norm,
+        "fairgrad/cosine": fairgrad.evidence.cosine,
+        "fairgrad/density_weight": fairgrad.evidence.density_weight,
+        "fairgrad/kappa_weight": fairgrad.evidence.kappa_weight,
+        "fairgrad/combined_norm": fairgrad.evidence.combined_norm,
+        "fairgrad/shared_conflict_blocked": float(fairgrad.evidence.shared_conflict_blocked),
+        "fairgrad/active_tasks": float(fairgrad.evidence.active_tasks),
+    }
+    if collect_z_gradients:
+        epsilon = 1.0e-30
+        rho_sq = float(z_gradient_squares["density"] / denominators["density"].square())
+        kappa_sq = float(z_gradient_squares["kappa"] / denominators["kappa"].square())
+        dot = float(z_gradient_dot / (denominators["density"] * denominators["kappa"])) if z_gradient_dot is not None else 0.0
+        trace = rho_sq + kappa_sq
+        determinant = max(rho_sq * kappa_sq - dot * dot, 0.0)
+        discriminant = max(trace * trace - 4.0 * determinant, 0.0)
+        largest = 0.5 * (trace + math.sqrt(discriminant))
+        smallest = 0.5 * (trace - math.sqrt(discriminant))
+        gradient_evidence.update(
+            {
+                "raw/rho_norm": math.sqrt(max(rho_sq, 0.0)),
+                "raw/kappa_norm": math.sqrt(max(kappa_sq, 0.0)),
+                "raw/dot": dot,
+                "raw/cosine": dot / math.sqrt(max(rho_sq * kappa_sq, epsilon)),
+                "raw/gram_determinant": determinant,
+                "raw/gram_condition": largest / max(smallest, epsilon),
+                "raw/joint_norm": math.sqrt(max(rho_sq + kappa_sq + 2.0 * dot, 0.0)),
+            }
+        )
+    diagnostics = {
+        name: float((numerator / denominator.clamp_min(1.0)).detach())
+        for name, (numerator, denominator) in diagnostic_totals.items()
+    }
+    for name in ("density/prediction_square", "density/target_square", "kappa/prediction_square", "kappa/target_square"):
+        diagnostics[name.replace("_square", "_rms")] = math.sqrt(max(diagnostics.pop(name), 0.0))
+    return MethodUpdate(
+        terms=terms,
+        sample_count=sample_count,
+        denominators={name: float(value) for name, value in denominators.items()},
+        gradient_evidence=gradient_evidence,
+        diagnostics=diagnostics,
+    )
+
+
 __all__ = [
     "FairGradEvidence",
     "FairGradResult",
     "GradientGroupEvidence",
     "backward_method_update",
+    "backward_method_update_units",
     "clip_parameter_groups",
     "combine_fairgrad",
 ]

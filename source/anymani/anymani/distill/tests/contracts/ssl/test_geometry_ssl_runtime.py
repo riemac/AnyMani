@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -23,14 +23,17 @@ from anymani.distill.methods.multi_anchor_gaussian_implicit_field import method 
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.augmentation import (
     maybe_rewrite_batch,
     permute_online_geometry_sample,
+    rewrite_batch_joint_sign_coordinates,
     sample_entity_permutation,
     validate_entity_permutation_transform,
 )
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.batch import (
     OnlineGeometrySample,
     pad_online_geometry_samples,
+    restore_padded_batch_from_replay,
     split_online_geometry_sample,
     split_padded_online_geometry_batch,
+    stage_padded_batch_for_replay,
 )
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.config import (
     EntityPermutationCfg,
@@ -44,6 +47,7 @@ from anymani.distill.methods.multi_anchor_gaussian_implicit_field.method import 
     _forward_microbatch_samples,
 )
 from anymani.distill.methods.multi_anchor_gaussian_implicit_field.state_measure import SobolJointSampler
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.training import backward_method_update_units
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
 from anymani.distill.models.decoders.representations.implicit_field import (
     DistanceSensitivityDecoderCfg,
@@ -337,6 +341,10 @@ def test_joint_sign_rewrite_keeps_density_and_flips_matching_kappa(monkeypatch: 
         seed=0,
     )
 
+    assert rewritten.evidence is batch.evidence  # coordinate gauge 不得把 1 个静态资产行展开为 q-row table
+    assert rewritten.evidence_row_index is batch.evidence_row_index
+    assert rewritten.joint_coordinate_sign is not None
+    torch.testing.assert_close(rewritten.joint_coordinate_sign, rewritten.q / batch.q)
     torch.testing.assert_close(rewritten.field_targets.density, batch.field_targets.density)
     torch.testing.assert_close(rewritten.field_targets.distance, batch.field_targets.distance)
     assert int((rewritten.q[0] / batch.q[0]).tolist().count(-1.0)) == 1
@@ -618,6 +626,64 @@ def test_forward_microbatch_split_preserves_sample_axis_and_nested_targets() -> 
     )
 
 
+def test_rewritten_microbatch_keeps_eight_unique_static_rows() -> None:
+    r"""正式 64-pair unit 只能编码 8 个资产行，joint-sign 不得恢复 64/512-row evidence。"""
+
+    q_block = torch.tensor(
+        [[0.1, -0.2], [0.2, -0.1], [0.3, 0.0], [0.4, 0.1], [-0.1, 0.2], [-0.2, 0.3], [-0.3, 0.4], [-0.4, 0.5]],
+        dtype=torch.float64,
+    )
+    blocks = [replace(_sample(q_block), asset_id=f"asset-{index:02d}") for index in range(16)]
+    batch = pad_online_geometry_samples(
+        blocks,
+        padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
+    )
+    signs = torch.ones_like(batch.q)
+    signs[::2, 0] = -1.0
+    rewritten = rewrite_batch_joint_sign_coordinates(batch, signs)
+    pieces = split_padded_online_geometry_batch(rewritten, microbatch_size=64)
+
+    assert rewritten.evidence.anchors.shape[0] == 16  # logical 128-pair test batch 仍按资产去重
+    assert tuple(piece.evidence.anchors.shape[0] for piece in pieces) == (8, 8)
+    assert all(piece.evidence_row_index is not None for piece in pieces)
+    assert all(piece.evidence_row_index.tolist() == [row for row in range(8) for _ in range(8)] for piece in pieces)
+
+
+def test_pinned_cpu_replay_roundtrip_preserves_every_typed_tensor() -> None:
+    r"""mini-epoch replay 只能改变 device/storage，不得改变 model input、teacher truth 或 routing。"""
+
+    block = _sample(torch.tensor([[0.1, -0.2], [0.3, 0.4]], dtype=torch.float32))
+    original = pad_online_geometry_samples(
+        list(split_online_geometry_sample(block)),
+        padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
+    )
+    original = replace(original, joint_coordinate_sign=torch.ones_like(original.q))
+    staged = stage_padded_batch_for_replay(original)
+    restored = restore_padded_batch_from_replay(staged, device="cpu")
+
+    assert staged.q.device.type == "cpu"
+    assert not staged.q.requires_grad
+    if torch.cuda.is_available():
+        assert staged.q.is_pinned()
+    for first, second, third in (
+        (original.evidence, staged.evidence, restored.evidence),
+        (original.queries, staged.queries, restored.queries),
+        (original.field_targets, staged.field_targets, restored.field_targets),
+        (original.sensitivity_targets, staged.sensitivity_targets, restored.sensitivity_targets),
+    ):
+        for field_info in fields(first):
+            source = getattr(first, field_info.name)
+            pinned = getattr(second, field_info.name)
+            replayed = getattr(third, field_info.name)
+            if isinstance(source, torch.Tensor):
+                assert pinned.device.type == "cpu"
+                torch.testing.assert_close(pinned, source)
+                torch.testing.assert_close(replayed, source)
+    for name in ("q", "evidence_row_index", "anchor_index", "q_index", "joint_coordinate_sign"):
+        torch.testing.assert_close(getattr(staged, name), getattr(original, name))
+        torch.testing.assert_close(getattr(restored, name), getattr(original, name))
+
+
 def test_streaming_backward_matches_full_group_additive_gradient(monkeypatch: pytest.MonkeyPatch) -> None:
     r"""逐块 task gradients 必须形成 FairGrad shared 方向和各自 private reader 梯度。"""
 
@@ -667,7 +733,14 @@ def test_streaming_backward_matches_full_group_additive_gradient(monkeypatch: py
     )
     monkeypatch.setattr(method_module, "maybe_rewrite_batch", lambda value, **_kwargs: value)
 
-    update = MultiAnchorGaussianMethod.backward_update(fake_method, batch, forward_step=0, microbatch_size=4)
+    update = backward_method_update_units(
+        fake_method,
+        (batch,),
+        forward_step=0,
+        logical_sample_count=4,
+        microbatch_size=4,
+        rewrite_batch_fn=lambda value, **_kwargs: value,
+    )
 
     assert update.sample_count == 4
     assert update.terms == {"density": pytest.approx(5.0), "kappa": pytest.approx(13.0)}
@@ -681,9 +754,12 @@ def test_streaming_backward_collects_unified_z_gradient_sufficient_statistics(
 ) -> None:
     r"""microbatch-denominator 下的 rho/kappa $Z$ 梯度应产生可重算 norm、dot、cosine 与 Gram 证据。"""
 
-    block = _sample(torch.tensor([[0.1, -0.2], [0.3, 0.4], [-0.5, 0.2], [0.7, -0.1]]))
+    blocks = [
+        replace(_sample(torch.tensor([[0.1, -0.2], [0.3, 0.4]])), asset_id="synthetic-a"),
+        replace(_sample(torch.tensor([[-0.5, 0.2], [0.7, -0.1]])), asset_id="synthetic-b"),
+    ]
     batch = pad_online_geometry_samples(
-        list(split_online_geometry_sample(block)),
+        blocks,
         padding=GeometryPaddingCfg(max_joint_count=2, max_tip_count=1),
     )
     parameter = torch.nn.Parameter(torch.tensor(2.0))
@@ -710,10 +786,36 @@ def test_streaming_backward_collects_unified_z_gradient_sufficient_statistics(
         }
         prediction = SimpleNamespace(
             latents=SimpleNamespace(entities=entities),
+            query_features=torch.zeros(1),
             density=torch.zeros_like(microbatch.field_targets.density),
             kappa=torch.zeros_like(microbatch.sensitivity_targets.kappa),
         )
         return MethodStep(objectives=objectives, sample_count=microbatch.q.shape[0]), prediction
+
+    def synthetic_latent_diagnostic(_batch, prediction):
+        diagnostic_entities = prediction.latents.entities.detach().requires_grad_(True)  # 独立 leaf unified $Z$
+        count = diagnostic_entities.new_tensor(float(diagnostic_entities.shape[0]))  # 当前 unit 的统计分母
+        rho_numerator = diagnostic_entities.square().sum()  # $L_\rho(Z)$，对 $Z$ 有正梯度
+        kappa_numerator = (diagnostic_entities - 3.0).square().sum()  # $L_\kappa(Z)$，对 $Z$ 有负梯度
+        objectives = {
+            "density": ObjectiveTermResult(
+                "density",
+                (AdditiveStatistic("density", rho_numerator, count),),
+                {"loss": rho_numerator / count},
+            ),
+            "kappa": ObjectiveTermResult(
+                "kappa",
+                (AdditiveStatistic("kappa", kappa_numerator, count),),
+                {"loss": kappa_numerator / count},
+            ),
+        }
+        diagnostic_prediction = SimpleNamespace(
+            latents=SimpleNamespace(entities=diagnostic_entities),
+            query_features=prediction.query_features,
+            density=prediction.density,
+            kappa=prediction.kappa,
+        )
+        return MethodStep(objectives=objectives, sample_count=int(diagnostic_entities.shape[0])), diagnostic_prediction
 
     fake_method = SimpleNamespace(
         config=SimpleNamespace(
@@ -722,6 +824,7 @@ def test_streaming_backward_collects_unified_z_gradient_sufficient_statistics(
             fairgrad=SimpleNamespace(near_opposition_tolerance=1.0e-6),
         ),
         _forward_with_prediction=synthetic_forward,
+        _forward_latent_diagnostic=synthetic_latent_diagnostic,
         optimizer_parameter_groups=lambda: (
             MethodParameterGroup("shared_encoder", (parameter,)),
             MethodParameterGroup("density_reader", (density_private,)),
@@ -734,15 +837,33 @@ def test_streaming_backward_collects_unified_z_gradient_sufficient_statistics(
     )
     monkeypatch.setattr(method_module, "maybe_rewrite_batch", lambda value, **_kwargs: value)
 
-    update = MultiAnchorGaussianMethod.backward_update(
+    full_update = MultiAnchorGaussianMethod.backward_update(
         fake_method,
         batch,
         forward_step=0,
         microbatch_size=4,
         collect_z_gradients=True,
     )
+    stream_update = backward_method_update_units(
+        fake_method,
+        tuple(split_padded_online_geometry_batch(batch, microbatch_size=2)),
+        forward_step=0,
+        logical_sample_count=4,
+        microbatch_size=2,
+        collect_z_gradients=True,
+        rewrite_batch_fn=lambda value, **_kwargs: value,
+    )
 
-    evidence = update.gradient_evidence
+    for key in (
+        "raw/rho_norm",
+        "raw/kappa_norm",
+        "raw/dot",
+        "raw/cosine",
+        "raw/gram_determinant",
+        "raw/joint_norm",
+    ):
+        assert stream_update.gradient_evidence[key] == pytest.approx(full_update.gradient_evidence[key])
+    evidence = stream_update.gradient_evidence
     assert evidence["raw/rho_norm"] > 0.0
     assert evidence["raw/kappa_norm"] > 0.0
     assert evidence["raw/dot"] < 0.0

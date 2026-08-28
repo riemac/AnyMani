@@ -7,7 +7,12 @@ from dataclasses import replace
 import pytest
 from anymani.distill.ssl.config_store import compose_pretrain_cfg
 from anymani.distill.ssl.experiment import EmbodimentPretrainCfg, resolved_config_dict
-from anymani.distill.ssl.runtime.checkpointing import require_resume_metadata_identity, require_resume_scientific_config
+from anymani.distill.ssl.pretrain import _build_parser, _config_overrides
+from anymani.distill.ssl.runtime.checkpointing import (
+    require_resume_metadata_identity,
+    require_resume_scientific_config,
+    resume_scientific_config,
+)
 
 pytestmark = pytest.mark.contract
 
@@ -99,7 +104,7 @@ def test_resume_rejects_code_formula_source_or_worktree_drift(field: str) -> Non
 
     metadata = {
         "code_revision": "revision-a",
-        "package_version": "0.7.3",
+        "package_version": "0.7.5",
         "geometry_semantics_schema": "5.0.0",
         "declared_objective": {"density": 1.0, "kappa": 1.0},
         "objective_formula": {"density": "raw-mse", "kappa": "scaled-mse"},
@@ -115,7 +120,65 @@ def test_resume_rejects_code_formula_source_or_worktree_drift(field: str) -> Non
         require_resume_metadata_identity(changed, metadata)
 
 
+def test_resume_can_explicitly_accept_validated_dirty_worktree_change() -> None:
+    r"""源码修复经真实 sanity 验证后，可放行 fingerprint 变化但仍保留其他 identity gates。"""
+
+    metadata = {
+        "code_revision": "revision-a",
+        "package_version": "0.7.5",
+        "geometry_semantics_schema": "5.0.0",
+        "declared_objective": {"density": 1.0, "kappa": 1.0},
+        "objective_formula": {"density": "raw-mse", "kappa": "scaled-mse"},
+        "fairgrad_formula": {"alpha": 1.0},
+        "parameter_partition": {"shared_encoder": 10},
+        "source_artifact": {"mode": "readonly", "producer": "sm_120"},
+        "worktree_dirty": True,
+        "worktree_fingerprint": "fingerprint-a",
+    }
+    changed = dict(metadata, worktree_fingerprint="fingerprint-after-validated-fix")
+
+    require_resume_metadata_identity(changed, metadata, allow_worktree_change=True)
+
+    changed["fairgrad_formula"] = {"alpha": 2.0}
+    with pytest.raises(ValueError, match="fairgrad_formula"):
+        require_resume_metadata_identity(changed, metadata, allow_worktree_change=True)
+
+
+def test_resume_worktree_change_still_requires_dirty_state_match() -> None:
+    r"""显式源码修复授权不能把 clean checkpoint 恢复到 dirty worktree。"""
+
+    metadata = {
+        "code_revision": "revision-a",
+        "package_version": "0.7.5",
+        "geometry_semantics_schema": "5.0.0",
+        "declared_objective": {"density": 1.0, "kappa": 1.0},
+        "objective_formula": {"density": "raw-mse", "kappa": "scaled-mse"},
+        "fairgrad_formula": {"alpha": 1.0},
+        "parameter_partition": {"shared_encoder": 10},
+        "source_artifact": {"mode": "readonly", "producer": "sm_120"},
+        "worktree_dirty": False,
+        "worktree_fingerprint": "",
+    }
+    changed = dict(metadata, worktree_dirty=True, worktree_fingerprint="fingerprint-after-fix")
+
+    with pytest.raises(ValueError, match="worktree_dirty"):
+        require_resume_metadata_identity(changed, metadata, allow_worktree_change=True)
+
+
+def test_allow_worktree_change_is_runtime_resume_policy_not_scientific_identity() -> None:
+    r"""CLI 的源码修复授权只控制 resume gate，不改变冻结的实验配置。"""
+
+    args = _build_parser().parse_args(["--allow-worktree-change"])
+    overrides = _config_overrides(args)
+    assert "run.allow_worktree_change=True" in overrides
+
+    baseline = resolved_config_dict(compose_pretrain_cfg())
+    changed = dict(baseline)
+    changed["run"] = dict(baseline["run"], allow_worktree_change=True)
+    assert resume_scientific_config(changed) == resume_scientific_config(baseline)
+
+
 def _config() -> EmbodimentPretrainCfg:
-    """从 ConfigStore 恢复 schema 8 实验，避免测试自己复制 concrete defaults。"""
+    """从 ConfigStore 恢复 schema 9 实验，避免测试自己复制 concrete defaults。"""
 
     return compose_pretrain_cfg()

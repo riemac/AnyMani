@@ -1,4 +1,4 @@
-r"""Schema 8 embodiment pure-pretraining 的普通命令行入口。
+r"""Schema 9 embodiment pure-pretraining 的普通命令行入口。
 
 Python preset 定义方法、表示、损失和默认训练数值；shell 使用 ``--flag value`` 声明本次运行。
 入口把显式 flags 转成内部 Hydra overrides，再恢复完整冻结配置。Hydra 字段路径不暴露给日常运行命令。
@@ -34,6 +34,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run_name", "--experiment_name", dest="experiment_name", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--resume_checkpoint", type=str, default=None)
+    parser.add_argument("--new_run", action="store_true", help="ignore matching incomplete runs and start a new run")
+    parser.add_argument(
+        "--allow_worktree_change",
+        "--allow-worktree-change",
+        action="store_true",
+        help="allow an explicitly validated dirty-worktree source fix when resuming an incomplete run",
+    )
     parser.add_argument("--source_cache_root", type=str, default=None)
     parser.add_argument("--source_cache_mode", choices=("auto", "readonly", "read-write", "off"), default=None)
     # 显式数据预算直接决定本次生成多少资产/q 样本以及循环利用几次。
@@ -43,7 +50,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--q_per_asset_per_minibatch", type=int, default=None)
     parser.add_argument("--mini_epochs", type=int, default=None)
     parser.add_argument("--microbatch_size", type=int, default=None)
-    parser.add_argument("--max_resident_assets", type=int, default=None)
     # optimizer 与运行 cadence 属于一次执行，可从 shell 明确覆盖 preset。
     parser.add_argument("--learning_rate", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=None)
@@ -56,6 +62,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shuffle_assets", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--deterministic_algorithms", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--resource_profile", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--emit_compression_basis", action=argparse.BooleanOptionalAction, default=None)
     return parser
 
 
@@ -71,6 +78,8 @@ def _config_overrides(args: argparse.Namespace) -> tuple[str, ...]:
         ("experiment_name", "run.experiment_name"),
         ("output_dir", "run.output_dir"),
         ("resume_checkpoint", "run.resume_checkpoint"),
+        ("new_run", "run.new_run"),
+        ("allow_worktree_change", "run.allow_worktree_change"),
         ("source_cache_root", "run.source_cache_root"),
         ("source_cache_mode", "run.source_cache_mode"),
         ("max_epochs", "trainer.max_epochs"),
@@ -79,7 +88,6 @@ def _config_overrides(args: argparse.Namespace) -> tuple[str, ...]:
         ("q_per_asset_per_minibatch", "trainer.sampling.q_per_asset_per_minibatch"),
         ("mini_epochs", "trainer.mini_epochs"),
         ("microbatch_size", "trainer.microbatch_size"),
-        ("max_resident_assets", "trainer.max_resident_assets"),
         ("learning_rate", "trainer.optimizer.learning_rate"),
         ("weight_decay", "trainer.optimizer.weight_decay"),
         ("max_gradient_norm_per_group", "trainer.max_gradient_norm_per_group"),
@@ -88,6 +96,7 @@ def _config_overrides(args: argparse.Namespace) -> tuple[str, ...]:
         ("shuffle_assets", "trainer.sampling.shuffle_assets"),
         ("deterministic_algorithms", "run.deterministic_algorithms"),
         ("resource_profile", "trainer.resource_profile"),
+        ("emit_compression_basis", "trainer.emit_compression_basis"),
     )
     overrides = [
         f"{path}={getattr(args, field)}"

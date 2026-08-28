@@ -20,13 +20,32 @@ class PretrainRun:
         self.config = config
 
     def prepare_output_dir(self, override: Path | None = None) -> Path:
-        r"""创建本次唯一 artifact 根目录；测试可显式覆盖 timestamp 路径。"""
+        r"""创建新 run，或为同一命令选择唯一带 recovery 的 INCOMPLETE run。"""
 
         output_dir = override
         if output_dir is None:
-            timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-            output_dir = Path(self.config.output_dir) / self.config.experiment_name / timestamp
+            experiment_root = Path(self.config.output_dir) / self.config.experiment_name
+            explicit = Path(self.config.resume_checkpoint).expanduser() if self.config.resume_checkpoint else None
+            if explicit is not None:
+                output_dir = explicit.resolve().parent.parent
+            elif not self.config.new_run and experiment_root.is_dir():
+                candidates = tuple(
+                    child
+                    for child in experiment_root.iterdir()
+                    if child.is_dir()
+                    and (child / "INCOMPLETE").is_file()
+                    and (child / "checkpoints" / "recovery.pt").is_file()
+                )
+                if len(candidates) > 1:
+                    raise RuntimeError(f"multiple incomplete runs require --resume_checkpoint or --new_run: {candidates}")
+                if candidates:
+                    output_dir = candidates[0]
+            if output_dir is None:
+                timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+                output_dir = experiment_root / timestamp
         output_dir.mkdir(parents=True, exist_ok=True)
+        if not (output_dir / "COMPLETE").exists():
+            (output_dir / "INCOMPLETE").write_text("schema=9.0.0\n", encoding="ascii")
         return output_dir
 
     @staticmethod
@@ -78,7 +97,7 @@ class PretrainRun:
         worktree_dirty: bool = False,
         worktree_fingerprint: str = "",
     ) -> Any:
-        r"""构造一次 pure-pretrain run 共用的 schema 8 checkpoint lineage。"""
+        r"""构造一次 pure-pretrain run 共用的 schema 9 checkpoint lineage。"""
 
         from anymani.distill.ssl.checkpoint import PretrainCheckpointMetadata
 
@@ -122,10 +141,12 @@ class PretrainRunCfg:
     output_dir: str = "logs/ssl"
     experiment_name: str = "multi_anchor_gaussian"
     resume_checkpoint: str = ""
+    new_run: bool = False  # 显式拒绝自动恢复匹配的 incomplete run
     seed: int = 0  # model 初始化及各 role 派生 seed 的唯一根
     deterministic_algorithms: bool = True
-    source_cache_root: str = "logs/ssl/_cache/geometry_source/v1"
+    source_cache_root: str = "logs/ssl/_cache/geometry_source/v2"
     source_cache_mode: str = "readonly"  # auto 先校验/补建 source，再以 readonly 训练
+    allow_worktree_change: bool = False  # 仅显式恢复已验证源码修复，不改变 scientific config
 
     def __post_init__(self) -> None:
         r"""拒绝空 experiment identity、负随机种子和未知 source cache 模式。"""

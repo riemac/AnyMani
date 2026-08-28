@@ -7,13 +7,14 @@ Trainer 不得读取 `representation.config.field` 或 padding layout。
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from threading import Event, Lock
 from typing import Any
 
 import torch
+from torch._functorch import config as functorch_config  # pyright: ignore[reportPrivateImportUsage]
 
 from anymani.assets.bank.hand_container import HandContainer
 from anymani.distill.methods.contracts import (
@@ -30,16 +31,19 @@ from anymani.distill.representations.geometry import GeometryRepresentation
 from anymani.distill.representations.sources.artifacts import GeometrySourceArtifactStore
 from anymani.distill.representations.sources.cache import GeometrySourceArena
 from anymani.distill.representations.sources.geometry_source import GeometrySource, GeometrySourceCore
-from anymani.distill.representations.targets.geometry_field import fixed_validation_gaussian_field_config
+from anymani.distill.representations.targets.geometry_field import fixed_gaussian_field_config
 
 from .artifact import build_retained_geometry_artifact
 from .augmentation import maybe_rewrite_batch, sample_entity_permutation
 from .batch import (
+    OnlineGeometrySample,
     PaddedOnlineGeometryBatch,
     attach_static_evidence_block,
     method_batch_views,
     pad_online_geometry_blocks,
+    restore_padded_batch_from_replay,
     split_padded_online_geometry_batch,
+    stage_padded_batch_for_replay,
 )
 from .config import MultiAnchorGaussianMethodCfg
 from .context import MultiAnchorObjectiveContext
@@ -97,7 +101,7 @@ from .source_runtime import (
 from .source_runtime import (
     start_physical_audit as start_method_physical_audit,
 )
-from .training import _q_per_asset_block, backward_method_update
+from .training import _q_per_asset_block, backward_method_update, backward_method_update_units
 
 _TRAIN_FORWARD_MICROBATCH_SAMPLES = 64
 """rho/kappa 普通参数反向的 `(asset,q)` 样本上限。"""
@@ -172,17 +176,19 @@ class MultiAnchorGaussianMethod:
 
         self.config = config
         self.representation = GeometryRepresentation(config.representation)
-        self.validation_representation = GeometryRepresentation(
+        self.fixed_representation = GeometryRepresentation(
             replace(
                 config.representation,
-                field=fixed_validation_gaussian_field_config(config.representation.field),
+                field=fixed_gaussian_field_config(config.representation.field),
             )
         )
         self.model: GeometrySSLModel | None = None
+        self.execution_policy: Any | None = None
+        self._compiled_forward: Any | None = None
         self.train_sources: LazyGeometrySources | None = None
         self.source_cache = GeometrySourceArena()
-        self.validation_sources: dict[str, LazyGeometrySources] = {}
         self.evaluation_sources: dict[str, LazyGeometrySources] = {}
+        self.active_role: str | None = None
         self.padding: GeometryPaddingCfg | None = None
         self.runtime_device: torch.device | None = None  # physical audit 与 resident source 共用 classifier device
         self.source_artifact_store: GeometrySourceArtifactStore | None = None
@@ -198,31 +204,29 @@ class MultiAnchorGaussianMethod:
             "elapsed_seconds": 0.0,
         }  # 所有 split 共用的 append-only GPU/CPU anchor 分类证据
 
-    def prepare(self, catalog: Any, *, device: torch.device, dtype: torch.dtype) -> None:
-        r"""建立 train/validation/evaluation source provider，并推导全局 padding。"""
+    def prepare(self, catalog: Any, *, role: str, device: torch.device, dtype: torch.dtype) -> None:
+        r"""只建立当前 train 或 evaluation 的 source provider，并独立推导 padding。"""
 
         del dtype
+        if role not in {"train", "evaluation"}:
+            raise ValueError(f"Geometry SSL method role must be train or evaluation, got {role!r}")
+        if self.active_role is not None:
+            raise RuntimeError("Geometry SSL method can prepare exactly one runtime role")
+        self.active_role = role
         self.runtime_device = torch.device(device)  # audit manifest 必须重建训练实际使用的 CUDA anchors
-        print(f"[Method] Indexing lazy train sources: {len(catalog.train)} assets")
-        self.train_sources = self._lazy_sources(catalog.train, self.representation)
-
-        print("[Method] Indexing lazy validation sources...")
-        self.validation_sources = {
-            suite_name: self._lazy_sources(suite_assets, self.validation_representation)
-            for suite_name, suite_assets in catalog.validation.items()
-        }
-
-        print("[Method] Indexing lazy evaluation sources...")
-        self.evaluation_sources = {
-            suite_name: self._lazy_sources(suite_assets, self.validation_representation)
-            for suite_name, suite_assets in catalog.evaluation.items()
-        }
-
-        all_assets = tuple(catalog.train)
-        all_assets += tuple(asset for assets in catalog.validation.values() for asset in assets)
-        all_assets += tuple(asset for assets in catalog.evaluation.values() for asset in assets)
+        if role == "train":
+            print(f"[Method] Indexing lazy train sources: {len(catalog.train)} assets")
+            self.train_sources = self._lazy_sources(catalog.train, self.representation)
+            active_assets = tuple(catalog.train)
+        else:
+            print("[Method] Indexing lazy evaluation sources...")
+            self.evaluation_sources = {
+                suite_name: self._lazy_sources(suite_assets, self.fixed_representation)
+                for suite_name, suite_assets in catalog.evaluation.items()
+            }
+            active_assets = tuple(asset for assets in catalog.evaluation.values() for asset in assets)
         self.padding = _derive_padding(
-            all_assets,
+            active_assets,
             max_graph_distance=self.config.model.encoder.backbone.max_graph_distance,
         )
 
@@ -233,6 +237,7 @@ class MultiAnchorGaussianMethod:
         mode: str,
         dataset_manifest_sha256: str,
         producer_device: str,
+        role: str = "train",
     ) -> None:
         r"""配置跨 run source store；Trainer 不读取 artifact 的 geometry 内部字段。"""
 
@@ -242,6 +247,7 @@ class MultiAnchorGaussianMethod:
             mode=mode,
             dataset_manifest_sha256=dataset_manifest_sha256,
             producer_device=producer_device,
+            role=role,
         )
 
     def source_artifact_identity(self) -> dict[str, object]:
@@ -294,7 +300,7 @@ class MultiAnchorGaussianMethod:
         return preflight_method_source_artifacts(self)
 
     def split_names(self, role: str) -> tuple[str, ...]:
-        r"""返回 validation/evaluation 的具名 suites；train 没有 suite 子轴。"""
+        r"""返回 evaluation 的具名 suites；train 没有 suite 子轴。"""
 
         return method_split_names(self, role)
 
@@ -336,10 +342,8 @@ class MultiAnchorGaussianMethod:
     ) -> MultiAnchorGaussianSession:
         r"""打开一个不向 Trainer 暴露 sources/samplers/loaders 的 split session。"""
 
-        if role in {"train", "training_evaluation"}:
+        if role == "train":
             sources = self.require_train_sources()
-        elif role == "validation":
-            sources = self.validation_sources.get(suite)
         elif role == "evaluation":
             sources = self.evaluation_sources.get(suite)
         else:
@@ -375,7 +379,38 @@ class MultiAnchorGaussianMethod:
         if self.model is not None:
             raise RuntimeError("multi-anchor method model is already initialized")
         self.model = GeometrySSLModel(self.config.model).to(device=device, dtype=dtype)
+        if self.execution_policy is not None and bool(self.execution_policy.compile_enabled):
+            # FairGrad obtains two task gradients from one activation graph. AOTAutograd's donated
+            # buffers are incompatible with the required first retain_graph=True gradient call. The
+            # setting must remain active after forward returns because the backward calls occur in
+            # the method's streaming reducer, outside this initialization scope.
+            functorch_config.donated_buffer = False
+            self._compiled_forward = torch.compile(
+                self.model,
+                mode=str(self.execution_policy.compile_mode),
+                fullgraph=True,
+            )
         return self.model
+
+    def configure_execution(self, policy: Any) -> None:
+        r"""接收 Trainer 的通用 precision/compile policy，不让 Trainer 读取具体模型字段。"""
+
+        if self.model is not None:
+            raise RuntimeError("execution policy must be configured before model initialization")
+        required = (
+            "teacher_dtype",
+            "parameter_dtype",
+            "model_autocast_dtype",
+            "loss_dtype",
+            "fairgrad_accumulation_dtype",
+            "allow_tf32",
+            "compile_enabled",
+            "compile_mode",
+        )
+        missing = tuple(name for name in required if not hasattr(policy, name))
+        if missing:
+            raise TypeError(f"Geometry SSL execution policy lacks fields={missing}")
+        self.execution_policy = policy
 
     def require_model(self) -> GeometrySSLModel:
         r"""返回已初始化模型；setup 顺序错误时明确失败。"""
@@ -447,7 +482,7 @@ class MultiAnchorGaussianMethod:
         self._record_anchor_classification(state)
         return state
 
-    def load_validation_device_state(
+    def load_fixed_device_state(
         self,
         source: GeometrySourceCore,
         *,
@@ -455,11 +490,11 @@ class MultiAnchorGaussianMethod:
         dtype: torch.dtype,
         bank_index: int = 0,
     ):
-        r"""把一项 CPU core 完成 anchors 并上传为固定 validation sigma 的 device state。"""
+        r"""把一项 CPU core 完成 anchors 并上传为固定 evaluation sigma 的 device state。"""
 
         state = self._load_device_state_with_artifact(
             source,
-            representation=self.validation_representation,
+            representation=self.fixed_representation,
             bank_index=bank_index,
             device=device,
             dtype=dtype,
@@ -571,7 +606,7 @@ class MultiAnchorGaussianMethod:
         ) + float(stats.elapsed_seconds)
 
     def declared_objective_weights(self) -> dict[str, float]:
-        r"""返回 objective presence；schema-8 不再以 scalar task weight 表达 shared 优先级。"""
+        r"""返回 objective presence；schema-9 不再以 scalar task weight 表达 shared 优先级。"""
 
         return {name: 1.0 for name in self.config.objectives.enabled()}
 
@@ -619,16 +654,67 @@ class MultiAnchorGaussianMethod:
         schedule: Any,
         mode: str = "train",
     ) -> PaddedOnlineGeometryBatch:
-        r"""由 schedule item realization 一次同资产 q block，并在 window 内复用 device state。"""
+        r"""兼容固定 evaluation：收集当前 schedule item 的 blocks 后形成一个 padded batch。"""
+
+        blocks = [
+            block
+            for unit in self._realize_minibatch_blocks(
+                schedule_item,
+                sources=sources,
+                samplers=samplers,
+                window=window,
+                seed=seed,
+                schedule=schedule,
+                mode=mode,
+            )
+            for block in unit
+        ]
+        return pad_online_geometry_blocks(blocks, padding=self.require_padding())
+
+    def realize_minibatch_units(
+        self,
+        schedule_item: Any,
+        *,
+        sources: LazyGeometrySources,
+        samplers: LazySobolSamplers,
+        window: Any,
+        seed: int,
+        schedule: Any,
+        mode: str = "train",
+    ) -> Iterator[PaddedOnlineGeometryBatch]:
+        r"""逐个产出 8 assets × 8 q 的 64-pair unit，不持有同一 update 的历史 CUDA batch。"""
+
+        padding = self.require_padding()
+        for blocks in self._realize_minibatch_blocks(
+            schedule_item,
+            sources=sources,
+            samplers=samplers,
+            window=window,
+            seed=seed,
+            schedule=schedule,
+            mode=mode,
+        ):
+            yield pad_online_geometry_blocks(blocks, padding=padding)
+
+    def _realize_minibatch_blocks(
+        self,
+        schedule_item: Any,
+        *,
+        sources: LazyGeometrySources,
+        samplers: LazySobolSamplers,
+        window: Any,
+        seed: int,
+        schedule: Any,
+        mode: str,
+    ) -> Iterator[list[OnlineGeometrySample]]:
+        r"""共享 source/prefetch/teacher 实现，按 device subwindow 交付未 padding 的资产 blocks。"""
 
         del schedule  # q-block、window 与随机身份均由 ScheduledMinibatch 显式携带
-        representation = self.representation if mode == "train" else self.validation_representation
-        padding = self.require_padding()
+        representation = self.representation if mode == "train" else self.fixed_representation
         catalog_ids = sources.asset_ids
         resident_indices = tuple(schedule_item.resident_asset_indices)
         if not resident_indices:
             raise ValueError("schedule item must declare the complete resident window, not only the minibatch")
-        samples = []
         q_block_index = int(schedule_item.q_block_index)  # 同一资产获得第几个新 q-block
         resident_set = set(resident_indices)
         logical_indices = tuple(schedule_item.asset_indices)
@@ -641,6 +727,7 @@ class MultiAnchorGaussianMethod:
         first_ids = tuple(catalog_ids[index] for index in asset_chunks[0])
         prefetch_handle = sources.prefetch_async(first_ids)  # 首组无可重叠 GPU 工作，立即异步提交
         for chunk_index, asset_chunk in enumerate(asset_chunks):
+            samples: list[OnlineGeometrySample] = []  # 当前 8 assets 的唯一 CUDA-resident teacher unit
             current_cores = sources.await_prefetch(prefetch_handle)  # 强引用 pin current，不依赖 arena LRU
             next_handle = None
             if chunk_index + 1 < len(asset_chunks):
@@ -702,9 +789,9 @@ class MultiAnchorGaussianMethod:
                         ),
                     )
                 )
+            yield samples  # caller 完成该 unit backward 后，activation 与 resident lease 才进入下一组
             if next_handle is not None:
                 prefetch_handle = next_handle
-        return pad_online_geometry_blocks(samples, padding=padding)
 
     def forward_objectives(
         self,
@@ -780,7 +867,7 @@ class MultiAnchorGaussianMethod:
         mode: str,
         apply_augmentation: bool = True,
     ) -> tuple[MethodStep, Any]:
-        r"""共享 objective 与固定评估所需的同一次模型预测，避免 validation 双前向。"""
+        r"""共享 objective 与固定评估所需的同一次模型预测，避免 evaluation 双前向。"""
 
         model = self.require_model()
         if mode == "train" and apply_augmentation:
@@ -791,25 +878,145 @@ class MultiAnchorGaussianMethod:
                 seed=step,
             )
         views = method_batch_views(batch)
-        q, evidence, evidence_row_index = views.model_input
+        q, evidence, evidence_row_index, joint_coordinate_sign = views.model_input
         query_points, bandwidths, owner_index, query_index, joint_index = views.readout_condition
         q = q.detach()  # 物理构型是模型条件；本方法只对模型参数建立普通一阶梯度图
-        prediction = model(
-            q,
-            evidence,
-            query_points,
-            bandwidths,
-            owner_index=owner_index,
-            query_index=query_index,
-            joint_index=joint_index,
-            evidence_row_index=evidence_row_index,
-        )
+        forward = self._compiled_forward if self._compiled_forward is not None else model
+        autocast_name = str(getattr(self.execution_policy, "model_autocast_dtype", "float32"))
+        if self._compiled_forward is not None and q.device.type == "cuda":
+            # 一个 stream unit 的两项 task gradient 共用同一前向图；下一 unit 开始前才声明新的 CUDA Graph step。
+            torch.compiler.cudagraph_mark_step_begin()
+        if q.device.type == "cuda" and autocast_name == "bfloat16":
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                raw_prediction = forward(
+                    q,
+                    evidence,
+                    query_points,
+                    bandwidths,
+                    owner_index=owner_index,
+                    query_index=query_index,
+                    joint_index=joint_index,
+                    evidence_row_index=evidence_row_index,
+                    joint_coordinate_sign=joint_coordinate_sign,
+                )
+        else:
+            raw_prediction = forward(
+                q,
+                evidence,
+                query_points,
+                bandwidths,
+                owner_index=owner_index,
+                query_index=query_index,
+                joint_index=joint_index,
+                evidence_row_index=evidence_row_index,
+                joint_coordinate_sign=joint_coordinate_sign,
+            )
+        prediction = GeometrySSLForward(
+            latents=raw_prediction.latents,
+            query_features=raw_prediction.query_features,
+            density=raw_prediction.density.to(torch.float32),
+            kappa=raw_prediction.kappa.to(torch.float32),
+        )  # objective numerator/loss 固定 FP32；cast 保留 learned BF16 graph
         context = MultiAnchorObjectiveContext(
             prediction=prediction,
             batch=batch,
         )
         results = evaluate_objectives(context, self.config.objectives)
         return MethodStep(objectives=results, sample_count=int(batch.q.shape[0])), prediction
+
+    def _forward_latent_diagnostic(
+        self,
+        batch: PaddedOnlineGeometryBatch,
+        prediction: GeometrySSLForward,
+    ) -> tuple[MethodStep, GeometrySSLForward]:
+        r"""从已返回的 unified $Z$ 重建 disposable readers，形成可对 $Z$ 求导的诊断图。
+
+        ``torch.compile`` 的 AOTAutograd 可以保证 prediction 对模型参数的反向路径，却不保证同时
+        返回的中间 ``latents.entities`` 仍作为 prediction 的可微输入节点。为避免把这一编译器输出
+        约定误当作模型梯度合同，这里只在显式 Z-gradient 诊断时将数值相同的 $Z$ 设为 leaf，再调用
+        与主模型相同的 density/$\kappa$ readers。该重算不写入参数 ``.grad``，也不参与 optimizer update。
+
+        数学上，该路径计算固定 query features 与当前 unified representation 下的偏导：
+        $$
+        \frac{\partial \mathcal L_\rho}{\partial Z},
+        \qquad
+        \frac{\partial \mathcal L_\kappa}{\partial Z}.
+        $$
+        ``detach`` 只切断 compiled encoder 的上游图；它不改变 $Z$ 的数值，也不改变 readers 对
+        $Z$ 的局部导数。正式配置仍为 64-pair unit、BF16 learned forward 与 FP32 objective。
+
+        Args:
+            batch (PaddedOnlineGeometryBatch): 当前 unit 的完整 model/readout/truth 视图。
+            prediction (GeometrySSLForward): 主 compiled forward 返回的预测与 unified $Z$。
+
+        Returns:
+            tuple[MethodStep, GeometrySSLForward]: 基于 diagnostic leaf $Z$ 的 objective 与预测。
+
+        Raises:
+            ValueError: batch 的 selector、padding 或 entity routing 违反 model contract 时抛出。
+        """
+
+        model = self.require_model()  # concrete decoder 参数与 learned architecture 的唯一拥有者
+        views = method_batch_views(batch)  # 重用主 forward 的 typed model/readout 轴，避免诊断路径漂移
+        _q, evidence, evidence_row_index, _joint_coordinate_sign = views.model_input  # $q$ 在此只用于路由
+        _query_points, bandwidths, owner_index, query_index, joint_index = views.readout_condition
+
+        # 编译器返回的 $Z$ 作为数值快照进入独立诊断图；其形状仍为 `[B,G,D]`，不再连接 encoder 上游。
+        diagnostic_entities = prediction.latents.entities.detach().requires_grad_(True)  # diagnostic leaf $Z$
+        diagnostic_latents = replace(prediction.latents, entities=diagnostic_entities)  # typed unified latent
+        diagnostic_query_features = prediction.query_features.detach()  # query path 对 $Z$ 偏导视为常量
+
+        # 与 GeometrySSLModel.forward 完全一致地恢复 entity validity 与 JOINT -> entity 路由，保证 padding
+        # 和跨结构 q-row 语义不因“只为求导重算”而改变。
+        entity_valid = evidence.entity_valid_mask  # `[B,G]`/`[G]`，padding owner 的物理有效性
+        if entity_valid is not None:
+            if evidence_row_index is not None and entity_valid.ndim == 2:
+                entity_valid = entity_valid[evidence_row_index]  # q-row 到 unique evidence row 的映射
+            if entity_valid.ndim == 1:
+                entity_valid = entity_valid.unsqueeze(0).expand(batch.q.shape[0], -1)  # `[B,G]` 广播视图
+
+        joint_entity_index = (
+            evidence.joint_entity_index[evidence_row_index]
+            if evidence_row_index is not None and evidence.joint_entity_index.ndim == 2
+            else evidence.joint_entity_index
+        )  # `[N_J]` 或 `[B,N_J]`，与主 forward 使用同一 typed routing
+
+        # 诊断 readers 与主 learned forward 使用同一 autocast policy；teacher/query/target 不在此路径生成。
+        autocast_name = str(getattr(self.execution_policy, "model_autocast_dtype", "float32"))
+        if diagnostic_entities.device.type == "cuda" and autocast_name == "bfloat16":
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                raw_diagnostic = model.decode_latents(
+                    diagnostic_latents,
+                    diagnostic_query_features,
+                    bandwidths=bandwidths,
+                    entity_valid_mask=entity_valid,
+                    joint_entity_index=joint_entity_index,
+                    owner_index=owner_index,
+                    query_index=query_index,
+                    joint_index=joint_index,
+                )
+        else:
+            raw_diagnostic = model.decode_latents(
+                diagnostic_latents,
+                diagnostic_query_features,
+                bandwidths=bandwidths,
+                entity_valid_mask=entity_valid,
+                joint_entity_index=joint_entity_index,
+                owner_index=owner_index,
+                query_index=query_index,
+                joint_index=joint_index,
+            )
+
+        # 与主路径相同，objective 在 FP32 prediction 上归约；reader 对 leaf $Z$ 的梯度仍保留完整图。
+        diagnostic_prediction = GeometrySSLForward(
+            latents=raw_diagnostic.latents,
+            query_features=raw_diagnostic.query_features,
+            density=raw_diagnostic.density.to(torch.float32),
+            kappa=raw_diagnostic.kappa.to(torch.float32),
+        )  # `[B,G,N_Q,N_sigma]` density 与 `[B,E]` kappa，objective dtype FP32
+        context = MultiAnchorObjectiveContext(prediction=diagnostic_prediction, batch=batch)
+        results = evaluate_objectives(context, self.config.objectives)  # 与正式 objective 完全同源
+        return MethodStep(objectives=results, sample_count=int(batch.q.shape[0])), diagnostic_prediction
 
     def dense_snapshot(
         self,
@@ -877,6 +1084,42 @@ class MultiAnchorGaussianMethod:
             collect_z_gradients=collect_z_gradients,
             rewrite_batch_fn=maybe_rewrite_batch,
         )
+
+    def backward_update_units(
+        self,
+        units: Iterator[PaddedOnlineGeometryBatch],
+        *,
+        forward_step: int,
+        logical_sample_count: int,
+        microbatch_size: int,
+        collect_z_gradients: bool = False,
+    ) -> MethodUpdate:
+        r"""流式消费 64-pair units，并在完整 512-pair denominator 后执行一次 FairGrad。"""
+
+        return backward_method_update_units(
+            self,
+            units,
+            forward_step=forward_step,
+            logical_sample_count=logical_sample_count,
+            microbatch_size=microbatch_size,
+            collect_z_gradients=collect_z_gradients,
+            rewrite_batch_fn=maybe_rewrite_batch,
+        )
+
+    def stage_replay_unit(self, unit: PaddedOnlineGeometryBatch) -> PaddedOnlineGeometryBatch:
+        r"""把固定 teacher unit 变成 pinned-CPU opaque replay payload。"""
+
+        return stage_padded_batch_for_replay(unit)
+
+    def restore_replay_unit(
+        self,
+        unit: PaddedOnlineGeometryBatch,
+        *,
+        device: torch.device,
+    ) -> PaddedOnlineGeometryBatch:
+        r"""只恢复当前即将反传的 replay unit，不预载整个 mini-epoch。"""
+
+        return restore_padded_batch_from_replay(unit, device=device)
 
     def evaluate_session(
         self,
@@ -977,7 +1220,6 @@ class MultiAnchorGaussianMethod:
 
         providers = [
             *(tuple([self.train_sources]) if self.train_sources is not None else ()),
-            *self.validation_sources.values(),
             *self.evaluation_sources.values(),
         ]
         seen: set[int] = set()

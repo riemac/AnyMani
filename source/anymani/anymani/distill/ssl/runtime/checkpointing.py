@@ -13,14 +13,23 @@ from anymani.distill.ssl.experiment import EmbodimentPretrainCfg, resolved_confi
 
 
 def resume_scientific_config(config: EmbodimentPretrainCfg | dict[str, object]) -> dict[str, object]:
-    r"""返回 resume 必须一致的科学配置，只排除 output/resume 定位。"""
+    r"""返回 resume 必须一致的科学配置，只排除 output/resume 定位与源码变更授权开关。"""
 
     payload = resolved_config_dict(config) if isinstance(config, EmbodimentPretrainCfg) else dict(config)
     run = payload.get("run")
     if not isinstance(run, dict):
         raise ValueError("resolved geometry SSL config lacks run mapping")
     payload["run"] = {
-        key: value for key, value in run.items() if key not in {"output_dir", "experiment_name", "resume_checkpoint"}
+        key: value
+        for key, value in run.items()
+        if key
+        not in {
+            "output_dir",
+            "experiment_name",
+            "resume_checkpoint",
+            "new_run",
+            "allow_worktree_change",
+        }
     }  # seed/deterministic_algorithms 属于科学轨迹，只排除 artifact 定位字段
     return payload
 
@@ -32,8 +41,8 @@ def require_resume_scientific_config(
     r"""拒绝当前 CLI 与 checkpoint 的任一 scientific config 漂移。"""
 
     schema = checkpoint_resolved.get("schema_version")
-    if schema != "8.0.0":
-        raise ValueError("resume checkpoint must contain schema 8 resolved configuration")
+    if schema != "9.0.0":
+        raise ValueError("resume checkpoint must contain schema 9 resolved configuration")
     expected = resume_scientific_config(checkpoint_resolved)
     actual = resume_scientific_config(current)
     if actual != expected:
@@ -44,8 +53,16 @@ def require_resume_scientific_config(
 def require_resume_metadata_identity(
     current: Mapping[str, object],
     checkpoint: Mapping[str, object],
+    *,
+    allow_worktree_change: bool = False,
 ) -> None:
-    r"""拒绝配置无法表达的代码、公式、参数分区、source producer 或 worktree 漂移。"""
+    r"""拒绝代码/公式/source 漂移，只在显式授权时放行 dirty worktree fingerprint 变化。
+
+    ``allow_worktree_change`` 是受控 recovery migration 开关，而不是科学配置覆盖。它允许研究者在
+    已完成针对性验证的源码修复后继续同一 incomplete run，但仍要求 checkpoint 与当前进程都处于
+    dirty worktree 状态，并继续严格比较 code revision、package、geometry、objective、FairGrad、参数
+    分区和 source artifact identity。这样不会把源码变化静默当成同一训练轨迹。
+    """
 
     fields = (
         "code_revision",
@@ -57,9 +74,12 @@ def require_resume_metadata_identity(
         "parameter_partition",
         "source_artifact",
         "worktree_dirty",
-        "worktree_fingerprint",
     )
     changed = tuple(name for name in fields if current.get(name) != checkpoint.get(name))
+    if current.get("worktree_dirty") != checkpoint.get("worktree_dirty"):
+        changed += ("worktree_dirty",)
+    if not allow_worktree_change and current.get("worktree_fingerprint") != checkpoint.get("worktree_fingerprint"):
+        changed += ("worktree_fingerprint",)
     if changed:
         raise ValueError(f"resume checkpoint metadata identity mismatch in fields={changed}")
 
