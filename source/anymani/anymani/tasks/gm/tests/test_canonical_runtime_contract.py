@@ -6,6 +6,7 @@ r"""canonical mask/reset 的纯 Torch 合同测试。
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ import pytest
 import torch
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "mdp" / "canonical_runtime.py"
+EVENTS_MODULE_PATH = Path(__file__).resolve().parents[1] / "mdp" / "events.py"
 
 
 def _module():
@@ -101,3 +103,22 @@ def test_round_robin_routing_matches_multi_asset_spawner_assignment() -> None:
     assert rows.tolist() == [10, 11, 12, 13, 14, 10, 11, 12, 13, 14, 10, 11]
     torch.testing.assert_close(masks[7], mask_rows[2])  # env 7 -> prototype 2
     assert masks[:, 0].all()
+
+
+def test_ghost_startup_locks_position_without_zero_velocity_braking_constraint() -> None:
+    r"""Ghost 位置可精确锁零，但 ``max_velocity=0`` 会改变 active articulation dynamics。"""
+
+    tree = ast.parse(EVENTS_MODULE_PATH.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "lock_canonical_ghost_joint_limits"
+    )
+    called_methods = {
+        node.func.attr
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+
+    assert "write_joint_position_limit_to_sim" in called_methods
+    assert "write_joint_velocity_limit_to_sim" not in called_methods

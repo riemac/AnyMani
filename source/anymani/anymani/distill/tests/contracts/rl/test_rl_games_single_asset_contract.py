@@ -147,3 +147,18 @@ def test_unified_play_entry_loads_distill_checkpoint_from_anymani_logs() -> None
     assert "agent.restore(resume_path)" in source
     assert 'parser.add_argument("--checkpoint"' in source
     assert 'parser.add_argument("--run_name"' in source
+
+
+def test_unified_play_entry_records_restore_before_finite_playback() -> None:
+    r"""正式 2048 identity 回放必须区分 Stage 构建、restore 与 restore 后有限步 rollout。"""
+
+    source = PLAY_ENTRY_PATH.read_text(encoding="utf-8")
+
+    environment_complete = source.index('num_envs=int(getattr(env.unwrapped, "num_envs"))')
+    restore_start = source.index('record_optional_rl_phase("checkpoint_restore", "start"')
+    restore_call = source.index("agent.restore(resume_path)")
+    restore_complete = source.index('record_optional_rl_phase("checkpoint_restore", "complete"')
+    playback_start = source.index('record_optional_rl_phase("playback", "start"')
+    playback_complete = source.index('record_optional_rl_phase("playback", "complete"')
+
+    assert environment_complete < restore_start < restore_call < restore_complete < playback_start < playback_complete

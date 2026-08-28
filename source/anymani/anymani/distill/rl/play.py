@@ -32,6 +32,7 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 from anymani.assets.bank.path_utils import resolve_anymani_root
+from anymani.distill.diagnostics.recording.rl import record_optional_rl_phase
 
 ANYMANI_ROOT = resolve_anymani_root()
 """AnyMani 仓库根目录；回放 checkpoint 搜索从这里的 `logs/distill/rl_games` 开始。"""
@@ -73,8 +74,10 @@ if args_cli.video:
 sys.argv = [sys.argv[0]] + hydra_args
 
 # 所有 Isaac Sim / rl_games runtime import 都应在 AppLauncher 之后发生。
+record_optional_rl_phase("app_launcher", "start", headless=bool(args_cli.headless))
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
+record_optional_rl_phase("app_launcher", "complete")
 
 
 import gymnasium as gym  # noqa: E402
@@ -191,7 +194,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     clip_obs = agent_cfg["params"]["env"].get("clip_observations", math.inf)
     clip_actions = agent_cfg["params"]["env"].get("clip_actions", math.inf)
 
+    # Environment construct 对 2048 unique assets 需要十几分钟，必须与 checkpoint restore 独立计时。
+    record_optional_rl_phase(
+        "environment_construct",
+        "start",
+        task=args_cli.task,
+        num_envs=int(env_cfg.scene.num_envs),
+    )
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    record_optional_rl_phase(
+        "environment_construct",
+        "complete",
+        num_envs=int(getattr(env.unwrapped, "num_envs")),  # Gym stub 不暴露 IsaacLab runtime 属性
+    )
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)  # rl_games player 当前只消费 single-agent env
 
@@ -217,12 +232,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg["params"]["config"]["num_actors"] = env.unwrapped.num_envs
     attach_masked_runtime_evidence(agent_cfg)
 
+    # Runner build 只建立网络与 player facade；checkpoint 参数覆盖属于下一独立阶段。
     runner_cls = AnyManiMaskedRunner if agent_cfg["params"]["algo"]["name"] == "anymani_masked_ppo" else Runner
     runner = runner_cls()
+    record_optional_rl_phase("runner_build", "start")
     runner.load(agent_cfg)
+    record_optional_rl_phase("runner_build", "complete")
     agent: BasePlayer = runner.create_player()
+    record_optional_rl_phase("checkpoint_restore", "start", checkpoint=resume_path)
     agent.restore(resume_path)
     agent.reset()
+    record_optional_rl_phase("checkpoint_restore", "complete", checkpoint=resume_path)
 
     dt = env.unwrapped.step_dt
     obs = env.reset()
@@ -232,7 +252,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if agent.is_rnn:
         agent.init_rnn()
 
+    # 有限步 headless play 验证恢复后的首次 action/step 生命周期；证据不解释策略任务表现。
     timestep = 0
+    record_optional_rl_phase("playback", "start", requested_steps=args_cli.steps)
     while simulation_app.is_running():
         start_time = time.time()
         with torch.inference_mode():
@@ -253,6 +275,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
 
+    record_optional_rl_phase("playback", "complete", completed_steps=timestep)
     env.close()
 
 

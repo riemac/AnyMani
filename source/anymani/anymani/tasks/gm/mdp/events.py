@@ -596,10 +596,14 @@ def lock_canonical_ghost_joint_limits(
 ) -> None:
     r"""把 inactive canonical joint 的 PhysX position limit 写成精确 ``[0,0]``。
 
-    importer 阶段使用有限 ``[-1e-3,1e-3]`` rad 只为保证 URDF/PhysX 属性合法；startup
-    后此 event 将每个 ``[env,joint]`` ghost slot 写为精确零区间，并同步 default pose
-    与 position target。物理验收使用 $|q|<10^{-5}$ rad、$|\dot q|<10^{-3}$ rad/s，
-    不使用不现实的 bitwise-zero 断言。
+    importer 阶段使用有限 ``[-pi,pi]`` rad，以容纳 heterogeneous prototypes 共享的全局 boot pose；startup
+    后此 event 将每个 ``[env,joint]`` ghost slot 写为精确零位置区间，并同步 default pose
+    与 position target。velocity limit 保留 importer 的有限正值：Isaac Sim 5.1 / PhysX 将
+    ``max_velocity=0`` 解释为持续制动约束；7-DOF matched probe 中它使相同 0.05 rad target
+    产生 0.0255 rad active-joint 偏差，而只保留零宽 position lock 后偏差降至 $1.17\times10^{-6}$ rad。
+
+    Ghost 无 collision，raw/processed action 与 target 均为零；因此无需用零速度上限表达语义静止。
+    Runtime 仍检查 $q,\dot q$ 的实际漂移，而不把配置值当作物理结果。
     """
 
     from .canonical_runtime import masked_joint_limits
@@ -624,10 +628,6 @@ def lock_canonical_ghost_joint_limits(
         env_ids=physx_ids,
         warn_limit_violation=False,
     )
-    velocity_limits = robot.data.joint_vel_limits[ids][:, joint_ids].clone()  # `[K,16]`，rad/s 上限
-    velocity_limits = torch.where(active, velocity_limits, torch.zeros_like(velocity_limits))
-    robot.write_joint_velocity_limit_to_sim(velocity_limits, joint_ids=joint_ids, env_ids=physx_ids)
-
     # writer 会把 default position clamp 到新 limits；这里显式把 ghost default/target 清成 0。
     default_state = robot.data.default_joint_pos[ids].clone()
     default_state[:, joint_ids] = torch.where(
