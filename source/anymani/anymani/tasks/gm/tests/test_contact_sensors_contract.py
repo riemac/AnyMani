@@ -132,6 +132,21 @@ def test_contact_layout_default_validation_reads_first_asset_only() -> None:
     assert layout.fingertip_link_names == ("first_tip",)
 
 
+def test_collision_only_layout_excludes_visual_adapter_but_keeps_physical_links() -> None:
+    r"""canonical ``thumb_root`` 类纯 visual adapter 不应浪费 ContactSensor/critic channel。"""
+
+    sidecar = _minimal_sidecar(tips=("physical_tip",))
+    joints = sidecar["hand_cfg"]["fingers"][0]["joints"]
+    joints[0]["collisions"] = []  # fixed adapter：有 body/visual，但没有任何 PhysX collision shape
+    joints[1]["collisions"] = [{"geometry": {"sphere": {"radius": 0.01}}}]  # 真实 fingertip collision
+
+    layout = build_contact_sensor_layout_from_sidecar(sidecar, asset_id="canonical", collision_only=True)
+
+    assert layout.finger_non_tip_link_names == ()
+    assert layout.fingertip_link_names == ("physical_tip",)
+    assert layout.all_sensor_names == ("contact_physical_tip", "contact_core")  # palm support 仍独立保留
+
+
 def test_contact_sensor_cfg_uses_single_link_object_filter() -> None:
     r"""每个 generated sensor cfg 应绑定单个 robot link，并只过滤到 object prim。"""
 
@@ -151,7 +166,13 @@ def test_contact_sensor_cfg_uses_single_link_object_filter() -> None:
     sys.modules["isaaclab"] = isaaclab
     sys.modules["isaaclab.sensors"] = sensors
     try:
-        cfg = make_contact_sensor_cfg("solo_tip", debug_vis=True)
+        cfg = make_contact_sensor_cfg(
+            "solo_tip",
+            debug_vis=True,
+            history_length=0,
+            track_air_time=False,
+            max_contact_data_count_per_prim=16,
+        )
     finally:
         if previous_isaaclab is None:
             sys.modules.pop("isaaclab", None)
@@ -165,4 +186,7 @@ def test_contact_sensor_cfg_uses_single_link_object_filter() -> None:
     assert cfg.prim_path == "{ENV_REGEX_NS}/Robot/solo_tip"
     assert cfg.filter_prim_paths_expr == ["{ENV_REGEX_NS}/object"]
     assert cfg.track_friction_forces is True
+    assert cfg.history_length == 0
+    assert cfg.track_air_time is False
+    assert cfg.max_contact_data_count_per_prim == 16
     assert cfg.debug_vis is True

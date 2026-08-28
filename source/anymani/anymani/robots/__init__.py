@@ -21,6 +21,7 @@ from typing import Any
 __all__ = [
     "DEFAULT_HAND_ANCHOR_POS_E",
     "HandActuatorSpawnCfg",
+    "CanonicalRuntimeCfg",
     "HandFrameCfg",
     "HandJointInitCfg",
     "HandSpawnAdapter",
@@ -56,6 +57,7 @@ def __getattr__(name: str) -> Any:
     if name in {
         "DEFAULT_HAND_ANCHOR_POS_E",
         "HandActuatorSpawnCfg",
+        "CanonicalRuntimeCfg",
         "HandFrameCfg",
         "HandJointInitCfg",
         "HandSpawnAdapter",

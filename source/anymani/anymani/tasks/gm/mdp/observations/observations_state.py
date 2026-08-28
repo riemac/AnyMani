@@ -49,7 +49,8 @@ def joint_pos_raw(
 
     # `asset_cfg` 在 ObservationManager 初始化时会解析 joint_names → joint_ids；preserve_order=True 要求顺序一致。
     asset: Articulation = env.scene[asset_cfg.name]
-    return asset.data.joint_pos[:, asset_cfg.joint_ids]  # $q_i$，raw rad，不随 limit 归一化
+    values = asset.data.joint_pos[:, asset_cfg.joint_ids]  # $q_i$，raw rad，不随 limit 归一化
+    return _mask_canonical_joint_values(env, values, asset_cfg.joint_ids)  # ghost $q_i=0$
 
 
 def joint_pos_limit_normalized(
@@ -79,7 +80,9 @@ def joint_pos_limit_normalized(
     q_max = asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids, 1]  # $q_i^{\max}$，soft upper bound，单位 rad
 
     # 线性映射 $[q^{\min},q^{\max}]\mapsto[-1,1]$，公式等价于 IsaacLab `scale_transform`。
-    return 2.0 * (q - q_min) / (q_max - q_min) - 1.0  # $q_i^{\mathrm{norm}}$，无量纲
+    span = (q_max - q_min).clamp_min(1.0e-8)  # ghost [0,0] 的退化区间只作为数值占位
+    values = 2.0 * (q - q_min) / span - 1.0  # $q_i^{\mathrm{norm}}$，无量纲
+    return _mask_canonical_joint_values(env, values, asset_cfg.joint_ids)  # inactive token 恒为 0
 
 
 def joint_vel_raw(
@@ -103,7 +106,8 @@ def joint_vel_raw(
 
     # 不减 default_joint_vel；手内操作关心当前真实角速度，而不是相对默认速度。
     asset: Articulation = env.scene[asset_cfg.name]
-    return asset.data.joint_vel[:, asset_cfg.joint_ids]  # $\dot q_i$，raw rad/s
+    values = asset.data.joint_vel[:, asset_cfg.joint_ids]  # $\dot q_i$，raw rad/s
+    return _mask_canonical_joint_values(env, values, asset_cfg.joint_ids)  # ghost $\dot q_i=0$
 
 
 def joint_target(
@@ -130,7 +134,7 @@ def joint_target(
     current_targets = getattr(action_term, "current_targets", None)  # $u_t$，`[B,N_j]`，rad
     if not isinstance(current_targets, torch.Tensor):
         raise RuntimeError(f"Action term '{action_name}' must expose tensor current_targets for joint_target obs.")
-    return current_targets
+    return _mask_canonical_joint_values(env, current_targets, getattr(action_term, "_joint_ids", None))
 
 
 def last_processed_action(
@@ -154,10 +158,8 @@ def last_processed_action(
     action_term = env.action_manager.get_term(action_name)
     processed_actions = getattr(action_term, "processed_actions", None)  # `[B,N_j]`，rad delta
     if not isinstance(processed_actions, torch.Tensor):
-        raise RuntimeError(
-            f"Action term '{action_name}' must expose processed_actions for gm raw-rad last_action obs."
-        )
-    return processed_actions
+        raise RuntimeError(f"Action term '{action_name}' must expose processed_actions for gm raw-rad last_action obs.")
+    return _mask_canonical_joint_values(env, processed_actions, getattr(action_term, "_joint_ids", None))
 
 
 def last_action(
@@ -184,11 +186,93 @@ def last_action(
 
     # `action_name=None` 时保持 IsaacLab 官方语义：返回 manager 拼接后的整条 raw action。
     if action_name is None:
-        return env.action_manager.action  # `[B,A]`，policy-facing raw action，通常无量纲
+        return _mask_canonical_joint_values(env, env.action_manager.action, None)  # `[B,A]`，ghost raw action 为 0
 
     # 指定 term 时读取该 term 的 `raw_actions`，而不是 `processed_actions`，以保证官方等价替换。
     action_term = env.action_manager.get_term(action_name)
-    return action_term.raw_actions  # `[B,A_term]`，该 action term 的 raw policy output
+    return _mask_canonical_joint_values(env, action_term.raw_actions, getattr(action_term, "_joint_ids", None))
+
+
+def canonical_asset_row(env: ManagerBasedRLEnv) -> torch.Tensor:
+    r"""读取 canonical evidence-bank 的离散 asset row，形状 `[B,1]`。
+
+    该字段只作为 routing identifier；训练入口必须关闭 rl_games 的全局 input RMS，不能把
+    row number 误读成有物理顺序的连续 morphology feature。
+    """
+
+    _ensure_canonical_state_from_cfg(env)
+    rows = getattr(env, "_anymani_canonical_asset_row", None)
+    if not isinstance(rows, torch.Tensor) or rows.shape != (env.num_envs,):
+        raise RuntimeError("canonical asset row state is not initialized")
+    return rows.to(dtype=torch.float32).unsqueeze(-1)
+
+
+def canonical_active_joint_mask(env: ManagerBasedRLEnv) -> torch.Tensor:
+    r"""读取 canonical `[B,16]` active mask 并转成 flat observation 的 float 0/1。"""
+
+    _ensure_canonical_state_from_cfg(env)
+    mask = getattr(env, "_anymani_canonical_active_joint_mask", None)
+    if not isinstance(mask, torch.Tensor) or mask.shape != (env.num_envs, 16):
+        raise RuntimeError("canonical active joint mask is not initialized")
+    return mask.to(dtype=torch.float32)
+
+
+def _mask_canonical_joint_values(
+    env: ManagerBasedRLEnv,
+    values: torch.Tensor,
+    joint_ids,
+) -> torch.Tensor:
+    r"""按 env-level active routing mask 置零 joint tensor 的 inactive columns。"""
+
+    _ensure_canonical_state_from_cfg(env)
+    active_mask = getattr(env, "_anymani_canonical_active_joint_mask", None)
+    if not isinstance(active_mask, torch.Tensor):
+        return values
+    if joint_ids is None:
+        if active_mask.shape != values.shape:
+            return values
+        subset_mask = active_mask
+    else:
+        subset_mask = active_mask[:, joint_ids]
+    if subset_mask.shape != values.shape:
+        return values
+    return values * subset_mask.to(dtype=values.dtype)
+
+
+def _ensure_canonical_state_from_cfg(env: ManagerBasedRLEnv) -> None:
+    r"""在 ObservationManager probe 阶段从 startup EventTerm 参数预装 routing state。
+
+    IsaacLab 会先调用 observation term 推断 shape，再执行 startup event；因此这里允许
+    manager preparation 读取同一份 JSON-safe static routing，而不是创建第二套 mask 真源。
+    """
+
+    if isinstance(getattr(env, "_anymani_canonical_active_joint_mask", None), torch.Tensor):
+        return
+    events_cfg = getattr(getattr(env, "cfg", None), "events", None)
+    initialize_cfg = getattr(events_cfg, "initialize_runtime", None)
+    params = getattr(initialize_cfg, "params", None)
+    if not isinstance(params, dict) or "active_joint_mask" not in params:
+        return
+    if params.get("routing_mode", "explicit") == "round_robin":
+        from ..canonical_runtime import expand_round_robin_routing
+
+        mask, rows = expand_round_robin_routing(
+            params["active_joint_mask"],
+            params.get("asset_rows", ()),
+            num_envs=env.num_envs,
+            device=env.device,
+        )
+        setattr(env, "_anymani_canonical_active_joint_mask", mask)
+        setattr(env, "_anymani_canonical_asset_row", rows)
+        return
+    mask = torch.as_tensor(params["active_joint_mask"], dtype=torch.bool, device=env.device)
+    if mask.shape != (env.num_envs, 16):
+        raise RuntimeError(f"canonical startup mask must have shape {(env.num_envs, 16)}, got {tuple(mask.shape)}")
+    setattr(env, "_anymani_canonical_active_joint_mask", mask)
+    rows = torch.as_tensor(params.get("asset_rows", range(env.num_envs)), dtype=torch.long, device=env.device)
+    if rows.shape != (env.num_envs,):
+        raise RuntimeError(f"canonical startup asset rows must have shape {(env.num_envs,)}, got {tuple(rows.shape)}")
+    setattr(env, "_anymani_canonical_asset_row", rows)
 
 
 __all__ = [
@@ -196,6 +280,8 @@ __all__ = [
     "joint_pos_raw",
     "joint_target",
     "joint_vel_raw",
+    "canonical_active_joint_mask",
+    "canonical_asset_row",
     "last_action",
     "last_processed_action",
 ]

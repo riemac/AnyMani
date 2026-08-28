@@ -246,12 +246,16 @@ def apply_generated_structural_collision_filter(
         "[INFO]: GM structural collision filter authored "
         f"link_pairs={len(filtered_pairs)}, directed_pair_edges={authored_pair_edges}"
     )
-    setattr(env, "_gm_structural_collision_filter_stats", {
-        "api": "FilteredPairsAPI",
-        "link_pairs": len(filtered_pairs),
-        "directed_edges": authored_pair_edges,
-        "missing_link_names": tuple(sorted(missing_link_names)),
-    })  # debug-only metadata，便于 smoke / 日志排查 pairwise 过滤是否生效
+    setattr(
+        env,
+        "_gm_structural_collision_filter_stats",
+        {
+            "api": "FilteredPairsAPI",
+            "link_pairs": len(filtered_pairs),
+            "directed_edges": authored_pair_edges,
+            "missing_link_names": tuple(sorted(missing_link_names)),
+        },
+    )  # debug-only metadata，便于 smoke / 日志排查 pairwise 过滤是否生效
 
 
 def _structural_collision_filter_link_names(
@@ -384,9 +388,7 @@ def reset_adr_episode_length(
     ids = _resolve_event_env_ids(env, env_ids)
     episode_lengths = getattr(env, "leap_adr_episode_lengths", None)
     if not isinstance(episode_lengths, torch.Tensor):
-        episode_lengths = torch.full(
-            (env.num_envs,), env.max_episode_length, dtype=torch.long, device=env.device
-        )
+        episode_lengths = torch.full((env.num_envs,), env.max_episode_length, dtype=torch.long, device=env.device)
         setattr(env, "leap_adr_episode_lengths", episode_lengths)
     min_steps = max(1, int(float(min_episode_length_s) / float(env.step_dt)))
     episode_lengths[ids] = torch.randint(
@@ -478,7 +480,10 @@ def reset_adr_robot_joints(
     joint_vel += math_utils.sample_uniform(-vel_width, vel_width, joint_vel.shape, env.device)
 
     reset_joint_pos = getattr(env, "leap_official_reset_joint_pos", None)
-    if not isinstance(reset_joint_pos, torch.Tensor) or reset_joint_pos.shape != robot.data.default_joint_pos[:, joint_ids].shape:
+    if (
+        not isinstance(reset_joint_pos, torch.Tensor)
+        or reset_joint_pos.shape != robot.data.default_joint_pos[:, joint_ids].shape
+    ):
         reset_joint_pos = robot.data.default_joint_pos[:, joint_ids].clone()
         setattr(env, "leap_official_reset_joint_pos", reset_joint_pos)
     reset_joint_pos[ids] = joint_pos
@@ -492,6 +497,180 @@ def reset_adr_robot_joints(
         anchor = reset_joint_pos.clone()
         setattr(env, "_gm_robot_reset_joint_anchor", anchor)
     anchor[ids] = joint_pos  # actual reset pose，不是未加噪 pre-grasp preset
+
+
+def initialize_canonical_runtime_state(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor | Sequence[int] | None,
+    active_joint_mask: torch.Tensor | Sequence[bool] | Sequence[Sequence[bool]],
+    asset_rows: torch.Tensor | Sequence[int] | None = None,
+    q_home: torch.Tensor | Sequence[Sequence[float]] | None = None,
+    routing_mode: Literal["explicit", "round_robin"] = "explicit",
+) -> None:
+    r"""安装 canonical per-env active mask 与 evidence-bank asset row。
+
+    ``active_joint_mask`` 可以是全体 ``[num_envs,16]``，也可以在 reset event 中只给
+    当前 ``env_ids`` 的 ``[K,16]``。该 event 不读取 XML；routing 已由 robots adapter
+    从 assets manifest materialize，并由训练配置以 JSON-safe tensor/list 传入。
+    """
+
+    from .canonical_runtime import expand_round_robin_routing, install_canonical_runtime_state
+
+    if routing_mode == "round_robin":
+        if asset_rows is None:
+            raise ValueError("round_robin canonical routing requires asset_rows")
+        full_mask, full_rows = expand_round_robin_routing(
+            active_joint_mask,
+            asset_rows,
+            num_envs=env.num_envs,
+            device=env.device,
+        )
+        install_canonical_runtime_state(env, full_mask, asset_rows=full_rows)
+        if q_home is not None:
+            q_home_rows = torch.as_tensor(q_home, dtype=torch.float32, device=env.device)
+            source_row_count = torch.as_tensor(active_joint_mask).shape[0]
+            if q_home_rows.shape != (source_row_count, 16):
+                raise ValueError("round_robin q_home must provide one [16] row per canonical asset")
+            selectors = torch.arange(env.num_envs, device=env.device) % q_home_rows.shape[0]
+            setattr(env, "_anymani_canonical_q_home", q_home_rows[selectors])
+        return
+    if routing_mode != "explicit":
+        raise ValueError(f"unsupported canonical routing_mode: {routing_mode!r}")
+
+    ids = _resolve_event_env_ids(env, env_ids)
+    mask = torch.as_tensor(active_joint_mask, dtype=torch.bool, device=env.device)
+    if mask.ndim == 1:
+        mask = mask.unsqueeze(0).expand(ids.numel(), -1)
+    if mask.ndim != 2 or mask.shape[-1] != 16:
+        raise ValueError(f"canonical active_joint_mask must have [K,16] or [num_envs,16], got {tuple(mask.shape)}")
+    if mask.shape[0] == env.num_envs:
+        full_mask = mask
+    elif mask.shape[0] == ids.numel():
+        previous = getattr(env, "_anymani_canonical_active_joint_mask", None)
+        full_mask = (
+            previous.clone()
+            if isinstance(previous, torch.Tensor) and previous.shape == (env.num_envs, 16)
+            else torch.zeros(env.num_envs, 16, dtype=torch.bool, device=env.device)
+        )
+        full_mask[ids] = mask
+    else:
+        raise ValueError(
+            f"canonical active mask batch {mask.shape[0]} does not match env ids {ids.numel()} or num_envs {env.num_envs}"
+        )
+
+    if asset_rows is None:
+        full_rows = None
+    else:
+        rows = torch.as_tensor(asset_rows, dtype=torch.long, device=env.device)
+        if rows.ndim != 1 or rows.shape[0] not in {ids.numel(), env.num_envs}:
+            raise ValueError("canonical asset_rows must match env ids or num_envs")
+        previous_rows = getattr(env, "_anymani_canonical_asset_row", None)
+        full_rows = (
+            previous_rows.clone()
+            if isinstance(previous_rows, torch.Tensor) and previous_rows.shape == (env.num_envs,)
+            else torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+        )
+        if rows.shape[0] == env.num_envs:
+            full_rows = rows
+        else:
+            full_rows[ids] = rows
+
+    install_canonical_runtime_state(env, full_mask, asset_rows=full_rows)  # env 级唯一 routing state
+    if q_home is not None:
+        home = torch.as_tensor(q_home, dtype=torch.float32, device=env.device)
+        if home.shape == (env.num_envs, 16):
+            setattr(env, "_anymani_canonical_q_home", home)
+        elif home.shape == (ids.numel(), 16):
+            full_home = getattr(env, "_anymani_canonical_q_home", torch.zeros(env.num_envs, 16, device=env.device))
+            full_home = full_home.clone()
+            full_home[ids] = home
+            setattr(env, "_anymani_canonical_q_home", full_home)
+        else:
+            raise ValueError("explicit q_home must have shape [K,16] or [num_envs,16]")
+
+
+def lock_canonical_ghost_joint_limits(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor | Sequence[int] | None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=[".*"], preserve_order=True),
+) -> None:
+    r"""把 inactive canonical joint 的 PhysX position limit 写成精确 ``[0,0]``。
+
+    importer 阶段使用有限 ``[-1e-3,1e-3]`` rad 只为保证 URDF/PhysX 属性合法；startup
+    后此 event 将每个 ``[env,joint]`` ghost slot 写为精确零区间，并同步 default pose
+    与 position target。物理验收使用 $|q|<10^{-5}$ rad、$|\dot q|<10^{-3}$ rad/s，
+    不使用不现实的 bitwise-zero 断言。
+    """
+
+    from .canonical_runtime import masked_joint_limits
+
+    ids = _resolve_event_env_ids(env, env_ids)
+    if ids.numel() == 0:
+        return
+    active_mask = getattr(env, "_anymani_canonical_active_joint_mask", None)
+    if not isinstance(active_mask, torch.Tensor) or active_mask.shape != (env.num_envs, 16):
+        raise RuntimeError("canonical active mask must be initialized before ghost joint lock")
+    robot: Articulation = env.scene[asset_cfg.name]
+    joint_ids = asset_cfg.joint_ids
+    if joint_ids is None:
+        joint_ids = list(range(robot.num_joints))
+    limits = robot.data.joint_pos_limits[ids][:, joint_ids, :].clone()  # `[K,16,2]`，hard runtime limits
+    active = active_mask[ids][:, joint_ids]  # `[K,16]`，same PhysX joint order
+    locked_limits = masked_joint_limits(limits, active)  # inactive joint limit is exactly [0,0]
+    physx_ids = cast(Sequence[int], ids)
+    robot.write_joint_position_limit_to_sim(
+        locked_limits,
+        joint_ids=joint_ids,
+        env_ids=physx_ids,
+        warn_limit_violation=False,
+    )
+    velocity_limits = robot.data.joint_vel_limits[ids][:, joint_ids].clone()  # `[K,16]`，rad/s 上限
+    velocity_limits = torch.where(active, velocity_limits, torch.zeros_like(velocity_limits))
+    robot.write_joint_velocity_limit_to_sim(velocity_limits, joint_ids=joint_ids, env_ids=physx_ids)
+
+    # writer 会把 default position clamp 到新 limits；这里显式把 ghost default/target 清成 0。
+    default_state = robot.data.default_joint_pos[ids].clone()
+    default_state[:, joint_ids] = torch.where(
+        active, default_state[:, joint_ids], torch.zeros_like(default_state[:, joint_ids])
+    )
+    robot.data.default_joint_pos[ids] = default_state
+    robot.set_joint_position_target(default_state[:, joint_ids], joint_ids=joint_ids, env_ids=physx_ids)
+
+
+def reset_canonical_robot_joints(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor | Sequence[int] | None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=[".*"], preserve_order=True),
+) -> None:
+    r"""按 per-env limit midpoint / q_home reset active joints，并将 ghost 状态清零。"""
+
+    from .canonical_runtime import canonical_reset_pose
+
+    ids = _resolve_event_env_ids(env, env_ids)
+    if ids.numel() == 0:
+        return
+    active_mask = getattr(env, "_anymani_canonical_active_joint_mask", None)
+    if not isinstance(active_mask, torch.Tensor) or active_mask.shape != (env.num_envs, 16):
+        raise RuntimeError("canonical active mask must be initialized before canonical joint reset")
+    robot: Articulation = env.scene[asset_cfg.name]
+    joint_ids = asset_cfg.joint_ids
+    if joint_ids is None:
+        joint_ids = list(range(robot.num_joints))
+    limits = robot.data.soft_joint_pos_limits[ids][:, joint_ids, :]
+    active = active_mask[ids][:, joint_ids]
+    q_home = getattr(env, "_anymani_canonical_q_home", None)
+    q_home_subset = q_home[ids][:, joint_ids] if isinstance(q_home, torch.Tensor) else None
+    joint_pos = canonical_reset_pose(limits, active, q_home=q_home_subset)
+    joint_vel = torch.zeros_like(joint_pos)  # ghost velocity is exactly zero at reset
+    physx_ids = cast(Sequence[int], ids)
+    robot.set_joint_position_target(joint_pos, joint_ids=joint_ids, env_ids=physx_ids)
+    robot.write_joint_state_to_sim(joint_pos, joint_vel, joint_ids=joint_ids, env_ids=physx_ids)
+
+    anchor = getattr(env, "_gm_robot_reset_joint_anchor", None)
+    if not isinstance(anchor, torch.Tensor) or anchor.shape != robot.data.default_joint_pos.shape:
+        anchor = robot.data.default_joint_pos.clone()
+        setattr(env, "_gm_robot_reset_joint_anchor", anchor)
+    anchor[ids[:, None], joint_ids] = joint_pos  # pose anchor 与实际 reset pose 完全一致
 
 
 def randomize_object_com_from_default_and_record(
@@ -734,7 +913,9 @@ def apply_adr_object_wrench(
         forces = torch.where(gate_subset, forces, torch.zeros_like(forces))
         torques = torch.where(gate_subset, torques, torch.zeros_like(torques))
     body_ids = asset_cfg.body_ids
-    resolved_body_ids = torch.tensor(body_ids, dtype=torch.long, device=env.device) if isinstance(body_ids, list) else None
+    resolved_body_ids = (
+        torch.tensor(body_ids, dtype=torch.long, device=env.device) if isinstance(body_ids, list) else None
+    )
     object_asset.permanent_wrench_composer.set_forces_and_torques(
         forces=forces,
         torques=torques,

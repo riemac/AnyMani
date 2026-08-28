@@ -21,6 +21,8 @@ from .observations_priv import (
     reward_release_coefficient,
 )
 from .observations_state import (
+    canonical_active_joint_mask,
+    canonical_asset_row,
     joint_pos_limit_normalized,
     joint_pos_raw,
     joint_target,
@@ -39,6 +41,8 @@ from .observations_tactile import (
 
 __all__ = [
     "adr_actual_state",
+    "canonical_active_joint_mask",
+    "canonical_asset_row",
     "finger_non_tip_contact_bits_ema",
     "fingertip_contact_binary",
     "fingertip_contact_force",

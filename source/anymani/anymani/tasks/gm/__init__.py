@@ -45,6 +45,26 @@ gym.register(
 )
 
 gym.register(
+    id="AnyMani-GM-Canonical-InHand-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.canonical_unified_env_cfg:CanonicalUnifiedInHandEnvCfg",
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-HeterogeneousAsset-TactileRotation-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.config.heterogeneous_asset.tactile_rotation_env_cfg:HeterogeneousTactileRotationEnvCfg"
+        ),
+    },
+)
+
+gym.register(
     id="AnyMani-GM-SingleAsset-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,

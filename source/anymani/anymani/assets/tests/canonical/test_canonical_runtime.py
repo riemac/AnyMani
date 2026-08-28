@@ -4,13 +4,15 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
-
 from anymani.assets.asset_schema_core import InertialCfg, JointLimitCfg, PoseCfg
 from anymani.assets.asset_schema_embodiment import FingerCfg, HandCfg, JointCfg, PalmCfg
 from anymani.assets.canonical_runtime import (
     CANONICAL_HAND_SCHEMA_V1,
     CanonicalHandSchemaCfg,
+    compute_canonical_startup_joint_positions,
     lower_hand_to_canonical,
+    materialize_canonical_artifact,
+    validate_canonical_artifact,
 )
 from anymani.assets.exporter import UrdfWriter, UrdfWriterCfg
 
@@ -193,3 +195,82 @@ def test_schema_rejects_duplicate_or_mismatched_finger_order() -> None:
             semantic_finger_slots=("thumb", "index", "middle", "ring"),
             physx_finger_order=("index", "middle", "thumb", "thumb"),
         )
+
+
+def test_artifact_cache_and_manifest_are_reproducible(tmp_path: Path) -> None:
+    r"""同一 typed source 二次 materialize 应复用 cache，manifest 可独立恢复并验证。"""
+
+    source = _source_hand()
+    first = materialize_canonical_artifact(
+        source,
+        asset_id="cache-source",
+        output_root=tmp_path / "outputs",
+        asset_row=3,
+        topology="right_t3_i1_m3",
+    )
+    second = materialize_canonical_artifact(
+        source,
+        asset_id="cache-source",
+        output_root=tmp_path / "outputs",
+        asset_row=3,
+        topology="right_t3_i1_m3",
+    )
+
+    assert first == second
+    assert Path(first.manifest_path).is_relative_to(tmp_path / "outputs" / "canonical_runtime" / "v1")
+    validate_canonical_artifact(first)
+
+
+def test_q_home_is_scattered_to_canonical_joint_order_and_changes_cache_identity(tmp_path: Path) -> None:
+    r"""source home 必须按 joint name scatter 到 16 槽；home 变化不能复用旧 manifest。"""
+
+    source = _source_hand()
+    source_home_names = tuple(
+        joint.name for finger in source.fingers for joint in finger.joints if joint.joint_type == "revolute"
+    )
+    source_home = tuple(0.1 * (index + 1) for index in range(source.dof_count))
+    _, routing = lower_hand_to_canonical(
+        source,
+        asset_id="home-source",
+        q_home=source_home,
+        q_home_joint_names=source_home_names,
+    )
+
+    expected_by_name = dict(zip(source_home_names, source_home))
+    for joint_name, value in zip(CANONICAL_HAND_SCHEMA_V1.joint_names, routing.q_home):
+        assert value == pytest.approx(expected_by_name.get(joint_name, 0.0))
+
+    first = materialize_canonical_artifact(
+        source,
+        asset_id="home-source",
+        output_root=tmp_path / "outputs",
+        q_home=source_home,
+        q_home_joint_names=source_home_names,
+    )
+    changed = materialize_canonical_artifact(
+        source,
+        asset_id="home-source",
+        output_root=tmp_path / "outputs",
+        q_home=tuple(value + 0.01 for value in source_home),
+        q_home_joint_names=source_home_names,
+    )
+    assert Path(first.manifest_path).parent != Path(changed.manifest_path).parent
+
+
+def test_global_startup_pose_projects_zero_into_active_limit_intersection() -> None:
+    r"""IsaacLab pre-event boot pose 必须同时满足所有 active prototypes，ghost 后续再锁零。"""
+
+    first, first_routing = lower_hand_to_canonical(_source_hand(), asset_id="first")
+    second, second_routing = lower_hand_to_canonical(_source_hand(), asset_id="second")
+    thumb_j0 = next(joint for finger in second.fingers for joint in finger.joints if joint.name == "thumb_j0")
+    thumb_j0.limit = thumb_j0.limit.replace(lower=0.4, upper=0.8)
+
+    startup = compute_canonical_startup_joint_positions((first, second), (first_routing, second_routing))
+
+    assert startup["thumb_j0"] == pytest.approx(0.4)  # 0 不在交集时投影到最近边界
+    assert startup["index_j0"] == pytest.approx(0.0)  # 0 在交集时保持最小偏转
+    for hand, routing in ((first, first_routing), (second, second_routing)):
+        joints = {joint.name: joint for finger in hand.fingers for joint in finger.joints}
+        for name, active in zip(CANONICAL_HAND_SCHEMA_V1.joint_names, routing.active_joint_mask, strict=True):
+            if active:
+                assert joints[name].limit.lower <= startup[name] <= joints[name].limit.upper

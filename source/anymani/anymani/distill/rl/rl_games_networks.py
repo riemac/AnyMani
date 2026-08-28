@@ -11,9 +11,10 @@ continuous action 接口，转换为 AnyMani teacher 的轻量 token Transformer
 - actor head 只从 joint tokens 输出逐关节 action mean；
 - value head 从所有 tokens 的 masked mean pooling 输出标量 value。
 
-这不是 MLP baseline。它是完整 joint-token Transformer 的 first runnable slice，后续
-可把 `distill/models/tokenizer.py`、`attention_bias.py`、`policy.py` 的正式结构逐步替换
-进来，而不改变 rl_games builder contract。
+这不是 MLP baseline。它是历史 joint-token Transformer 的 first runnable compatibility
+slice，不代表当前 heterogeneous backbone 已选定。后续可让 rl_games builder 适配
+`distill/models/input_adapters`、`backbones`、`heads` 与 `policy.py` 的共享实现，而不在
+本文件复制网络；deferred `attention_bias.py` 不再是默认接入项。
 
 TODO(tactile rotation temporal adapters):
     新增两个训练 adapter，但网络本体归 `distill.models.temporal_encoder`：
@@ -57,8 +58,9 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from anymani.distill.models.temporal_encoder import TactileTemporalConvEncoder
 from rl_games.algos_torch import model_builder, network_builder
+
+from anymani.distill.models.temporal_encoder import TactileTemporalConvEncoder
 
 
 @dataclass(frozen=True)

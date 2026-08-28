@@ -109,6 +109,12 @@ class ClampedRelativeJointPositionAction(RelativeJointPositionAction):
     cfg: ClampedRelativeJointActionCfg
     """类型收窄后的配置，确保 IDE 能识别本类的额外字段。"""
 
+    @staticmethod
+    def _mask_canonical_action(action: torch.Tensor, active_mask: torch.Tensor) -> torch.Tensor:
+        r"""把当前 action term 投影到 active joint 子空间。"""
+
+        return action * active_mask.to(dtype=action.dtype)  # $a^{env}_{b,j}=m_{b,j}a^{policy}_{b,j}$
+
     def __init__(self, cfg: ClampedRelativeJointActionCfg, env: ManagerBasedEnv):
         r"""初始化相对关节位置动作，继承父类的 scale/clip/offset 解析逻辑。
 
@@ -145,6 +151,16 @@ class ClampedRelativeJointPositionAction(RelativeJointPositionAction):
         # 当前关节角 $q_t$ (rad)，形状 $[B, d]$
         q_current = self._asset.data.joint_pos[:, self._joint_ids]  # $q_t$
 
+        # canonical runtime 的 active mask 是 env 级 routing 真源；没有安装时保持 native action 语义。
+        active_mask_full = getattr(self._env, "_anymani_canonical_active_joint_mask", None)
+        if isinstance(active_mask_full, torch.Tensor):
+            active_mask = active_mask_full[:, self._joint_ids]  # `[B,d]`，当前 action term 的 joint subset
+            self._processed_actions[:] = self._mask_canonical_action(
+                self.processed_actions, active_mask
+            )  # ghost processed delta q is zero
+        else:
+            active_mask = torch.ones_like(self.processed_actions, dtype=torch.bool)  # native path 不额外引入 mask
+
         # 增量目标（未 clamp limit）：$q_t + a_t^{\text{proc}}$
         target_uncapped = q_current + self.processed_actions  # $q_t + \Delta_t$
 
@@ -154,6 +170,7 @@ class ClampedRelativeJointPositionAction(RelativeJointPositionAction):
         q_max = self._asset.data.soft_joint_pos_limits[:, self._joint_ids, 1]  # $q^{\max}_i$，(rad)
 
         target = torch.clamp(target_uncapped, min=q_min, max=q_max)  # $q^{\text{cmd}}_{t+1}$
+        target = torch.where(active_mask, target, torch.zeros_like(target))  # ghost target 恒为 $0$ rad
 
         # 下发 PD 目标
         self._asset.set_joint_position_target(target, joint_ids=self._joint_ids)
@@ -201,6 +218,7 @@ class ClampedRelativeJointActionCfg(RelativeJointPositionActionCfg):
     $|a_t^{\text{proc}}| \le 0.1$ rad。默认 `None`（依赖 scale 本身限幅）。
     推荐：teacher RL 阶段先不设，待观察到动作抖动后按需开启。
     """
+
 
 __all__ = [
     "ClampedRelativeJointActionCfg",

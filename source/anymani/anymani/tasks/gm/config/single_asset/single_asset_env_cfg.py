@@ -35,7 +35,7 @@ leaf sample。使用它的原因不是追求泛化，而是固定 morphology 变
 - command 难度第一轮主动收窄到 fixed `{h}` z 轴 + episode 目标，贴近 LEAP 官方
   z-axis 成功基线；random-axis / subgoal 留给 single-asset 跑通后的下一轮消融。
 - 训练策略第一轮使用 MLP PPO，网络复杂度不参与本文件；训练入口统一使用
-  `python -m anymani.distill.train --task AnyMani-GM-SingleAsset-MLP-v0`。
+  `python -m anymani.distill.rl.train --task AnyMani-GM-SingleAsset-MLP-v0`。
 
 == 推荐的最小验收信号 ==
 

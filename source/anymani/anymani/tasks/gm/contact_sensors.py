@@ -167,6 +167,7 @@ def build_contact_sensor_layout_from_assets(
     assets: Iterable[Any],
     *,
     validate_all_assets: bool = False,
+    collision_only: bool = False,
 ) -> GmContactSensorLayout:
     r"""从 resolved hand assets 构造 contact sensor layout。
 
@@ -177,6 +178,7 @@ def build_contact_sensor_layout_from_assets(
     Args:
         assets (Iterable[Any]): resolved hand asset 序列，元素通常是 `HandContainer`。
         validate_all_assets (bool): 是否要求所有 asset 的 contact layout 与第一个 asset 完全一致。
+        collision_only (bool): 是否排除 sidecar 中 ``collisions=[]`` 的纯 adapter/ghost links。
 
     Returns:
         GmContactSensorLayout: 第一个 asset 的 contact sensor 布局。
@@ -194,6 +196,7 @@ def build_contact_sensor_layout_from_assets(
     first_layout = build_contact_sensor_layout_from_sidecar(
         getattr(first_asset, "sidecar"),
         asset_id=str(getattr(first_asset, "asset_id", "<unknown>")),
+        collision_only=collision_only,
     )
 
     # 可选 strict 模式只比较 contact topology，不比较几何数值；post-mutate 几何变化不应触发失败。
@@ -203,6 +206,7 @@ def build_contact_sensor_layout_from_assets(
             layout = build_contact_sensor_layout_from_sidecar(
                 getattr(asset, "sidecar"),
                 asset_id=str(getattr(asset, "asset_id", "<unknown>")),
+                collision_only=collision_only,
             )
             if _layout_signature(layout) != first_signature:
                 raise ValueError(
@@ -218,6 +222,7 @@ def build_contact_sensor_layout_from_sidecar(
     sidecar: Mapping[str, Any],
     *,
     asset_id: str = "<unknown>",
+    collision_only: bool = False,
 ) -> GmContactSensorLayout:
     r"""从 `hand.yaml` sidecar 的 `hand_cfg` 字段解析 contact sensor layout。
 
@@ -231,6 +236,8 @@ def build_contact_sensor_layout_from_sidecar(
     Args:
         sidecar (Mapping[str, Any]): `HandContainer.sidecar` 或 YAML 解析后的 `dict`。
         asset_id (str): 当前 sidecar 所属 asset id，用于错误消息定位。
+        collision_only (bool): 若为 ``True``，只为至少含一个 collision geometry 的 child link
+            建 sensor；纯 visual adapter 与 canonical ghost 不产生接触，不占 critic channel。
 
     Returns:
         GmContactSensorLayout: tip / non-tip link 与 sensor 名称布局。
@@ -249,6 +256,8 @@ def build_contact_sensor_layout_from_sidecar(
     finger_non_tip_links: list[str] = []  # 只含 finger links；palm 是独立合法支撑角色
     for joint_cfg in _iter_joint_cfgs(hand_cfg, asset_id=asset_id):
         child_link = _require_nonempty_string(joint_cfg.get("child"), f"asset {asset_id!r} joint.child")
+        if collision_only and not joint_cfg.get("collisions"):
+            continue  # 无 collision shape 的 fixed adapter/ghost body 在 PhysX 中不可能产生 object contact
         if bool(joint_cfg.get("is_tip", False)):
             tip_links.append(child_link)  # 指尖 link：鼓励多指与 object 接触
         else:
@@ -279,6 +288,10 @@ def make_contact_sensor_cfg(
     robot_prim_path: str = "{ENV_REGEX_NS}/Robot",
     object_prim_path: str = "{ENV_REGEX_NS}/object",
     debug_vis: bool = False,
+    history_length: int = 3,
+    track_air_time: bool = True,
+    track_friction_forces: bool = True,
+    max_contact_data_count_per_prim: int = 64,
 ):
     r"""构造单个 hand link 对 object 的 Isaac Lab `ContactSensorCfg`。
 
@@ -302,6 +315,10 @@ def make_contact_sensor_cfg(
         robot_prim_path (str): robot articulation root prim path，默认 `"{ENV_REGEX_NS}/Robot"`。
         object_prim_path (str): filtered object prim path，默认 `"{ENV_REGEX_NS}/object"`。
         debug_vis (bool): 是否打开 Isaac Lab contact sensor debug visualization。
+        history_length (int): PhysX-rate force history 长度；任务自有 policy-rate EMA 时可设为 0。
+        track_air_time (bool): 是否维护 air/contact timers；只有任务读取 timers 时才应开启。
+        track_friction_forces (bool): 是否聚合切向摩擦力；tactile rotation 保持 True。
+        max_contact_data_count_per_prim (int): 每个 sensor prim 的 contact record 容量上限。
 
     Returns:
         ContactSensorCfg: 可挂到 `InteractiveSceneCfg` 的 per-link contact sensor 配置。
@@ -314,10 +331,10 @@ def make_contact_sensor_cfg(
         prim_path=f"{robot_prim_path}/{link_name}",
         filter_prim_paths_expr=[object_prim_path],
         update_period=0.0,
-        history_length=3,
-        track_air_time=True,
-        track_friction_forces=True,
-        max_contact_data_count_per_prim=64,
+        history_length=int(history_length),
+        track_air_time=bool(track_air_time),
+        track_friction_forces=bool(track_friction_forces),
+        max_contact_data_count_per_prim=int(max_contact_data_count_per_prim),
         force_threshold=0.125,
         debug_vis=debug_vis,
     )
@@ -331,6 +348,10 @@ def install_contact_sensors(
     object_prim_path: str = "{ENV_REGEX_NS}/object",
     debug_vis: bool = False,
     overwrite: bool = True,
+    history_length: int = 3,
+    track_air_time: bool = True,
+    track_friction_forces: bool = True,
+    max_contact_data_count_per_prim: int = 64,
 ) -> None:
     r"""把 layout 中的 per-link sensors 动态安装到 `InteractiveSceneCfg` 实例。
 
@@ -345,6 +366,10 @@ def install_contact_sensors(
         object_prim_path (str): filtered object prim path。
         debug_vis (bool): 是否打开 contact sensor debug visualization。
         overwrite (bool): 重复安装时是否覆盖同名属性；默认 True 使 `__post_init__` 幂等。
+        history_length (int): 传给每只 ContactSensor 的 physics-rate history 长度。
+        track_air_time (bool): 是否为每只 sensor 分配 air/contact timer buffers。
+        track_friction_forces (bool): 是否读取 object-filtered friction records。
+        max_contact_data_count_per_prim (int): 每只 sensor 的 contact record 容量上限。
 
     Raises:
         AttributeError: 当 `overwrite=False` 且 scene 已有同名字段时抛出。
@@ -362,6 +387,10 @@ def install_contact_sensors(
                 robot_prim_path=robot_prim_path,
                 object_prim_path=object_prim_path,
                 debug_vis=debug_vis,
+                history_length=history_length,
+                track_air_time=track_air_time,
+                track_friction_forces=track_friction_forces,
+                max_contact_data_count_per_prim=max_contact_data_count_per_prim,
             ),
         )
 

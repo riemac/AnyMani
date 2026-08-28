@@ -24,6 +24,10 @@ def mean_policy_action_std(algo: Any) -> float | None:
     if parameter is None:
         parameter = getattr(network, "logstd", None)  # TCN/custom continuous-logstd network contract
         parameter_is_logstd = parameter is not None
+    if parameter is None:
+        policy = getattr(network, "policy", None)
+        parameter = getattr(policy, "global_log_std", None)
+        parameter_is_logstd = parameter is not None
     if not isinstance(parameter, torch.Tensor):
         return None
     with torch.no_grad():

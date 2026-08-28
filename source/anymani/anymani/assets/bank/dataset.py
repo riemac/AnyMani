@@ -331,6 +331,40 @@ class HandAssetDataset:
             evaluation=evaluation,
         )
 
+    def resolve_train(
+        self,
+        *,
+        require_geometry_semantics: bool = False,
+        allow_legacy_left_handedness: bool = False,
+        max_assets: int | None = None,
+    ) -> ResolvedHandAssetPartition:
+        r"""只展开 train partition，不读取 validation/evaluation bundle 路径。
+
+        schema 仍由 :meth:`from_yaml` 按 2.0 完整严格解析；该入口只缩小运行时 IO 边界，服务 PPO
+        训练与资产预热。返回顺序完全继承 YAML run/group/mother/variant-set 声明，并由既有 lineage
+        resolver 在每个 variant set 内按 asset ID 排序。
+
+        Args:
+            require_geometry_semantics (bool): 是否要求每项资产交付 typed static geometry semantics。
+            allow_legacy_left_handedness (bool): 是否显式放行缺严格镜像证书的 legacy generated left。
+            max_assets (int | None): 仅供 smoke/诊断的有序 train 前缀长度；``None`` 表示完整 partition。
+
+        Returns:
+            ResolvedHandAssetPartition: 唯一性验证后的有序 train records/container 轴。
+        """
+
+        if max_assets is not None and max_assets < 1:
+            raise ValueError("max_assets must be positive when provided")
+        train = self._resolve_generated_partition(
+            self.config.train,
+            partition_name="train",
+            require_geometry_semantics=require_geometry_semantics,
+            allow_legacy_left_handedness=allow_legacy_left_handedness,
+            max_records=max_assets,
+        )  # 只对 train.runs 触发 bundle/sidecar/mesh IO
+        _validate_unique_asset_records((train,))  # train 内路径、asset ID 与 content hash 仍必须唯一
+        return train
+
     def _resolve_generated_partition(
         self,
         config: HandAssetPartitionCfg,
@@ -338,6 +372,7 @@ class HandAssetDataset:
         partition_name: str,
         require_geometry_semantics: bool,
         allow_legacy_left_handedness: bool,
+        max_records: int | None = None,
     ) -> ResolvedHandAssetPartition:
         r"""按 YAML 声明顺序展开 generated run/group/mother/set 层级。"""
 
@@ -370,7 +405,17 @@ class HandAssetDataset:
                                 "allow_legacy_left_handedness": allow_legacy_left_handedness,
                             }
                         )
-        if len(jobs) < 2:
+        if max_records is not None:
+            # Smoke prefix 必须保持正式 YAML 顺序，但不应并行启动后续无关 lineage 的 IO。
+            resolved_lineages = []
+            resolved_count = 0
+            for job in jobs:
+                lineage_records = _resolve_generated_lineage_job(job)
+                resolved_lineages.append(lineage_records)
+                resolved_count += len(lineage_records)
+                if resolved_count >= max_records:
+                    break
+        elif len(jobs) < 2:
             resolved_lineages = [_resolve_generated_lineage_job(jobs[0])] if jobs else []
         else:
             worker_count = min(8, max(1, (os.cpu_count() or 2) // 2), len(jobs))
@@ -382,6 +427,8 @@ class HandAssetDataset:
                 futures = [executor.submit(_resolve_generated_lineage_job, job) for job in jobs]
                 resolved_lineages = [future.result() for future in futures]
         records = [record for lineage_records in resolved_lineages for record in lineage_records]
+        if max_records is not None:
+            records = records[:max_records]  # 最后一条 lineage 可能使 records 超过 requested prefix
         return ResolvedHandAssetPartition(name=partition_name, records=tuple(records))
 
     def _resolve_official_partition(

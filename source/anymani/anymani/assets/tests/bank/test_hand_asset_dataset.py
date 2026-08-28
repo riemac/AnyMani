@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 from anymani.assets.bank.dataset import HandAssetDataset
+from anymani.assets.bank.prepared_train import resolve_prepared_train
 
 
 def _write_bundle(path: Path, asset_id: str) -> Path:
@@ -79,6 +80,87 @@ def _write_dataset(path: Path, payload: dict) -> Path:
 
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     return path
+
+
+def test_prepared_train_cache_restores_records_and_rejects_changed_source_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r"""prepared cache 必须同时提供快速命中和 source-bytes fail-closed。
+
+    首次调用仍由正式 resolver 验证 bundle；命中后不再解析 YAML/URDF。修改 ``hand.urdf`` 后，
+    dependency SHA-256 必须令 cache 失效并重新进入 resolver，不能返回旧科研语义。
+    """
+
+    generation_run = _write_generation_run(tmp_path / "generated")
+    mother = _write_bundle(generation_run / "single_palm_leap" / "right_t4_i4_m4_r4", "mother")
+    _write_variant_set(mother, "train_set", ("variant",))
+    manifest = _write_dataset(
+        tmp_path / "dataset.yaml",
+        {
+            "schema_version": "2.0.0",
+            "default_run_dir": str(generation_run),
+            "train": {
+                "runs": {
+                    "default": {
+                        "groups": {
+                            "single_palm_leap": {
+                                "right_t4_i4_m4_r4": {
+                                    "include_mother": True,
+                                    "variant_sets": ["train_set"],
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "validation": {
+                "unseen_variant_set": {"runs": {}},
+                "unseen_mother": {"runs": {}},
+            },
+            "evaluation": {
+                "unseen_variant_set": {"runs": {}},
+                "unseen_mother": {"runs": {}},
+                "official_zero_shot": {"assets": []},
+            },
+        },
+    )
+    dataset = HandAssetDataset.from_yaml(manifest)
+    cache_root = tmp_path / "cache"
+
+    first, first_hit = resolve_prepared_train(
+        dataset,
+        require_geometry_semantics=False,
+        cache_root=cache_root,
+    )
+    assert not first_hit
+    assert tuple(asset.asset_id for asset in first.assets) == ("mother", "variant")
+
+    def _unexpected_resolve(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("strict resolver called")
+
+    monkeypatch.setattr(HandAssetDataset, "resolve_train", _unexpected_resolve)
+    restored, restored_hit = resolve_prepared_train(
+        dataset,
+        require_geometry_semantics=False,
+        cache_root=cache_root,
+    )
+    assert restored_hit
+    assert restored == first
+
+    with pytest.raises(RuntimeError, match="strict resolver called"):
+        resolve_prepared_train(
+            dataset,
+            require_geometry_semantics=True,
+            cache_root=cache_root,
+        )  # typed-geometry 选项改变必须 miss，不能复用 geometry=None payload
+
+    (mother / "hand.urdf").write_text('<robot name="changed"><link name="palm"/></robot>', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="strict resolver called"):
+        resolve_prepared_train(
+            dataset,
+            require_geometry_semantics=False,
+            cache_root=cache_root,
+        )
 
 
 def test_dataset_resolves_named_validation_and_evaluation_suites(tmp_path: Path) -> None:
@@ -377,3 +459,59 @@ def test_dataset_schema_two_rejects_legacy_flat_validation(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="schema must be exactly '2.0.0'"):
         HandAssetDataset.from_yaml(manifest)
+
+
+def test_resolve_train_does_not_touch_broken_holdout_paths(tmp_path: Path) -> None:
+    r"""PPO 训练只应展开 train；损坏 holdout 不能把 2048-asset startup 变成全数据扫描。"""
+
+    run = _write_generation_run(tmp_path / "generated")
+    mother = _write_bundle(run / "single_palm_leap" / "right_t4_i4_m4_r4", "mother")
+    _write_variant_set(mother, "train_set", ("variant_b", "variant_a"))
+    missing_run = tmp_path / "holdout-does-not-exist"  # 完整 resolve 若触碰该路径必须失败
+    manifest = _write_dataset(
+        tmp_path / "train_only.yaml",
+        {
+            "schema_version": "2.0.0",
+            "default_run_dir": str(run),
+            "train": {
+                "runs": {
+                    "ppo": {
+                        "groups": {
+                            "single_palm_leap": {
+                                "right_t4_i4_m4_r4": {
+                                    "include_mother": True,
+                                    "variant_sets": ["train_set"],
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "validation": {
+                "unseen_variant_set": {"runs": {}},
+                "unseen_mother": {
+                    "runs": {
+                        "broken": {
+                            "run_dir": str(missing_run),
+                            "groups": {"missing": {"missing_mother": {"include_mother": True}}},
+                        }
+                    }
+                },
+            },
+            "evaluation": {
+                "unseen_variant_set": {"runs": {}},
+                "unseen_mother": {"runs": {}},
+                "official_zero_shot": {"assets": []},
+            },
+        },
+    )
+
+    dataset = HandAssetDataset.from_yaml(manifest)
+    train = dataset.resolve_train()
+    prefix = dataset.resolve_train(max_assets=2)
+
+    assert train.name == "train"
+    assert tuple(container.asset_id for container in train.assets) == ("mother", "variant_a", "variant_b")
+    assert tuple(container.asset_id for container in prefix.assets) == ("mother", "variant_a")
+    with pytest.raises(FileNotFoundError):
+        dataset.resolve()  # 证明 train-only 通过不是 fixture 中 holdout 偶然有效

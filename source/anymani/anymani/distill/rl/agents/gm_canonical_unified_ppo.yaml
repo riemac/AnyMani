@@ -1,0 +1,79 @@
+# canonical unified PPO：五个 topology mother 先 lower 到同一 16-DOF/25-body PhysX batch。
+# 该 YAML 使用本地 anymani_masked_ppo agent，inactive joint 不进入 log-prob/entropy/KL/bounds。
+
+params:
+  seed: 42
+
+  env:
+    clip_observations: 1000000.0
+    clip_actions: 1.0
+
+  algo:
+    name: anymani_masked_ppo
+
+  model:
+    name: anymani_masked_continuous
+
+  network:
+    name: anymani_canonical_masked
+    separate: False
+    canonical_policy:
+      owner_feature_dim: 32
+      joint_feature_dim: 16
+      hidden_width: 128
+      layers: 2
+      attention_heads: 4
+      feedforward_width: 256
+      dropout: 0.0
+      initial_log_std: -0.5
+
+  load_checkpoint: False
+  load_path: ''
+
+  config:
+    name: gm_canonical_unified
+    env_name: rlgpu
+    device: 'cuda:0'
+    device_name: 'cuda:0'
+    multi_gpu: False
+    ppo: True
+    mixed_precision: False
+    normalize_input: False
+    normalize_value: True
+    value_bootstrap: True
+    torch_compile: False
+    rsl_style_console: True
+    num_actors: -1
+    reward_shaper:
+      scale_value: 1.0
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    learning_rate: 5.0e-4
+    lr_schedule: adaptive
+    schedule_type: standard
+    kl_threshold: 0.01
+    score_to_win: 100000
+    max_epochs: 10000
+    save_best_after: 200
+    save_frequency: 200
+    print_stats: True
+    grad_norm: 1.0
+    entropy_coef: 0.002
+    truncate_grads: True
+    e_clip: 0.2
+    horizon_length: 32
+    # Retained geometry recomputes owner-surface/anchor features during PPO fine-tuning;
+    # 640 divides the 160x32 rollout and fits the RTX 5070 Ti alongside Isaac Sim.
+    minibatch_size: 640
+    mini_epochs: 5
+    critic_coef: 4.0
+    clip_value: True
+    clip_actions: False
+    seq_length: 1
+    bounds_loss_coef: 0.0001
+
+    player:
+      deterministic: True
+      games_num: 64
+      print_stats: True

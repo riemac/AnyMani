@@ -1,3 +1,14 @@
+0.7.4 - 2026-08-28
+==================
+
+- 新增 dataset-driven heterogeneous tactile-rotation 环境：严格消费 `ppo.yaml.train` 的 2048 个有序资产，lower 为统一 16-DOF/25-body canonical articulation，并以 round-robin 支持每资产两个独立 replicas 的 4096 environments。
+- 固定 69D actor、103D privileged critic 与 policy-step masked relative action；active joints 共用 global log-std，ghost 从 environment target、observation、log-prob、entropy、KL、bounds 与 regularization 全链路排除。
+- 新增确定性冻结 `[asset,21,128]` Z provider 与 checkpoint identity gate；dataset、manifest、asset order、physical geometry hashes 或 Z table 改变时，在 model state restore 前 fail closed。
+- 增加 implementation-aware prepared train cache、mesh-aware/versioned stable USD cache 与 canonical global startup-pose intersection；2048 项 prepared-cache hit 中位数为 49.70 s，2048/2048 USD hit 复验无文件改写。
+- 新增 RL phase/resource evidence recorder、artifact analyzer 与父进程 benchmark runner；summary 同时报告 phase duration/throughput、current process-tree RSS、HWM sum、swap、system RAM 与 NVML 显存。
+- IsaacLab 2.3.2 / Isaac Sim 5.1 上完成 2048×1 和 2048×2=4096 的 Stage/PhysX、reset/step 与完整 PPO；4096-env 100-update run 处理 6,553,600 transitions，NVML 峰值 7.77 GB、进程 swap 为零且无非有限值。该 run 总墙钟 29 分 19 秒，严格 30 分钟门仍差 40.89 s；goal success 为零，结果只作为 infrastructure evidence。
+- 新增异构 RL runtime 验证报告并保留边界：canonical/native 任务尺度物理审计、正式 2048 identity train/play restore 与真实 SSL provider 替换后的容量复测进入下一轮。
+
 0.7.3 - 2026-08-27
 ==================
 

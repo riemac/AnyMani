@@ -28,20 +28,22 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import xml.etree.ElementTree as ET
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, cast
 
-from .asset_schema_core import InertialCfg, JointLimitCfg, MaterialCfg, PoseCfg, SphereGeometryCfg
-from .asset_schema_embodiment import FingerCfg, HandCfg, JointCfg
+from .asset_schema_core import InertialCfg, JointLimitCfg, JointType, MaterialCfg, PoseCfg, SphereGeometryCfg
+from .asset_schema_embodiment import FingerCfg, HandCfg, JointCfg, PalmCfg
 from .exporter import UrdfWriter, UrdfWriterCfg
 from .handedness import compose_poses
 
-
 CANONICAL_HAND_SCHEMA_VERSION = "v1"  # 派生 URDF 与 manifest 的稳定 schema namespace
-CANONICAL_HAND_SCHEMA_V1 = None  # 在模块末尾实例化，供运行时与测试共享同一对象
+CANONICAL_RUNTIME_MATERIALIZER_VERSION = "v1.1-global-startup-intersection"
+"""canonical exporter 算法身份；实现/ghost importer contract 变化时使 artifact cache 失效。"""
 _IDENTIFIER_PATTERN = re.compile(r"^(?P<slot>[a-z]+)_j(?P<depth>[0-9]+)$")
-_GHOST_LIMIT = 1.0e-3  # rad；先给 importer 一个有限小区间，startup event 再写精确 [0, 0]
+_GHOST_LIMIT = 3.141592653589793  # rad；容纳全局 boot pose，startup event 随后写精确 [0,0]
 _GHOST_MASS = 1.0e-6  # kg；只保持 PhysX articulated body 数值可用，不参与真实动力学语义
 _GHOST_INERTIA = 1.0e-10  # kg m^2；ghost 的三轴对角惯量
 _GHOST_MARKER_RADIUS = 1.0e-7  # m；透明 visual marker，不生成 collision
@@ -103,9 +105,7 @@ class CanonicalHandSchemaCfg:
         r"""返回 importer 的 depth-major revolute joint 名称序列。"""
 
         return tuple(
-            f"{slot}_j{depth}"
-            for depth in range(self.max_revolute_per_finger)
-            for slot in self.physx_finger_order
+            f"{slot}_j{depth}" for depth in range(self.max_revolute_per_finger) for slot in self.physx_finger_order
         )
 
     @property
@@ -131,6 +131,10 @@ class CanonicalHandSchemaCfg:
                 "max_revolute_per_finger": self.max_revolute_per_finger,
             }
         )
+
+
+CANONICAL_HAND_SCHEMA_V1: CanonicalHandSchemaCfg
+"""模块级 v1 schema 单例；在文件末尾实例化。"""
 
 
 @dataclass(frozen=True)
@@ -219,7 +223,7 @@ class CanonicalHandArtifact:
         }
 
     @classmethod
-    def from_manifest(cls, manifest_path: Path) -> "CanonicalHandArtifact":
+    def from_manifest(cls, manifest_path: Path) -> CanonicalHandArtifact:
         r"""从 manifest 恢复 artifact，并保留 manifest 中的相对路径语义。"""
 
         document = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -304,7 +308,7 @@ def _ghost_joint(
     parent: str,
     child: str,
     *,
-    joint_type: str = "revolute",
+    joint_type: JointType = "revolute",
     origin: PoseCfg | None = None,
     is_tip: bool = False,
 ) -> JointCfg:
@@ -356,8 +360,16 @@ def _canonical_finger(
         raise ValueError(f"finger {finger.name!r} violates compact proximal order: {depths}")
 
     # 固定 root / tip 只从链的两端识别；活动链中间不能夹杂 fixed joint。
-    first_fixed = None if force_ghost else (finger.joints[0] if finger.joints and finger.joints[0].joint_type == "fixed" else None)
-    last_fixed = None if force_ghost else (finger.joints[-1] if finger.joints and finger.joints[-1].joint_type == "fixed" else None)
+    first_fixed = (
+        None
+        if force_ghost
+        else (finger.joints[0] if finger.joints and finger.joints[0].joint_type == "fixed" else None)
+    )
+    last_fixed = (
+        None
+        if force_ghost
+        else (finger.joints[-1] if finger.joints and finger.joints[-1].joint_type == "fixed" else None)
+    )
     interior_start = 1 if first_fixed is not None else 0
     interior_end = -1 if last_fixed is not None else None
     interior = [] if force_ghost else finger.joints[interior_start:interior_end]
@@ -368,11 +380,11 @@ def _canonical_finger(
 
     root_name = f"{finger.name}_root"
     tip_name = f"{finger.name}_tip"
-    mount = finger.mount
+    mount = PoseCfg.from_value(finger.mount)
     source_root = first_fixed
     source_tip = last_fixed
     if source_root is not None:
-        root_origin = compose_poses(mount, source_root.origin)
+        root_origin = compose_poses(mount, PoseCfg.from_value(source_root.origin))
         root = source_root.replace(
             name=f"{finger.name}_root_fixed",
             parent="palm",
@@ -381,7 +393,7 @@ def _canonical_finger(
             metadata={**source_root.metadata, "canonical_active": True, "source_joint": source_root.name},
         )
     else:
-        first_active_origin = source_revolute[0].origin if source_revolute else PoseCfg()
+        first_active_origin = PoseCfg.from_value(source_revolute[0].origin) if source_revolute else PoseCfg()
         root = _ghost_joint(
             f"{finger.name}_root_fixed",
             "palm",
@@ -397,11 +409,11 @@ def _canonical_finger(
         child = f"{finger.name}_link_j{depth}"
         if depth < len(source_revolute):
             source_joint = source_revolute[depth]
-            origin = source_joint.origin if source_root is not None or depth > 0 else PoseCfg()
+            origin = PoseCfg.from_value(source_joint.origin) if source_root is not None or depth > 0 else PoseCfg()
             # 无 root source 的首个活动 origin 已吸收到 adapter root；后续局部变换保持原样。
             canonical_joint = source_joint.replace(
                 name=f"{finger.name}_j{depth}",
-                parent=canonical_joints[-1].child,
+                parent=str(canonical_joints[-1].child),
                 child=child,
                 origin=origin,
                 metadata={**source_joint.metadata, "canonical_active": True, "source_joint": source_joint.name},
@@ -411,7 +423,7 @@ def _canonical_finger(
         else:
             canonical_joint = _ghost_joint(
                 f"{finger.name}_j{depth}",
-                canonical_joints[-1].child,
+                str(canonical_joints[-1].child),
                 child,
             )
         canonical_joints.append(canonical_joint)
@@ -419,7 +431,7 @@ def _canonical_finger(
     if source_tip is not None:
         tip_joint = source_tip.replace(
             name=f"{finger.name}_tip_fixed",
-            parent=canonical_joints[-1].child,
+            parent=str(canonical_joints[-1].child),
             child=tip_name,
             metadata={**source_tip.metadata, "canonical_active": True, "source_joint": source_tip.name},
             is_tip=True,
@@ -427,7 +439,7 @@ def _canonical_finger(
     else:
         tip_joint = _ghost_joint(
             f"{finger.name}_tip_fixed",
-            canonical_joints[-1].child,
+            str(canonical_joints[-1].child),
             tip_name,
             joint_type="fixed",
             is_tip=True,
@@ -448,10 +460,11 @@ def lower_hand_to_canonical(
     hand: HandCfg,
     *,
     asset_id: str,
-    schema: CanonicalHandSchemaCfg = None,
+    schema: CanonicalHandSchemaCfg | None = None,
     asset_row: int = 0,
     topology: str = "unknown",
     q_home: tuple[float, ...] = (),
+    q_home_joint_names: tuple[str, ...] = (),
 ) -> tuple[HandCfg, CanonicalHandRouting]:
     r"""从 typed source ``HandCfg`` 派生 canonical hand 与 active routing。
 
@@ -491,7 +504,7 @@ def lower_hand_to_canonical(
 
     canonical = HandCfg(
         name=f"{hand.name}_canonical_{schema.version}",
-        palm=hand.palm.copy(),
+        palm=cast(PalmCfg, hand.palm).copy(),
         fingers=canonical_fingers,
         family=hand.family,
         handedness=hand.handedness,
@@ -505,6 +518,15 @@ def lower_hand_to_canonical(
     source_names_to_canonical = dict(source_to_canonical)
     active_mask = tuple(name in source_names_to_canonical.values() for name in schema.joint_names)
     active_names = tuple(name for name, active in zip(schema.joint_names, active_mask) if active)
+    if q_home and len(q_home) != len(source_joint_names):
+        raise ValueError(
+            f"q_home must follow the {len(source_joint_names)} source active joints, got {len(q_home)} values"
+        )
+    home_names = q_home_joint_names or tuple(source_joint_names)
+    if q_home and (len(home_names) != len(q_home) or set(home_names) != set(source_joint_names)):
+        raise ValueError("q_home_joint_names must identify every source active joint exactly once")
+    source_home = dict(zip(home_names, q_home)) if q_home else {}
+    canonical_q_home = tuple(float(source_home.get(name, 0.0)) for name in schema.joint_names)
     routing = CanonicalHandRouting(
         asset_id=asset_id,
         asset_row=asset_row,
@@ -517,9 +539,83 @@ def lower_hand_to_canonical(
         handedness=hand.handedness,
         family=hand.family,
         topology=topology,
-        q_home=tuple(q_home),
+        q_home=canonical_q_home,
     )
     return canonical, routing
+
+
+def compute_canonical_startup_joint_positions(
+    canonical_hands: Sequence[HandCfg],
+    routings: Sequence[CanonicalHandRouting],
+    *,
+    schema: CanonicalHandSchemaCfg | None = None,
+) -> dict[str, float]:
+    r"""计算所有 prototypes 均合法的 canonical articulation 全局启动姿态。
+
+    IsaacLab 在 per-env startup/reset event 之前，先用 ``ArticulationCfg.init_state.joint_pos`` 的同一
+    16D 向量验证所有 prototype。对 canonical slot $j$，真实 active limits 的交集为：
+
+    $$
+    I_j=\left[\max_{a:m_{aj}=1}l_{aj},\ \min_{a:m_{aj}=1}u_{aj}\right].
+    $$
+
+    启动值选择离 0 最近的投影 $q_j^{boot}=\Pi_{I_j}(0)$；没有 active row 的槽取 0。ghost URDF
+    临时 limit 必须容纳该向量，PhysX startup event 随后将每个 inactive ``[env,joint]`` 锁回 `[0,0]`。
+
+    Args:
+        canonical_hands (Sequence[HandCfg]): 与 selection row 对齐的 canonical typed hands。
+        routings (Sequence[CanonicalHandRouting]): 同序 active masks。
+        schema (CanonicalHandSchemaCfg | None): canonical joint axis；默认 v1。
+
+    Returns:
+        dict[str, float]: 可直接写入 ``ArticulationCfg.InitialStateCfg.joint_pos`` 的 16 项 mapping。
+
+    Raises:
+        ValueError: hand/routing 未对齐、joint/limit 缺失或任一 active-limit 交集为空。
+    """
+
+    schema = schema or CANONICAL_HAND_SCHEMA_V1
+    if not canonical_hands or len(canonical_hands) != len(routings):
+        raise ValueError("canonical startup pose requires non-empty row-aligned hands and routings")
+    lower_by_joint: dict[str, list[float]] = {name: [] for name in schema.joint_names}
+    upper_by_joint: dict[str, list[float]] = {name: [] for name in schema.joint_names}
+    for row, (hand, routing) in enumerate(zip(canonical_hands, routings, strict=True)):
+        joints = {
+            joint.name: joint
+            for finger in hand.fingers
+            for joint in finger.joints
+            if joint.joint_type == "revolute"
+        }  # canonical 16-slot name→typed joint
+        if tuple(joints) != tuple(
+            joint.name
+            for finger in hand.fingers
+            for joint in finger.joints
+            if joint.joint_type == "revolute"
+        ):
+            raise ValueError(f"canonical row {row} contains duplicate revolute joint names")
+        for joint_name, active in zip(schema.joint_names, routing.active_joint_mask, strict=True):
+            if not active:
+                continue
+            joint = joints.get(joint_name)
+            if joint is None or joint.limit is None:
+                raise ValueError(f"canonical row {row} active joint {joint_name!r} lacks a finite limit")
+            limit = cast(JointLimitCfg, joint.limit)  # JointCfg.__post_init__ 已把 mapping/sequence lower 成 typed cfg
+            lower_by_joint[joint_name].append(float(limit.lower))
+            upper_by_joint[joint_name].append(float(limit.upper))
+
+    startup: dict[str, float] = {}
+    for joint_name in schema.joint_names:
+        if not lower_by_joint[joint_name]:
+            startup[joint_name] = 0.0  # selected smoke prefix 中从未 active 的槽只落在 ghost importer interval
+            continue
+        lower = max(lower_by_joint[joint_name])  # $\max_a l_{aj}$
+        upper = min(upper_by_joint[joint_name])  # $\min_a u_{aj}$
+        if lower > upper:
+            raise ValueError(
+                f"canonical active-limit intersection is empty for {joint_name!r}: lower={lower}, upper={upper}"
+            )
+        startup[joint_name] = min(max(0.0, lower), upper)  # $\Pi_{[l,u]}(0)$，最小化启动偏转
+    return startup
 
 
 def materialize_canonical_artifact(
@@ -528,10 +624,11 @@ def materialize_canonical_artifact(
     asset_id: str,
     output_root: Path,
     source_urdf_path: Path | None = None,
-    schema: CanonicalHandSchemaCfg = None,
+    schema: CanonicalHandSchemaCfg | None = None,
     asset_row: int = 0,
     topology: str = "unknown",
     q_home: tuple[float, ...] = (),
+    q_home_joint_names: tuple[str, ...] = (),
 ) -> CanonicalHandArtifact:
     r"""把 source hand materialize 到 ``outputs/canonical_runtime/v1/<cache-key>/``。
 
@@ -543,7 +640,16 @@ def materialize_canonical_artifact(
     source_content_hash = _stable_digest(hand.to_dict())
     source_urdf_hash = _sha256_file(source_urdf_path) if source_urdf_path is not None else _stable_digest("")
     cache_key = _stable_digest(
-        {"schema_version": schema.version, "schema_digest": schema.digest, "source_content_hash": source_content_hash, "source_urdf_hash": source_urdf_hash}
+        {
+            "schema_version": schema.version,
+            "schema_digest": schema.digest,
+            "materializer_version": CANONICAL_RUNTIME_MATERIALIZER_VERSION,
+            "source_content_hash": source_content_hash,
+            "source_urdf_hash": source_urdf_hash,
+            "asset_row": asset_row,
+            "q_home": tuple(float(value) for value in q_home),
+            "q_home_joint_names": q_home_joint_names,
+        }
     )
     artifact_dir = output_root / "canonical_runtime" / schema.version / cache_key
     manifest_path = artifact_dir / "canonical_runtime.json"
@@ -560,6 +666,7 @@ def materialize_canonical_artifact(
         asset_row=asset_row,
         topology=topology,
         q_home=q_home,
+        q_home_joint_names=q_home_joint_names,
     )
     artifact_dir.mkdir(parents=True, exist_ok=True)
     result = UrdfWriter(UrdfWriterCfg(overwrite=True)).export(canonical, artifact_dir)
@@ -581,6 +688,47 @@ def materialize_canonical_artifact(
     return artifact
 
 
+def validate_canonical_artifact(
+    artifact: CanonicalHandArtifact,
+    *,
+    schema: CanonicalHandSchemaCfg | None = None,
+) -> None:
+    r"""验证 manifest、URDF hash、joint set、body set 与 routing 长度的一致性。
+
+    XML 中的 joint 元素仍按 exporter 的 finger-major 写出；IsaacLab importer 的 depth-major
+    array 顺序由 ``schema.joint_names`` 明确规定并写入 manifest。因此这里分别验证 XML
+    的物理名称集合和 canonical array 的顺序合同，不把 XML 文本顺序错误地当成 PhysX 顺序。
+    """
+
+    schema = schema or CANONICAL_HAND_SCHEMA_V1
+    if artifact.schema_version != schema.version or artifact.schema_digest != schema.digest:
+        raise ValueError(
+            f"canonical artifact {artifact.asset_id!r} schema mismatch: "
+            f"artifact=({artifact.schema_version},{artifact.schema_digest}), "
+            f"expected=({schema.version},{schema.digest})"
+        )
+    urdf_path = Path(artifact.canonical_urdf_path)
+    if not urdf_path.is_file():
+        raise FileNotFoundError(f"canonical URDF does not exist: {urdf_path}")
+    if _sha256_file(urdf_path) != artifact.canonical_urdf_hash:
+        raise ValueError(f"canonical URDF hash mismatch for asset {artifact.asset_id!r}")
+    root = ET.parse(urdf_path).getroot()
+    xml_joint_names = tuple(
+        joint.attrib["name"] for joint in root.findall("./joint") if joint.attrib.get("type") == "revolute"
+    )
+    xml_body_names = tuple(link.attrib["name"] for link in root.findall("./link"))
+    if set(xml_joint_names) != set(schema.joint_names) or len(xml_joint_names) != schema.dof_count:
+        raise ValueError(f"canonical asset {artifact.asset_id!r} has invalid revolute joint names: {xml_joint_names!r}")
+    if set(xml_body_names) != set(schema.body_names) or len(xml_body_names) != schema.body_count:
+        raise ValueError(f"canonical asset {artifact.asset_id!r} has invalid body names: {xml_body_names!r}")
+    if len(artifact.routing.active_joint_mask) != schema.dof_count:
+        raise ValueError("canonical routing active_joint_mask length must equal 16")
+    if len(artifact.routing.active_tip_mask) != len(schema.physx_finger_order):
+        raise ValueError("canonical routing active_tip_mask length must equal the number of finger slots")
+    if artifact.routing.active_dof_count != artifact.routing.source_dof_count:
+        raise ValueError("canonical routing active DOF count must equal source DOF count")
+
+
 def _sha256_file(path: Path | None) -> str:
     r"""计算文件内容 SHA-256；不存在的 source URDF 由调用方显式传入 None。"""
 
@@ -597,6 +745,7 @@ CANONICAL_HAND_SCHEMA_V1 = CanonicalHandSchemaCfg()
 
 
 __all__ = [
+    "CANONICAL_RUNTIME_MATERIALIZER_VERSION",
     "CANONICAL_HAND_SCHEMA_VERSION",
     "CANONICAL_HAND_SCHEMA_V1",
     "CanonicalHandSchemaCfg",
@@ -604,5 +753,6 @@ __all__ = [
     "CanonicalHandArtifact",
     "CanonicalHandGroupManifest",
     "lower_hand_to_canonical",
+    "compute_canonical_startup_joint_positions",
     "materialize_canonical_artifact",
 ]

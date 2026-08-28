@@ -1,9 +1,10 @@
 r"""PALM / JOINT / TIP 几何观测契约 —— teacher RL 的静态形态特征入口。
 
-本模块记录 AnyMani teacher 阶段当前合意的 geometry obs schema。它不是网络
-`nn.Module`，也不直接实现 mesh encoder；它负责定义从 hand asset / hand.yaml /
-URDF / IsaacLab runtime 中应提取哪些**形态学字段**，再交给
-`distill/models` 的 tokenizer / geometry adapter 编码为 token。
+本模块保存 AnyMani 早期 teacher 阶段的 geometry-observation 草稿。它不是网络
+`nn.Module`，也不直接实现 mesh encoder。新的 candidate-neutral physical source/field
+契约位于 `distill/representations`，learnable geometry/token adapter 位于
+`distill/models/input_adapters`；本文件暂时保留已有字段推导，等待真实 source 实现时逐项
+迁移和审计，不再作为跨 SSL/RL 的唯一事实源。
 
 == 当前上下文 ==
 
@@ -109,16 +110,19 @@ randomization，policy 看到的正是当下 env 实例使用的真实 clamp 边
 == axis_h0 ==
 
 关节轴不是长度/位置，而是“该关节绕哪个方向旋转”的 signed unit vector。当前选择
-将它表达在 hand semantic frame `{h}` 的 home pose 下：
+将它表达在 hand semantic frame `{h}` 的资产基准构型 $q_{\mathfrak m}^{0}$ 下；该基准
+构型不强制为全零：
 
 $$
-\mathbf{a}^{h}_{i,0} = R^{h}_{j_i}(q=0)\,\mathbf{a}^{j_i}_{i},
+\mathbf{a}^{h}_{i,0} = R^{h}_{j_i}(q_{\mathfrak m}^{0})\,\mathbf{a}^{j_i}_{i},
 \qquad \|\mathbf{a}^{h}_{i,0}\|_2=1.
 $$
 
 其中 $\mathbf{a}^{j_i}_{i}$ 是 JointCfg.axis 在本 joint local frame 中的定义，
-$R^{h}_{j_i}(q=0)$ 是 home pose 下 joint frame 到 `{h}` 的旋转。这样网络看到的是
-“在手的语义坐标系中，这个 joint 是屈伸轴、外展轴，还是拇指特殊相位轴”。
+$R^{h}_{j_i}(q_{\mathfrak m}^{0})$ 是基准构型下 joint frame 到 `{h}` 的旋转。`{h}` 只固定
+$z_h=n_p$，其 $x/y$ 是 $SO(2)$ gauge；因此 raw axis 不能被解释成固定的屈伸/外展/thumb
+方向并直接送入策略。当前几何前端应将 axis--anchor 关系收缩为 $SO(2)$ 不变且保留 joint-sign
+奇性的标量特征，再形成 $f_i^{screw}$ 与 $z_i^{(1)}$。
 
 NOTE: generated assets 的 `{h}` / palm frame 由资产建模约定给出；真实 URDF 的
 `{a}->{h}` 对齐属于 sim2sim 阶段，不在 teacher 第一版解决。
@@ -138,11 +142,9 @@ cylinder / sphere / ellipse 等类型，但第一版 teacher 不把 `geom_type` 
 因此 $d$ 目前更多是 family / preset 常量或局部几何锚点；仍保留是为了让网络知道
 collision 皮肤相对 joint frame 是否存在系统性平移。
 
-Question / 后续风险:
-    fixed root segment 的 collision 几何当前不属于 JOINT token，也不属于 TIP token。
-    对第一批 in-hand manipulation teacher，先让它通过 dynamic SE(3) edge 的 frame
-    关系间接进入结构；若后续发现 root-fixed skin 与物体接触显著影响策略，可能需要
-    增加 LINK / ROOT_SEGMENT token 或把 root-fixed extents 挂到 palm→root edge feature。
+NOTE: fixed root segment 的 collision geometry 必须在 asset sidecar/manifest 中审核后归入现有
+      PALM/JOINT/TIP surface owner，或拒绝进入需要完整 coverage 的实验。当前合同不增加
+      LINK/ROOT_SEGMENT token，也不依赖 dynamic all-pairs $SE(3)$ 间接补偿缺失 owner。
 """
 
 
@@ -152,9 +154,9 @@ Question / 后续风险:
 
 r"""TODO(PALM geometry): palm token 的静态几何字段与动态预留字段。
 
-PALM token 是 hand-level anchor，不出动作，不携带 $q/\dot q$。它的职责不是
-flatten 可变长度的 mount set；mount / palm→joint / palm→tip 关系已由
-all-pairs dynamic SE(3) edge 表达。
+PALM token 是 hand-level physical entity，不出动作，不携带 $q/\dot q$。它的职责不是
+flatten 可变长度的 mount set；mount、physical anchors、基准 screw 与 topology 关系由
+geometry front-end 的 owner-aware scalar relations 表达，不使用 dynamic all-pairs $SE(3)$ 作为当前默认。
 
 当前 PALM 静态 geometry 第一版字段：
 
@@ -274,7 +276,7 @@ TipGeo:
 其中 `B` 可以是 asset batch / env batch，取决于接入 RL 的位置。若同一 asset 在多个
 env clone 中复用，应优先在 asset 维缓存，再按 env 的 asset id gather，避免重复存储。
 
-`models/tokenizer.py` 再消费这些结构化字段，分别投影成 PALM / JOINT / TIP token。
+`models/input_adapters/grouped_tokens.py` 再消费这些结构化字段，分别投影成 PALM / JOINT / TIP token。
 
 TOAGENT:
     实现时优先保持 schema 清楚，不要为了 rl_games 的扁平 obs 接口把所有字段过早

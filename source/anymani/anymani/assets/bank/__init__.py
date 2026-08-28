@@ -44,9 +44,11 @@ from .path_utils import (
     resolve_container_entry_path,
     resolve_post_mutate_root,
 )
+from .prepared_train import PREPARED_TRAIN_CACHE_SCHEMA_VERSION, resolve_prepared_train
 
 __all__ = [
     "HAND_ASSET_DATASET_SCHEMA_VERSION",
+    "PREPARED_TRAIN_CACHE_SCHEMA_VERSION",
     "HandAssetDataset",
     "HandAssetDatasetCfg",
     "HandAssetEvaluationCfg",
@@ -73,5 +75,6 @@ __all__ = [
     "resolve_bank_path",
     "resolve_container_entry_path",
     "resolve_post_mutate_root",
+    "resolve_prepared_train",
     "coerce_hand_container_cfg",
 ]

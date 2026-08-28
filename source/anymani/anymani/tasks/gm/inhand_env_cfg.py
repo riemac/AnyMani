@@ -60,8 +60,8 @@ GM_CLEAR_SKY_LIGHT_INTENSITY = 750.0
 """clear-sky HDRI dome light 强度；与 heterogeneous GUI smoke 保持一致。"""
 
 GM_DEFAULT_HAND_BANK_PATH = (
-    "source/anymani/anymani/assets/generated/2026-06-10_11-30-08/"
-    "single_palm_leap/right_t4_i4_m4_r4/2026-06-11_14-20-22"
+    "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-16_14-55-19/"
+    "single_palm_allegro/right_t4_i4_m4_r4"
 )
 r"""GM in-hand 默认使用的 same-topology post-mutate run。"""
 
@@ -96,11 +96,9 @@ reset，应把该常量升级为 reset-time 的 $p^e_o=p^e_h+R_{eh}p^h_o$ 计算
 
 DEFAULT_GM_HAND_SPAWN_CFG = HandSpawnCfg(
     bank=HandBankCfg(
-        source_mode="post_mutate",
-        selection_mode="sample",
-        post_mutate_path=GM_DEFAULT_HAND_BANK_PATH,
-        sample_count=GM_DEFAULT_HAND_SAMPLE_COUNT,
-        sample_seed=GM_DEFAULT_HAND_SAMPLE_SEED,
+        source_mode="mixed",
+        selection_mode="explicit",
+        containers=(GM_DEFAULT_HAND_BANK_PATH,),
         validate_mesh_relpaths=True,
         parse_visual_rgba=True,
     ),
@@ -596,6 +594,7 @@ class GmInHandEnvCfg_PLAY(GmInHandEnvCfg):
         self.scene.num_envs = 50
         self.observations.policy.enable_corruption = False
         self.terminations.time_out = None
+
 
 __all__ = [
     "DEFAULT_GM_HAND_SPAWN_CFG",

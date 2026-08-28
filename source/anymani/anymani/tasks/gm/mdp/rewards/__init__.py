@@ -19,7 +19,9 @@ from .rewards_contact import (
     bad_non_tip_contact,
     good_fingertip_contact,
     tactile_bad_finger_non_tip_contact,
+    tactile_bad_finger_non_tip_contact_ungated,
     tactile_good_tip_contact,
+    tactile_good_tip_contact_ungated,
 )
 from .rewards_reorient import (
     AxisDeltaRotationReward,
@@ -62,7 +64,9 @@ __all__ = [
     "termination_penalty_placeholder",
     "torque_l2_curriculum",
     "tactile_bad_finger_non_tip_contact",
+    "tactile_bad_finger_non_tip_contact_ungated",
     "tactile_good_tip_contact",
+    "tactile_good_tip_contact_ungated",
     "tactile_axis_delta_rotation_rate",
     "tactile_full_pose_keypoint_reward",
     "tactile_goal_success_impulse",

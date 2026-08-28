@@ -23,6 +23,11 @@ from .adr_joint_actions import (
     compute_relative_joint_command,
 )
 from .clamped_relative_action import ClampedRelativeJointActionCfg, ClampedRelativeJointPositionAction
+from .policy_step_masked_relative_action import (
+    PolicyStepMaskedRelativeJointPositionAction,
+    PolicyStepMaskedRelativeJointPositionActionCfg,
+    compute_policy_step_masked_relative_target,
+)
 
 __all__ = [
     "ADREMAJointPositionToLimitsAction",
@@ -34,7 +39,10 @@ __all__ = [
     "ClampedRelativeJointPositionAction",
     "PolicyStepADRTargetJointPositionAction",
     "PolicyStepADRTargetJointPositionActionCfg",
+    "PolicyStepMaskedRelativeJointPositionAction",
+    "PolicyStepMaskedRelativeJointPositionActionCfg",
     "compute_ema_joint_command",
     "compute_leap_adr_latency_steps",
     "compute_relative_joint_command",
+    "compute_policy_step_masked_relative_target",
 ]

@@ -175,12 +175,9 @@ def test_gm_inhand_default_hand_bank_is_fixed_reproducible_slice() -> None:
     values = _constant_values()  # 模块级数值锚点，如 sample_count / seed / env count
     bank_call = _keyword_call(_default_hand_spawn_call(), "bank")  # `HandBankCfg(...)` 声明
 
-    assert _keyword_literal(bank_call, "source_mode", values) == "post_mutate"  # same-topology post-mutate 主线
-    assert _keyword_literal(bank_call, "selection_mode", values) == "sample"  # 固定 seed 随机子集
-    assert _keyword_literal(bank_call, "post_mutate_path", values) == values["GM_DEFAULT_HAND_BANK_PATH"]
-    assert _keyword_literal(bank_call, "sample_count", values) == values["GM_DEFAULT_HAND_SAMPLE_COUNT"]
-    assert values["GM_DEFAULT_HAND_SAMPLE_COUNT"] > 0  # 当前 preset 可调，但必须保留至少一个 hand
-    assert _keyword_literal(bank_call, "sample_seed", values) == values["GM_DEFAULT_HAND_SAMPLE_SEED"] == 42
+    assert _keyword_literal(bank_call, "source_mode", values) == "mixed"  # current generated root 使用 explicit bundle
+    assert _keyword_literal(bank_call, "selection_mode", values) == "explicit"  # source topology 直接可复现
+    assert _keyword_literal(bank_call, "containers", values) == (values["GM_DEFAULT_HAND_BANK_PATH"],)
 
 
 def test_gm_inhand_default_env_count_matches_hands_times_envs_per_hand() -> None:

@@ -174,9 +174,62 @@ def tactile_bad_finger_non_tip_contact(
     return indicator * curriculum_gain(env, lambda_floor=0.0, lambda_max=1.0)
 
 
+def tactile_good_tip_contact_ungated(
+    env: ManagerBasedRLEnv,
+    fingertip_sensor_names: Sequence[str],
+    finger_non_tip_sensor_names: Sequence[str],
+    palm_sensor_name: str,
+    min_contacts: int = 2,
+    ema_alpha: float = 0.5,
+    force_threshold: float = 0.25,
+) -> torch.Tensor:
+    r"""返回无 curriculum 的共享 EMA 多指接触 indicator。
+
+    heterogeneous infra stage 没有 reward-release curriculum；本函数仍消费与 N000 相同的
+    policy-rate contact singleton，只移除乘法系数：
+
+    $$
+    r_{tip}=\mathbf 1\left[\sum_i c_i^{tip}\ge k\right].
+    $$
+    """
+
+    state = get_tactile_contact_state(
+        env,
+        fingertip_sensor_names,
+        finger_non_tip_sensor_names,
+        palm_sensor_name,
+        ema_alpha,
+        force_threshold,
+    )  # actor/critic/reward 共用同一 policy-step EMA snapshot
+    return (state.tip_bits.sum(dim=-1) >= int(min_contacts)).float()  # `[B]`，无 curriculum gain
+
+
+def tactile_bad_finger_non_tip_contact_ungated(
+    env: ManagerBasedRLEnv,
+    fingertip_sensor_names: Sequence[str],
+    finger_non_tip_sensor_names: Sequence[str],
+    palm_sensor_name: str,
+    ema_alpha: float = 0.5,
+    force_threshold: float = 0.25,
+) -> torch.Tensor:
+    r"""返回无 curriculum 的 finger non-tip contact indicator；palm support 保持中性。"""
+
+    state = get_tactile_contact_state(
+        env,
+        fingertip_sensor_names,
+        finger_non_tip_sensor_names,
+        palm_sensor_name,
+        ema_alpha,
+        force_threshold,
+    )  # 与 good-tip/actor/critic 相同的共享 snapshot
+    return torch.any(state.finger_non_tip_bits, dim=-1).float()  # `[B]`，外部负权重形成 penalty
+
+
 __all__ = [
     "bad_non_tip_contact",
     "good_fingertip_contact",
     "tactile_bad_finger_non_tip_contact",
+    "tactile_bad_finger_non_tip_contact_ungated",
     "tactile_good_tip_contact",
+    "tactile_good_tip_contact_ungated",
 ]
