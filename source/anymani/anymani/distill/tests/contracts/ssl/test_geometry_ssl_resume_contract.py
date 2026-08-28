@@ -135,7 +135,11 @@ def test_resume_can_explicitly_accept_validated_dirty_worktree_change() -> None:
         "worktree_dirty": True,
         "worktree_fingerprint": "fingerprint-a",
     }
-    changed = dict(metadata, worktree_fingerprint="fingerprint-after-validated-fix")
+    changed = dict(
+        metadata,
+        code_revision="revision-after-validated-fix",
+        worktree_fingerprint="fingerprint-after-validated-fix",
+    )
 
     require_resume_metadata_identity(changed, metadata, allow_worktree_change=True)
 

@@ -56,16 +56,16 @@ def require_resume_metadata_identity(
     *,
     allow_worktree_change: bool = False,
 ) -> None:
-    r"""拒绝代码/公式/source 漂移，只在显式授权时放行 dirty worktree fingerprint 变化。
+    r"""拒绝代码/公式/source 漂移，只在显式授权时放行已验证源码修复的 code/worktree 变化。
 
     ``allow_worktree_change`` 是受控 recovery migration 开关，而不是科学配置覆盖。它允许研究者在
-    已完成针对性验证的源码修复后继续同一 incomplete run，但仍要求 checkpoint 与当前进程都处于
-    dirty worktree 状态，并继续严格比较 code revision、package、geometry、objective、FairGrad、参数
-    分区和 source artifact identity。这样不会把源码变化静默当成同一训练轨迹。
+    已完成针对性验证的源码修复后继续同一 incomplete run，并放行该修复产生的 code revision 与
+    worktree fingerprint 变化；仍要求 checkpoint 与当前进程都处于相同 dirty 状态，并继续严格比较
+    package、geometry、objective、FairGrad、参数分区和 source artifact identity。这样不会把源码变化
+    静默当成同一训练轨迹。
     """
 
     fields = (
-        "code_revision",
         "package_version",
         "geometry_semantics_schema",
         "declared_objective",
@@ -76,6 +76,8 @@ def require_resume_metadata_identity(
         "worktree_dirty",
     )
     changed = tuple(name for name in fields if current.get(name) != checkpoint.get(name))
+    if not allow_worktree_change and current.get("code_revision") != checkpoint.get("code_revision"):
+        changed += ("code_revision",)
     if current.get("worktree_dirty") != checkpoint.get("worktree_dirty"):
         changed += ("worktree_dirty",)
     if not allow_worktree_change and current.get("worktree_fingerprint") != checkpoint.get("worktree_fingerprint"):
