@@ -460,6 +460,7 @@ def test_pretrain_validation_and_evaluation_are_explicit_stages(
 
     final = yaml.safe_load((evaluation_dir / "evaluation.yaml").read_text(encoding="utf-8"))["suites"]
     assert final["unseen"]["metrics"]
+    assert final["unseen"]["teacher_baselines"]["kappa"]["physical_baseline_mse"] == 1.0
     assert final["unseen"]["ablation_analysis"]["bootstrap_replicates"] == 2
     assert final["official_zero_shot"] == {"status": "empty", "asset_count": 0}
     assert (evaluation_dir / "training_morphology_q_bank.yaml").is_file()

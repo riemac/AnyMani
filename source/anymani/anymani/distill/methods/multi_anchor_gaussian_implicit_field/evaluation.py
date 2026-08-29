@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import torch
@@ -12,7 +13,7 @@ from .augmentation import rewrite_batch_joint_sign_coordinates
 from .batch import PaddedOnlineGeometryBatch, method_batch_views
 
 if TYPE_CHECKING:
-    from anymani.distill.models.geometry_ssl import GeometrySSLForward, GeometrySSLModel
+    from anymani.distill.models.geometry_ssl import GeometrySSLModel
 
 geometry_ssl_ablation_forward: Any = None
 geometry_ssl_reconstruction_metrics_per_sample: Any = None
@@ -147,8 +148,11 @@ def fixed_evaluation_ablation_evidence(
             evidence_row_index=batch.evidence_row_index,
             **common,
         )
-        predictions: dict[str, GeometrySSLForward | None] = {"full": full}
-        predictions["query_only"] = geometry_ssl_ablation_forward(
+        # CUDA Graph 复用 compiled output storage；每次 forward 后立即归约，避免后续调用覆盖旧预测。
+        per_ablation: dict[str, dict[str, tuple[float | None, ...]] | None] = {
+            "full": geometry_ssl_reconstruction_metrics_per_sample(full, batch)
+        }
+        query_only = geometry_ssl_ablation_forward(
             model,
             q,
             batch.evidence,
@@ -158,12 +162,13 @@ def fixed_evaluation_ablation_evidence(
             evidence_row_index=batch.evidence_row_index,
             **common,
         )
+        per_ablation["query_only"] = geometry_ssl_reconstruction_metrics_per_sample(query_only, batch)
         try:
             same_asset_permutation = same_asset_q_permutation(batch.asset_ids, device=q.device)
         except ValueError:
-            predictions["same_asset_q_shuffle"] = None
+            per_ablation["same_asset_q_shuffle"] = None
         else:
-            predictions["same_asset_q_shuffle"] = geometry_ssl_ablation_forward(
+            same_asset_q_shuffle = geometry_ssl_ablation_forward(
                 model,
                 q,
                 batch.evidence,
@@ -174,12 +179,15 @@ def fixed_evaluation_ablation_evidence(
                 evidence_row_index=batch.evidence_row_index,
                 **common,
             )
+            per_ablation["same_asset_q_shuffle"] = geometry_ssl_reconstruction_metrics_per_sample(
+                same_asset_q_shuffle, batch
+            )
         try:
             cross_permutation = cross_asset_permutation(batch.asset_ids, device=q.device)
         except ValueError:
-            predictions["cross_asset_shuffle"] = None
+            per_ablation["cross_asset_shuffle"] = None
         else:
-            predictions["cross_asset_shuffle"] = geometry_ssl_ablation_forward(
+            cross_asset_shuffle = geometry_ssl_ablation_forward(
                 model,
                 q,
                 batch.evidence,
@@ -190,7 +198,10 @@ def fixed_evaluation_ablation_evidence(
                 evidence_row_index=batch.evidence_row_index,
                 **common,
             )
-        predictions["joint_token_shuffle"] = geometry_ssl_ablation_forward(
+            per_ablation["cross_asset_shuffle"] = geometry_ssl_reconstruction_metrics_per_sample(
+                cross_asset_shuffle, batch
+            )
+        joint_token_shuffle = geometry_ssl_ablation_forward(
             model,
             q,
             batch.evidence,
@@ -200,10 +211,9 @@ def fixed_evaluation_ablation_evidence(
             evidence_row_index=batch.evidence_row_index,
             **common,
         )
-        per_ablation = {
-            name: geometry_ssl_reconstruction_metrics_per_sample(prediction, batch) if prediction is not None else None
-            for name, prediction in predictions.items()
-        }
+        per_ablation["joint_token_shuffle"] = geometry_ssl_reconstruction_metrics_per_sample(
+            joint_token_shuffle, batch
+        )
         q_indices = batch.q_index.tolist() if batch.q_index is not None else [-1] * len(batch.asset_ids)
         for sample_index, (asset_id, q_index) in enumerate(zip(batch.asset_ids, q_indices)):
             records.append(
@@ -278,6 +288,12 @@ def evaluate_method_session(
             )
             update_evaluation_digest(digest, batch)
             if include_ablations:
+                # joint-sign audit 在全部 ablations 之后使用 reference observable；先复制 CUDA Graph 输出。
+                parity_reference = replace(
+                    prediction,
+                    density=prediction.density.clone(),
+                    kappa=prediction.kappa.clone(),
+                )
                 evidence = fixed_evaluation_ablation_evidence(method.require_model(), (batch,))
                 raw_names = evidence.get("ablations")
                 if not isinstance(raw_names, (tuple, list)):
@@ -318,7 +334,7 @@ def evaluate_method_session(
                     apply_augmentation=False,
                 )[1]
                 parity = joint_sign_observable_metrics(
-                    prediction,
+                    parity_reference,
                     rewritten_prediction,
                     joint_sign=joint_sign,
                     joint_index=batch.sensitivity_targets.joint_index,

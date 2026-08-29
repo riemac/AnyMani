@@ -677,7 +677,12 @@ def evaluate_checkpoint(
             if not hasattr(report, "metrics"):
                 summary[suite_name] = report
                 continue
-            suite_payload = {"metrics": report.metrics, "strata": report.strata, "ablations": report.ablations}
+            suite_payload = {
+                "metrics": report.metrics,
+                "strata": report.strata,
+                "teacher_baselines": report.teacher_baselines,
+                "ablations": report.ablations,
+            }
             if report.ablations is not None:
                 actual = tuple(str(name) for name in report.ablations.get("ablations", ()))[1:]
                 if actual != config.final_ablations:
