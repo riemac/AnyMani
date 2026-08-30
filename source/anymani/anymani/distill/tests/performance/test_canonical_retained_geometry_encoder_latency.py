@@ -13,6 +13,11 @@ from anymani.distill.models.input_adapters.geometry import (
     ImplicitGeometryEncoder,
     StaticGeometryEvidence,
 )
+from anymani.distill.models.input_adapters.se3_invariant_encoder import (
+    SE3InvariantAnchorFrontendCfg,
+    SE3InvariantGeometryEncoder,
+    SE3InvariantGeometryEncoderCfg,
+)
 
 pytestmark = pytest.mark.performance
 
@@ -91,8 +96,14 @@ def _canonical_single_structure_evidence(device: torch.device) -> StaticGeometry
     )
 
 
-def test_canonical_retained_encoder_p95_is_at_most_40_ms() -> None:
-    r"""$B=4096$、20 warmup、50 CUDA Events；排除 H2D/source/decoder/policy/env。"""
+@pytest.mark.parametrize("encoder_kind", ("legacy", "se3"))
+def test_canonical_retained_encoder_p95_is_at_most_40_ms(encoder_kind: str) -> None:
+    r"""N031/N040 retained encoder 均以 $B=4096$、20 warmup、50 CUDA Events 验收。
+
+    计时排除 H2D、source、decoder、policy 和 environment，只包含从 GPU-resident $q$/static evidence 到
+    graph-backbone final-norm $Z$ 的完整 retained path。两种 frontend 参数布局完全一致，因此共同使用
+    `582343` 参数锚点；N040 的 line projection 只能改变前端几何运算，不能偷换网络容量。
+    """
 
     if not torch.cuda.is_available():
         pytest.skip("canonical retained-encoder performance contract requires CUDA")
@@ -103,7 +114,22 @@ def test_canonical_retained_encoder_p95_is_at_most_40_ms() -> None:
 
     torch.manual_seed(20260813)
     torch.cuda.manual_seed_all(20260813)
-    model = ImplicitGeometryEncoder(GeometrySSLModelCfg().encoder).to(device).eval()
+    legacy_config = GeometrySSLModelCfg().encoder  # N031 width-128/layers-4 canonical 容量
+    if encoder_kind == "legacy":
+        model = ImplicitGeometryEncoder(legacy_config).to(device).eval()
+    else:
+        model = SE3InvariantGeometryEncoder(
+            SE3InvariantGeometryEncoderCfg(
+                frontend=SE3InvariantAnchorFrontendCfg(
+                    relation_width=legacy_config.frontend.relation_width,
+                    home_width=legacy_config.frontend.home_width,
+                    screw_width=legacy_config.frontend.screw_width,
+                    role_width=legacy_config.frontend.role_width,
+                    length_scale_m=legacy_config.frontend.length_scale_m,
+                ),
+                backbone=legacy_config.backbone,
+            )
+        ).to(device).eval()
     evidence = _canonical_single_structure_evidence(device)
     q = torch.empty(4096, 16, device=device, dtype=torch.float32).uniform_(-0.7, 0.7)
 
@@ -140,6 +166,7 @@ def test_canonical_retained_encoder_p95_is_at_most_40_ms() -> None:
     print(
         {
             "device": device_name,
+            "encoder_kind": encoder_kind,
             "batch_size": 4096,
             "warmup": 20,
             "events": 50,

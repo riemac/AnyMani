@@ -72,8 +72,21 @@
 
 ### `density_gamma_method_smoke.py`
 
-使用正式 v0.8.0 method 在真实 held-out sources 上闭合 density-only teacher、Gamma target、联合 forward、FairGrad backward 与参数分组；`--compile` 额外验证 fullgraph BF16 路径。
+使用 `--config` 指定正式 v0.8.0 或 N040 v0.8.1 method，在真实 held-out sources 上闭合 density-only teacher、Gamma target、联合 forward、FairGrad backward 与参数分组；`--compile` 额外验证 fullgraph BF16 路径。
+
+```bash
+/home/hac/isaac/env_isaaclab/bin/python scripts/research/density_gamma_method_smoke.py \
+  --config geometry_ssl_density_material_jacobian_se3_v0_8_1 --compile
+```
 
 ### `density_gamma_streaming_parity.py`
 
 比较同一 16-assets × 2-q realization 的完整 32-row batch 与两个 16-row streaming units。FP32 用于验证数学 parity，BF16 差异单独解释为 GEMM reduction precision envelope。
+
+### `n031_frame_gauge_audit.py`
+
+在 64 held-out morphologies × 2 q 上共同重写 points、palm normal 与 spatial screws，分别测量 SO(2)、origin translation 和 arbitrary proper-SE(3) 下的 home features、screw features 与 Z parity。`--encoder legacy` 复现 N031 origin 泄漏；`--encoder se3` 把同一 N031 encoder state 迁入 N040 line frontend，隔离架构变化本身。
+
+```bash
+/home/hac/isaac/env_isaaclab/bin/python scripts/research/n031_frame_gauge_audit.py --encoder se3
+```

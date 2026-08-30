@@ -18,8 +18,9 @@ def main() -> None:
 
     parser = ArgumentParser()
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--config", default="geometry_ssl_density_material_jacobian_v0_8_0")
     args = parser.parse_args()
-    config = compose_evaluation_cfg(config_ref="geometry_ssl_density_material_jacobian_v0_8_0")
+    config = compose_evaluation_cfg(config_ref=args.config)
     if args.compile:
         config = replace(
             config,
@@ -89,6 +90,7 @@ def main() -> None:
             "anchor_bank": batch.anchor_index.tolist(),
             "kappa_present": hasattr(batch, "sensitivity_targets"),
             "compile_enabled": bool(config.evaluation.execution.compile_enabled),
+            "config": args.config,
         }
         print(json.dumps(report, indent=2))
     finally:

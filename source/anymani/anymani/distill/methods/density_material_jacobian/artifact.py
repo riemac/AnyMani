@@ -9,6 +9,8 @@ from typing import Any
 
 import torch
 
+from anymani.distill.models.input_adapters.se3_invariant_encoder import SE3InvariantGeometryEncoderCfg
+
 
 def build_retained_artifact(
     method: Any,
@@ -35,14 +37,22 @@ def build_retained_artifact(
     source_artifact = metadata.get("source_artifact", {})
     if not isinstance(precision, Mapping) or not isinstance(source_artifact, Mapping):
         raise ValueError("retained artifact lineage lacks precision or source identity")
+    encoder_config = method.config.model.encoder  # retained architecture 的强类型配置
+    encoder_type = (
+        "se3_invariant" if isinstance(encoder_config, SE3InvariantGeometryEncoderCfg) else "legacy_so2"
+    )  # schema-5 consumer 不能仅凭同形 state keys 推断 frontend 数学
+    feature_spec = method.feature_spec()  # frame contract 是 artifact 自描述语义的唯一来源
     return {
         "schema_version": "5.0.0",
         "artifact_type": "retained_geometry_encoder",
         "retained_state": retained,
-        "retained_model_config": {"encoder": asdict(method.config.model.encoder)},
-        "feature_spec": asdict(method.feature_spec()),
+        "retained_model_config": {
+            "encoder_type": encoder_type,
+            "encoder": asdict(encoder_config),
+        },
+        "feature_spec": asdict(feature_spec),
         "input_contract": {
-            "frame": "physical geometry in hand frame {h}; in-plane SO(2) gauge",
+            "frame": feature_spec.frame_contract,
             "units": "length=m,joint=rad,density=dimensionless,Gamma=rad^-1",
             "retained_inputs": "physical q + static geometry evidence",
             "discarded_ssl_readers": "density,material_jacobian",

@@ -1,3 +1,12 @@
+0.8.1 - 2026-08-30
+==================
+
+- 新增 proper-$SE(3)$-invariant point/anchor 与 screw-line/anchor frontend；用 anchor 到 physical screw axis 的垂直关系删除 `axis_point = omega × v` 引入的 hand-frame origin dependence，同时保留 palm normal、reflection-sensitive chirality 与 joint-sign directed features。
+- 新增统一 proper-$SE(3)$ evidence rewrite：points、palm normal 与 spatial screws 分别按 `p'=Rp+t`、`n'=Rn`、`omega'=Romega`、`v'=Rv-omega'×t` 共同改写；每个训练 q-block 使用一个 Haar-$SO(3)$ rotation 与共享 translation，density/Gamma scalar truth 不变。
+- 新增独立 N040 encoder/model/method/config 与 `geometry_ssl_density_material_jacobian_se3_v0_8_1` snapshot。Architecture-only Z parity 在迁移 N031 权重和 one-cycle trained checkpoint 上分别为约 `3.7e-7` 和 `2.1e-7`，因此不加入 paired-Z consistency loss。
+- Schema-5 retained artifact 增加显式 `encoder_type=se3_invariant`，防止与 legacy frontend 同形的参数在 PPO 侧被错误重建；canonical RTX 5070 Ti、`B=4096` retained p95 为 `34.18 ms`，低于 40 ms 门槛。
+- 完成 one-cycle 8192-asset medium 与两个 16,384-pair replication seeds。三 seed 无发散或 channel collapse；matched cycle-1 相对 N031 的 early density/Gamma skill 分别低约 1.8/4.3 个百分点，进入 12-cycle 正式训练继续验收渐近质量。
+
 0.8.0 - 2026-08-30
 ==================
 

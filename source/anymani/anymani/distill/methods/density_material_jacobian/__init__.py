@@ -10,6 +10,8 @@ from .config import (
     MaterialPointSamplingCfg,
 )
 from .method import DensityMaterialJacobianMethod
+from .se3_config import SE3CoordinateRewriteCfg, SE3DensityMaterialJacobianMethodCfg
+from .se3_method import SE3DensityMaterialJacobianMethod
 
 __all__ = [
     "DensityMaterialJacobianMethod",
@@ -19,4 +21,7 @@ __all__ = [
     "GammaChannelScaleCfg",
     "MaterialJacobianObjectiveCfg",
     "MaterialPointSamplingCfg",
+    "SE3CoordinateRewriteCfg",
+    "SE3DensityMaterialJacobianMethod",
+    "SE3DensityMaterialJacobianMethodCfg",
 ]
