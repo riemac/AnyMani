@@ -36,6 +36,9 @@ class ExperimentPreset:
 
 # 只有这里声明公开实验名称；版本化快照作为默认值，历史文件只通过显式名称访问。
 _MODULES: dict[str, str] = {
+    "geometry_ssl_density_material_jacobian_v0_8_0": (
+        "anymani.distill.ssl.experiments.geometry_ssl_density_material_jacobian_v0_8_0"
+    ),
     "geometry_ssl_multitask_representation_v0_7_3": (
         "anymani.distill.ssl.experiments.geometry_ssl_multitask_representation_v0_7_3"
     ),
