@@ -157,8 +157,7 @@ class GeometrySSLRunLogger:
         """
 
         baselines: dict[str, float] = {}
-        for name in ("density", "kappa"):
-            record = teacher_baselines.get(name)
+        for name, record in teacher_baselines.items():
             if not isinstance(record, Mapping):
                 raise ValueError(f"final teacher baseline lacks mapping for {name}")
             value = record.get("baseline_mse")
@@ -166,6 +165,8 @@ class GeometrySSLRunLogger:
                 raise ValueError(f"final teacher baseline {name}.baseline_mse must be positive")
             baselines[name] = float(value)
 
+        if not baselines:
+            raise ValueError("final teacher baselines must contain at least one objective mapping")
         sources = []
         if lineage_metrics_path is not None and lineage_metrics_path.resolve() != self.jsonl_path.resolve():
             sources.append(lineage_metrics_path)
@@ -196,6 +197,9 @@ class GeometrySSLRunLogger:
         with temporary.open("w", encoding="utf-8") as stream:
             for update in range(1, expected_optimizer_updates + 1):
                 raw = by_update[update]
+                missing_raw = [name for name in baselines if f"raw/{name}" not in raw]
+                if missing_raw:
+                    raise ValueError(f"metric record optimizer_update={update} lacks raw terms={missing_raw}")
                 normalized = {
                     name: float(raw[f"raw/{name}"]) / baselines[name]
                     for name in baselines
