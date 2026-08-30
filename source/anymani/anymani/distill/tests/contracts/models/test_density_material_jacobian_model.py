@@ -124,3 +124,35 @@ def test_joint_model_backpropagates_both_tasks_into_shared_encoder() -> None:
 
     assert any(gradient is not None and torch.count_nonzero(gradient) > 0 for gradient in density_grad)
     assert any(gradient is not None and torch.count_nonzero(gradient) > 0 for gradient in gamma_grad)
+
+
+def test_explicit_latent_replay_supports_query_only_intervention() -> None:
+    r"""固定 query/material features 时，zero-Z intervention 应只改变 readers 的 latent condition。"""
+
+    torch.manual_seed(23)
+    model = _model()
+    evidence = _evidence()
+    q = torch.tensor(((0.1,), (-0.2,)), dtype=torch.float64)
+    queries = torch.randn(2, 3, 4, 3, dtype=torch.float64) * 0.02
+    bandwidths = torch.tensor((0.004, 0.016, 0.064), dtype=torch.float64)
+    owner = torch.tensor(((1, 2), (1, 2)), dtype=torch.long)
+    joint = torch.zeros_like(owner)
+    material = torch.tensor(((0, 1), (0, 1)), dtype=torch.long)
+    full = model(q, evidence, queries, bandwidths, owner, joint, material)
+    zero_latents = type(full.latents)(entities=torch.zeros_like(full.latents.entities))
+    query_only = model.decode_features(
+        zero_latents,
+        full.query_features,
+        full.material_pair_features,
+        bandwidths,
+        evidence,
+        owner,
+        joint,
+        evidence_row_index=None,
+        entity_valid_mask=None,
+    )
+
+    assert query_only.density.shape == full.density.shape
+    assert query_only.material_jacobian.shape == full.material_jacobian.shape
+    assert not torch.equal(query_only.density, full.density)
+    assert not torch.equal(query_only.material_jacobian, full.material_jacobian)

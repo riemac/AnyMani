@@ -67,3 +67,13 @@
 - Material identity 固定为 owner-local home-surface point。不得换成每个 q 重新查询的 closest point，否则 anchor-distance derivative 会包含未建模的 tangent/barycentric drift。
 - Anchor 轴是可变长度无序集合。Reader 必须对每个实际 anchor 共享参数，不能把存储下标当作稳定通道身份。
 - Logs 位于 `logs/autoresearch/material_point_jacobian/`，不属于 Git 源码。研究判断同步记录在 ignored working docs `docs/joint-coordinate-gauge-policy/`。
+
+## Formal Method Admission
+
+### `density_gamma_method_smoke.py`
+
+使用正式 v0.8.0 method 在真实 held-out sources 上闭合 density-only teacher、Gamma target、联合 forward、FairGrad backward 与参数分组；`--compile` 额外验证 fullgraph BF16 路径。
+
+### `density_gamma_streaming_parity.py`
+
+比较同一 16-assets × 2-q realization 的完整 32-row batch 与两个 16-row streaming units。FP32 用于验证数学 parity，BF16 差异单独解释为 GEMM reduction precision envelope。

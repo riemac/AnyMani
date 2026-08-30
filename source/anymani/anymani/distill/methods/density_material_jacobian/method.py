@@ -34,6 +34,7 @@ from .batch import (
     stage_padded_batch_for_replay,
 )
 from .config import DensityMaterialJacobianMethodCfg
+from .evaluation_metrics import DensityPhysicalMetricAccumulator
 from .objectives import (
     DensityGammaObjectiveContext,
     evaluate_objectives,
@@ -476,6 +477,9 @@ class DensityMaterialJacobianMethod(MultiAnchorGaussianMethod):
             }
             for ablation in ablation_names
         }
+        asset_ablation_sums: dict[str, dict[str, dict[str, float]]] = {}
+        asset_ablation_counts: dict[str, int] = {}
+        density_physical = DensityPhysicalMetricAccumulator()
         step_index = 0
         self.eval_mode()
         with torch.no_grad():
@@ -521,6 +525,15 @@ class DensityMaterialJacobianMethod(MultiAnchorGaussianMethod):
                     channel_sign_count[channel] += nonzero.sum().double().cpu()
                 zero_prediction_square += prediction.material_jacobian[zero].double().square().sum().cpu()
                 zero_prediction_count += zero.sum().double().cpu()
+
+                density_physical.update(
+                    prediction.density,
+                    batch.field_targets.distance,
+                    batch.field_targets.bandwidths,
+                    batch.field_targets.valid_mask,
+                    batch.field_targets.query_stratum,
+                    batch.field_targets.owner_role,
+                )
                 if include_ablations:
                     model = self.require_model()
                     entities = prediction.latents.entities
@@ -558,6 +571,7 @@ class DensityMaterialJacobianMethod(MultiAnchorGaussianMethod):
                         "cross_asset_shuffle": entities[cross_asset_index],
                         "joint_token_shuffle": joint_shuffled,
                     }
+                    prediction_by_ablation = {"full": prediction}
                     for ablation, ablated_entities in variants.items():
                         ablated_latents = type(prediction.latents)(entities=ablated_entities)
                         ablated_prediction = model.decode_features(
@@ -577,10 +591,27 @@ class DensityMaterialJacobianMethod(MultiAnchorGaussianMethod):
                             DensityGammaObjectiveContext(ablated_prediction, batch),
                             self.config.objectives,
                         )
+                        prediction_by_ablation[ablation] = ablated_prediction
                         for name, result in ablated_step.items():
                             component = result.components[0]
                             ablation_totals[ablation][name][0] += float(component.numerator)
                             ablation_totals[ablation][name][1] += float(component.denominator)
+                    per_sample = {
+                        ablation: self._per_sample_evaluation_terms(candidate, batch)
+                        for ablation, candidate in prediction_by_ablation.items()
+                    }
+                    for row, asset_id in enumerate(batch.asset_ids):
+                        asset_terms = asset_ablation_sums.setdefault(
+                            asset_id,
+                            {
+                                ablation: {"density": 0.0, "material_jacobian": 0.0}
+                                for ablation in ablation_names
+                            },
+                        )
+                        asset_ablation_counts[asset_id] = asset_ablation_counts.get(asset_id, 0) + 1
+                        for ablation in ablation_names:
+                            for term in ("density", "material_jacobian"):
+                                asset_terms[ablation][term] += float(per_sample[ablation][term][row])
                 step_index += 1
         if baseline_total is None:
             raise RuntimeError("evaluation produced no teacher baseline statistics")
@@ -608,6 +639,7 @@ class DensityMaterialJacobianMethod(MultiAnchorGaussianMethod):
         metrics["material_jacobian_structural_zero_prediction_rms"] = float(
             torch.sqrt(zero_prediction_square / zero_prediction_count.clamp_min(1.0))
         )
+        density_physical_report = density_physical.finalize()
         ablation_payload = None
         if include_ablations:
             aggregate = {
@@ -618,16 +650,29 @@ class DensityMaterialJacobianMethod(MultiAnchorGaussianMethod):
                 for ablation, terms in ablation_totals.items()
             }
             ablation_payload = {
-                "pairing_key": ["asset_id", "q_index"],
+                "pairing_key": ["asset_id"],
                 "ablations": ablation_names,
                 "aggregate_metrics": aggregate,
-                "records": [],
+                "records": [
+                    {
+                        "asset_id": asset_id,
+                        "metrics": {
+                            ablation: {
+                                term: value / asset_ablation_counts[asset_id]
+                                for term, value in terms.items()
+                            }
+                            for ablation, terms in ablations.items()
+                        },
+                    }
+                    for asset_id, ablations in sorted(asset_ablation_sums.items())
+                ],
             }
         return MethodEvaluationReport(
             metrics=metrics,
             strata={
                 "metric_scores": metrics,
                 "material_jacobian_channels": channel_metrics,
+                "density_physical": density_physical_report,
                 "batch_count": step_index,
             },
             teacher_baselines=baselines,
@@ -635,15 +680,102 @@ class DensityMaterialJacobianMethod(MultiAnchorGaussianMethod):
         )
 
     def analyze_ablations(self, evidence: Mapping[str, Any], *, bootstrap_replicates: int, seed: int) -> dict[str, Any]:
-        r"""首个 method 在无 final ablation evidence 时返回显式空报告。"""
+        r"""以 asset 为统计单位，对每个 intervention 相对 full 的 objective 增量做 paired bootstrap。"""
 
+        records = evidence.get("records", ())
+        if not isinstance(records, (tuple, list)) or not records:
+            raise ValueError("paired ablation analysis requires non-empty asset records")
+        ablations = tuple(str(name) for name in evidence.get("ablations", ()))
+        if not ablations or ablations[0] != "full":
+            raise ValueError("ablation evidence must list full as the first condition")
+        terms = ("density", "material_jacobian")
+        deltas: dict[str, dict[str, list[float]]] = {
+            ablation: {term: [] for term in terms}
+            for ablation in ablations[1:]
+        }
+        for record in records:
+            metrics = record.get("metrics") if isinstance(record, Mapping) else None
+            if not isinstance(metrics, Mapping) or not isinstance(metrics.get("full"), Mapping):
+                raise ValueError("ablation record lacks full metric mapping")
+            full = metrics["full"]
+            for ablation in ablations[1:]:
+                candidate = metrics.get(ablation)
+                if not isinstance(candidate, Mapping):
+                    raise ValueError(f"ablation record lacks {ablation!r} metrics")
+                for term in terms:
+                    deltas[ablation][term].append(float(candidate[term]) - float(full[term]))
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed))
+        analysis: dict[str, dict[str, object]] = {}
+        for ablation, term_values in deltas.items():
+            analysis[ablation] = {}
+            for term, values in term_values.items():
+                tensor = torch.tensor(values, dtype=torch.float64)
+                indices = torch.randint(
+                    len(tensor),
+                    (bootstrap_replicates, len(tensor)),
+                    generator=generator,
+                )
+                bootstrap = tensor[indices].mean(dim=1)
+                analysis[ablation][term] = {
+                    "mean_delta": float(tensor.mean()),
+                    "ci95": [
+                        float(torch.quantile(bootstrap, 0.025)),
+                        float(torch.quantile(bootstrap, 0.975)),
+                    ],
+                    "positive_fraction": float((tensor > 0.0).double().mean()),
+                }
         return {
-            "record_count": len(evidence.get("records", ())),
+            "record_count": len(records),
             "bootstrap_replicates": bootstrap_replicates,
             "seed": seed,
             "aggregate_metrics": evidence.get("aggregate_metrics", {}),
-            "note": "aggregate-only first formal ablation; paired bootstrap records are deferred",
+            "paired_delta": analysis,
         }
+
+    def _per_sample_evaluation_terms(
+        self,
+        prediction: DensityMaterialJacobianForward,
+        batch: PaddedDensityGammaBatch,
+    ) -> dict[str, torch.Tensor]:
+        r"""返回每个 `(asset,q)` 的 density/Gamma objective，供 asset-level paired aggregation。"""
+
+        density_error = prediction.density - batch.field_targets.density
+        density_weight = batch.field_targets.valid_mask.to(density_error.dtype).unsqueeze(-1).expand_as(density_error)
+        density = (density_error.square() * density_weight).flatten(start_dim=1).sum(dim=1) / density_weight.flatten(
+            start_dim=1
+        ).sum(dim=1).clamp_min(1.0)
+        gamma_target = batch.material_targets.relation_sensitivity_per_rad
+        scales = torch.tensor(
+            self.config.objectives.material_jacobian.channel_scale.values,
+            device=gamma_target.device,
+            dtype=gamma_target.dtype,
+        )
+        gamma_error = (prediction.material_jacobian - gamma_target) / scales
+        anchor_valid = batch.evidence.anchor_valid_mask
+        if anchor_valid is None:
+            anchor_valid = torch.ones(
+                batch.evidence.anchors.shape[:-1],
+                device=gamma_target.device,
+                dtype=torch.bool,
+            )
+        anchor_valid = anchor_valid[batch.evidence_row_index]
+        valid = batch.edge_valid_mask[:, :, None, None] & anchor_valid[:, None, :, None]
+        channel_valid = torch.ones_like(gamma_target, dtype=torch.bool)
+        channel_valid[..., 1] = batch.material_targets.radius_valid_mask
+        valid = valid & channel_valid
+        active = valid & batch.material_targets.ancestor_mask[:, :, None, None]
+        zero = valid & ~batch.material_targets.ancestor_mask[:, :, None, None]
+        active_weight = active.to(gamma_error.dtype)
+        zero_weight = zero.to(gamma_error.dtype)
+        active_mean = (gamma_error.square() * active_weight).flatten(start_dim=1).sum(dim=1) / active_weight.flatten(
+            start_dim=1
+        ).sum(dim=1).clamp_min(1.0)
+        zero_mean = (gamma_error.square() * zero_weight).flatten(start_dim=1).sum(dim=1) / zero_weight.flatten(
+            start_dim=1
+        ).sum(dim=1).clamp_min(1.0)
+        gamma = (2.0 / 3.0) * active_mean + (1.0 / 3.0) * zero_mean
+        return {"density": density.detach(), "material_jacobian": gamma.detach()}
 
 
 DensityMaterialJacobianMethodCfg.runtime_type = DensityMaterialJacobianMethod
