@@ -8,6 +8,13 @@
 methods/
 ├── contracts.py
 │   EmbodimentMethod、MethodSplitSession、MethodEvaluationReport
+├── density_material_jacobian/
+│   ├── config.py            density/Gamma 方法装配与 sampling/channel scales
+│   ├── method.py            source 复用、联合 forward、FairGrad、evaluation/export
+│   ├── batch.py             fixed material identities、density/Gamma target 与 padding
+│   ├── objectives.py        density/Gamma 归约与 teacher baselines
+│   ├── augmentation.py      entity permutation 与 joint-sign rewrite
+│   └── artifact.py          schema-5 encoder-only artifact
 └── multi_anchor_gaussian_implicit_field/
     ├── __init__.py          绑定 rho/kappa 两项 ClassVar func
     ├── config.py            方法装配与固定双 objective
@@ -24,7 +31,7 @@ methods/
     └── state_measure.py     完整 joint-limit scrambled Sobol
 ```
 
-当前 concrete method 是多锚点 Gaussian 隐式场。新方法以各自聚合根实现，只共享 `contracts.py` 中的窄协议。
+当前主线 concrete method 是 Gaussian density + anchor-relational Material-point Jacobian；v0.7.5 多锚点 density/κ method 保留为完整历史实验与可复现对照。两个方法各自拥有 batch/model/objectives，只共享窄生命周期协议与已验证 source/cache/session 基础设施。
 
 ## Development Style And Conventions
 
@@ -43,17 +50,17 @@ Trainer 只调用 `prepare`、`open_session`、`forward_objectives`/可选流式
 batch 的三块信息流如下，模型前向只消费前两块，truth 进入 objective：
 
 - `model_input`：`q`、anchors、home、screws、graph、masks
-- `readout_condition`：query、sigma、edge selectors
-- `truth`：distance/density/`κ`/`g`、物理有效、active/zero、provenance
+- `readout_condition`：density query/sigma 与 material owner/JOINT/home-point selectors
+- `truth`：distance/density、四通道 Gamma、物理有效、active/zero、provenance
 
 `StaticGeometryEvidence` 留在 model 的 `input_adapters/evidence.py`。`build_static_geometry_evidence()`、padding 和选
 `A^(k)` 属于 `batch.py`；method 通过 façade 调用，不把这些实现复制到 Trainer。
 
 ### 双项损失与采样
 
-每资产 8 套独立 anchor bank；同资产 q-block 共享并轮换；validation / independent q-bank / PPO 固定 `A^(0)`。`q` 来自完整 joint-limit Sobol，采样器保持原始构型测度。query 50/25/25；训练 sigma 4/16/64 mm ±10% jitter，validation 关闭 jitter。每个有效 JOINT、每个 q 固定 `2 active + 1 structural-zero`。ancestor mask 只用于监督归约。
+每资产 8 套独立 anchor bank；同资产 q-block 共享并轮换；evaluation / independent q-bank / PPO 固定 `A^(0)`。`q` 来自完整 joint-limit Sobol，采样器保持原始构型测度。query 50/25/25；训练 sigma 4/16/64 mm ±10% jitter，evaluation 关闭 jitter。每个有效 JOINT、每个 q 固定 `2 active + 1 structural-zero`。ancestor mask 只用于监督归约。
 
-run-local teacher baseline 只负责训练后归一化曲线，不进入 optimizer。density 使用 raw MSE，κ 使用固定 `0.1 m/rad` 无量纲残差；每个有效 JOINT、每个 q 固定 `2 active + 1 structural-zero`，active/zero 按 2:1 归约。joint-sign rewrite 每个 `(asset,q)` 以 0.20 概率翻一个有效 JOINT；density/distance 不变，对应 `κ/g` 翻号。训练按 64 个样本建立梯度图，以完整 512-pair denominator 分块反向；shared encoder 使用精确两任务 FairGrad，density/kappa readers 各自使用 private gradient，三个参数组分别裁剪。
+run-local teacher baseline 只负责训练后归一化曲线，不进入 optimizer。当前主线 density 使用 raw MSE；Gamma 的 height/radius/dot/chirality 使用全数据集固定尺度，再按每样本 active/zero 2:1 归约。Joint-sign rewrite 每个 `(asset,q)` 以 0.20 概率翻一个有效 JOINT；density/distance 不变，对应 selected Gamma column 翻号。训练以完整 logical minibatch denominator 流式累计；shared encoder 使用两任务 FairGrad，density/Gamma readers 各自使用 private gradient，三个参数组分别裁剪。
 
 ## Common Operations And Tools
 
