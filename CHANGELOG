@@ -1,3 +1,24 @@
+0.8.0 - 2026-08-30
+==================
+
+- 新增独立 Gaussian density + fixed-material anchor-relational Jacobian SSL method；四通道 Gamma 使用 height/radius/dot/chirality 关系，保持 hand-frame SE(3) 不变、joint-coordinate sign 等变和 reflection-sensitive chirality。
+- Density-only Warp teacher 删除旧 κ/closest-point Jacobian 路径；每 q-block 复用一次 POE/current screws，并同步轮换 8 个 anchor realizations、固定 owner-local material identities、entity permutation 和 20% joint-sign rewrite。
+- 新增 unified encoder + density/Gamma readers、两任务 FairGrad streaming backward、跨结构 padding、run-local baselines、generic objective logging、schema-9 checkpoint 与 schema-5 encoder-only retained artifact。
+- 完成 8192-asset N030/N031 正式训练和两条 1024-asset × 64-q held-out suites。最终 N031 density skill 为 `72.24%/72.08%`，Gamma 为 `86.18%/86.38%`；Gamma 四通道均达到约 `81.7%--90.7%`。
+- 新增物理 density 解释指标：shell/adjacent distance MAE 约 `1.55/2.64 mm`，`PGS@4mm,80%` 约 `99.99%`，4 mm near-contact F1 约 `0.840`。四类 latent interventions 的 asset-level paired bootstrap CI 全部严格为正。
+- Rank-64 bilinear Gamma reader 在 matched probe 上不及 additive/FiLM reader，并产生更高 structural-zero leakage；正式路线保留 additive/FiLM。完整 N031 run、artifact、Research run card 与 N031 accepted 图谱节点已闭合。
+
+0.7.5 - 2026-08-28
+==================
+
+- Geometry SSL 生命周期收敛为 `train -> last.pt + retained_encoder.pt -> explicit evaluate`；删除 active validation、checkpoint selection、`best.pt` 与训练期 evaluation 耦合，训练只解析 8192 项 train，evaluation 只解析 2048 项 held-out assets。
+- pretrain/checkpoint schema 升至 `9.0.0`，source artifact schema 升至 `2.0.0`；每 epoch 原子覆盖 recovery，完成后自动发布 schema-5 encoder-only retained artifact。
+- source cache v2 使用共享内容寻址 object store、train/evaluation 独立 SQLite/WAL role indexes、compact mesh layout、容量 gate 与显式 `status`/`audit`/`prune` 维护入口。
+- 训练 update 改为 8 个 64-pair stream units，完整 denominator 后再执行 FairGrad、gradient clipping 与 AdamW；learned model 使用 BF16 autocast，geometry teacher、loss reduction 与参数 master state 保持 FP32。
+- 完成真实 RTX 5070 Ti 512-pair CUDA smoke 与 2-update warm-cache smoke：峰值 allocated 约 3.99 GB，warm steady step 约 14.16 s；真实 64-asset × 8-bank v1/v2 source parity、full/8×64 streamed gradient/FairGrad/AdamW delta parity、BF16 16-update admission、mini-epoch pinned-CPU replay 和 epoch recovery 均通过。正式 256-epoch training 与 cross-embodiment generalization 尚未启动。
+- 修正 `torch.compile` AOTAutograd 返回 latent 后的 unified-$Z$ 诊断求导边界：诊断现在从 compiled 数值 $Z$ 建立独立 leaf reader 图，保持正式参数更新路径不变；新增真实 BF16/compile 4-epoch sanity 覆盖第 4 epoch diagnostic 分支，并验证 full/streamed Z-Gram denominator 等价。
+- 增加显式 `--allow-worktree-change` recovery policy：已验证的 dirty-worktree 源码修复可以继续既有 incomplete run，并放行该修复产生的 code revision/fingerprint 变化，但 scientific config、package、FairGrad、参数分区、source identity 与 dirty 状态仍严格 fail-closed。
+
 0.7.4 - 2026-08-28
 ==================
 
