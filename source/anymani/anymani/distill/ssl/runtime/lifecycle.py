@@ -178,9 +178,17 @@ def _restore_sampling_state(
 
 
 def _declared_objective_weights(method: Any) -> dict[str, float]:
-    r"""读取 method 显式声明的 rho/kappa 权重；baseline 归一化不改写该声明。"""
+    r"""读取 method 显式声明的 objective 权重；baseline 归一化不改写该声明。"""
 
     return dict(method.declared_objective_weights())
+
+
+def _format_objective_terms(terms: Mapping[str, float]) -> str:
+    r"""按 method 声明顺序格式化任意 objective terms，不让 Trainer 绑定具体物理目标名。"""
+
+    if not terms:
+        raise ValueError("objective term summary requires at least one named term")
+    return " ".join(f"{name}={float(value):.6e}" for name, value in terms.items())
 
 
 def _mini_epoch_order(
@@ -856,7 +864,7 @@ def fit_embodiment_pretrain(
             )
             print(
                 f"[SSL] epoch {completed_epochs:03d}/{trainer.config.max_epochs} "
-                f"rho_mse={epoch_terms['density']:.4e} kappa_scaled_mse={epoch_terms['kappa']:.4e} "
+                f"{_format_objective_terms(epoch_terms)} "
                 f"updates={optimizer_update} pairs={new_pairs_seen}",
                 flush=True,
             )
@@ -893,8 +901,7 @@ def fit_embodiment_pretrain(
                 print(
                     "[SSL checkpoint]\n"
                     f"  epoch={completed_epochs} optimizer_updates={optimizer_update}\n"
-                    f"  density_mse={epoch_terms['density']:.6e} "
-                    f"kappa_scaled_mse={epoch_terms['kappa']:.6e}\n"
+                    f"  {_format_objective_terms(epoch_terms)}\n"
                     f"  new_pairs_seen={new_pairs_seen} pair_uses={pair_uses}",
                     flush=True,
                 )
