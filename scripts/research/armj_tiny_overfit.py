@@ -21,6 +21,10 @@ from typing import Any
 
 import torch
 from anymani.distill.models.backbones.geometry_transformer import GraphBiasedTransformerCfg
+from anymani.distill.models.decoders.representations.material_point_jacobian import (
+    BilinearAnchorRelationalJacobianDecoder,
+    BilinearAnchorRelationalJacobianDecoderCfg,
+)
 from anymani.distill.models.input_adapters.encoder import (
     GeometryEncoderCfg,
     ImplicitGeometryEncoder,
@@ -107,6 +111,7 @@ class TinyRelationJacobianModel(nn.Module):
         hidden_width: int = 64,
         layers: int = 2,
         relation_width: int = 32,
+        reader_kind: str = "additive",
     ) -> None:
         super().__init__()
         frontend = SO2AnchorFrontendCfg(
@@ -126,11 +131,24 @@ class TinyRelationJacobianModel(nn.Module):
         )  # 默认 width64/layers2；中型 probe 使用 width128/layers4
         self.latent_width = backbone.hidden_width  # unified owner/JOINT token width $D=64$
         self.encoder = ImplicitGeometryEncoder(GeometryEncoderCfg(frontend=frontend, backbone=backbone))
-        self.reader = RelationJacobianReader(
-            latent_width=backbone.hidden_width,
-            relation_width=frontend.relation_width,
-            hidden_width=hidden_width,
-        )
+        self.reader_kind = reader_kind
+        if reader_kind == "additive":
+            self.reader = RelationJacobianReader(
+                latent_width=backbone.hidden_width,
+                relation_width=frontend.relation_width,
+                hidden_width=hidden_width,
+            )
+        elif reader_kind == "bilinear":
+            self.reader = BilinearAnchorRelationalJacobianDecoder(
+                BilinearAnchorRelationalJacobianDecoderCfg(
+                    latent_width=backbone.hidden_width,
+                    relation_width=frontend.relation_width,
+                    hidden_width=hidden_width,
+                    readout_rank=64,
+                )
+            )
+        else:
+            raise ValueError(f"unknown relation reader_kind={reader_kind!r}")
 
     def forward(
         self,
@@ -180,7 +198,9 @@ class TinyRelationJacobianModel(nn.Module):
             normal_by_row,
             batch.anchor_valid_mask,
         )  # `[B,E,K,D_r]`，permutation-equivariant static pair condition
-        return self.reader(owner_latent, joint_latent, static_pair_feature, use_latent=use_latent)
+        if isinstance(self.reader, RelationJacobianReader):
+            return self.reader(owner_latent, joint_latent, static_pair_feature, use_latent=use_latent)
+        return self.reader(owner_latent, joint_latent, static_pair_feature)
 
 
 def _sample_edges(spec: Any, *, points_per_edge: int, device: torch.device) -> tuple[torch.Tensor, ...]:
@@ -366,11 +386,12 @@ def _train_model(
     learning_rate: float,
     use_latent: bool,
     seed: int,
+    reader_kind: str = "additive",
 ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
     r"""在同一个 fixed bank 上训练 full 或 query-only 模型，并保存稀疏学习轨迹。"""
 
     torch.manual_seed(seed)
-    model = TinyRelationJacobianModel().to(device=fixed_batch.q.device, dtype=torch.float32)
+    model = TinyRelationJacobianModel(reader_kind=reader_kind).to(device=fixed_batch.q.device, dtype=torch.float32)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1.0e-4)
     trajectory: list[dict[str, Any]] = []
     torch.cuda.synchronize()
@@ -427,6 +448,7 @@ def _train_model(
                 _, ablations[name] = _loss_and_metrics(ablated_prediction, fixed_batch)
     report = {
         "use_latent": use_latent,
+        "reader_kind": reader_kind,
         "updates": updates,
         "learning_rate": learning_rate,
         "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
@@ -448,6 +470,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--full-updates", type=int, default=500)
     parser.add_argument("--query-only-updates", type=int, default=300)
     parser.add_argument("--learning-rate", type=float, default=3.0e-4)
+    parser.add_argument("--reader", choices=("additive", "bilinear"), default="additive")
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -506,6 +529,7 @@ def main() -> None:
         learning_rate=args.learning_rate,
         use_latent=True,
         seed=20260830,
+        reader_kind=args.reader,
     )
     query_report, query_state = _train_model(
         fixed_batch,
@@ -513,6 +537,7 @@ def main() -> None:
         learning_rate=args.learning_rate,
         use_latent=False,
         seed=20260830,
+        reader_kind=args.reader,
     )
     report = {
         "case": "AR-MPJ-003",
@@ -537,6 +562,7 @@ def main() -> None:
             "encoder_layers": 2,
             "relation_width": 32,
             "channel_scale": list(CHANNEL_SCALE),
+            "reader_kind": args.reader,
         },
         "full": full_report,
         "query_only": query_report,

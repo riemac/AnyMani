@@ -7,6 +7,8 @@ import torch
 from anymani.distill.models.decoders.representations.material_point_jacobian import (
     AnchorRelationalJacobianDecoder,
     AnchorRelationalJacobianDecoderCfg,
+    BilinearAnchorRelationalJacobianDecoder,
+    BilinearAnchorRelationalJacobianDecoderCfg,
 )
 
 pytestmark = pytest.mark.contract
@@ -59,3 +61,30 @@ def test_decoder_rejects_misaligned_edge_or_relation_width() -> None:
         decoder(owner, joint, pair)
     with pytest.raises(ValueError, match="static_pair_feature"):
         decoder(owner, owner, torch.zeros(2, 3, 5, 5))
+
+
+def test_bilinear_decoder_preserves_anchor_permutation_and_all_gradient_paths() -> None:
+    r"""低秩 row/column reader 必须保持 K 等变并连接 owner、JOINT 与 static query。"""
+
+    torch.manual_seed(19)
+    decoder = BilinearAnchorRelationalJacobianDecoder(
+        BilinearAnchorRelationalJacobianDecoderCfg(
+            latent_width=12,
+            relation_width=6,
+            hidden_width=10,
+            readout_rank=5,
+        )
+    ).double()
+    owner = torch.randn(2, 4, 12, dtype=torch.float64, requires_grad=True)
+    joint = torch.randn(2, 4, 12, dtype=torch.float64, requires_grad=True)
+    pair = torch.randn(2, 4, 7, 6, dtype=torch.float64, requires_grad=True)
+    baseline = decoder(owner, joint, pair)
+    permutation = torch.tensor((6, 2, 0, 5, 1, 4, 3), dtype=torch.long)
+    permuted = decoder(owner, joint, pair[:, :, permutation])
+
+    assert baseline.shape == (2, 4, 7, 4)
+    torch.testing.assert_close(permuted, baseline[:, :, permutation], atol=2.0e-15, rtol=2.0e-15)
+    baseline.square().mean().backward()
+    for value in (owner, joint, pair):
+        assert value.grad is not None
+        assert torch.count_nonzero(value.grad) > 0

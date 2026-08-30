@@ -155,12 +155,13 @@ def _train(
     learning_rate: float,
     use_latent: bool,
     seed: int,
+    reader_kind: str,
 ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
     r"""在 train fixed bank 循环更新，并按 250-update cadence 检查 morphology-disjoint validation。"""
 
     torch.manual_seed(seed)
     device = train_batches[0].q.device
-    model = TinyRelationJacobianModel().to(device=device, dtype=torch.float32)
+    model = TinyRelationJacobianModel(reader_kind=reader_kind).to(device=device, dtype=torch.float32)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1.0e-4)
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed + 17)
@@ -198,6 +199,7 @@ def _train(
     }
     report = {
         "use_latent": use_latent,
+        "reader_kind": reader_kind,
         "updates": updates,
         "learning_rate": learning_rate,
         "elapsed_seconds": elapsed,
@@ -220,6 +222,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--full-updates", type=int, default=2000)
     parser.add_argument("--query-only-updates", type=int, default=1000)
     parser.add_argument("--learning-rate", type=float, default=3.0e-4)
+    parser.add_argument("--reader", choices=("additive", "bilinear"), default="additive")
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -294,6 +297,7 @@ def main() -> None:
         learning_rate=args.learning_rate,
         use_latent=True,
         seed=20260830,
+        reader_kind=args.reader,
     )
     query_report, query_state = _train(
         train_batches,
@@ -303,6 +307,7 @@ def main() -> None:
         learning_rate=args.learning_rate,
         use_latent=False,
         seed=20260830,
+        reader_kind=args.reader,
     )
     report = {
         "case": "AR-MPJ-005",
@@ -321,6 +326,7 @@ def main() -> None:
             "encoder_layers": 2,
             "relation_width": 32,
             "channel_scale": list(CHANNEL_SCALE),
+            "reader_kind": args.reader,
         },
         "full": full_report,
         "query_only": query_report,

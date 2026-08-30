@@ -110,4 +110,84 @@ class AnchorRelationalJacobianDecoder(nn.Module):
         return self.output_projection(fused)  # `[B,E,K,4]`
 
 
-__all__ = ["AnchorRelationalJacobianDecoder", "AnchorRelationalJacobianDecoderCfg"]
+@dataclass(frozen=True)
+class BilinearAnchorRelationalJacobianDecoderCfg:
+    r"""Owner/material row 与 selected JOINT column 的低秩双线性读取配置。"""
+
+    latent_width: int = 128  # owner/JOINT unified token width $D$
+    relation_width: int = 64  # static material-anchor feature width $D_r$
+    hidden_width: int = 128  # row query MLP width
+    readout_rank: int = 64  # 每个 Gamma channel 的最大交互秩 $R$
+
+    def __post_init__(self) -> None:
+        r"""拒绝空容量或秩。"""
+
+        if min(self.latent_width, self.relation_width, self.hidden_width, self.readout_rank) < 1:
+            raise ValueError("bilinear material-Jacobian decoder widths/rank must be positive")
+
+
+class BilinearAnchorRelationalJacobianDecoder(nn.Module):
+    r"""以 rank-$R$ owner/material × JOINT 乘积预测四通道 Gamma。
+
+    对每条 material/anchor query 构造四个 row factors $A_c(z_g,f_k)\in\mathbb R^R$，selected JOINT
+    构造共享 column factor $B(z_i)\in\mathbb R^R$：
+
+    $$
+    \widehat\Gamma_{c}=\frac{A_c^TB}{\sqrt R}+b_c(f_k).
+    $$
+
+    低秩乘积显式表达“哪个 owner/material relation 由哪个 JOINT column 驱动”；query-only residual
+    $b_c$ 保留静态 morphology population mean，使双线性交互只承担 current-q/joint-specific 修正。
+    """
+
+    def __init__(
+        self,
+        config: BilinearAnchorRelationalJacobianDecoderCfg = BilinearAnchorRelationalJacobianDecoderCfg(),
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.row_projection = nn.Sequential(
+            nn.Linear(config.latent_width + config.relation_width, config.hidden_width),
+            nn.GELU(),
+            nn.Linear(config.hidden_width, 4 * config.readout_rank),
+        )  # `[z_g,f_k] -> [4,R]`
+        self.joint_projection = nn.Sequential(
+            nn.LayerNorm(config.latent_width),
+            nn.Linear(config.latent_width, config.readout_rank, bias=False),
+        )  # $z_i -> B\in\mathbb R^R$
+        self.query_residual = nn.Linear(config.relation_width, 4)  # 静态 material-anchor population mean
+        self.scale = float(config.readout_rank) ** -0.5  # $1/\sqrt R$ 保持初始化方差稳定
+
+    def forward(
+        self,
+        owner_latent: torch.Tensor,
+        joint_latent: torch.Tensor,
+        static_pair_feature: torch.Tensor,
+    ) -> torch.Tensor:
+        r"""返回 permutation-equivariant `[B,E,K,4]` 低秩 Gamma prediction。"""
+
+        if owner_latent.shape != joint_latent.shape or owner_latent.ndim != 3:
+            raise ValueError("owner_latent and joint_latent must have identical [B,E,D] shape")
+        if owner_latent.shape[-1] != self.config.latent_width:
+            raise ValueError("owner/joint latent width does not match bilinear decoder config")
+        if (
+            static_pair_feature.ndim != 4
+            or static_pair_feature.shape[:2] != owner_latent.shape[:2]
+            or static_pair_feature.shape[-1] != self.config.relation_width
+        ):
+            raise ValueError("static_pair_feature must have aligned [B,E,K,D_r] shape")
+        anchor_count = static_pair_feature.shape[2]  # 当前可变 $K$
+        owner_expanded = owner_latent.unsqueeze(-2).expand(-1, -1, anchor_count, -1)  # `[B,E,K,D]`
+        row = self.row_projection(torch.cat((owner_expanded, static_pair_feature), dim=-1))
+        row = row.view(*row.shape[:-1], 4, self.config.readout_rank)  # `[B,E,K,4,R]`
+        column = self.joint_projection(joint_latent).unsqueeze(-2).unsqueeze(-2)  # `[B,E,1,1,R]`
+        interaction = torch.sum(row * column, dim=-1) * self.scale  # `[B,E,K,4]`
+        return interaction + self.query_residual(static_pair_feature)  # 静态 + joint-specific 修正
+
+
+__all__ = [
+    "AnchorRelationalJacobianDecoder",
+    "AnchorRelationalJacobianDecoderCfg",
+    "BilinearAnchorRelationalJacobianDecoder",
+    "BilinearAnchorRelationalJacobianDecoderCfg",
+]
