@@ -197,7 +197,8 @@ def test_morphology_cell_extras_preserve_reset_subset_group_means() -> None:
     assert extras["cell/left_tips3_thumb3dof/episode_count"] == 2.0
     assert extras["cell/left_tips3_thumb3dof/goal_success_count"] == 2.0
     assert extras["cell/left_tips3_thumb4dof/goal_success_count"] == 4.0
-    assert "cell/left_tips4_thumb3dof/goal_success_count" not in extras  # 无样本cell不伪造零值
+    assert extras["cell/left_tips4_thumb3dof/episode_count"] == 0.0
+    assert extras["cell/left_tips4_thumb3dof/goal_success_count"] == 0.0  # count=0表明该零值不可解释为观测
 
 
 def test_partial_reset_preserves_other_env_and_blocks_same_stamp_delta() -> None:

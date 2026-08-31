@@ -1,5 +1,3 @@
-r"""只读 RL runtime artifact 汇总入口。"""
+r"""异构PPO日志的artifact-only只读分析；CLI/API从具体模块显式导入。"""
 
-from .runtime import summarize_rl_runtime_artifacts
-
-__all__ = ["summarize_rl_runtime_artifacts"]
+__all__: list[str] = []

@@ -199,13 +199,13 @@ class TactileRotationCommand(CommandTerm):
         reset_cells = cell_ids[ids]
         for cell_id, label in enumerate(labels):
             member_ids = ids[reset_cells == cell_id]
-            if member_ids.numel() == 0:
-                continue
             extras[f"cell/{label}/episode_count"] = float(member_ids.numel())
             for metric_name in metric_names:
                 metric = self.metrics.get(metric_name)
                 if isinstance(metric, torch.Tensor):
-                    extras[f"cell/{label}/{metric_name}"] = float(metric[member_ids].mean().item())
+                    extras[f"cell/{label}/{metric_name}"] = (
+                        float(metric[member_ids].mean().item()) if member_ids.numel() > 0 else 0.0
+                    )
         return extras
 
     def ensure_post_physics_progress_updated(self, env: ManagerBasedRLEnv | None = None) -> None:

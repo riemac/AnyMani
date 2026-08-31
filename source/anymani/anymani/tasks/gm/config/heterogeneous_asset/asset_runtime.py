@@ -8,7 +8,9 @@ asset rows、mask、q-home 和 contact layout。它不构造 frozen $Z$ 或 PPO 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+from pathlib import Path
 
 from anymani.assets.bank.dataset import HandAssetDataset
 from anymani.assets.bank.path_utils import resolve_anymani_root
@@ -172,6 +174,32 @@ HETEROGENEOUS_ASSET_ROWS = tuple(range(len(HETEROGENEOUS_CANONICAL_ARTIFACTS)))
 HETEROGENEOUS_Q_HOME_ROWS = tuple(artifact.routing.q_home for artifact in HETEROGENEOUS_CANONICAL_ARTIFACTS)
 """`[A,16]` canonical q-home；reset 时 active slots 取真实值，ghost 清零。"""
 
+
+def _reset_q_rows() -> tuple[tuple[float, ...], ...]:
+    r"""读取可选task pregrasp manifest；geometry q-home仍保持canonical artifact原值。"""
+
+    raw_path = os.environ.get("ANYMANI_HETEROGENEOUS_PREGRASP_MANIFEST")
+    if raw_path is None or raw_path.strip() == "":
+        return HETEROGENEOUS_Q_HOME_ROWS
+    path = Path(raw_path).expanduser()
+    path = path.resolve() if path.is_absolute() else (resolve_anymani_root() / path).resolve()
+    document = json.loads(path.read_text())
+    if document.get("artifact_type") != "anymani.pregrasp.easy_tier_manifest" or document.get("schema_version") != "1.0.0":
+        raise ValueError("unsupported heterogeneous pregrasp manifest")
+    if tuple(int(row) for row in document.get("dataset_rows", ())) != HETEROGENEOUS_SOURCE_DATASET_ROWS:
+        raise ValueError("pregrasp manifest dataset rows disagree with current heterogeneous selection")
+    rows = tuple(tuple(float(value) for value in row) for row in document.get("selected_q_rad", ()))
+    if len(rows) != len(HETEROGENEOUS_ACTIVE_MASK_ROWS) or any(len(row) != 16 for row in rows):
+        raise ValueError("pregrasp manifest must provide one canonical [16] q row per selected asset")
+    for row, active in zip(rows, HETEROGENEOUS_ACTIVE_MASK_ROWS):
+        if any(not is_active and value != 0.0 for value, is_active in zip(row, active)):
+            raise ValueError("pregrasp manifest ghost q entries must be exactly zero")
+    return rows
+
+
+HETEROGENEOUS_RESET_Q_ROWS = _reset_q_rows()
+"""Task reset使用的per-asset q；默认等于q-home，显式manifest可独立覆盖。"""
+
 _GROUP_MANIFEST = CanonicalHandGroupManifest(
     schema_version=CANONICAL_HAND_SCHEMA_V1.version,
     schema_digest=CANONICAL_HAND_SCHEMA_V1.digest,
@@ -257,5 +285,6 @@ __all__ = [
     "HETEROGENEOUS_HAND_SPAWN_CFG",
     "HETEROGENEOUS_PREPARED_CACHE_HIT",
     "HETEROGENEOUS_Q_HOME_ROWS",
+    "HETEROGENEOUS_RESET_Q_ROWS",
     "PPO_DATASET",
 ]
