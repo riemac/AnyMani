@@ -47,29 +47,68 @@ def _asset_limit() -> int | None:
     return value
 
 
+def _explicit_dataset_rows() -> tuple[int, ...] | None:
+    r"""解析八组canary显式formal-dataset rows；与ordered prefix limit互斥。"""
+
+    raw = os.environ.get("ANYMANI_HETEROGENEOUS_ASSET_ROWS")
+    if raw is None or raw.strip() == "":
+        return None
+    rows = tuple(int(item.strip()) for item in raw.split(",") if item.strip())
+    if not rows or len(set(rows)) != len(rows):
+        raise ValueError("ANYMANI_HETEROGENEOUS_ASSET_ROWS must contain unique comma-separated rows")
+    if any(row < 0 or row >= FORMAL_PPO_ASSET_COUNT for row in rows):
+        raise ValueError(f"explicit heterogeneous asset rows must lie in [0,{FORMAL_PPO_ASSET_COUNT - 1}]")
+    return rows
+
+
 HETEROGENEOUS_ASSET_LIMIT = _asset_limit()
 """当前进程的显式 smoke asset count；``None`` 表示完整 2048。"""
+
+HETEROGENEOUS_EXPLICIT_DATASET_ROWS = _explicit_dataset_rows()
+"""可选八组balanced canary在formal `ppo.yaml.train`轴上的selection-local rows。"""
+
+if HETEROGENEOUS_ASSET_LIMIT is not None and HETEROGENEOUS_EXPLICIT_DATASET_ROWS is not None:
+    raise ValueError("heterogeneous ordered asset limit and explicit dataset rows are mutually exclusive")
 
 record_optional_rl_phase(
     "asset_resolve_train",
     "start",
-    requested_assets=HETEROGENEOUS_ASSET_LIMIT or FORMAL_PPO_ASSET_COUNT,
+    requested_assets=(
+        len(HETEROGENEOUS_EXPLICIT_DATASET_ROWS)
+        if HETEROGENEOUS_EXPLICIT_DATASET_ROWS is not None
+        else HETEROGENEOUS_ASSET_LIMIT or FORMAL_PPO_ASSET_COUNT
+    ),
 )
 _TRAIN_PARTITION, HETEROGENEOUS_PREPARED_CACHE_HIT = resolve_prepared_train(
     PPO_DATASET,
     require_geometry_semantics=True,
-    max_assets=HETEROGENEOUS_ASSET_LIMIT,
+    max_assets=HETEROGENEOUS_ASSET_LIMIT if HETEROGENEOUS_EXPLICIT_DATASET_ROWS is None else None,
 )
 """只展开 train bundles；smoke 前缀不会启动后续 lineage IO。"""
 record_optional_rl_phase(
     "asset_resolve_train",
     "complete",
-    resolved_assets=len(_TRAIN_PARTITION.assets),
+    resolved_assets=(
+        len(HETEROGENEOUS_EXPLICIT_DATASET_ROWS)
+        if HETEROGENEOUS_EXPLICIT_DATASET_ROWS is not None
+        else len(_TRAIN_PARTITION.assets)
+    ),
     dataset_digest=PPO_DATASET.source_sha256,
     prepared_cache_hit=HETEROGENEOUS_PREPARED_CACHE_HIT,
 )
 
-HETEROGENEOUS_SOURCE_ASSETS = _TRAIN_PARTITION.assets
+HETEROGENEOUS_SOURCE_DATASET_ROWS = (
+    HETEROGENEOUS_EXPLICIT_DATASET_ROWS
+    if HETEROGENEOUS_EXPLICIT_DATASET_ROWS is not None
+    else tuple(range(len(_TRAIN_PARTITION.assets)))
+)
+"""当前selection各local row对应的formal dataset row；只服务provenance/diagnostics。"""
+
+HETEROGENEOUS_SOURCE_ASSETS = (
+    tuple(_TRAIN_PARTITION.assets[row] for row in HETEROGENEOUS_EXPLICIT_DATASET_ROWS)
+    if HETEROGENEOUS_EXPLICIT_DATASET_ROWS is not None
+    else _TRAIN_PARTITION.assets
+)
 """保持 ``ppo.yaml`` train 顺序的 source ``HandContainer`` 轴。"""
 
 HETEROGENEOUS_HAND_SPAWN_CFG = HandSpawnCfg(
@@ -124,13 +163,18 @@ _GROUP_MANIFEST = CanonicalHandGroupManifest(
     schema_digest=CANONICAL_HAND_SCHEMA_V1.digest,
     artifacts=HETEROGENEOUS_CANONICAL_ARTIFACTS,
 )
+_SELECTION_NAME = (
+    "rows-" + hashlib.sha256(",".join(str(row) for row in HETEROGENEOUS_SOURCE_DATASET_ROWS).encode()).hexdigest()[:16]
+    if HETEROGENEOUS_EXPLICIT_DATASET_ROWS is not None
+    else f"train-{len(HETEROGENEOUS_CANONICAL_ARTIFACTS)}"
+)
 _GROUP_MANIFEST_PATH = (
     resolve_anymani_root()
     / "outputs/canonical_runtime"
     / CANONICAL_HAND_SCHEMA_V1.version
     / "groups"
     / PPO_DATASET.source_sha256
-    / f"train-{len(HETEROGENEOUS_CANONICAL_ARTIFACTS)}.json"
+    / f"{_SELECTION_NAME}.json"
 )
 _GROUP_MANIFEST.write(_GROUP_MANIFEST_PATH)  # 可审计项目派生物；缓存 hit 时内容保持 bitwise stable
 HETEROGENEOUS_GROUP_MANIFEST_PATH = _GROUP_MANIFEST_PATH
@@ -179,7 +223,11 @@ HETEROGENEOUS_CONTACT_LAYOUT = _contact_layout()
 """固定 24 个 object-filtered sensors：4 tips + 19 finger non-tips + neutral palm。"""
 
 
-if HETEROGENEOUS_ASSET_LIMIT is None and len(HETEROGENEOUS_CANONICAL_ARTIFACTS) != 2048:
+if (
+    HETEROGENEOUS_ASSET_LIMIT is None
+    and HETEROGENEOUS_EXPLICIT_DATASET_ROWS is None
+    and len(HETEROGENEOUS_CANONICAL_ARTIFACTS) != 2048
+):
     raise ValueError(f"formal PPO dataset must resolve exactly 2048 assets, got {len(HETEROGENEOUS_CANONICAL_ARTIFACTS)}")
 
 

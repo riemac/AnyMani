@@ -69,7 +69,9 @@ def _obs() -> torch.Tensor:
     obs[:, :16] = torch.arange(16) / torch.pi  # $q/\pi$
     obs[:, 16:32] = 0.25  # target/$\pi$
     obs[:, 32:48] = -0.5  # previous policy action
-    obs[:, 48:52] = torch.tensor([[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0]])
+    obs[:, 48:52] = torch.tensor(
+        [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]
+    )  # canonical TIP axis `index,middle,ring,thumb`，互异值可证伪任何静默 permutation
     obs[:, 52] = torch.tensor([0.0, 1.0])  # asset row
     obs[0, 53:60] = 1.0  # 7 active joints
     obs[1, 53:] = 1.0  # 16 active joints
@@ -85,7 +87,10 @@ def test_adapter_routes_n000_joint_tip_and_frozen_z_features() -> None:
     torch.testing.assert_close(policy_input.joint_features[0, :, 0], _obs()[0, :16])
     torch.testing.assert_close(policy_input.joint_features[0, :, 1], _obs()[0, 16:32])
     torch.testing.assert_close(policy_input.joint_features[0, :, 2], _obs()[0, 32:48])
-    torch.testing.assert_close(policy_input.owner_features[0, 17:21, 0], torch.tensor([0.0, 1.0, 0.0, 1.0]))
+    torch.testing.assert_close(
+        policy_input.owner_features[0, 17:21, 0],
+        torch.tensor([0.1, 0.2, 0.3, 0.4]),
+    )  # 环境TIP observation与owner TIP必须保持同一semantic order
     assert policy_input.geometry_entities is not None
     assert policy_input.geometry_entities.shape == (2, 21, 128)
     assert policy_input.shortest_path[0, 0, 1] == 0

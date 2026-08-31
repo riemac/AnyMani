@@ -38,6 +38,7 @@ from .observations_tactile import (
     tip_contact_bits_ema,
     tip_force_magnitude_ema,
 )
+from .observations_temporal import per_joint_policy_frame
 
 __all__ = [
     "adr_actual_state",
@@ -57,6 +58,7 @@ __all__ = [
     "object_orientation",
     "object_pos",
     "palm_force_magnitude_ema",
+    "per_joint_policy_frame",
     "reorient_command",
     "reward_release_coefficient",
     "tip_contact_bits_ema",

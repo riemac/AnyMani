@@ -164,6 +164,20 @@ class HeterogeneousTactileRotationActionsCfg:
 
 
 @configclass
+class HeterogeneousN040HistoryActionsCfg:
+    r"""继承N000 accepted TCN的20 Hz、每policy-step一次$1/24$ rad相对target。"""
+
+    hand_joint_pos = gm_mdp.PolicyStepMaskedRelativeJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=[".*"],
+        preserve_order=True,
+        scale=1.0 / 24.0,
+        clip={".*": (-1.0 / 24.0, 1.0 / 24.0)},
+        use_zero_offset=True,
+    )
+
+
+@configclass
 class HeterogeneousPolicyObsCfg(ObsGroup):
     r"""52D N000 current frame + 17D manifest routing certificate。"""
 
@@ -175,6 +189,40 @@ class HeterogeneousPolicyObsCfg(ObsGroup):
     active_joint_mask = ObsTerm(func=gm_mdp.canonical_active_joint_mask)
 
     def __post_init__(self) -> None:
+        self.enable_corruption = False
+        self.concatenate_terms = True
+
+
+@configclass
+class HeterogeneousN040HistoryPolicyObsCfg(ObsGroup):
+    r"""1969D flat ABI：逐JOINT History30 + static limits + routing certificate。
+
+    `joint_history`由ObservationManager形成`[B,30,16,4]`后flatten为1920D；limits不进历史，
+    保持32D；末尾仍是`asset_row1 + active_mask16`。Flat tensor只服务rl_games transport，policy
+    adapter立即恢复结构化axes。
+    """
+
+    joint_history = ObsTerm(
+        func=gm_mdp.per_joint_policy_frame,
+        params={
+            "asset_cfg": HETEROGENEOUS_JOINT_CFG,
+            "action_name": "hand_joint_pos",
+            **_contact_params(),
+        },
+        history_length=30,
+        flatten_history_dim=True,
+    )
+    joint_limits = ObsTerm(
+        func=gm_mdp.joint_soft_pos_limits,
+        params={"asset_cfg": HETEROGENEOUS_JOINT_CFG},
+        scale=1.0 / math.pi,
+    )
+    asset_row = ObsTerm(func=gm_mdp.canonical_asset_row)
+    active_joint_mask = ObsTerm(func=gm_mdp.canonical_active_joint_mask)
+
+    def __post_init__(self) -> None:
+        r"""关闭corruption并保持各term自有history配置，不做group-level覆盖。"""
+
         self.enable_corruption = False
         self.concatenate_terms = True
 
@@ -210,6 +258,14 @@ class HeterogeneousObservationsCfg:
     r"""Deployable policy 与 privileged central critic groups。"""
 
     policy: ObsGroup = HeterogeneousPolicyObsCfg(history_length=1)
+    critic: ObsGroup = HeterogeneousCriticObsCfg(history_length=1)
+
+
+@configclass
+class HeterogeneousN040HistoryObservationsCfg:
+    r"""N040 History30 actor与同一103D privileged critic。"""
+
+    policy: ObsGroup = HeterogeneousN040HistoryPolicyObsCfg()
     critic: ObsGroup = HeterogeneousCriticObsCfg(history_length=1)
 
 
@@ -352,4 +408,12 @@ class HeterogeneousTactileRotationEnvCfg(ManagerBasedRLEnvCfg):
         self.viewer.lookat = (0.0, 0.0, 0.5)
 
 
-__all__ = ["HeterogeneousTactileRotationEnvCfg"]
+@configclass
+class HeterogeneousN040HistoryTactileRotationEnvCfg(HeterogeneousTactileRotationEnvCfg):
+    r"""冻结N040 policy adapter的History30 observation variant；MDP其余语义完全继承N000。"""
+
+    observations: HeterogeneousN040HistoryObservationsCfg = HeterogeneousN040HistoryObservationsCfg()
+    actions: HeterogeneousN040HistoryActionsCfg = HeterogeneousN040HistoryActionsCfg()
+
+
+__all__ = ["HeterogeneousN040HistoryTactileRotationEnvCfg", "HeterogeneousTactileRotationEnvCfg"]

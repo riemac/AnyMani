@@ -11,8 +11,10 @@ from anymani.distill.rl.heterogeneous_masked_ppo import (
     HETEROGENEOUS_CRITIC_OBS_DIM,
     HETEROGENEOUS_MASKED_OBS_DIM,
     HETEROGENEOUS_N000_FRAME_DIM,
+    HETEROGENEOUS_N040_HISTORY_OBS_DIM,
     HETEROGENEOUS_ROUTE_DIM,
 )
+from anymani.tasks.gm.config.heterogeneous_asset import agents as heterogeneous_agent_package
 from rl_games.algos_torch import model_builder
 
 
@@ -22,6 +24,14 @@ def _agent_cfg() -> dict:
     yaml_path = Path(agent_package.__file__).with_name("gm_heterogeneous_n000_ppo.yaml")
     with yaml_path.open(encoding="utf-8") as file:
         return yaml.safe_load(file)  # 纯配置解析，不 import IsaacLab/Kit
+
+
+def _n040_agent_cfg() -> dict:
+    r"""读取task-local冻结N040 History30 rl_games YAML。"""
+
+    yaml_path = Path(heterogeneous_agent_package.__file__).with_name("gm_heterogeneous_n040_history30_ppo.yaml")
+    with yaml_path.open(encoding="utf-8") as file:
+        return yaml.safe_load(file)
 
 
 def test_heterogeneous_actor_and_central_critic_schema() -> None:
@@ -65,6 +75,29 @@ def test_infrastructure_ppo_budget_divides_2048x1_and_2048x2_batches() -> None:
     assert (2048 * horizon) % minibatch == 0
     assert (4096 * horizon) % minibatch == 0
     assert float(params["env"]["clip_observations"]) > 2047.0  # asset row 不能被 wrapper clamp
+
+
+def test_n040_history30_agent_uses_task_local_yaml_and_frozen_artifact() -> None:
+    r"""正式alias必须显式声明1969D ABI、N040 SHA和non-recurrent TCN PPO预算。"""
+
+    params = _n040_agent_cfg()["params"]
+    network = params["network"]
+    train = params["config"]
+
+    assert HETEROGENEOUS_N040_HISTORY_OBS_DIM == 1969
+    assert network["name"] == "anymani_heterogeneous_n040_history30"
+    assert network["parallel_geometry_temporal"] is True
+    assert network["compile_policy_adapter"] is True
+    assert network["temporal_encoder"] == "stack_mlp"
+    assert network["retained_geometry"]["artifact_sha256"] == (
+        "cda44cc9eae5ca28a1a735176ef4764805559d13e235c52477b6ac438b20ddea"
+    )
+    assert network["heterogeneous_policy"]["joint_feature_dim"] == 6
+    assert network["heterogeneous_policy"]["temporal_feature_dim"] == 32
+    assert network["heterogeneous_policy"]["layers"] == 1
+    assert train["seq_length"] == 1  # History30属于observation，不是rl_games recurrent state
+    assert train["horizon_length"] == 16
+    assert train["minibatch_size"] == train["central_value_config"]["minibatch_size"] == 4096
 
 
 def test_native_central_value_network_consumes_103d_state_and_backpropagates() -> None:

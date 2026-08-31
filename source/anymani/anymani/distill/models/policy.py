@@ -80,6 +80,9 @@ class CanonicalPolicyCfg:
     geometry_entity_width: int = 128
     """retained geometry encoder 的统一 PALM/JOINT/TIP final-norm token 宽度。"""
 
+    temporal_feature_dim: int = 0
+    """可选逐JOINT History30摘要宽度；0表示current-frame/legacy route不注入时序latent。"""
+
     def __post_init__(self) -> None:
         r"""拒绝与 canonical entity/action schema 不兼容的容量。"""
 
@@ -100,6 +103,8 @@ class CanonicalPolicyCfg:
             raise ValueError("canonical policy hidden_width must be divisible by attention_heads")
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("canonical policy dropout must lie in [0,1)")
+        if self.temporal_feature_dim < 0:
+            raise ValueError("temporal_feature_dim must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -133,6 +138,9 @@ class EmbodimentPolicyInput:
     geometry_entities: torch.Tensor | None = None
     """可选 `[B,21,D]` retained unified geometry $Z$；JOINT view 不单独存储。"""
 
+    temporal_features: torch.Tensor | None = None
+    """可选 `[B,16,D_t]` 逐JOINT History30摘要；跨JOINT交互留给policy adapter。"""
+
     def __post_init__(self) -> None:
         r"""检查所有 batch/entity/action axes 的闭合。"""
 
@@ -161,6 +169,12 @@ class EmbodimentPolicyInput:
                 CANONICAL_OWNER_COUNT,
             ):
                 raise ValueError("geometry_entities must have shape [B,21,D]")
+        if self.temporal_features is not None:
+            if self.temporal_features.ndim != 3 or self.temporal_features.shape[:2] != (
+                batch_size,
+                CANONICAL_JOINT_COUNT,
+            ):
+                raise ValueError("temporal_features must have shape [B,16,D_t]")
         for graph in (self.shortest_path, self.parent_direction, self.child_direction):
             if graph.shape not in {
                 (CANONICAL_OWNER_COUNT, CANONICAL_OWNER_COUNT),
@@ -303,6 +317,11 @@ class EmbodimentPolicy(nn.Module):
             nn.Linear(config.hidden_width, config.hidden_width),
         )
         self.geometry_projection = nn.Linear(config.geometry_entity_width, config.hidden_width)
+        self.temporal_projection = (
+            nn.Linear(config.temporal_feature_dim, config.hidden_width)
+            if config.temporal_feature_dim > 0
+            else None
+        )  # History30 route才创建；legacy current-frame route不持有空时序参数
         self.backbone = GraphBiasedTransformer(
             GraphBiasedTransformerCfg(
                 hidden_width=config.hidden_width,
@@ -312,7 +331,10 @@ class EmbodimentPolicy(nn.Module):
                 dropout=config.dropout,
             )
         )
-        self.action_head = nn.Linear(config.hidden_width, 1)  # 全 16 JOINT owner 共享同一 head
+        self.action_head = nn.Sequential(
+            nn.LayerNorm(config.hidden_width),
+            nn.Linear(config.hidden_width, 1),
+        )  # contextual token→无量纲Gaussian mean；全有效JOINT共享最薄输出投影
         self.value_head = nn.Linear(config.hidden_width, 1)  # PALM context -> scalar critic
         self.global_log_std = nn.Parameter(torch.tensor(float(config.initial_log_std)))  # 唯一 exploration 参数
 
@@ -322,6 +344,15 @@ class EmbodimentPolicy(nn.Module):
         # owner feature 先投影到统一 D 维；不加入 slot index embedding，保证 token 置换等变。
         owner_tokens = self.owner_projection(inputs.owner_features)  # `[B,21,D]`
         joint_tokens = self.joint_projection(inputs.joint_features)  # `[B,16,D]`
+        if inputs.temporal_features is not None:
+            if self.temporal_projection is None:
+                raise ValueError("temporal_features were provided but temporal_feature_dim is zero")
+            if inputs.temporal_features.shape[-1] != self.config.temporal_feature_dim:
+                raise ValueError(
+                    "temporal feature width disagrees with policy config: "
+                    f"actual={inputs.temporal_features.shape[-1]} expected={self.config.temporal_feature_dim}"
+                )
+            joint_tokens = joint_tokens + self.temporal_projection(inputs.temporal_features)
         if inputs.geometry_entities is not None:
             owner_tokens = owner_tokens + self.geometry_projection(inputs.geometry_entities)
         joint_mask_float = inputs.joint_valid_mask.unsqueeze(-1).to(dtype=joint_tokens.dtype)

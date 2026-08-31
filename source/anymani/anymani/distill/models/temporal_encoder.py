@@ -248,4 +248,139 @@ class TactileTemporalConvEncoder(nn.Module):
         return self.projection(flattened)  # `[B,d_z]`，默认 `[B,64]`
 
 
-__all__ = ["TactileTemporalConvEncoder"]
+class PerJointTactileTemporalEncoder(nn.Module):
+    r"""用一套共享TCN独立编码每个JOINT的低维History30。
+
+    输入 $Y\in\mathbb R^{B\times30\times N_J\times F}$ 按oldest-to-latest排列。实现仅把
+    `(batch,joint)` 合并为卷积batch：
+
+    $$
+    [B,30,N_J,F]\rightarrow[BN_J,30,F]\rightarrow[BN_J,D_t]\rightarrow[B,N_J,D_t].
+    $$
+
+    TCN不跨JOINT混合；跨手指协调由后续graph policy adapter负责。该分工使每个JOINT可用自己的
+    $q/u/a/contact$历史提取接触建立—释放模式，同时维持跨拓扑共享参数和置换等变输出。
+
+    Args:
+        joint_count (int): canonical JOINT槽数，heterogeneous v1固定16。
+        frame_dim (int): 每JOINT每帧特征数，主线`[q/pi,target/pi,last_action,owner-tip-contact]`为4。
+        latent_dim (int): 每JOINT时序摘要宽度，当前候选64。
+        hidden_channels (tuple[int, int, int]): 三层共享Conv1d channels。
+    """
+
+    def __init__(
+        self,
+        *,
+        joint_count: int = 16,
+        frame_dim: int = 4,
+        latent_dim: int = 64,
+        hidden_channels: tuple[int, int, int] = (64, 64, 64),
+    ) -> None:
+        r"""构造唯一共享TCN，并冻结输入/输出JOINT axes。"""
+
+        super().__init__()
+        if joint_count < 1:
+            raise ValueError("per-joint temporal encoder joint_count must be positive")
+        self.joint_count = int(joint_count)  # $N_J=16$ canonical slots
+        self.frame_dim = int(frame_dim)  # $F=4$ raw local frame features
+        self.latent_dim = int(latent_dim)  # $D_t=64$ temporal summary width
+        self.encoder = TactileTemporalConvEncoder(
+            frame_dim=self.frame_dim,
+            latent_dim=self.latent_dim,
+            hidden_channels=hidden_channels,
+        )  # 所有JOINT共享同一组conv/projection参数
+
+    def forward(self, history: torch.Tensor, joint_valid_mask: torch.Tensor) -> torch.Tensor:
+        r"""编码逐JOINT history并把ghost latent精确清零。
+
+        Args:
+            history (torch.Tensor): `[B,30,N_J,F]` oldest-to-latest raw history。
+            joint_valid_mask (torch.Tensor): bool `[B,N_J]` active mask。
+
+        Returns:
+            torch.Tensor: `[B,N_J,D_t]` temporal summaries；inactive rows全零。
+        """
+
+        if history.ndim != 4 or history.shape[1:] != (
+            self.encoder.history_length,
+            self.joint_count,
+            self.frame_dim,
+        ):
+            raise ValueError(
+                "per-joint history must have shape "
+                f"[B,{self.encoder.history_length},{self.joint_count},{self.frame_dim}], got {tuple(history.shape)}"
+            )
+        batch_size = history.shape[0]
+        if joint_valid_mask.shape != (batch_size, self.joint_count) or joint_valid_mask.dtype != torch.bool:
+            raise ValueError(f"joint_valid_mask must be bool [{batch_size},{self.joint_count}]")
+
+        # 先把JOINT轴移到时间轴前，再合并`B×N_J`；每条Conv1d序列只来自一个JOINT。
+        joint_sequences = history.permute(0, 2, 1, 3).reshape(
+            batch_size * self.joint_count,
+            self.encoder.history_length,
+            self.frame_dim,
+        )  # `[BN_J,30,F]`
+        temporal = self.encoder(joint_sequences).reshape(
+            batch_size,
+            self.joint_count,
+            self.latent_dim,
+        )  # `[B,N_J,D_t]`
+        return temporal * joint_valid_mask.unsqueeze(-1).to(dtype=temporal.dtype)  # ghost摘要精确零
+
+
+class PerJointHistoryStackEncoder(nn.Module):
+    r"""按固定时间位置直接读取每个JOINT的History30。
+
+    对每个JOINT把oldest-to-latest $30\times4=120$ 个标量展平，再通过共享小MLP得到$D_t$维摘要：
+
+    $$
+    z_{t,j}=W_2\,\operatorname{GELU}\!\left(W_1\operatorname{LN}(\operatorname{vec}Y_{t,j})+b_1\right)+b_2.
+    $$
+
+    固定列位置本身就是时间编码，因此不做mean pooling；与TCN相比，它保留全部原始历史但移除大量小
+    Conv1d kernels，作为4096-env严格时延门下的保守候选。
+    """
+
+    def __init__(self, *, joint_count: int = 16, frame_dim: int = 4, latent_dim: int = 32) -> None:
+        r"""构造共享ordered-stack MLP。"""
+
+        super().__init__()
+        if min(joint_count, frame_dim, latent_dim) < 1:
+            raise ValueError("per-joint stack encoder dimensions must be positive")
+        self.joint_count = int(joint_count)
+        self.frame_dim = int(frame_dim)
+        self.latent_dim = int(latent_dim)
+        self.history_length = 30
+        stack_width = self.history_length * self.frame_dim  # $30\times4=120$
+        self.network = nn.Sequential(
+            nn.LayerNorm(stack_width),
+            nn.Linear(stack_width, self.latent_dim),
+            nn.GELU(),
+            nn.Linear(self.latent_dim, self.latent_dim),
+        )
+
+    def forward(self, history: torch.Tensor, joint_valid_mask: torch.Tensor) -> torch.Tensor:
+        r"""编码`[B,30,N_J,F]`并把ghost摘要置零。"""
+
+        if history.ndim != 4 or history.shape[1:] != (
+            self.history_length,
+            self.joint_count,
+            self.frame_dim,
+        ):
+            raise ValueError(
+                f"per-joint stack history must have shape [B,30,{self.joint_count},{self.frame_dim}], "
+                f"got {tuple(history.shape)}"
+            )
+        batch_size = history.shape[0]
+        if joint_valid_mask.shape != (batch_size, self.joint_count) or joint_valid_mask.dtype != torch.bool:
+            raise ValueError(f"joint_valid_mask must be bool [{batch_size},{self.joint_count}]")
+        stacked = history.permute(0, 2, 1, 3).reshape(batch_size, self.joint_count, -1)  # `[B,N_J,120]`
+        temporal = self.network(stacked)  # shared MLP逐JOINT独立应用，`[B,N_J,D_t]`
+        return temporal * joint_valid_mask.unsqueeze(-1).to(dtype=temporal.dtype)
+
+
+__all__ = [
+    "PerJointHistoryStackEncoder",
+    "PerJointTactileTemporalEncoder",
+    "TactileTemporalConvEncoder",
+]

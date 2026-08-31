@@ -127,6 +127,7 @@ def _dump_agent_cfg(path: str, agent_cfg: dict) -> None:
     network_cfg = agent_cfg["params"]["network"]
     runtime_bank = network_cfg.pop("canonical_evidence_bank", None)
     frozen_z_provider = network_cfg.pop("frozen_z_provider", None)
+    retained_geometry_provider = network_cfg.pop("retained_geometry_provider", None)
     try:
         dump_yaml(path, agent_cfg)
     finally:
@@ -134,6 +135,8 @@ def _dump_agent_cfg(path: str, agent_cfg: dict) -> None:
             network_cfg["canonical_evidence_bank"] = runtime_bank
         if frozen_z_provider is not None:
             network_cfg["frozen_z_provider"] = frozen_z_provider
+        if retained_geometry_provider is not None:
+            network_cfg["retained_geometry_provider"] = retained_geometry_provider
 
 
 def _fix_minibatch_size(agent_cfg: dict, num_envs: int) -> None:

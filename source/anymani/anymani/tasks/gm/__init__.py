@@ -65,6 +65,18 @@ gym.register(
 )
 
 gym.register(
+    id="AnyMani-GM-HeterogeneousAsset-TactileRotation-History30-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.config.heterogeneous_asset.tactile_rotation_env_cfg:"
+            "HeterogeneousN040HistoryTactileRotationEnvCfg"
+        ),
+    },
+)
+
+gym.register(
     id="AnyMani-GM-SingleAsset-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,

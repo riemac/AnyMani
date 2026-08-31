@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import gymnasium as gym
 
+from anymani.tasks.gm.config.heterogeneous_asset import agents as heterogeneous_agents
+
 from . import agents
 
 gym.register(
@@ -90,6 +92,21 @@ gym.register(
             "HeterogeneousTactileRotationEnvCfg"
         ),
         "rl_games_cfg_entry_point": f"{agents.__name__}:gm_heterogeneous_n000_ppo.yaml",
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-HeterogeneousAsset-N040-History30-PPO-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            "anymani.tasks.gm.config.heterogeneous_asset.tactile_rotation_env_cfg:"
+            "HeterogeneousN040HistoryTactileRotationEnvCfg"
+        ),
+        "rl_games_cfg_entry_point": (
+            f"{heterogeneous_agents.__name__}:gm_heterogeneous_n040_history30_ppo.yaml"
+        ),
     },
 )
 
