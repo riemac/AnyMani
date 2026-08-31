@@ -1,4 +1,4 @@
-r"""为八组16个easy-tier资产搜索稳定且TIP更接近DexCube的per-asset q reset。"""
+r"""固定per-asset q后搜索稳定、TIP更可达的DexCube contact-basin平移。"""
 
 from __future__ import annotations
 
@@ -9,40 +9,21 @@ from pathlib import Path
 from typing import cast
 
 BALANCED_DATASET_ROWS = (416, 417, 352, 353, 0, 1, 64, 65, 432, 433, 368, 369, 16, 17, 80, 81)
-
-N000_CANONICAL_Q = (
-    0.0,
-    0.0,
-    0.0,
-    0.88,
-    -0.61000001,
-    -0.12,
-    0.56,
-    1.73000002,
-    1.05999994,
-    1.17999995,
-    1.51999998,
-    0.71999997,
-    0.93000001,
-    0.57999998,
-    0.44,
-    1.63,
-)
-
-CANDIDATE_NAMES = (
-    "zero",
-    "n000_template",
-    "limit_midpoint",
-    "limit_quarter",
-    "limit_three_quarter",
-    "template_plus_0p2",
-    "template_minus_0p2",
-    "template_distal_plus_0p35",
+OFFSETS_E_M = (
+    (0.0, 0.0, 0.0),
+    (-0.02, 0.0, 0.0),
+    (0.02, 0.0, 0.0),
+    (0.0, -0.02, 0.0),
+    (0.0, 0.02, 0.0),
+    (0.0, -0.04, 0.0),
+    (0.0, 0.04, 0.0),
+    (0.0, 0.0, 0.015),
+    (0.0, 0.0, -0.015),
 )
 
 
 def main() -> int:
-    r"""并行settle 128个候选，按stable→TIP distance→non-tip→limit margin词典序选择。"""
+    r"""并行settle 16×9 object offsets并写v3 reset manifest。"""
 
     os.environ["ANYMANI_HETEROGENEOUS_ASSET_ROWS"] = ",".join(str(row) for row in BALANCED_DATASET_ROWS)
     from isaaclab.app import AppLauncher
@@ -66,8 +47,14 @@ def main() -> int:
         from isaaclab.assets import Articulation, RigidObject
         from isaaclab.envs import ManagerBasedRLEnv
 
+        q_manifest_path = Path("outputs/pregrasp/easy_tier_balanced16_scale1p2.json")
+        q_manifest = json.loads(q_manifest_path.read_text())
+        if tuple(q_manifest["dataset_rows"]) != tuple(HETEROGENEOUS_SOURCE_DATASET_ROWS):
+            raise ValueError("q manifest rows disagree with balanced object-offset search")
+        selected_q = torch.tensor(q_manifest["selected_q_rad"], dtype=torch.float32)
+
         assets = len(BALANCED_DATASET_ROWS)
-        candidates = len(CANDIDATE_NAMES)
+        candidates = len(OFFSETS_E_M)
         cfg = HeterogeneousTactileRotationEnvCfg()
         cfg.scene.num_envs = assets * candidates
         env = gym.make("AnyMani-GM-HeterogeneousAsset-TactileRotation-v0", cfg=cfg)
@@ -82,32 +69,23 @@ def main() -> int:
             dtype=torch.bool,
             device=runtime_env.device,
         )
-        limits = robot.data.soft_joint_pos_limits
-        lower, upper = limits[:, :, 0], limits[:, :, 1]
-        span = upper - lower
-        template = torch.tensor(N000_CANONICAL_Q, device=runtime_env.device).expand(assets, -1)
-        q = torch.zeros(assets * candidates, 16, device=runtime_env.device)
-        q[assets : 2 * assets] = template
-        q[2 * assets : 3 * assets] = 0.5 * (lower[2 * assets : 3 * assets] + upper[2 * assets : 3 * assets])
-        q[3 * assets : 4 * assets] = lower[3 * assets : 4 * assets] + 0.25 * span[3 * assets : 4 * assets]
-        q[4 * assets : 5 * assets] = lower[4 * assets : 5 * assets] + 0.75 * span[4 * assets : 5 * assets]
-        q[5 * assets : 6 * assets] = template + 0.2
-        q[6 * assets : 7 * assets] = template - 0.2
-        q[7 * assets : 8 * assets] = template
-        q[7 * assets : 8 * assets, 4:] += 0.35  # depth1–3增加flexion proposal
-        q = torch.maximum(torch.minimum(q, upper), lower) * active
+        q = selected_q.to(runtime_env.device).repeat(candidates, 1) * active
         robot.write_joint_state_to_sim(q, torch.zeros_like(q))
         robot.set_joint_position_target(q)
-        initial_pos = object_asset.data.root_pos_w.clone()
+        object_pose = object_asset.data.root_pose_w.clone()
+        for candidate_index, offset in enumerate(OFFSETS_E_M):
+            rows = slice(candidate_index * assets, (candidate_index + 1) * assets)
+            object_pose[rows, :3] += torch.tensor(offset, device=runtime_env.device)
+        object_asset.write_root_pose_to_sim(object_pose)
+        object_asset.write_root_velocity_to_sim(torch.zeros(assets * candidates, 6, device=runtime_env.device))
+        initial_pos = object_pose[:, :3].clone()
 
         tip_distances = []
-        tip_active_counts = []
-        tip_ge2 = []
+        tip_active = []
         bad_contacts = []
         drift = []
         linear_sq = []
         angular_sq = []
-        tracking_sq = []
         for step in range(120):
             robot.set_joint_position_target(q)
             runtime_env.scene.write_data_to_sim()
@@ -117,8 +95,7 @@ def main() -> int:
                 continue
             tip_distances.append(
                 torch.linalg.vector_norm(
-                    robot.data.body_pos_w[:, tip_body_ids] - object_asset.data.root_pos_w.unsqueeze(1),
-                    dim=-1,
+                    robot.data.body_pos_w[:, tip_body_ids] - object_asset.data.root_pos_w.unsqueeze(1), dim=-1
                 ).mean(dim=-1)
             )
             tip_force = torch.stack(
@@ -128,8 +105,7 @@ def main() -> int:
                 ],
                 dim=-1,
             )
-            tip_active_counts.append((tip_force > 0.25).float().sum(dim=-1))
-            tip_ge2.append(((tip_force > 0.25).sum(dim=-1) >= 2).float())
+            tip_active.append((tip_force > 0.25).float().sum(dim=-1))
             non_tip_force = torch.stack(
                 [
                     torch.linalg.vector_norm(sensor_total_force_w(runtime_env, name), dim=-1)
@@ -141,30 +117,17 @@ def main() -> int:
             drift.append(torch.linalg.vector_norm(object_asset.data.root_pos_w - initial_pos, dim=-1))
             linear_sq.append(object_asset.data.root_lin_vel_w.square().sum(dim=-1))
             angular_sq.append(object_asset.data.root_ang_vel_w.square().sum(dim=-1))
-            tracking_sq.append(((robot.data.joint_pos - q) * active).square().sum(dim=-1) / active.sum(dim=-1))
 
         tip_distance = torch.stack(tip_distances).mean(dim=0)
-        tip_active_mean = torch.stack(tip_active_counts).mean(dim=0)
-        tip_ge2_fraction = torch.stack(tip_ge2).mean(dim=0)
+        tip_active_mean = torch.stack(tip_active).mean(dim=0)
         bad_fraction = torch.stack(bad_contacts).mean(dim=0)
         drift_max = torch.stack(drift).amax(dim=0)
         linear_rms = torch.sqrt(torch.stack(linear_sq).mean(dim=0))
         angular_rms = torch.sqrt(torch.stack(angular_sq).mean(dim=0))
-        tracking_rms = torch.sqrt(torch.stack(tracking_sq).mean(dim=0))
-        dropped = drift_max >= 0.07
-        stable = (
-            (~dropped)
-            & (drift_max <= 0.025)
-            & (linear_rms <= 0.05)
-            & (angular_rms <= 0.5)
-            & (tracking_rms <= 0.1)
-        )
-        lower_margin = torch.where(active, q - lower, torch.inf).amin(dim=-1)
-        upper_margin = torch.where(active, upper - q, torch.inf).amin(dim=-1)
-        margin = torch.minimum(lower_margin, upper_margin)
+        stable = (drift_max <= 0.025) & (linear_rms <= 0.05) & (angular_rms <= 0.5)
 
+        selected_offsets = []
         records = []
-        selected_q = []
         for asset_index, dataset_row in enumerate(HETEROGENEOUS_SOURCE_DATASET_ROWS):
             env_ids = [candidate * assets + asset_index for candidate in range(candidates)]
             viable = [env_id for env_id in env_ids if bool(stable[env_id].item())]
@@ -175,68 +138,36 @@ def main() -> int:
                     -float(tip_active_mean[env_id].item()),
                     float(tip_distance[env_id].item()),
                     float(bad_fraction[env_id].item()),
-                    float(tracking_rms[env_id].item()),
-                    -float(margin[env_id].item()),
                 ),
             )
             candidate_index = best // assets
-            selected_q.append([float(value) for value in q[best].tolist()])
+            selected_offsets.append(list(OFFSETS_E_M[candidate_index]))
             records.append(
                 {
                     "dataset_row": int(dataset_row),
-                    "local_asset_row": asset_index,
-                    "candidate_index": candidate_index,
-                    "candidate_name": CANDIDATE_NAMES[candidate_index],
+                    "offset_index": candidate_index,
+                    "offset_e_m": list(OFFSETS_E_M[candidate_index]),
                     "stable": bool(stable[best].item()),
-                    "tip_center_distance_mean_m": float(tip_distance[best].item()),
                     "tip_active_count_mean": float(tip_active_mean[best].item()),
-                    "tip_ge2_fraction": float(tip_ge2_fraction[best].item()),
+                    "tip_center_distance_mean_m": float(tip_distance[best].item()),
                     "finger_non_tip_fraction": float(bad_fraction[best].item()),
                     "drift_max_m": float(drift_max[best].item()),
-                    "linear_velocity_rms_m_s": float(linear_rms[best].item()),
-                    "angular_velocity_rms_rad_s": float(angular_rms[best].item()),
-                    "joint_limit_margin_min_rad": float(margin[best].item()),
-                    "target_tracking_error_rms_rad": float(tracking_rms[best].item()),
                 }
             )
-        candidate_records = []
-        for candidate_index, candidate_name in enumerate(CANDIDATE_NAMES):
-            for asset_index, dataset_row in enumerate(HETEROGENEOUS_SOURCE_DATASET_ROWS):
-                env_id = candidate_index * assets + asset_index
-                candidate_records.append(
-                    {
-                        "dataset_row": int(dataset_row),
-                        "candidate_index": candidate_index,
-                        "candidate_name": candidate_name,
-                        "stable": bool(stable[env_id].item()),
-                        "tip_active_count_mean": float(tip_active_mean[env_id].item()),
-                        "tip_ge2_fraction": float(tip_ge2_fraction[env_id].item()),
-                        "tip_center_distance_mean_m": float(tip_distance[env_id].item()),
-                        "finger_non_tip_fraction": float(bad_fraction[env_id].item()),
-                        "target_tracking_error_rms_rad": float(tracking_rms[env_id].item()),
-                    }
-                )
-        output = {
-            "artifact_type": "anymani.pregrasp.easy_tier_manifest",
-            "schema_version": "1.0.0",
-            "cube_scale": 1.2,
-            "dataset_rows": list(HETEROGENEOUS_SOURCE_DATASET_ROWS),
-            "candidate_names": list(CANDIDATE_NAMES),
-            "selected_q_rad": selected_q,
-            "records": records,
-            "candidate_records": candidate_records,
-        }
-        output_path = Path("outputs/pregrasp/easy_tier_balanced16_scale1p2_v2.json")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output = dict(q_manifest)
+        output["parent_manifest"] = str(q_manifest_path)
+        output["selected_object_offset_e_m"] = selected_offsets
+        output["object_offset_candidates_e_m"] = [list(offset) for offset in OFFSETS_E_M]
+        output["object_offset_records"] = records
+        output_path = Path("outputs/pregrasp/easy_tier_balanced16_scale1p2_v3.json")
         output_path.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
         print(
             json.dumps(
                 {
                     "output": str(output_path),
                     "stable_selected": sum(record["stable"] for record in records),
-                    "candidate_histogram": {
-                        name: sum(record["candidate_name"] == name for record in records) for name in CANDIDATE_NAMES
-                    },
+                    "nonzero_offsets": sum(any(abs(value) > 0 for value in offset) for offset in selected_offsets),
+                    "tip_active_mean": sum(record["tip_active_count_mean"] for record in records) / assets,
                     "tip_distance_mean_m": sum(record["tip_center_distance_mean_m"] for record in records) / assets,
                 },
                 sort_keys=True,

@@ -23,6 +23,7 @@ from .observations_priv import (
 from .observations_state import (
     canonical_active_joint_mask,
     canonical_asset_row,
+    canonical_morphology_cell_one_hot,
     joint_pos_limit_normalized,
     joint_pos_raw,
     joint_target,
@@ -44,6 +45,7 @@ __all__ = [
     "adr_actual_state",
     "canonical_active_joint_mask",
     "canonical_asset_row",
+    "canonical_morphology_cell_one_hot",
     "finger_non_tip_contact_bits_ema",
     "fingertip_contact_binary",
     "fingertip_contact_force",

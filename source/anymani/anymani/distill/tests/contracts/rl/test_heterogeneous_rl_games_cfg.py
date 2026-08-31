@@ -12,6 +12,7 @@ from anymani.distill.rl.heterogeneous_masked_ppo import (
     HETEROGENEOUS_MASKED_OBS_DIM,
     HETEROGENEOUS_N000_FRAME_DIM,
     HETEROGENEOUS_N040_HISTORY_OBS_DIM,
+    HETEROGENEOUS_N040_CRITIC_OBS_DIM,
     HETEROGENEOUS_ROUTE_DIM,
 )
 from anymani.tasks.gm.config.heterogeneous_asset import agents as heterogeneous_agent_package
@@ -85,6 +86,7 @@ def test_n040_history30_agent_uses_task_local_yaml_and_frozen_artifact() -> None
     train = params["config"]
 
     assert HETEROGENEOUS_N040_HISTORY_OBS_DIM == 1969
+    assert HETEROGENEOUS_N040_CRITIC_OBS_DIM == 127
     assert network["name"] == "anymani_heterogeneous_n040_history30"
     assert network["parallel_geometry_temporal"] is True
     assert network["compile_policy_adapter"] is True

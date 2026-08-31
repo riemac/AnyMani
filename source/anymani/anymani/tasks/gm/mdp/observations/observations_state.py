@@ -217,6 +217,19 @@ def canonical_active_joint_mask(env: ManagerBasedRLEnv) -> torch.Tensor:
     return mask.to(dtype=torch.float32)
 
 
+def canonical_morphology_cell_one_hot(env: ManagerBasedRLEnv) -> torch.Tensor:
+    r"""返回固定八组的privileged critic one-hot，形状`[B,8]`。
+
+    Cell标签只进入central critic/diagnostics，不进入deployable actor。
+    """
+
+    _ensure_canonical_state_from_cfg(env)
+    cell_ids = getattr(env, "_anymani_morphology_cell_id", None)
+    if not isinstance(cell_ids, torch.Tensor) or cell_ids.shape != (env.num_envs,):
+        raise RuntimeError("canonical morphology cell IDs are not initialized")
+    return torch.nn.functional.one_hot(cell_ids.to(dtype=torch.long), num_classes=8).to(dtype=torch.float32)
+
+
 def _mask_canonical_joint_values(
     env: ManagerBasedRLEnv,
     values: torch.Tensor,
@@ -264,6 +277,11 @@ def _ensure_canonical_state_from_cfg(env: ManagerBasedRLEnv) -> None:
         )
         setattr(env, "_anymani_canonical_active_joint_mask", mask)
         setattr(env, "_anymani_canonical_asset_row", rows)
+        morphology_rows = params.get("morphology_cell_ids")
+        if morphology_rows is not None:
+            cells = torch.as_tensor(morphology_rows, dtype=torch.long, device=env.device)
+            selectors = torch.arange(env.num_envs, device=env.device) % cells.shape[0]
+            setattr(env, "_anymani_morphology_cell_id", cells[selectors])
         return
     mask = torch.as_tensor(params["active_joint_mask"], dtype=torch.bool, device=env.device)
     if mask.shape != (env.num_envs, 16):
@@ -273,6 +291,12 @@ def _ensure_canonical_state_from_cfg(env: ManagerBasedRLEnv) -> None:
     if rows.shape != (env.num_envs,):
         raise RuntimeError(f"canonical startup asset rows must have shape {(env.num_envs,)}, got {tuple(rows.shape)}")
     setattr(env, "_anymani_canonical_asset_row", rows)
+    morphology_cells = params.get("morphology_cell_ids")
+    if morphology_cells is not None:
+        cells = torch.as_tensor(morphology_cells, dtype=torch.long, device=env.device)
+        if cells.shape != (env.num_envs,):
+            raise RuntimeError(f"canonical morphology cells must have shape {(env.num_envs,)}, got {tuple(cells.shape)}")
+        setattr(env, "_anymani_morphology_cell_id", cells)
 
 
 __all__ = [
@@ -282,6 +306,7 @@ __all__ = [
     "joint_vel_raw",
     "canonical_active_joint_mask",
     "canonical_asset_row",
+    "canonical_morphology_cell_one_hot",
     "last_action",
     "last_processed_action",
 ]

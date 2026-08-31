@@ -506,6 +506,7 @@ def initialize_canonical_runtime_state(
     asset_rows: torch.Tensor | Sequence[int] | None = None,
     q_home: torch.Tensor | Sequence[Sequence[float]] | None = None,
     morphology_cell_ids: torch.Tensor | Sequence[int] | None = None,
+    object_position_offsets: torch.Tensor | Sequence[Sequence[float]] | None = None,
     routing_mode: Literal["explicit", "round_robin"] = "explicit",
 ) -> None:
     r"""安装 canonical per-env active mask 与 evidence-bank asset row。
@@ -540,6 +541,12 @@ def initialize_canonical_runtime_state(
                 raise ValueError("round_robin morphology_cell_ids must provide one scalar per canonical asset")
             selectors = torch.arange(env.num_envs, device=env.device) % cell_rows.shape[0]
             setattr(env, "_anymani_morphology_cell_id", cell_rows[selectors])
+        if object_position_offsets is not None:
+            offset_rows = torch.as_tensor(object_position_offsets, dtype=torch.float32, device=env.device)
+            if offset_rows.shape != (torch.as_tensor(active_joint_mask).shape[0], 3):
+                raise ValueError("round_robin object_position_offsets must provide one [3] row per canonical asset")
+            selectors = torch.arange(env.num_envs, device=env.device) % offset_rows.shape[0]
+            setattr(env, "_anymani_object_position_offset_e", offset_rows[selectors])
         return
     if routing_mode != "explicit":
         raise ValueError(f"unsupported canonical routing_mode: {routing_mode!r}")
@@ -599,6 +606,28 @@ def initialize_canonical_runtime_state(
         if cells.shape != (env.num_envs,):
             raise ValueError("explicit morphology_cell_ids must have shape [num_envs]")
         setattr(env, "_anymani_morphology_cell_id", cells)
+    if object_position_offsets is not None:
+        offsets = torch.as_tensor(object_position_offsets, dtype=torch.float32, device=env.device)
+        if offsets.shape != (env.num_envs, 3):
+            raise ValueError("explicit object_position_offsets must have shape [num_envs,3]")
+        setattr(env, "_anymani_object_position_offset_e", offsets)
+
+
+def apply_canonical_object_position_offset(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor | Sequence[int] | None,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> None:
+    r"""在base object reset后应用per-env contact-basin平移，再由后续event记录真实anchor。"""
+
+    ids = _resolve_event_env_ids(env, env_ids)
+    offsets = getattr(env, "_anymani_object_position_offset_e", None)
+    if not isinstance(offsets, torch.Tensor) or offsets.shape != (env.num_envs, 3):
+        return  # 无manifest route等价于零offset，不增加reset副作用
+    object_asset: RigidObject = env.scene[object_cfg.name]
+    pose = object_asset.data.root_pose_w[ids].clone()
+    pose[:, :3] += offsets[ids]
+    object_asset.write_root_pose_to_sim(pose, env_ids=cast(Sequence[int], ids))
 
 
 def lock_canonical_ghost_joint_limits(

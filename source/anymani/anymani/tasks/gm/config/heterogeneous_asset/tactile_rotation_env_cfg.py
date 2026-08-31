@@ -46,6 +46,7 @@ from .asset_runtime import (
     HETEROGENEOUS_CONTACT_LAYOUT,
     HETEROGENEOUS_HAND_ADAPTER,
     HETEROGENEOUS_HAND_SPAWN_CFG,
+    HETEROGENEOUS_OBJECT_OFFSET_ROWS,
     HETEROGENEOUS_RESET_Q_ROWS,
 )
 
@@ -255,6 +256,14 @@ class HeterogeneousCriticObsCfg(ObsGroup):
 
 
 @configclass
+class HeterogeneousN040CriticObsCfg(HeterogeneousCriticObsCfg):
+    r"""103D task state + active mask16 + morphology cell one-hot8 = 127D task-aware critic。"""
+
+    active_joint_mask = ObsTerm(func=gm_mdp.canonical_active_joint_mask)
+    morphology_cell = ObsTerm(func=gm_mdp.canonical_morphology_cell_one_hot)
+
+
+@configclass
 class HeterogeneousObservationsCfg:
     r"""Deployable policy 与 privileged central critic groups。"""
 
@@ -267,7 +276,7 @@ class HeterogeneousN040HistoryObservationsCfg:
     r"""N040 History30 actor与同一103D privileged critic。"""
 
     policy: ObsGroup = HeterogeneousN040HistoryPolicyObsCfg()
-    critic: ObsGroup = HeterogeneousCriticObsCfg(history_length=1)
+    critic: ObsGroup = HeterogeneousN040CriticObsCfg(history_length=1)
 
 
 @configclass
@@ -340,6 +349,7 @@ class HeterogeneousEventsCfg:
             "asset_rows": HETEROGENEOUS_ASSET_ROWS,
             "q_home": HETEROGENEOUS_RESET_Q_ROWS,
             "morphology_cell_ids": HETEROGENEOUS_CELL_ID_ROWS,
+            "object_position_offsets": HETEROGENEOUS_OBJECT_OFFSET_ROWS,
             "routing_mode": "round_robin",
         },
     )
@@ -361,6 +371,11 @@ class HeterogeneousEventsCfg:
             "velocity_range": {},
             "asset_cfg": SceneEntityCfg("object"),
         },
+    )
+    apply_object_offset = EventTerm(
+        func=gm_mdp.apply_canonical_object_position_offset,
+        mode="reset",
+        params={"object_cfg": SceneEntityCfg("object")},
     )
     record_object_anchor = EventTerm(
         func=gm_mdp.record_object_reset_anchor,

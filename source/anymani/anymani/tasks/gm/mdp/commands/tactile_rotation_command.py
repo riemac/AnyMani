@@ -203,8 +203,8 @@ class TactileRotationCommand(CommandTerm):
             for metric_name in metric_names:
                 metric = self.metrics.get(metric_name)
                 if isinstance(metric, torch.Tensor):
-                    extras[f"cell/{label}/{metric_name}"] = (
-                        float(metric[member_ids].mean().item()) if member_ids.numel() > 0 else 0.0
+                    extras[f"cell/{label}/{metric_name}_sum"] = (
+                        float(metric[member_ids].sum().item()) if member_ids.numel() > 0 else 0.0
                     )
         return extras
 

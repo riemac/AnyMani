@@ -36,7 +36,7 @@ def main() -> int:
         runtime_env.sim._app_control_on_stop_handle = None
         obs, _ = env.reset()
         history = obs["policy"][:, : 30 * 16 * 4].reshape(2, 30, 16, 4)
-        if obs["policy"].shape != (2, 1969) or obs["critic"].shape != (2, 103):
+        if obs["policy"].shape != (2, 1969) or obs["critic"].shape != (2, 127):
             raise RuntimeError(f"unexpected observation shapes policy={obs['policy'].shape} critic={obs['critic'].shape}")
         torch.testing.assert_close(history[:, 0], history[:, -1])
         action_term = runtime_env.action_manager.get_term("hand_joint_pos")

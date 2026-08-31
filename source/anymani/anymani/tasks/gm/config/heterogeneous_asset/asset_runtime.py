@@ -200,6 +200,28 @@ def _reset_q_rows() -> tuple[tuple[float, ...], ...]:
 HETEROGENEOUS_RESET_Q_ROWS = _reset_q_rows()
 """Task reset使用的per-asset q；默认等于q-home，显式manifest可独立覆盖。"""
 
+
+def _reset_object_offset_rows() -> tuple[tuple[float, float, float], ...]:
+    r"""读取可选per-asset object position offsets，单位m、env/hand-aligned axes。"""
+
+    raw_path = os.environ.get("ANYMANI_HETEROGENEOUS_PREGRASP_MANIFEST")
+    if raw_path is None or raw_path.strip() == "":
+        return tuple((0.0, 0.0, 0.0) for _ in HETEROGENEOUS_SOURCE_DATASET_ROWS)
+    path = Path(raw_path).expanduser()
+    path = path.resolve() if path.is_absolute() else (resolve_anymani_root() / path).resolve()
+    document = json.loads(path.read_text())
+    raw_offsets = document.get("selected_object_offset_e_m")
+    if raw_offsets is None:
+        return tuple((0.0, 0.0, 0.0) for _ in HETEROGENEOUS_SOURCE_DATASET_ROWS)
+    offsets = tuple(tuple(float(value) for value in row) for row in raw_offsets)
+    if len(offsets) != len(HETEROGENEOUS_SOURCE_DATASET_ROWS) or any(len(row) != 3 for row in offsets):
+        raise ValueError("pregrasp manifest object offsets must provide one [3] row per selected asset")
+    return offsets  # type: ignore[return-value]
+
+
+HETEROGENEOUS_OBJECT_OFFSET_ROWS = _reset_object_offset_rows()
+"""Task object reset在记录episode anchor前应用的per-asset position offset，单位m。"""
+
 _GROUP_MANIFEST = CanonicalHandGroupManifest(
     schema_version=CANONICAL_HAND_SCHEMA_V1.version,
     schema_digest=CANONICAL_HAND_SCHEMA_V1.digest,
@@ -286,5 +308,6 @@ __all__ = [
     "HETEROGENEOUS_PREPARED_CACHE_HIT",
     "HETEROGENEOUS_Q_HOME_ROWS",
     "HETEROGENEOUS_RESET_Q_ROWS",
+    "HETEROGENEOUS_OBJECT_OFFSET_ROWS",
     "PPO_DATASET",
 ]

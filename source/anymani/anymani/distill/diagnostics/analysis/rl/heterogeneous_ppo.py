@@ -10,6 +10,7 @@ import argparse
 import math
 from pathlib import Path
 from statistics import mean
+from types import SimpleNamespace
 from typing import Any
 
 import yaml
@@ -45,9 +46,45 @@ def _series_summary(events, *, window: int = 20) -> dict[str, Any]:
         "last_value": values[-1],
         "first_window_mean": mean(first),
         "last_window_mean": mean(last),
+        "min_value": min(values),
+        "max_value": max(values),
         "finite_count": len(finite),
         "non_finite_count": len(values) - len(finite),
     }
+
+
+def _cell_series_summary(
+    metric_events,
+    count_events,
+    *,
+    window: int = 20,
+    metric_is_sum: bool = False,
+) -> dict[str, Any]:
+    r"""按episode_count过滤无样本cohort，并恢复cell内均值。
+
+    新固定-key logger把cell numerator/mean与count以同一reset-cohort权重写入TensorBoard，二者比值恢复
+    cell内mean。旧dynamic-key run的count可大于1且metric已是raw mean，此时不做比值变换。
+    """
+
+    counts = {int(event.step): float(event.value) for event in count_events}
+    old_dynamic_schema = any(value > 1.0 for value in counts.values()) and not metric_is_sum
+    recovered = []
+    for event in metric_events:
+        count = counts.get(int(event.step), 0.0)
+        if count <= 0.0:
+            continue
+        value = float(event.value) if old_dynamic_schema else float(event.value) / count
+        recovered.append(SimpleNamespace(step=int(event.step), value=value))
+    summary = _series_summary(recovered, window=window)
+    summary["observed_reset_cohorts"] = len(recovered)
+    summary["logging_schema"] = (
+        "sum_over_episode_count"
+        if metric_is_sum
+        else "dynamic_raw_mean"
+        if old_dynamic_schema
+        else "fixed_key_legacy_mean_over_count"
+    )
+    return summary
 
 
 def analyze_heterogeneous_ppo(event_path: Path) -> dict[str, Any]:
@@ -87,9 +124,10 @@ def analyze_heterogeneous_ppo(event_path: Path) -> dict[str, Any]:
     cell_metrics: dict[str, Any] = {}
     for label in CELL_LABELS:
         prefix = f"Episode/Metrics/goal_pose/cell/{label}/"
-        metrics = {}
+        count_tag = prefix + "episode_count"
+        count_events = accumulator.Scalars(count_tag) if count_tag in tags else []
+        metrics = {"episode_count": _series_summary(count_events)}
         for metric_name in (
-            "episode_count",
             "goal_success_count",
             "net_rotation_turns",
             "position_error",
@@ -97,8 +135,18 @@ def analyze_heterogeneous_ppo(event_path: Path) -> dict[str, Any]:
             "contact/finger_non_tip_occupancy_fraction",
             "termination/object_out_of_anchor_fraction",
         ):
-            tag = prefix + metric_name
-            metrics[metric_name] = _series_summary(accumulator.Scalars(tag)) if tag in tags else {"count": 0}
+            sum_tag = prefix + metric_name + "_sum"
+            legacy_tag = prefix + metric_name
+            tag = sum_tag if sum_tag in tags else legacy_tag
+            metrics[metric_name] = (
+                _cell_series_summary(
+                    accumulator.Scalars(tag),
+                    count_events,
+                    metric_is_sum=tag == sum_tag,
+                )
+                if tag in tags and count_events
+                else {"count": 0}
+            )
         cell_metrics[label] = metrics
 
     required = ("reward", "episode_length", "actor_kl", "central_value_loss", "goal_success", "net_rotation_turns")

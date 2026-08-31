@@ -45,6 +45,9 @@ HETEROGENEOUS_MASKED_OBS_DIM = HETEROGENEOUS_N000_FRAME_DIM + HETEROGENEOUS_ROUT
 HETEROGENEOUS_CRITIC_OBS_DIM = 103
 """N000 privileged state 删除 ADR 48D 与 reward-release 1D 后的 central critic 维度。"""
 
+HETEROGENEOUS_N040_CRITIC_OBS_DIM = 127
+"""N040 task-aware critic：103D state + active mask16 + morphology cell one-hot8。"""
+
 HETEROGENEOUS_HISTORY_LENGTH = 30
 """20 Hz下覆盖1.5 s的逐JOINT raw history长度。"""
 
@@ -353,6 +356,7 @@ __all__ = [
     "HETEROGENEOUS_MASKED_OBS_DIM",
     "HETEROGENEOUS_N000_FRAME_DIM",
     "HETEROGENEOUS_N040_HISTORY_OBS_DIM",
+    "HETEROGENEOUS_N040_CRITIC_OBS_DIM",
     "HETEROGENEOUS_ROUTE_DIM",
     "HeterogeneousN000MaskedPpoBuilder",
     "HeterogeneousN000MaskedPpoNetwork",
