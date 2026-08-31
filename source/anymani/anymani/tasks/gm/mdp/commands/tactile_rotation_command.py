@@ -159,11 +159,53 @@ class TactileRotationCommand(CommandTerm):
         diagnostics = self._ensure_diagnostics_initialized()
         if diagnostics is not None:
             diagnostics.capture_terminal(self._env, ids)  # 必须先冻结 terminal causes，再由 super 取 subset mean
+        cell_extras = self._morphology_cell_extras(ids)  # 必须在super清零per-env metrics前分组
         extras = super().reset(env_ids)  # 先记录旧 episode metrics；内部会按当前 pose resample goal
+        extras.update(cell_extras)
         self._capture_reset_state(ids)  # object reset event 已执行，此处读取本 episode 真实 reset pose
         self._refresh_goal_errors(_mask_from_ids(self.num_envs, ids, self.device))  # 新 anchor 下同步 success/termination 双门
         if diagnostics is not None:
             diagnostics.reset(self._env, ids)  # super 已清旧 metrics；此处写入新 episode actual ADR snapshot
+        return extras
+
+    def _morphology_cell_extras(self, ids: torch.Tensor) -> dict[str, float]:
+        r"""在reset subset内按固定八组聚合关键episode metrics。
+
+        Cell metadata只用于logging，不进入actor。某次reset没有该cell时不生成key，避免把缺样本误写为0。
+        """
+
+        cell_ids = getattr(self._env, "_anymani_morphology_cell_id", None)
+        if not isinstance(cell_ids, torch.Tensor) or cell_ids.shape != (self.num_envs,):
+            return {}
+        labels = (
+            "left_tips3_thumb3dof",
+            "left_tips3_thumb4dof",
+            "left_tips4_thumb3dof",
+            "left_tips4_thumb4dof",
+            "right_tips3_thumb3dof",
+            "right_tips3_thumb4dof",
+            "right_tips4_thumb3dof",
+            "right_tips4_thumb4dof",
+        )
+        metric_names = (
+            "goal_success_count",
+            "net_rotation_turns",
+            "position_error",
+            "contact/tip_active_count_mean",
+            "contact/finger_non_tip_occupancy_fraction",
+            "termination/object_out_of_anchor_fraction",
+        )
+        extras: dict[str, float] = {}
+        reset_cells = cell_ids[ids]
+        for cell_id, label in enumerate(labels):
+            member_ids = ids[reset_cells == cell_id]
+            if member_ids.numel() == 0:
+                continue
+            extras[f"cell/{label}/episode_count"] = float(member_ids.numel())
+            for metric_name in metric_names:
+                metric = self.metrics.get(metric_name)
+                if isinstance(metric, torch.Tensor):
+                    extras[f"cell/{label}/{metric_name}"] = float(metric[member_ids].mean().item())
         return extras
 
     def ensure_post_physics_progress_updated(self, env: ManagerBasedRLEnv | None = None) -> None:

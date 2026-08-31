@@ -42,6 +42,7 @@ from ...contact_sensors import install_contact_sensors
 from .asset_runtime import (
     HETEROGENEOUS_ACTIVE_MASK_ROWS,
     HETEROGENEOUS_ASSET_ROWS,
+    HETEROGENEOUS_CELL_ID_ROWS,
     HETEROGENEOUS_CONTACT_LAYOUT,
     HETEROGENEOUS_HAND_ADAPTER,
     HETEROGENEOUS_HAND_SPAWN_CFG,
@@ -338,6 +339,7 @@ class HeterogeneousEventsCfg:
             "active_joint_mask": HETEROGENEOUS_ACTIVE_MASK_ROWS,
             "asset_rows": HETEROGENEOUS_ASSET_ROWS,
             "q_home": HETEROGENEOUS_Q_HOME_ROWS,
+            "morphology_cell_ids": HETEROGENEOUS_CELL_ID_ROWS,
             "routing_mode": "round_robin",
         },
     )

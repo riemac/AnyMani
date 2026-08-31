@@ -505,6 +505,7 @@ def initialize_canonical_runtime_state(
     active_joint_mask: torch.Tensor | Sequence[bool] | Sequence[Sequence[bool]],
     asset_rows: torch.Tensor | Sequence[int] | None = None,
     q_home: torch.Tensor | Sequence[Sequence[float]] | None = None,
+    morphology_cell_ids: torch.Tensor | Sequence[int] | None = None,
     routing_mode: Literal["explicit", "round_robin"] = "explicit",
 ) -> None:
     r"""安装 canonical per-env active mask 与 evidence-bank asset row。
@@ -533,6 +534,12 @@ def initialize_canonical_runtime_state(
                 raise ValueError("round_robin q_home must provide one [16] row per canonical asset")
             selectors = torch.arange(env.num_envs, device=env.device) % q_home_rows.shape[0]
             setattr(env, "_anymani_canonical_q_home", q_home_rows[selectors])
+        if morphology_cell_ids is not None:
+            cell_rows = torch.as_tensor(morphology_cell_ids, dtype=torch.long, device=env.device)
+            if cell_rows.shape != (torch.as_tensor(active_joint_mask).shape[0],):
+                raise ValueError("round_robin morphology_cell_ids must provide one scalar per canonical asset")
+            selectors = torch.arange(env.num_envs, device=env.device) % cell_rows.shape[0]
+            setattr(env, "_anymani_morphology_cell_id", cell_rows[selectors])
         return
     if routing_mode != "explicit":
         raise ValueError(f"unsupported canonical routing_mode: {routing_mode!r}")
@@ -587,6 +594,11 @@ def initialize_canonical_runtime_state(
             setattr(env, "_anymani_canonical_q_home", full_home)
         else:
             raise ValueError("explicit q_home must have shape [K,16] or [num_envs,16]")
+    if morphology_cell_ids is not None:
+        cells = torch.as_tensor(morphology_cell_ids, dtype=torch.long, device=env.device)
+        if cells.shape != (env.num_envs,):
+            raise ValueError("explicit morphology_cell_ids must have shape [num_envs]")
+        setattr(env, "_anymani_morphology_cell_id", cells)
 
 
 def lock_canonical_ghost_joint_limits(

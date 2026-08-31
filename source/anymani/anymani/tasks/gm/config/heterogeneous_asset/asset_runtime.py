@@ -152,6 +152,20 @@ HETEROGENEOUS_ACTIVE_MASK_ROWS = tuple(
 )
 """`[A,16]` JSON-safe active action/observation masks。"""
 
+
+def _morphology_cell_id(artifact) -> int:
+    r"""推导handedness×TIP-count×thumb-DoF固定八组ID；忽略binary family。"""
+
+    routing = artifact.routing
+    handedness_offset = 0 if routing.handedness == "left" else 4
+    tip_offset = 0 if sum(routing.active_tip_mask) == 3 else 2
+    thumb_offset = 0 if sum(routing.active_joint_mask[index] for index in (3, 7, 11, 15)) == 3 else 1
+    return handedness_offset + tip_offset + thumb_offset
+
+
+HETEROGENEOUS_CELL_ID_ROWS = tuple(_morphology_cell_id(artifact) for artifact in HETEROGENEOUS_CANONICAL_ARTIFACTS)
+"""与local canonical asset rows同序的固定`0..7`diagnostic/ADR cell IDs。"""
+
 HETEROGENEOUS_ASSET_ROWS = tuple(range(len(HETEROGENEOUS_CANONICAL_ARTIFACTS)))
 """frozen-$Z$/manifest 的离散 dataset row ``0..A-1``。"""
 
@@ -233,6 +247,7 @@ if (
 
 __all__ = [
     "HETEROGENEOUS_ACTIVE_MASK_ROWS",
+    "HETEROGENEOUS_CELL_ID_ROWS",
     "HETEROGENEOUS_ASSET_ROWS",
     "HETEROGENEOUS_CANONICAL_ARTIFACTS",
     "HETEROGENEOUS_CONTACT_LAYOUT",

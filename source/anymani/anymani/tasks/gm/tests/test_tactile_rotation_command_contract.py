@@ -178,6 +178,28 @@ def test_progress_refresh_is_immediate_and_idempotent_per_step() -> None:
     assert torch.allclose(command.axis_speed, torch.tensor([2.0, -2.0]), atol=1.0e-4)
 
 
+def test_morphology_cell_extras_preserve_reset_subset_group_means() -> None:
+    r"""Command super-reset标量化前必须按cell保留per-env episode evidence。"""
+
+    command = _fake_command(batch=4)
+    command._env._anymani_morphology_cell_id = torch.tensor([0, 0, 1, 1])
+    command.metrics = {
+        "goal_success_count": torch.tensor([1.0, 3.0, 2.0, 6.0]),
+        "net_rotation_turns": torch.tensor([0.1, 0.3, 0.2, 0.6]),
+        "position_error": torch.zeros(4),
+        "contact/tip_active_count_mean": torch.ones(4),
+        "contact/finger_non_tip_occupancy_fraction": torch.zeros(4),
+        "termination/object_out_of_anchor_fraction": torch.zeros(4),
+    }
+
+    extras = command._morphology_cell_extras(torch.arange(4))
+
+    assert extras["cell/left_tips3_thumb3dof/episode_count"] == 2.0
+    assert extras["cell/left_tips3_thumb3dof/goal_success_count"] == 2.0
+    assert extras["cell/left_tips3_thumb4dof/goal_success_count"] == 4.0
+    assert "cell/left_tips4_thumb3dof/goal_success_count" not in extras  # 无样本cell不伪造零值
+
+
 def test_partial_reset_preserves_other_env_and_blocks_same_stamp_delta() -> None:
     r"""partial reset 只清目标 env，并使 reset observation 不累计同 stamp 伪旋转。"""
 
