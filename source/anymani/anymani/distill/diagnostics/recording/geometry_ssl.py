@@ -28,7 +28,7 @@ class GeometrySSLRunLogger:
     train 与 validation 通过 ``split`` 命名空间隔离，official evaluation 由独立冻结后流程记录。
     """
 
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(self, output_dir: Path, *, purge_step: int | None = None) -> None:
         r"""创建输出目录、TensorBoard writer 和 append-only JSONL。
 
         Args:
@@ -37,9 +37,34 @@ class GeometrySSLRunLogger:
 
         output_dir.mkdir(parents=True, exist_ok=True)  # 只创建本次实验目录，不扫描其他 runs
         self.output_dir = output_dir  # NPZ 与结构化记录共同根
-        self.writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))  # event 文件
+        self.writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"), purge_step=purge_step)  # event 文件
         self.jsonl_path = output_dir / "metrics.jsonl"  # append-only 标量证据
         self.runtime_jsonl_path = output_dir / "runtime.jsonl"  # window/memory/throughput 生命周期证据
+
+    def continuation_offsets(self) -> dict[str, int]:
+        r"""刷新 TensorBoard，并返回两个 JSONL 的 epoch-transaction byte offsets。"""
+
+        self.writer.flush()
+        return {
+            "metrics_jsonl_bytes": self.jsonl_path.stat().st_size if self.jsonl_path.is_file() else 0,
+            "runtime_jsonl_bytes": self.runtime_jsonl_path.stat().st_size if self.runtime_jsonl_path.is_file() else 0,
+        }
+
+    def restore_continuation(self, offsets: Mapping[str, int], *, purge_step: int) -> None:
+        r"""把 JSONL 截到 recovery epoch barrier，并以 TensorBoard purge step 重开 writer。"""
+
+        for name, path in (("metrics_jsonl_bytes", self.jsonl_path), ("runtime_jsonl_bytes", self.runtime_jsonl_path)):
+            raw_offset = offsets.get(name)
+            if not isinstance(raw_offset, int) or raw_offset < 0:
+                raise ValueError(f"recovery logger offset {name!r} must be a non-negative integer")
+            current_size = path.stat().st_size if path.is_file() else 0
+            if current_size < raw_offset:
+                raise ValueError(f"recovery logger file {path} is shorter than checkpoint offset")
+            if path.is_file():
+                with path.open("r+b") as stream:
+                    stream.truncate(raw_offset)
+        self.writer.close()
+        self.writer = SummaryWriter(log_dir=str(self.output_dir / "tensorboard"), purge_step=purge_step)
 
     def log_runtime_event(self, event: dict[str, Any]) -> None:
         r"""追加一条 resident-window 或 optimizer-update 运行时事件。

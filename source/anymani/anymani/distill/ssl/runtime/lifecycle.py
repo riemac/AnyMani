@@ -164,13 +164,18 @@ def _restore_sampling_state(
     payload: dict[str, Any],
     schedule: OnlineMinibatchSchedule,
     session: Any,
+    *,
+    allow_completed_budget_extension: bool = False,
 ) -> None:
-    r"""严格恢复 Trainer schedule 与 opaque Method session state。"""
+    r"""恢复 Trainer/session；显式 extension 只放行已耗尽旧 schedule 的总预算上界。"""
 
     raw_schedule = payload.get("schedule")
     if not isinstance(raw_schedule, dict):
         raise ValueError("checkpoint lacks schema 9 epoch/minibatch state")
-    schedule.load_state_dict(raw_schedule)
+    schedule.load_state_dict(
+        raw_schedule,
+        allow_completed_budget_extension=allow_completed_budget_extension,
+    )
     raw_session = payload.get("method_session")
     if not isinstance(raw_session, dict):
         raise ValueError("checkpoint lacks method session state")
@@ -434,6 +439,7 @@ def fit_embodiment_pretrain(
     source_ref_count = 0
     source_ref_digest = hashlib.sha256(b"anymani-source-artifact-ref-log-v1\0")
     source_ref_path = output_dir / "source_artifacts.jsonl"
+    lineage_metrics_path: Path | None = None  # extension child 的 finalized metrics 只读 prefix
     automatic_recovery = output_dir / "checkpoints" / "recovery.pt"
     resume_path = (
         Path(run.config.resume_checkpoint).expanduser().resolve()
@@ -484,6 +490,7 @@ def fit_embodiment_pretrain(
             "source_artifact_ref_digest": source_ref_digest.hexdigest(),
             "source_artifact_ref_bytes": source_ref_byte_offset,
             "log_continuation_offsets": dict(log_continuation_offsets),
+            "lineage_metrics_path": str(lineage_metrics_path) if lineage_metrics_path is not None else "",
             "torch_rng_state": torch.get_rng_state(),
             "cuda_rng_state_all": torch.cuda.get_rng_state_all(),
         }
@@ -528,11 +535,58 @@ def fit_embodiment_pretrain(
         checkpoint_resolved = loaded_metadata.get("resolved_config")
         if not isinstance(checkpoint_resolved, dict):
             raise ValueError("resume checkpoint lacks resolved config")
-        require_resume_scientific_config(resolved_config, checkpoint_resolved)
+        checkpoint_trainer = checkpoint_resolved.get("trainer")
+        current_trainer = resolved_config.get("trainer")
+        if not isinstance(checkpoint_trainer, dict) or not isinstance(current_trainer, dict):
+            raise ValueError("resume checkpoint/current config lacks trainer mapping")
+        checkpoint_max_epochs = checkpoint_trainer.get("max_epochs")
+        current_max_epochs = current_trainer.get("max_epochs")
+        if not isinstance(checkpoint_max_epochs, int) or not isinstance(current_max_epochs, int):
+            raise ValueError("resume checkpoint/current trainer lacks integer max_epochs")
+        is_budget_extension = current_max_epochs > checkpoint_max_epochs
+        require_resume_scientific_config(
+            resolved_config,
+            checkpoint_resolved,
+            allow_completed_budget_extension=is_budget_extension and bool(run.config.extend_completed_run),
+            allow_experiment_identity_change=(
+                is_budget_extension
+                and bool(run.config.extend_completed_run)
+                and bool(run.config.allow_worktree_change)
+            ),
+        )
+        source_run_root = resume_path.parent.parent
+        if is_budget_extension:
+            if not run.config.extend_completed_run:
+                raise ValueError("larger max_epochs requires explicit completed-run extension")
+            if not (source_run_root / "COMPLETE").is_file():
+                raise ValueError("completed-run extension source lacks COMPLETE marker")
+            if (source_run_root / "INCOMPLETE").exists() or (source_run_root / "checkpoints" / "recovery.pt").exists():
+                raise ValueError("completed-run extension source has conflicting incomplete/recovery state")
+            if int(payload["epoch"]) != checkpoint_max_epochs:
+                raise ValueError("completed-run extension checkpoint is not the source budget endpoint")
+            resolved_output = output_dir.resolve()
+            resolved_source = source_run_root.resolve()
+            if resolved_output == resolved_source or resolved_source in resolved_output.parents:
+                raise ValueError("completed-run extension must write to an independent child run")
+            completion: dict[str, str] = {}
+            for line in (source_run_root / "COMPLETE").read_text(encoding="ascii").splitlines():
+                name, separator, value = line.partition("=")
+                if not separator or not name or not value:
+                    raise ValueError("completed-run extension source has malformed COMPLETE marker")
+                completion[name] = value
+            if completion != {
+                "schema": "9.0.0",
+                "epoch": str(checkpoint_max_epochs),
+                "optimizer_update": str(payload["optimizer_update"]),
+            }:
+                raise ValueError("completed-run extension COMPLETE marker disagrees with checkpoint endpoint")
         require_resume_metadata_identity(
             asdict(metadata()),
             loaded_metadata,
             allow_worktree_change=bool(run.config.allow_worktree_change),
+            extension_source_package_version=(
+                run.config.extension_source_package_version if is_budget_extension else ""
+            ),
         )
         state = dict(payload["trainer_state"])
         for name in ("completed_epochs", "optimizer_update", "new_pairs_seen", "pair_uses", "teacher_pairs_realized"):
@@ -574,18 +628,51 @@ def fit_embodiment_pretrain(
         # 即使 prefix 为空也要截断旧的中断尾巴，否则后续 byte offset 会包含未被 digest 覆盖的行。
         source_ref_path.write_bytes(prefix)
         raw_ref_bytes = state.get("source_artifact_ref_bytes")
-        if not isinstance(raw_ref_bytes, int) or raw_ref_bytes < 0 or len(prefix) != raw_ref_bytes:
+        if not isinstance(raw_ref_bytes, int) or raw_ref_bytes < 0:
+            raise ValueError("resume checkpoint lacks a valid source ref byte offset")
+        if len(prefix) != raw_ref_bytes and not is_budget_extension:
             raise ValueError("resume checkpoint source ref byte offset disagrees with validated prefix")
-        source_ref_byte_offset = raw_ref_bytes
+        # 旧 immutable epoch checkpoint 在 count/digest 后、byte offset 前落盘；extension 已由完整 prefix digest
+        # 验证内容，因此可迁移到实际长度。普通 recovery 仍要求三者逐值一致。
+        source_ref_byte_offset = len(prefix)
         raw_log_offsets = state.get("log_continuation_offsets")
         if not isinstance(raw_log_offsets, Mapping):
             raise ValueError("resume checkpoint lacks logger continuation offsets")
-        log_continuation_offsets = {str(name): int(value) for name, value in raw_log_offsets.items()}
-        logger.restore_continuation(log_continuation_offsets, purge_step=optimizer_update + 1)
+        if is_budget_extension:
+            source_metrics_path = source_run_root / "metrics.jsonl"
+            if not source_metrics_path.is_file():
+                raise ValueError("completed-run extension source lacks metrics.jsonl prefix")
+            prefix_updates: list[int] = []
+            for line_number, line in enumerate(source_metrics_path.read_text(encoding="utf-8").splitlines(), start=1):
+                record = json.loads(line)
+                update = record.get("optimizer_update")
+                if not isinstance(update, int):
+                    raise ValueError(f"extension metrics prefix line {line_number} lacks optimizer_update")
+                prefix_updates.append(update)
+            if prefix_updates != list(range(1, optimizer_update + 1)):
+                raise ValueError("completed-run extension metrics prefix is not a complete update sequence")
+            lineage_metrics_path = source_metrics_path
+            log_continuation_offsets = {"metrics_jsonl_bytes": 0, "runtime_jsonl_bytes": 0}
+            logger.restore_continuation(log_continuation_offsets, purge_step=optimizer_update + 1)
+        else:
+            log_continuation_offsets = {str(name): int(value) for name, value in raw_log_offsets.items()}
+            logger.restore_continuation(log_continuation_offsets, purge_step=optimizer_update + 1)
+            raw_lineage_metrics_path = state.get("lineage_metrics_path", "")
+            if raw_lineage_metrics_path:
+                if not isinstance(raw_lineage_metrics_path, str):
+                    raise ValueError("resume checkpoint lineage_metrics_path must be a string")
+                lineage_metrics_path = Path(raw_lineage_metrics_path).expanduser().resolve()
+                if not lineage_metrics_path.is_file():
+                    raise ValueError("resume checkpoint metrics lineage prefix does not exist")
         sampling_state = state.get("sampling")
         if not isinstance(sampling_state, dict):
             raise ValueError("resume checkpoint lacks Trainer sampling state")
-        _restore_sampling_state(sampling_state, train_schedule, train_session)
+        _restore_sampling_state(
+            sampling_state,
+            train_schedule,
+            train_session,
+            allow_completed_budget_extension=is_budget_extension,
+        )
         torch_rng_state = state.get("torch_rng_state")
         cuda_rng_state = state.get("cuda_rng_state_all")
         if not isinstance(torch_rng_state, torch.Tensor):
@@ -897,6 +984,9 @@ def fit_embodiment_pretrain(
                         }
                     )
                     del snapshot_input, snapshot_prediction, snapshot_batch
+                # Immutable checkpoint 必须记录包含本 epoch 全部 JSONL/source refs 的 transaction barrier。
+                log_continuation_offsets = logger.continuation_offsets()
+                source_ref_byte_offset = source_ref_path.stat().st_size if source_ref_path.is_file() else 0
                 save_checkpoint(output_dir / "checkpoints" / f"epoch_{completed_epochs:06d}.pt")
                 print(
                     "[SSL checkpoint]\n"
@@ -932,11 +1022,7 @@ def fit_embodiment_pretrain(
         logger.finalize_training_metrics(
             teacher_baselines=teacher_baselines,
             expected_optimizer_updates=optimizer_update,
-            lineage_metrics_path=(
-                resume_path.parent.parent / "metrics.jsonl"
-                if resume_path is not None
-                else None
-            ),
+            lineage_metrics_path=lineage_metrics_path,
         )
         _write_yaml(
             output_dir / "training_summary.yaml",

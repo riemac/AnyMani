@@ -86,6 +86,44 @@ def test_schedule_checkpoint_rejects_budget_drift() -> None:
         changed.load_state_dict(state)
 
 
+def test_completed_schedule_can_explicitly_extend_only_its_total_epoch_budget() -> None:
+    r"""显式 extension 从旧终点继续无状态 cycle permutation，不放行普通 resume 的预算漂移。"""
+
+    config = OnlineSamplingCfg(assets_per_minibatch=2, q_per_asset_per_minibatch=1, seed=67)
+    prefix = OnlineMinibatchSchedule(8, config, max_epochs=2, num_minibatches=2)
+    for _ in range(prefix.total_minibatches):
+        prefix.next()
+    state = prefix.state_dict()
+    assert state["permutation"] == ()
+
+    extension = OnlineMinibatchSchedule(8, config, max_epochs=4, num_minibatches=2)
+    with pytest.raises(ValueError, match="max_epochs"):
+        extension.load_state_dict(state)
+    extension.load_state_dict(state, allow_completed_budget_extension=True)
+    assert extension.completed_epochs == 2
+    assert extension.next().q_block_index == 1
+
+
+def test_budget_extension_rejects_incomplete_prefix_or_nonincreasing_budget() -> None:
+    r"""Extension 只能承接旧 run 的完整终点，不能绕过 incomplete recovery 或缩短预算。"""
+
+    config = OnlineSamplingCfg(assets_per_minibatch=2, q_per_asset_per_minibatch=1, seed=71)
+    incomplete = OnlineMinibatchSchedule(8, config, max_epochs=3, num_minibatches=2)
+    incomplete.next()
+    incomplete.next()
+    incomplete_state = incomplete.state_dict()
+    target = OnlineMinibatchSchedule(8, config, max_epochs=4, num_minibatches=2)
+    with pytest.raises(ValueError, match="completed source budget"):
+        target.load_state_dict(incomplete_state, allow_completed_budget_extension=True)
+
+    complete = OnlineMinibatchSchedule(8, config, max_epochs=3, num_minibatches=2)
+    for _ in range(complete.total_minibatches):
+        complete.next()
+    smaller = OnlineMinibatchSchedule(8, config, max_epochs=2, num_minibatches=2)
+    with pytest.raises(ValueError, match="increase max_epochs"):
+        smaller.load_state_dict(complete.state_dict(), allow_completed_budget_extension=True)
+
+
 def test_schedule_refuses_checkpoint_inside_epoch() -> None:
     r"""未消费完当前 epoch 的 teacher buffer 时不得发布可恢复状态。"""
 

@@ -7,6 +7,7 @@ minibatch/Sobol/RNG 状态，并拒绝当前 CLI 与 checkpoint 之间的科学�
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path  # immutable epoch checkpoint 与 mutable alias 发布路径
 
 from anymani.distill.ssl.experiment import EmbodimentPretrainCfg, resolved_config_dict
@@ -15,7 +16,7 @@ from anymani.distill.ssl.experiment import EmbodimentPretrainCfg, resolved_confi
 def resume_scientific_config(config: EmbodimentPretrainCfg | dict[str, object]) -> dict[str, object]:
     r"""返回 resume 必须一致的科学配置，只排除 output/resume 定位与源码变更授权开关。"""
 
-    payload = resolved_config_dict(config) if isinstance(config, EmbodimentPretrainCfg) else dict(config)
+    payload = deepcopy(resolved_config_dict(config) if isinstance(config, EmbodimentPretrainCfg) else dict(config))
     run = payload.get("run")
     if not isinstance(run, dict):
         raise ValueError("resolved geometry SSL config lacks run mapping")
@@ -29,6 +30,8 @@ def resume_scientific_config(config: EmbodimentPretrainCfg | dict[str, object]) 
             "resume_checkpoint",
             "new_run",
             "allow_worktree_change",
+            "extend_completed_run",
+            "extension_source_package_version",
         }
     }  # seed/deterministic_algorithms 属于科学轨迹，只排除 artifact 定位字段
     return payload
@@ -37,14 +40,39 @@ def resume_scientific_config(config: EmbodimentPretrainCfg | dict[str, object]) 
 def require_resume_scientific_config(
     current: EmbodimentPretrainCfg | dict[str, object],
     checkpoint_resolved: dict[str, object],
+    *,
+    allow_completed_budget_extension: bool = False,
+    allow_experiment_identity_change: bool = False,
 ) -> None:
-    r"""拒绝当前 CLI 与 checkpoint 的任一 scientific config 漂移。"""
+    r"""拒绝 scientific drift；显式 completed extension 只允许总 epoch 上界严格增加。"""
 
     schema = checkpoint_resolved.get("schema_version")
     if schema != "9.0.0":
         raise ValueError("resume checkpoint must contain schema 9 resolved configuration")
     expected = resume_scientific_config(checkpoint_resolved)
     actual = resume_scientific_config(current)
+    if allow_experiment_identity_change:
+        expected_identity = expected.pop("experiment_identity", None)
+        actual_identity = actual.pop("experiment_identity", None)
+        if not isinstance(expected_identity, dict) or not isinstance(actual_identity, dict):
+            raise ValueError("experiment identity migration requires two identity mappings")
+        if any(
+            expected_identity.get(name) != actual_identity.get(name)
+            for name in ("name", "module", "path")
+        ):
+            raise ValueError("experiment identity migration may change only snapshot sha256")
+    if allow_completed_budget_extension:
+        expected_trainer = expected.get("trainer")
+        actual_trainer = actual.get("trainer")
+        if not isinstance(expected_trainer, dict) or not isinstance(actual_trainer, dict):
+            raise ValueError("completed budget extension requires trainer mappings")
+        old_max_epochs = expected_trainer.get("max_epochs")
+        new_max_epochs = actual_trainer.get("max_epochs")
+        if not isinstance(old_max_epochs, int) or not isinstance(new_max_epochs, int):
+            raise ValueError("completed budget extension requires integer max_epochs")
+        if new_max_epochs <= old_max_epochs:
+            raise ValueError("completed budget extension must strictly increase max_epochs")
+        expected_trainer["max_epochs"] = new_max_epochs
     if actual != expected:
         changed_sections = tuple(key for key in expected.keys() | actual.keys() if expected.get(key) != actual.get(key))
         raise ValueError(f"resume scientific config mismatch in sections={changed_sections}")
@@ -55,6 +83,7 @@ def require_resume_metadata_identity(
     checkpoint: Mapping[str, object],
     *,
     allow_worktree_change: bool = False,
+    extension_source_package_version: str = "",
 ) -> None:
     r"""拒绝代码/公式/source 漂移，只在显式授权时放行已验证源码修复的 code/worktree 变化。
 
@@ -66,7 +95,6 @@ def require_resume_metadata_identity(
     """
 
     fields = (
-        "package_version",
         "geometry_semantics_schema",
         "declared_objective",
         "objective_formula",
@@ -75,6 +103,11 @@ def require_resume_metadata_identity(
         "source_artifact",
         "worktree_dirty",
     )
+    if extension_source_package_version:
+        if checkpoint.get("package_version") != extension_source_package_version:
+            raise ValueError("resume checkpoint package_version does not match explicit extension source package")
+    else:
+        fields = ("package_version", *fields)
     changed = tuple(name for name in fields if current.get(name) != checkpoint.get(name))
     if not allow_worktree_change and current.get("code_revision") != checkpoint.get("code_revision"):
         changed += ("code_revision",)

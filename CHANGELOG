@@ -6,6 +6,7 @@
 - 新增独立 N040 encoder/model/method/config 与 `geometry_ssl_density_material_jacobian_se3_v0_8_1` snapshot。Architecture-only Z parity 在迁移 N031 权重和 one-cycle trained checkpoint 上分别为约 `3.7e-7` 和 `2.1e-7`，因此不加入 paired-Z consistency loss。
 - Schema-5 retained artifact 增加显式 `encoder_type=se3_invariant`，防止与 legacy frontend 同形的参数在 PPO 侧被错误重建；canonical RTX 5070 Ti、`B=4096` retained p95 为 `34.18 ms`，低于 40 ms 门槛。
 - 完成 one-cycle 8192-asset medium 与两个 16,384-pair replication seeds。三 seed 无发散或 channel collapse；matched cycle-1 相对 N031 的 early density/Gamma skill 分别低约 1.8/4.3 个百分点，进入 12-cycle 正式训练继续验收渐近质量。
+- 完成 N031/N040 matched 12→16 cycle completed-run extension。N040 16-cycle held-out density为 `74.88/74.98%`，Gamma为 `86.41/86.55%`，contact F1约`0.834`，full-SE3 Z relative-L2 `3.14e-7`；该 artifact成为N040 headline推荐checkpoint。N031 16-cycle density/Gamma为 `76.61--76.69% / 88.06--88.14%`，保留为辅助指标性能锚点。
 
 0.8.0 - 2026-08-30
 ==================

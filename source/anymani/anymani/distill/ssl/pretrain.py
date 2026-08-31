@@ -41,6 +41,19 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow an explicitly validated dirty-worktree source fix when resuming an incomplete run",
     )
+    parser.add_argument(
+        "--extend_completed_run",
+        "--extend-completed-run",
+        action="store_true",
+        help="start an independent child run by extending a completed checkpoint to a larger max_epochs budget",
+    )
+    parser.add_argument(
+        "--extension_source_package_version",
+        "--extension-source-package-version",
+        type=str,
+        default=None,
+        help="exact source checkpoint package version for an explicitly reviewed cross-release extension",
+    )
     parser.add_argument("--source_cache_root", type=str, default=None)
     parser.add_argument("--source_cache_mode", choices=("auto", "readonly", "read-write", "off"), default=None)
     # 显式数据预算直接决定本次生成多少资产/q 样本以及循环利用几次。
@@ -80,6 +93,8 @@ def _config_overrides(args: argparse.Namespace) -> tuple[str, ...]:
         ("resume_checkpoint", "run.resume_checkpoint"),
         ("new_run", "run.new_run"),
         ("allow_worktree_change", "run.allow_worktree_change"),
+        ("extend_completed_run", "run.extend_completed_run"),
+        ("extension_source_package_version", "run.extension_source_package_version"),
         ("source_cache_root", "run.source_cache_root"),
         ("source_cache_mode", "run.source_cache_mode"),
         ("max_epochs", "trainer.max_epochs"),

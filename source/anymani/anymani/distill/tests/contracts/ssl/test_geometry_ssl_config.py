@@ -43,6 +43,8 @@ def test_experiment_registry_exposes_versioned_and_legacy_snapshots() -> None:
     """registry 必须显式公开当前版本和保留的 legacy 快照。"""
 
     assert available_experiments() == (
+        "geometry_ssl_density_material_jacobian_se3_v0_8_1",
+        "geometry_ssl_density_material_jacobian_v0_8_0",
         "geometry_ssl_multitask_representation_v0_7_3",
         "multi_anchor_gaussian_implicit_field",
     )

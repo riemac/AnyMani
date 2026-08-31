@@ -27,7 +27,12 @@ class PretrainRun:
             experiment_root = Path(self.config.output_dir) / self.config.experiment_name
             explicit = Path(self.config.resume_checkpoint).expanduser() if self.config.resume_checkpoint else None
             if explicit is not None:
-                output_dir = explicit.resolve().parent.parent
+                explicit_run_root = explicit.resolve().parent.parent
+                if (explicit_run_root / "COMPLETE").is_file() and not self.config.extend_completed_run:
+                    raise ValueError("completed training run is immutable; use explicit completed-run extension")
+                # 初次 extension 从 COMPLETE source 建立独立 child；child 自己中断后仍原地恢复。
+                if not self.config.extend_completed_run or (explicit_run_root / "INCOMPLETE").is_file():
+                    output_dir = explicit_run_root
             elif not self.config.new_run and experiment_root.is_dir():
                 candidates = tuple(
                     child
@@ -147,6 +152,8 @@ class PretrainRunCfg:
     source_cache_root: str = "logs/ssl/_cache/geometry_source/v2"
     source_cache_mode: str = "readonly"  # auto 先校验/补建 source，再以 readonly 训练
     allow_worktree_change: bool = False  # 仅显式恢复已验证源码修复，不改变 scientific config
+    extend_completed_run: bool = False  # 从 immutable COMPLETE checkpoint 向更大总 epoch 预算建立独立 child run
+    extension_source_package_version: str = ""  # 跨 release extension 必须逐值声明 source checkpoint package
 
     def __post_init__(self) -> None:
         r"""拒绝空 experiment identity、负随机种子和未知 source cache 模式。"""
@@ -159,6 +166,10 @@ class PretrainRunCfg:
             raise ValueError("source_cache_mode must be 'auto', 'readonly', 'read-write', or 'off'")
         if self.source_cache_mode != "off" and not self.source_cache_root:
             raise ValueError("source_cache_root is required unless source cache mode is off")
+        if self.extend_completed_run and not self.resume_checkpoint:
+            raise ValueError("completed-run extension requires an explicit resume_checkpoint")
+        if self.extension_source_package_version and not self.extend_completed_run:
+            raise ValueError("extension_source_package_version requires completed-run extension")
 
 
 __all__ = ["PretrainRun", "PretrainRunCfg"]

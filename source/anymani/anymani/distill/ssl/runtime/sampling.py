@@ -196,15 +196,28 @@ class OnlineMinibatchSchedule:
             "max_resident_assets": self.max_resident_assets,
         }
 
-    def load_state_dict(self, state: OnlineSamplingState | dict[str, object]) -> None:
-        r"""恢复全局游标，并拒绝预算、seed、窗口或排列身份漂移。"""
+    def load_state_dict(
+        self,
+        state: OnlineSamplingState | dict[str, object],
+        *,
+        allow_completed_budget_extension: bool = False,
+    ) -> None:
+        r"""恢复全局游标；extension 只承接已完全耗尽的较小旧预算。"""
 
         if isinstance(state, dict):
             parsed = sampling_state_from_dict(state)
             if state.get("num_minibatches") != self.num_minibatches:
                 raise ValueError("sampling checkpoint num_minibatches does not match trainer config")
-            if state.get("max_epochs") != self.max_epochs:
-                raise ValueError("sampling checkpoint max_epochs does not match trainer config")
+            stored_max_epochs = state.get("max_epochs")
+            extending_budget = stored_max_epochs != self.max_epochs
+            if extending_budget:
+                if not allow_completed_budget_extension:
+                    raise ValueError("sampling checkpoint max_epochs does not match trainer config")
+                if not isinstance(stored_max_epochs, int) or stored_max_epochs >= self.max_epochs:
+                    raise ValueError("completed budget extension must increase max_epochs")
+                old_total_minibatches = stored_max_epochs * self.num_minibatches
+                if parsed.minibatch_cursor != old_total_minibatches:
+                    raise ValueError("completed budget extension requires a completed source budget")
             if state.get("seed") != self.config.seed:
                 raise ValueError("sampling checkpoint seed does not match trainer config")
             if state.get("max_resident_assets") != self.max_resident_assets:
@@ -213,7 +226,7 @@ class OnlineMinibatchSchedule:
             if not isinstance(raw_permutation, (tuple, list)):
                 raise ValueError("sampling checkpoint permutation must be an integer sequence")
             expected_permutation = tuple()
-            if parsed.minibatch_cursor < self.total_minibatches:
+            if parsed.minibatch_cursor < self.total_minibatches and not extending_budget:
                 cycle_index = parsed.minibatch_cursor // self.minibatches_per_cycle
                 expected_permutation = self._permutation_for_cycle(cycle_index)
             if tuple(raw_permutation) != expected_permutation:
