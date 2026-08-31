@@ -22,6 +22,7 @@ source /home/hac/isaac/env_isaaclab/bin/activate
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import random
@@ -62,6 +63,12 @@ parser.add_argument(
 parser.add_argument("--video", action="store_true", default=False, help="Record a playback video.")
 parser.add_argument("--video_length", type=int, default=1000, help="Recorded video length in policy steps.")
 parser.add_argument("--steps", type=int, default=None, help="Optional max playback steps before auto-exit.")
+parser.add_argument(
+    "--metrics-output",
+    type=str,
+    default=None,
+    help="Optional JSON path for fixed-time morphology-cell episode sum/count metrics.",
+)
 parser.add_argument("--real-time", action="store_true", default=False, help="Run at env step real time if possible.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -146,6 +153,75 @@ def _distill_log_root(agent_cfg: dict) -> Path:
 
     config_name = agent_cfg["params"]["config"]["name"]  # 例如 `gm_single_asset_mlp`
     return ANYMANI_ROOT / "logs" / "distill" / "rl_games" / config_name
+
+
+def _accumulate_cell_episode_metrics(accumulator: dict[str, float], infos: object) -> None:
+    r"""累积CommandTerm写入的绝对cell episode count/sums；忽略非terminal step。"""
+
+    if not isinstance(infos, dict):
+        return
+    mappings = [infos]
+    for container_name in ("log", "episode"):
+        container = infos.get(container_name)
+        if isinstance(container, dict):
+            mappings.append(container)
+    for mapping in mappings:
+        for key, value in mapping.items():
+            if not isinstance(key, str) or "cell/" not in key:
+                continue
+            if not (key.endswith("/episode_count") or key.endswith("_sum")):
+                continue
+            scalar = float(value.item()) if isinstance(value, torch.Tensor) else float(value)
+            if key.startswith("cell/"):
+                key = f"Metrics/goal_pose/{key}"
+            accumulator[key] = accumulator.get(key, 0.0) + scalar
+
+
+def _write_fixed_time_metrics(
+    output_path: str,
+    *,
+    checkpoint: str,
+    seed: int,
+    completed_steps: int,
+    done_count: int,
+    accumulated: dict[str, float],
+) -> None:
+    r"""把固定时长renewal-process统计恢复为各cell及全局episode均值。"""
+
+    cells: dict[str, dict[str, float]] = {}
+    prefix = "Metrics/goal_pose/cell/"
+    for key, value in accumulated.items():
+        if not key.startswith(prefix) or not key.endswith("/episode_count"):
+            continue
+        label = key[len(prefix) : -len("/episode_count")]
+        count = value
+        cell: dict[str, float] = {"episode_count": count}
+        metric_prefix = f"{prefix}{label}/"
+        for metric_key, metric_sum in accumulated.items():
+            if metric_key.startswith(metric_prefix) and metric_key.endswith("_sum"):
+                metric_name = metric_key[len(metric_prefix) : -len("_sum")]
+                cell[metric_name] = metric_sum / count if count > 0.0 else 0.0
+        cells[label] = cell
+    total_count = sum(cell["episode_count"] for cell in cells.values())
+    global_metrics: dict[str, float] = {"episode_count": total_count}
+    metric_names = {name for cell in cells.values() for name in cell if name != "episode_count"}
+    for metric_name in metric_names:
+        numerator = sum(cell.get(metric_name, 0.0) * cell["episode_count"] for cell in cells.values())
+        global_metrics[metric_name] = numerator / total_count if total_count > 0.0 else 0.0
+    output = {
+        "schema_version": "1.0.0",
+        "artifact_type": "anymani.heterogeneous_ppo.fixed_time_evaluation",
+        "checkpoint": str(Path(checkpoint).resolve()),
+        "seed": seed,
+        "completed_policy_steps": completed_steps,
+        "done_count": done_count,
+        "aggregation": "renewal_process_episode_sum_over_count",
+        "global_metrics": global_metrics,
+        "cell_metrics": cells,
+    }
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
 
 
 def _resolve_checkpoint(agent_cfg: dict) -> str:
@@ -254,13 +330,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # 有限步 headless play 验证恢复后的首次 action/step 生命周期；证据不解释策略任务表现。
     timestep = 0
+    accumulated_cell_metrics: dict[str, float] = {}
+    done_count = 0
     record_optional_rl_phase("playback", "start", requested_steps=args_cli.steps)
     while simulation_app.is_running():
         start_time = time.time()
         with torch.inference_mode():
             obs = agent.obs_to_torch(obs)
             actions = agent.get_action(obs, is_deterministic=agent.is_deterministic)
-            obs, _, dones, _ = env.step(actions)
+            obs, _, dones, infos = env.step(actions)
+            step_done_count = int(torch.count_nonzero(dones).item())
+            done_count += step_done_count
+            if step_done_count > 0:
+                _accumulate_cell_episode_metrics(accumulated_cell_metrics, infos)
             if len(dones) > 0 and agent.is_rnn and agent.states is not None:
                 for state in agent.states:
                     state[:, dones, :] = 0.0
@@ -276,6 +358,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             time.sleep(sleep_time)
 
     record_optional_rl_phase("playback", "complete", completed_steps=timestep)
+    if args_cli.metrics_output is not None:
+        _write_fixed_time_metrics(
+            args_cli.metrics_output,
+            checkpoint=resume_path,
+            seed=int(env_cfg.seed),
+            completed_steps=timestep,
+            done_count=done_count,
+            accumulated=accumulated_cell_metrics,
+        )
     env.close()
 
 

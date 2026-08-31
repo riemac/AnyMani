@@ -273,10 +273,18 @@ class HeterogeneousObservationsCfg:
 
 @configclass
 class HeterogeneousN040HistoryObservationsCfg:
-    r"""N040 History30 actor与同一103D privileged critic。"""
+    r"""N040 History30 actor与127D morphology-conditioned privileged critic。"""
 
     policy: ObsGroup = HeterogeneousN040HistoryPolicyObsCfg()
     critic: ObsGroup = HeterogeneousN040CriticObsCfg(history_length=1)
+
+
+@configclass
+class HeterogeneousN040HistoryLegacyCriticObservationsCfg:
+    r"""仅用于恢复已持久化run001/002 checkpoint的1969D actor + 103D critic ABI。"""
+
+    policy: ObsGroup = HeterogeneousN040HistoryPolicyObsCfg()
+    critic: ObsGroup = HeterogeneousCriticObsCfg(history_length=1)
 
 
 @configclass
@@ -307,6 +315,17 @@ class HeterogeneousRewardsCfg:
     failure = RewTerm(
         func=gm_mdp.failure_termination_impulse,
         weight=-50.0,
+        params={"termination_term_names": ("object_out_of_anchor", "goal_axis_misaligned")},
+    )
+
+
+@configclass
+class HeterogeneousFailure100RewardsCfg(HeterogeneousRewardsCfg):
+    r"""稳定化消融：每次anchor/axis failure impulse从-50提高到-100，其余reward不变。"""
+
+    failure = RewTerm(
+        func=gm_mdp.failure_termination_impulse,
+        weight=-100.0,
         params={"termination_term_names": ("object_out_of_anchor", "goal_axis_misaligned")},
     )
 
@@ -433,4 +452,25 @@ class HeterogeneousN040HistoryTactileRotationEnvCfg(HeterogeneousTactileRotation
     actions: HeterogeneousN040HistoryActionsCfg = HeterogeneousN040HistoryActionsCfg()
 
 
-__all__ = ["HeterogeneousN040HistoryTactileRotationEnvCfg", "HeterogeneousTactileRotationEnvCfg"]
+@configclass
+class HeterogeneousN040HistoryLegacyCriticEvalEnvCfg(HeterogeneousN040HistoryTactileRotationEnvCfg):
+    r"""固定评估旧103D central-critic checkpoint；actor与MDP和当前N040 task完全相同。"""
+
+    observations: HeterogeneousN040HistoryLegacyCriticObservationsCfg = (
+        HeterogeneousN040HistoryLegacyCriticObservationsCfg()
+    )
+
+
+@configclass
+class HeterogeneousN040Failure100TactileRotationEnvCfg(HeterogeneousN040HistoryTactileRotationEnvCfg):
+    r"""127D task-aware critic主线的failure=-100单变量稳定化variant。"""
+
+    rewards: HeterogeneousFailure100RewardsCfg = HeterogeneousFailure100RewardsCfg()
+
+
+__all__ = [
+    "HeterogeneousN040HistoryLegacyCriticEvalEnvCfg",
+    "HeterogeneousN040HistoryTactileRotationEnvCfg",
+    "HeterogeneousN040Failure100TactileRotationEnvCfg",
+    "HeterogeneousTactileRotationEnvCfg",
+]

@@ -171,7 +171,8 @@ class TactileRotationCommand(CommandTerm):
     def _morphology_cell_extras(self, ids: torch.Tensor) -> dict[str, float]:
         r"""在reset subset内按固定八组聚合关键episode metrics。
 
-        Cell metadata只用于logging，不进入actor。某次reset没有该cell时不生成key，避免把缺样本误写为0。
+        Cell metadata只用于logging，不进入actor。固定八组keys配合episode count，使TensorBoard和固定评估都能
+        用`sum/count`恢复cell内均值，而不会把无样本时的零值当作观测。
         """
 
         cell_ids = getattr(self._env, "_anymani_morphology_cell_id", None)

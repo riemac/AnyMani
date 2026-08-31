@@ -110,4 +110,34 @@ gym.register(
     },
 )
 
+gym.register(
+    id="AnyMani-GM-HeterogeneousAsset-N040-History30-LegacyCritic-Eval-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            "anymani.tasks.gm.config.heterogeneous_asset.tactile_rotation_env_cfg:"
+            "HeterogeneousN040HistoryLegacyCriticEvalEnvCfg"
+        ),
+        "rl_games_cfg_entry_point": (
+            f"{heterogeneous_agents.__name__}:gm_heterogeneous_n040_history30_ppo.yaml"
+        ),
+    },
+)
+
+gym.register(
+    id="AnyMani-GM-HeterogeneousAsset-N040-History30-Failure100-PPO-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            "anymani.tasks.gm.config.heterogeneous_asset.tactile_rotation_env_cfg:"
+            "HeterogeneousN040Failure100TactileRotationEnvCfg"
+        ),
+        "rl_games_cfg_entry_point": (
+            f"{heterogeneous_agents.__name__}:gm_heterogeneous_n040_history30_ppo.yaml"
+        ),
+    },
+)
+
 __all__ = []
