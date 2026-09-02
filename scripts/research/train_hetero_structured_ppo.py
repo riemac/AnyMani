@@ -27,6 +27,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=4)
     parser.add_argument("--minibatches", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--initial-log-std", type=float, default=-0.5)
     parser.add_argument("--eval-steps", type=int, default=100)
     parser.add_argument("--run-dir", type=Path, required=True)
     return parser.parse_args()
@@ -193,7 +194,7 @@ def main() -> int:
     import gymnasium as gym
     import numpy as np
     import torch
-    from anymani.distill.models.heterogeneous_policy import StructuredActorCriticPackage
+    from anymani.distill.models.heterogeneous_policy import StructuredActorCfg, StructuredActorCriticPackage
     from anymani.distill.models.structured_heterogeneous import StructuredActorObservation
     from anymani.distill.rl.runtime.structured_geometry import build_structured_retained_geometry_provider
     from anymani.distill.rl.structured_ppo import StructuredPpoCfg, collect_rollout, update_ppo
@@ -236,7 +237,9 @@ def main() -> int:
         provider = build_structured_retained_geometry_provider(ASSET_BINDING, device=runtime_env.device)
         # Environment construction may consume RNG; reseed immediately before model init for matched weights。
         torch.manual_seed(ARGS.seed)
-        package = StructuredActorCriticPackage().to(runtime_env.device)
+        package = StructuredActorCriticPackage(
+            actor_cfg=StructuredActorCfg(initial_log_std=ARGS.initial_log_std)
+        ).to(runtime_env.device)
         runtime = StructuredHeterogeneousRuntime(provider, cast(StructuredActorCriticPackage, package)).to(
             runtime_env.device
         )
@@ -339,6 +342,7 @@ def main() -> int:
                 "critic": "masked_pool_d128",
                 "precision": "fp32",
                 "n040_layers": 4,
+                "initial_log_std": ARGS.initial_log_std,
                 "actor_parameters": sum(parameter.numel() for parameter in package.actor.parameters()),
                 "critic_parameters": sum(parameter.numel() for parameter in package.critic.parameters()),
             },
