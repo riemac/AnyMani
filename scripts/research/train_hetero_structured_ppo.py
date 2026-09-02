@@ -117,7 +117,7 @@ def _state_trees_equal(left: Any, right: Any) -> bool:
     import torch
 
     if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
-        return bool(torch.equal(left, right))
+        return bool(torch.equal(left.detach().cpu(), right.detach().cpu()))
     if isinstance(left, dict) and isinstance(right, dict):
         return set(left) == set(right) and all(_state_trees_equal(left[key], right[key]) for key in left)
     if isinstance(left, (list, tuple)) and isinstance(right, type(left)):
