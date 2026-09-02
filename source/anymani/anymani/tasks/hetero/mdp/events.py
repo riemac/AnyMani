@@ -18,6 +18,7 @@ from isaaclab.assets import Articulation, RigidObject
 from anymani.pregrasp import FilePregraspProvider, PregraspLookupKey, PregraspQuery, PregraspRecord, PregraspTier
 from anymani.pregrasp.isaac_runtime import hand_semantic_pose_w, object_pose_w_from_hand
 
+from ..contact_layout import structural_collision_filter_pairs
 from .runtime_state import (
     CANONICAL_JOINT_COUNT,
     HETERO_PREGRASP_STATE_ATTR,
@@ -31,6 +32,84 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from isaaclab.envs import ManagerBasedEnv
+
+
+def apply_structural_collision_filter(
+    env: ManagerBasedEnv,
+    env_ids: Sequence[int] | None,
+    *,
+    robot_prim_path: str,
+    palm_link_name: str,
+    finger_link_chains: Sequence[Sequence[str]],
+) -> None:
+    r"""在prestartup阶段以双向``FilteredPairsAPI``写结构碰撞过滤。"""
+
+    _ = env_ids  # stage级prestartup操作不按episode subset重复
+    from pxr import Sdf, Usd, UsdPhysics
+
+    if "{ENV_REGEX_NS}" not in robot_prim_path:
+        raise ValueError("robot_prim_path must contain {ENV_REGEX_NS}")
+    stage = env.scene.stage
+    pairs = structural_collision_filter_pairs(
+        palm_link_name, tuple(tuple(str(link) for link in chain) for chain in finger_link_chains)
+    )
+    link_names = sorted({name for pair in pairs for name in pair})
+    directed_edges = 0
+    with Usd.EditContext(stage, Usd.EditTarget(stage.GetRootLayer())):
+        for env_path in env.scene.env_prim_paths:
+            robot_path = robot_prim_path.replace("{ENV_REGEX_NS}", str(env_path))
+            paths = {name: f"{robot_path}/{name}" for name in link_names}
+            missing = [name for name, path in paths.items() if not stage.GetPrimAtPath(path).IsValid()]
+            if missing:
+                raise RuntimeError(f"canonical structural collision links are missing: {missing}")
+            for left, right in pairs:
+                for source, target in ((paths[left], paths[right]), (paths[right], paths[left])):
+                    source_prim = stage.GetPrimAtPath(source)
+                    api = UsdPhysics.FilteredPairsAPI.Apply(source_prim)
+                    if not api:
+                        raise RuntimeError(f"cannot apply FilteredPairsAPI to {source}")
+                    relationship = api.GetFilteredPairsRel() or api.CreateFilteredPairsRel()
+                    target_path = Sdf.Path(target)
+                    if target_path not in set(relationship.GetTargets()):
+                        relationship.AddTarget(target_path)
+                        directed_edges += 1
+    setattr(
+        env,
+        "_anymani_hetero_structural_collision_stats",
+        {"link_pairs": len(pairs), "directed_edges": directed_edges},
+    )
+
+
+def lock_ghost_joint_limits(
+    env: ManagerBasedEnv,
+    env_ids: Sequence[int] | torch.Tensor | None,
+    *,
+    active_joint_mask_by_env: Sequence[Sequence[bool]],
+    robot_name: str = "robot",
+) -> None:
+    r"""把inactive canonical position limits写为精确$[0,0]$并清default/target。
+
+    Velocity limits保持importer的有限正值；PhysX会把零velocity limit解释为持续制动约束。
+    """
+
+    ids = normalize_env_ids(env_ids, num_envs=env.num_envs, device=env.device)
+    robot = cast(Articulation, env.scene[robot_name])
+    if robot.num_joints != CANONICAL_JOINT_COUNT:
+        raise ValueError("ghost lock requires canonical 16-joint articulation")
+    active = torch.tensor(active_joint_mask_by_env, dtype=torch.bool, device=env.device)
+    if active.shape != (env.num_envs, CANONICAL_JOINT_COUNT):
+        raise ValueError("ghost lock requires full [num_envs,16] active mask")
+    limits = robot.data.joint_pos_limits[ids].clone()
+    selected_active = active[ids]
+    limits[..., 0] = torch.where(selected_active, limits[..., 0], torch.zeros_like(limits[..., 0]))
+    limits[..., 1] = torch.where(selected_active, limits[..., 1], torch.zeros_like(limits[..., 1]))
+    robot.write_joint_position_limit_to_sim(
+        limits, env_ids=ids, warn_limit_violation=False  # type: ignore[arg-type]
+    )
+    selected_default = robot.data.default_joint_pos[ids]
+    default = torch.where(selected_active, selected_default, torch.zeros_like(selected_default))
+    robot.data.default_joint_pos[ids] = default
+    robot.set_joint_position_target(default, env_ids=ids)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)

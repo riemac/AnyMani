@@ -16,6 +16,8 @@ from anymani.pregrasp import PregraspLookupKey, PregraspRecord
 
 HETERO_PREGRASP_STATE_ATTR = "_anymani_hetero_pregrasp_reset_state"  # env上的唯一preload sidecar名称
 CANONICAL_JOINT_COUNT = 16  # canonical-v1 fixed transport width；逻辑cardinality由active mask决定
+CANONICAL_TIP_COUNT = 4  # index/middle/ring/thumb
+CANONICAL_OWNER_COUNT = 21  # PALM1 + JOINT16 + TIP4
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,28 @@ def normalize_env_ids(
     if torch.unique(resolved).numel() != resolved.numel():
         raise ValueError("env_ids must not contain duplicate environments")
     return resolved
+
+
+def derive_tip_and_owner_masks(active_joint_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""由depth-major joint mask推导TIP与PALM/JOINT/TIP owner masks。
+
+    Canonical joint轴reshape为$[B,D=4,F=4]$，finger顺序固定index/middle/ring/thumb。每指必须是从
+    proximal depth 0开始的连续prefix；TIP在该指至少有一个active revolute时有效。Owner轴固定为
+    ``[PALM, JOINT×16, TIP×4]``。
+    """
+
+    if active_joint_mask.ndim != 2 or active_joint_mask.shape[1] != CANONICAL_JOINT_COUNT:
+        raise ValueError("active_joint_mask must have shape [B,16]")
+    if active_joint_mask.dtype != torch.bool:
+        raise TypeError("active_joint_mask must be bool")
+    by_depth_finger = active_joint_mask.reshape(active_joint_mask.shape[0], 4, 4)  # $[B,D,F]$
+    non_prefix = by_depth_finger[:, 1:] & ~by_depth_finger[:, :-1]
+    if bool(non_prefix.any().item()):
+        raise ValueError("each canonical finger joint mask must form a proximal compact prefix")
+    active_tip_mask = by_depth_finger.any(dim=1)  # $[B,F]$，index/middle/ring/thumb
+    palm_mask = torch.ones(active_joint_mask.shape[0], 1, dtype=torch.bool, device=active_joint_mask.device)
+    active_owner_mask = torch.cat((palm_mask, active_joint_mask, active_tip_mask), dim=-1)  # $[B,21]$
+    return active_tip_mask, active_owner_mask
 
 
 @dataclass(frozen=True)
@@ -218,6 +242,8 @@ class HeterogeneousPregraspState:
         self.q_state_rad = torch.zeros(num_envs, CANONICAL_JOINT_COUNT, device=device, dtype=dtype)
         self.q_target_rad = torch.zeros_like(self.q_state_rad)
         self.active_joint_mask = torch.zeros(num_envs, CANONICAL_JOINT_COUNT, device=device, dtype=torch.bool)
+        self.active_tip_mask = torch.zeros(num_envs, CANONICAL_TIP_COUNT, device=device, dtype=torch.bool)
+        self.active_owner_mask = torch.zeros(num_envs, CANONICAL_OWNER_COUNT, device=device, dtype=torch.bool)
         self.object_position_h_m = torch.zeros(num_envs, 3, device=device, dtype=dtype)
         self.object_quat_h_wxyz = torch.zeros(num_envs, 4, device=device, dtype=dtype)
         self.valid = torch.zeros(num_envs, device=device, dtype=torch.bool)  # 尚未provider-resolve的row不能执行action
@@ -238,6 +264,9 @@ class HeterogeneousPregraspState:
         self.q_state_rad[ids] = batch.q_state_rad
         self.q_target_rad[ids] = batch.q_target_rad
         self.active_joint_mask[ids] = batch.active_joint_mask
+        tip_mask, owner_mask = derive_tip_and_owner_masks(batch.active_joint_mask)
+        self.active_tip_mask[ids] = tip_mask
+        self.active_owner_mask[ids] = owner_mask
         self.object_position_h_m[ids] = batch.object_position_h_m
         self.object_quat_h_wxyz[ids] = batch.object_quat_h_wxyz
         self.valid[ids] = True  # 所有tensor复制完成后才发布valid commit marker
@@ -325,11 +354,14 @@ def synchronize_action_reset(
 
 __all__ = [
     "CANONICAL_JOINT_COUNT",
+    "CANONICAL_OWNER_COUNT",
+    "CANONICAL_TIP_COUNT",
     "HETERO_PREGRASP_STATE_ATTR",
     "HeterogeneousPregraspState",
     "PregraspRuntimeIdentity",
     "ResolvedPregraspBatch",
     "compute_policy_step_masked_relative_target",
+    "derive_tip_and_owner_masks",
     "normalize_env_ids",
     "synchronize_action_reset",
 ]
