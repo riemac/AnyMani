@@ -112,6 +112,49 @@ def lock_ghost_joint_limits(
     robot.set_joint_position_target(default, env_ids=ids)  # type: ignore[arg-type]
 
 
+def validate_formal_object_physics(
+    env: ManagerBasedEnv,
+    env_ids: Sequence[int] | torch.Tensor | None,
+    *,
+    expected_physics_identity: dict[str, object],
+    object_name: str = "object",
+) -> None:
+    r"""在startup读取PhysX mass/inertia并核对formal scale probe identity。
+
+    Scene cfg负责density/material/solver的单一源码，真实USD bytes在scene import时验证；本event补上配置无法替代的
+    PhysX结果检查。DexCube当前为fixed mass，scale1.2实测$m=0.2160000056$ kg、三个主惯量均
+    $1.8662401999\times10^{-4}$ kg m2。任何asset或importer漂移都在首次reset前失败。
+    """
+
+    _ = env_ids  # 物体属性由所有env共享；仍读取完整view以证伪prototype不一致
+    object_asset = cast(RigidObject, env.scene[object_name])
+    masses = object_asset.root_physx_view.get_masses().to(device=env.device).reshape(env.num_envs, -1)
+    inertias = object_asset.root_physx_view.get_inertias().to(device=env.device).reshape(env.num_envs, -1)
+    expected_mass = float(cast(float, expected_physics_identity["object_observed_mass_kg"]))
+    expected_principal = torch.tensor(
+        cast(list[float], expected_physics_identity["object_observed_principal_inertia_kg_m2"]),
+        dtype=inertias.dtype,
+        device=inertias.device,
+    )
+    expected_inertia = torch.zeros_like(inertias)
+    expected_inertia[:, (0, 4, 8)] = expected_principal
+    mass_error = torch.max(torch.abs(masses - expected_mass))
+    inertia_error = torch.max(torch.abs(inertias - expected_inertia))
+    if float(mass_error.item()) > 1.0e-7 or float(inertia_error.item()) > 1.0e-9:
+        raise RuntimeError(
+            "runtime DexCube mass/inertia disagree with formal pregrasp identity: "
+            f"mass_error={float(mass_error.item()):.3e}, inertia_error={float(inertia_error.item()):.3e}"
+        )
+    setattr(
+        env,
+        "_anymani_formal_object_physics_validation",
+        {
+            "mass_error_kg": float(mass_error.item()),
+            "inertia_error_kg_m2": float(inertia_error.item()),
+        },
+    )
+
+
 @dataclass(frozen=True)
 class PregraspAssetBinding:
     r"""一个runtime asset prototype所需的exact lookup key与absolute object scale。
@@ -307,4 +350,5 @@ __all__ = [
     "PregraspAssetBinding",
     "PregraspResetCfg",
     "reset_from_pregrasp_cache",
+    "validate_formal_object_physics",
 ]

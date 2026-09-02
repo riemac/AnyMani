@@ -30,13 +30,13 @@ from anymani.robots.hand_spawn import CanonicalRuntimeCfg, HandSpawnAdapter, Han
 from ...contact_layout import HeterogeneousContactLayout, build_canonical_contact_layout
 from ...mdp.events import PregraspAssetBinding, PregraspResetCfg
 from ...mdp.runtime_state import PregraspRuntimeIdentity
+from .pregrasp_identity import DEX_CUBE_SHA256, FormalPregraspCatalogIdentity
 
 FORMAL_PPO_ASSET_COUNT = 2048
 PPO_DATASET_PATH = (
     resolve_anymani_root() / "source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ppo.yaml"
 )
-DEFAULT_PREGRASP_CACHE_ROOT = resolve_anymani_root() / "outputs/pregrasp/schema_v2/cache"
-DEX_CUBE_SHA256 = "7a5c015690652f4ca1d62ed757d494c51f052067bd037372c8fd581bc92d437b"
+DEFAULT_PREGRASP_CACHE_ROOT = resolve_anymani_root() / "outputs/pregrasp/schema_v2/formal-cache-v2"
 
 
 def selected_formal_dataset_rows() -> tuple[int, ...]:
@@ -108,6 +108,7 @@ class GeneratedAssetBinding:
         num_envs: int,
         object_scale: float,
         minimum_tier: PregraspTier,
+        catalog_identity: FormalPregraspCatalogIdentity,
         exact_tier: PregraspTier | None = None,
         cache_root: Path = DEFAULT_PREGRASP_CACHE_ROOT,
     ) -> PregraspResetCfg:
@@ -120,6 +121,7 @@ class GeneratedAssetBinding:
                 object_scale=object_scale,
                 minimum_tier=minimum_tier,
                 exact_tier=exact_tier,
+                catalog_identity=catalog_identity,
             )
             for runtime_identity in self.runtime_identities
         )
@@ -199,6 +201,7 @@ def _select_pregrasp_binding(
     object_scale: float,
     minimum_tier: PregraspTier,
     exact_tier: PregraspTier | None,
+    catalog_identity: FormalPregraspCatalogIdentity,
 ) -> PregraspAssetBinding:
     r"""从已提交index中选择唯一runtime-identity/scale/tier basin record。"""
 
@@ -214,7 +217,9 @@ def _select_pregrasp_binding(
         document = json.loads(cache.payload_path(entry).read_text(encoding="utf-8"))
         record = PregraspRecord.from_dict(cast(dict, document))
         key = record.lookup_key
-        if key.cube_asset_sha256 != DEX_CUBE_SHA256 or key.support_mode != "palm_supported":
+        try:
+            catalog_identity.validate_lookup_key(key)
+        except ValueError:
             continue
         try:
             runtime_identity.validate_lookup_key(key)

@@ -8,17 +8,37 @@ event配置中fail closed解析exact basin。
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, retrieve_file_path
+
+from anymani.pregrasp.isaac_runtime import file_sha256
 
 from ...contact_sensors import install_contact_sensors
 from .asset_binding import GeneratedAssetBinding, build_generated_asset_binding
+from .pregrasp_identity import (
+    DEX_CUBE_SHA256,
+    FORMAL_OBJECT_DENSITY_KG_M3,
+    FORMAL_OBJECT_SCALE,
+    FORMAL_SOLVER_POSITION_ITERATIONS,
+    FORMAL_SOLVER_VELOCITY_ITERATIONS,
+    FormalPregraspCatalogIdentity,
+)
 
-OBJECT_SCALE = 1.2  # DexCube absolute USD scale；其它anchor由独立prestartup process显式覆盖spawn cfg
+OBJECT_SCALE = FORMAL_OBJECT_SCALE  # DexCube absolute USD scale；其它anchor由独立prestartup process覆盖spawn cfg
+DEX_CUBE_USD_PATH = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
+RESOLVED_DEX_CUBE_PATH = Path(retrieve_file_path(DEX_CUBE_USD_PATH)).resolve(strict=True)
+RESOLVED_DEX_CUBE_SHA256 = file_sha256(RESOLVED_DEX_CUBE_PATH)
+if RESOLVED_DEX_CUBE_SHA256 != DEX_CUBE_SHA256:
+    raise RuntimeError("resolved DexCube USD bytes disagree with formal pregrasp identity")
+FORMAL_PREGRASP_IDENTITY = FormalPregraspCatalogIdentity.build(
+    object_scale=OBJECT_SCALE,
+    cube_sha256=RESOLVED_DEX_CUBE_SHA256,
+)
 ASSET_BINDING: GeneratedAssetBinding = build_generated_asset_binding()  # 当前process唯一ordered physical axis
 ASSET_COUNT = ASSET_BINDING.asset_count  # selection-local prototype数$A$
 NUM_ENVS = int(os.environ.get("ANYMANI_HETERO_NUM_ENVS", str(ASSET_COUNT)))  # round-robin scene环境数$N$
@@ -40,18 +60,18 @@ class GeneratedHeterogeneousSceneCfg(InteractiveSceneCfg):
     object: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/object",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
+            usd_path=DEX_CUBE_USD_PATH,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
                 disable_gravity=False,
                 enable_gyroscopic_forces=True,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=0,
+                solver_position_iteration_count=FORMAL_SOLVER_POSITION_ITERATIONS,
+                solver_velocity_iteration_count=FORMAL_SOLVER_VELOCITY_ITERATIONS,
                 sleep_threshold=0.005,
                 stabilization_threshold=0.0025,
                 max_depenetration_velocity=1000.0,
             ),
-            mass_props=sim_utils.MassPropertiesCfg(density=400.0),
+            mass_props=sim_utils.MassPropertiesCfg(density=FORMAL_OBJECT_DENSITY_KG_M3),
             scale=(OBJECT_SCALE, OBJECT_SCALE, OBJECT_SCALE),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.6), rot=(1.0, 0.0, 0.0, 0.0)),
@@ -78,7 +98,11 @@ __all__ = [
     "ASSET_BINDING",
     "ASSET_COUNT",
     "CONTACT_LAYOUT",
+    "DEX_CUBE_USD_PATH",
+    "FORMAL_PREGRASP_IDENTITY",
     "GeneratedHeterogeneousSceneCfg",
     "NUM_ENVS",
     "OBJECT_SCALE",
+    "RESOLVED_DEX_CUBE_PATH",
+    "RESOLVED_DEX_CUBE_SHA256",
 ]

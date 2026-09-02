@@ -58,6 +58,12 @@ def main() -> int:
     import anymani.tasks.hetero  # noqa: F401  # 注册唯一新Gym ID
     import gymnasium as gym
     import torch
+    from anymani.tasks.hetero.config.generated.pregrasp_identity import FORMAL_SEARCH_PROTOCOL_DIGEST
+    from anymani.tasks.hetero.config.generated.scene import (
+        FORMAL_PREGRASP_IDENTITY,
+        RESOLVED_DEX_CUBE_PATH,
+        RESOLVED_DEX_CUBE_SHA256,
+    )
     from anymani.tasks.hetero.config.generated.tactile_rotation_env_cfg import (
         ASSET_BINDING,
         GeneratedHeterogeneousTactileRotationEnvCfg,
@@ -116,6 +122,9 @@ def main() -> int:
         sidecar = getattr(runtime_env, HETERO_PREGRASP_STATE_ATTR)
         if not isinstance(sidecar, HeterogeneousPregraspState) or not bool(sidecar.valid.all().item()):
             raise AssertionError("structured env reset did not resolve both pregrasp rows")
+        physics_validation = getattr(runtime_env, "_anymani_formal_object_physics_validation", None)
+        if not isinstance(physics_validation, dict):
+            raise AssertionError("startup did not validate actual DexCube mass/inertia")
 
         reward_sum = torch.zeros(runtime_env.num_envs, device=runtime_env.device)
         termination_count = torch.zeros(runtime_env.num_envs, device=runtime_env.device)
@@ -171,6 +180,14 @@ def main() -> int:
             "signed_net_rotation_rad": [float(value) for value in command.net_rotation_rad.tolist()],
             "goal_success_count": [float(value) for value in command.goal_success_count.tolist()],
             "pregrasp_record_digests": list(sidecar.record_digests),
+            "formal_pregrasp_identity": {
+                "cube_local_path": str(RESOLVED_DEX_CUBE_PATH),
+                "cube_sha256": RESOLVED_DEX_CUBE_SHA256,
+                "gate_digest": FORMAL_PREGRASP_IDENTITY.gate_digest,
+                "physics_identity": dict(FORMAL_PREGRASP_IDENTITY.physics_identity),
+                "search_protocol_digest": FORMAL_SEARCH_PROTOCOL_DIGEST,
+                "runtime_physics_validation": physics_validation,
+            },
             "actor_contains_only_tip_contact": True,
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)

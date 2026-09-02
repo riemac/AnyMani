@@ -97,23 +97,9 @@ def _parse_args() -> argparse.Namespace:
 def _build_gate():
     r"""构造进入search identity的首轮显式认证门。"""
 
-    from anymani.pregrasp import PregraspGate
+    from anymani.tasks.hetero.config.generated.pregrasp_identity import FORMAL_PREGRASP_GATE
 
-    return PregraspGate(
-        min_tip_ge_2_fraction=0.8,  # 6 s窗口中至少80% policy samples具有2 TIP
-        min_tip_ge_3_fraction=0.8,  # gravity-robust候选的三TIP质量门
-        max_finger_non_tip_fraction=0.0,  # 任何>0.25 N finger non-tip sample都拒绝contact tier
-        max_penetration_depth_m=0.001,  # 1 mm；当前probe数值噪声约1–3 µm
-        max_anchor_distance_m=0.025,  # 与任务position success门同为25 mm
-        max_linear_velocity_rms_m_s=0.05,
-        max_angular_velocity_rms_rad_s=0.5,
-        max_object_orientation_drift_rad=0.5,
-        min_joint_limit_margin_rad=0.0,
-        max_target_tracking_error_rms_rad=0.1,
-        max_joint_effort_rms_N_m=2.0,
-        min_basin_success_fraction=0.8,
-        required_gravity_directions=6,
-    )
+    return FORMAL_PREGRASP_GATE
 
 
 def _point_metric_dict(metrics: Any) -> dict[str, Any]:
@@ -341,6 +327,7 @@ def main() -> int:
         from anymani.tasks.hetero.config.generated.pregrasp_harness_env_cfg import (
             GeneratedPregraspHarnessEnvCfg,
         )
+        from anymani.tasks.hetero.config.generated.pregrasp_identity import formal_physics_identity
         from anymani.tasks.hetero.config.generated.scene import ASSET_BINDING, CONTACT_LAYOUT
         from anymani.tasks.hetero.contact_sensors import sensor_contact_magnitude
         from isaaclab.assets import Articulation, RigidObject
@@ -819,20 +806,7 @@ def main() -> int:
             "certification_tail_policy_steps": 120 - gate_start,
             "physics_substeps_per_policy_step": 6,
         }
-        physics_identity = {
-            "isaac_sim": "5.1",
-            "object_sha256": cube_sha256,
-            "absolute_prestartup_scale": True,
-            "object_mass_policy": "fixed_mass_from_usd",
-            "object_inertia_scale_law": "approximately_s_squared",
-            "physics_dt_s": runtime_env.physics_dt,
-            "policy_dt_s": runtime_env.step_dt,
-            "solver_position_iterations": object_spawn.rigid_props.solver_position_iteration_count,
-            "solver_velocity_iterations": object_spawn.rigid_props.solver_velocity_iteration_count,
-            "contact_force_threshold_N": 0.25,
-            "contact_ema_alpha": 0.5,
-            "effort_source": "implicit_actuator_computed_torque",
-        }
+        physics_identity = formal_physics_identity(object_scale=args.scale, cube_sha256=cube_sha256)
         point_records = []
         ranked_by_asset: list[list[tuple[tuple[float, ...], int, Any]]] = [[] for _ in range(asset_count)]
         frontier_by_asset: list[list[tuple[tuple[float, ...], int, Any]]] = [[] for _ in range(asset_count)]

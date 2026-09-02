@@ -29,14 +29,28 @@ from ...mdp import rewards as reward_mdp
 from ...mdp import terminations as termination_mdp
 from ...mdp.actions import POLICY_STEP_AUTHORITY_RAD, PreloadAwareMaskedRelativeJointPositionActionCfg
 from ...mdp.contact_state import reset_contact_state
-from ...mdp.events import apply_structural_collision_filter, lock_ghost_joint_limits, reset_from_pregrasp_cache
+from ...mdp.events import (
+    apply_structural_collision_filter,
+    lock_ghost_joint_limits,
+    reset_from_pregrasp_cache,
+    validate_formal_object_physics,
+)
+from .pregrasp_identity import (
+    FORMAL_CONTACT_EMA_ALPHA,
+    FORMAL_CONTACT_FORCE_THRESHOLD_N,
+    FORMAL_DYNAMIC_FRICTION,
+    FORMAL_PHYSICS_DT_S,
+    FORMAL_RESTITUTION,
+    FORMAL_STATIC_FRICTION,
+)
 from .scene import (
     ACTIVE_MASK_BY_ENV,
     ASSET_BINDING,
     CONTACT_LAYOUT,
-    GeneratedHeterogeneousSceneCfg,
+    FORMAL_PREGRASP_IDENTITY,
     NUM_ENVS,
     OBJECT_SCALE,
+    GeneratedHeterogeneousSceneCfg,
 )
 
 
@@ -57,6 +71,7 @@ PREGRASP_RESET_CFG = ASSET_BINDING.build_pregrasp_reset_cfg(
     num_envs=NUM_ENVS,
     object_scale=OBJECT_SCALE,
     minimum_tier=MINIMUM_PREGRASP_TIER,
+    catalog_identity=FORMAL_PREGRASP_IDENTITY,
     exact_tier=EXACT_PREGRASP_TIER,
 )
 
@@ -67,8 +82,8 @@ def _contact_params() -> dict[str, object]:
     return {
         "layout": CONTACT_LAYOUT,
         "active_joint_mask_by_env": ACTIVE_MASK_BY_ENV,
-        "ema_alpha": 0.5,
-        "force_threshold_N": 0.25,
+        "ema_alpha": FORMAL_CONTACT_EMA_ALPHA,
+        "force_threshold_N": FORMAL_CONTACT_FORCE_THRESHOLD_N,
     }
 
 
@@ -241,6 +256,11 @@ class GeneratedHeterogeneousEventsCfg:
         mode="startup",
         params={"active_joint_mask_by_env": ACTIVE_MASK_BY_ENV, "robot_name": "robot"},
     )
+    object_physics_identity = EventTerm(
+        func=validate_formal_object_physics,
+        mode="startup",
+        params={"expected_physics_identity": dict(FORMAL_PREGRASP_IDENTITY.physics_identity)},
+    )
     pregrasp_reset = EventTerm(
         func=reset_from_pregrasp_cache,
         mode="reset",
@@ -268,7 +288,13 @@ class GeneratedHeterogeneousTactileRotationEnvCfg(ManagerBasedRLEnvCfg):
     )
     viewer: ViewerCfg = ViewerCfg()
     sim: SimulationCfg = SimulationCfg(
-        physics_material=RigidBodyMaterialCfg(static_friction=1.0, dynamic_friction=1.0),
+        physics_material=RigidBodyMaterialCfg(
+            static_friction=FORMAL_STATIC_FRICTION,
+            dynamic_friction=FORMAL_DYNAMIC_FRICTION,
+            restitution=FORMAL_RESTITUTION,
+            friction_combine_mode="average",
+            restitution_combine_mode="average",
+        ),
         physx=PhysxCfg(
             bounce_threshold_velocity=0.2,
             gpu_max_rigid_contact_count=2**23,
@@ -289,7 +315,7 @@ class GeneratedHeterogeneousTactileRotationEnvCfg(ManagerBasedRLEnvCfg):
         super().__post_init__()  # pyright: ignore[reportAttributeAccessIssue]
         self.decimation = 6
         self.episode_length_s = 120.0
-        self.sim.dt = 1.0 / 120.0
+        self.sim.dt = FORMAL_PHYSICS_DT_S
         self.sim.render_interval = self.decimation
         self.viewer.eye = (2.0, 2.0, 1.5)
         self.viewer.lookat = (0.0, 0.0, 0.5)
