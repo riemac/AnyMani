@@ -38,6 +38,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--basin-artifact", type=Path, required=True)  # 含中心+随机扰动trials的artifact
     parser.add_argument("--dataset-row", type=int, required=True)  # 只作artifact selection，不进入lookup identity
     parser.add_argument("--cache-root", type=Path, required=True)  # AtomicPregraspCache根目录
+    parser.add_argument(
+        "--minimum-tier",
+        choices=("support_basin", "contact_basin"),
+        default="contact_basin",
+    )  # 认证的binomial成功事件；必须与basin search identity一致
     return parser.parse_args()
 
 
@@ -82,7 +87,7 @@ def main() -> int:
 
     发布记录使用nominal artifact中的reset candidate$(q_s,q_t,T_{ho})$，因为basin trials正是围绕该输入
     扰动；point metrics使用basin的零扰动中心trial，保证最终证书引用同一独立复核。Local basin成功定义为
-    trial tier至少达到contact，统计量为$k/n$，并再次与gate的$p_{\min}=0.8$比较。
+    trial tier至少达到显式``--minimum-tier``，统计量为$k/n$，并再次与gate的$p_{\min}=0.8$比较。
 
     Returns:
         int: 成功发布并由provider反向解析后返回0。
@@ -91,7 +96,7 @@ def main() -> int:
         ValueError: 任一identity、中心状态、trial统计、tier或scale证据不一致。
     """
 
-    args = _parse_args()  # 用户提供的四个边界不在脚本内隐式搜索
+    args = _parse_args()  # 用户提供的路径、row、tier与cache边界不在脚本内隐式搜索
     nominal_path = args.nominal_artifact.resolve()  # evidence hash绑定resolved文件内容
     basin_path = args.basin_artifact.resolve()
     nominal = _load_document(nominal_path, artifact_type="anymani.pregrasp.point_search")
@@ -99,21 +104,21 @@ def main() -> int:
     if basin.get("schema_version") != "3.0.0" or basin.get("portfolio") != "basin":
         raise ValueError("basin evidence must use point-search schema 3.0.0 and basin portfolio")
 
-    # Nominal reset candidate必须来自独立exact replay，并已经达到contact point tier。
+    minimum_tier = PregraspTier(args.minimum_tier)  # support/contact使用同一物理门但不同接触成功事件
+
+    # Nominal reset candidate必须来自独立exact replay，并达到本次要求的point tier。
     nominal_item = _select_row(nominal["gate_frontier"], args.dataset_row, label="nominal gate_frontier")
     nominal_record = PregraspRecord.from_dict(nominal_item["record"])  # 重算record与lookup digests
-    if nominal_record.coverage != PregraspCoverage.POINT or not tier_satisfies(
-        nominal_record.tier, PregraspTier.CONTACT_BASIN
-    ):
-        raise ValueError("nominal record must be a replayed contact point")
+    if nominal_record.coverage != PregraspCoverage.POINT or not tier_satisfies(nominal_record.tier, minimum_tier):
+        raise ValueError("nominal record does not satisfy the requested replayed point tier")
 
     # Basin trials逐条重新解析，防止只信任outer summary或tier histogram。
     trial_items = [point for point in basin["points"] if int(point["dataset_row"]) == args.dataset_row]
     if not trial_items:
         raise ValueError("basin artifact contains no trials for requested dataset row")
     trial_records = [PregraspRecord.from_dict(point["record"]) for point in trial_items]
-    if any(record.coverage != PregraspCoverage.POINT for record in trial_records):
-        raise ValueError("raw basin trials must remain point records before certification")
+    if any(record.coverage == PregraspCoverage.BASIN for record in trial_records):
+        raise ValueError("raw basin trials cannot carry pre-existing basin certificates")
     if any(record.gate != nominal_record.gate for record in trial_records):
         raise ValueError("nominal and basin trials disagree on gate")
     if any(record.lookup_key.physics_identity != nominal_record.lookup_key.physics_identity for record in trial_records):
@@ -141,18 +146,25 @@ def main() -> int:
         raise ValueError("basin center angular velocity must be zero")
     if center_record.candidate.q_target_rad != candidate.q_target_rad:
         raise ValueError("basin center PD preload target does not match nominal candidate")
-    if not tier_satisfies(center_record.tier, PregraspTier.CONTACT_BASIN):
-        raise ValueError("zero-perturbation center trial did not reproduce contact tier")
+    if not tier_satisfies(center_record.tier, minimum_tier):
+        raise ValueError("zero-perturbation center trial did not reproduce requested tier")
 
     # 从逐trial严格record重算$k/n$，并与outer sufficient statistics双向核对。
-    contact_successes = sum(
-        tier_satisfies(record.tier, PregraspTier.CONTACT_BASIN) for record in trial_records
-    )  # $k$：完整contact point gate通过数
+    tier_successes = sum(tier_satisfies(record.tier, minimum_tier) for record in trial_records)
+    # $k$：完整minimum-tier point gate通过数；support与contact都先通过相同稳定物理门
     trial_count = len(trial_records)  # $n$：中心+随机local perturbations总数
     summary = _select_row(basin["basin_summary"], args.dataset_row, label="basin summary")
-    if int(summary["trials"]) != trial_count or int(summary["contact_successes"]) != contact_successes:
+    if "minimum_tier" in summary:
+        if str(summary["minimum_tier"]) != minimum_tier.value:
+            raise ValueError("basin summary minimum tier disagrees with publication request")
+        reported_successes = int(summary["tier_successes"])
+    else:
+        if minimum_tier != PregraspTier.CONTACT_BASIN:
+            raise ValueError("legacy basin summary can only certify contact tier")
+        reported_successes = int(summary["contact_successes"])
+    if int(summary["trials"]) != trial_count or reported_successes != tier_successes:
         raise ValueError("basin outer summary disagrees with strict trial records")
-    success_fraction = contact_successes / trial_count  # binomial sufficient statistic $\hat p=k/n$
+    success_fraction = tier_successes / trial_count  # binomial sufficient statistic $\hat p=k/n$
     if not bool(summary["passed"]) or success_fraction < nominal_record.gate.min_basin_success_fraction:
         raise ValueError("local perturbation basin does not satisfy configured success fraction")
 
@@ -181,7 +193,7 @@ def main() -> int:
         scale_max=scale,
         scale_samples=(scale_sample,),
         perturbation_trials=trial_count,
-        perturbation_successes=contact_successes,
+        perturbation_successes=tier_successes,
         gravity_directions_passed=0,  # 当前论文palm-up contact tier不宣称六轴gravity robustness
     )
 
@@ -194,8 +206,9 @@ def main() -> int:
         "nominal_artifact_sha256": _sha256(nominal_path),
         "basin_artifact_sha256": _sha256(basin_path),
         "basin_protocol": basin_search_identity,
+        "minimum_tier": minimum_tier.value,
         "perturbation_trials": trial_count,
-        "perturbation_successes": contact_successes,
+        "perturbation_successes": tier_successes,
     }
     lookup_key = replace(nominal_record.lookup_key, search_identity=search_identity)
     certified = certify_pregrasp(
@@ -206,8 +219,8 @@ def main() -> int:
         coverage=PregraspCoverage.BASIN,
         scale_certificate=certificate,
     )
-    if certified.tier != PregraspTier.CONTACT_BASIN:
-        raise ValueError("published basin unexpectedly changed nominal contact tier")
+    if certified.tier != center_record.tier or not tier_satisfies(certified.tier, minimum_tier):
+        raise ValueError("published basin unexpectedly changed the independently replayed center tier")
 
     # Payload先于index原子发布；随后从provider边界按exact identity/tier/coverage/scale反向查询。
     cache = AtomicPregraspCache(args.cache_root)
@@ -216,7 +229,7 @@ def main() -> int:
         PregraspQuery(
             lookup_key=certified.lookup_key,
             requested_scale=scale,
-            min_tier=PregraspTier.CONTACT_BASIN,
+            min_tier=minimum_tier,
             require_basin=True,
         )
     )
@@ -233,7 +246,8 @@ def main() -> int:
                 "tier": certified.tier.value,
                 "coverage": certified.coverage.value,
                 "scale_interval": [certificate.scale_min, certificate.scale_max],
-                "basin_successes": contact_successes,
+                "minimum_tier": minimum_tier.value,
+                "basin_successes": tier_successes,
                 "basin_trials": trial_count,
                 "basin_success_fraction": success_fraction,
             },

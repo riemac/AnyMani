@@ -77,6 +77,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--refine-yaw-deg", type=float, default=15.0)
     parser.add_argument("--basin-linear-velocity-radius", type=float, default=0.01)
     parser.add_argument("--basin-angular-velocity-radius", type=float, default=0.1)
+    parser.add_argument(
+        "--basin-min-tier",
+        choices=("support_basin", "contact_basin"),
+        default="contact_basin",
+        help="Complete point tier counted as a successful local perturbation trial.",
+    )
     parser.add_argument("--elite-count", type=int, default=16)
     parser.add_argument("--cem-std-scale", type=float, default=1.0)
     return parser.parse_args()
@@ -782,6 +788,7 @@ def main() -> int:
                 else None
             ),
             "basin_center_control_trials_per_asset": 1 if args.portfolio == "basin" else None,
+            "basin_minimum_tier": args.basin_min_tier if args.portfolio == "basin" else None,
             "cem_elite_count": args.elite_count if args.portfolio == "cem" else None,
             "cem_std_scale": args.cem_std_scale if args.portfolio == "cem" else None,
             "settle_policy_steps": 120,
@@ -984,19 +991,23 @@ def main() -> int:
         actual_inertia = object_asset.root_physx_view.get_inertias().detach().cpu().reshape(num_envs, -1)
         basin_summary = []
         if args.portfolio == "basin":
+            accepted_tiers = (
+                {"support_basin", "contact_basin", "gravity_robust"}
+                if args.basin_min_tier == "support_basin"
+                else {"contact_basin", "gravity_robust"}
+            )  # support盆只要求完整物理门；contact盆额外要求TIP/non-tip门
             for local_asset, row in enumerate(rows):
                 asset_points = [point for point in point_records if int(point["dataset_row"]) == row]
-                contact_successes = sum(
-                    point["tier"] in {"contact_basin", "gravity_robust"} for point in asset_points
-                )
+                tier_successes = sum(point["tier"] in accepted_tiers for point in asset_points)
                 basin_summary.append(
                     {
                         "dataset_row": row,
                         "trials": len(asset_points),
-                        "contact_successes": contact_successes,
-                        "contact_success_fraction": contact_successes / len(asset_points),
+                        "minimum_tier": args.basin_min_tier,
+                        "tier_successes": tier_successes,
+                        "tier_success_fraction": tier_successes / len(asset_points),
                         "required_success_fraction": gate.min_basin_success_fraction,
-                        "passed": contact_successes / len(asset_points) >= gate.min_basin_success_fraction,
+                        "passed": tier_successes / len(asset_points) >= gate.min_basin_success_fraction,
                         "center_trial_env_id": local_asset,
                         "center_trial_tier": point_records[local_asset]["tier"],
                     }
