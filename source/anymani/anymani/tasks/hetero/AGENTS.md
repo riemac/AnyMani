@@ -2,7 +2,7 @@
 
 `hetero`固定表示：同一个object-manipulation任务下，并行实例化多种generated hand embodiments；这些手可以具有不同topology、active DoF、handedness、TIP数和几何参数。它不是multi-agent、多物体或通用multi-task命名空间。
 
-本目录已建立独立Python package、pregrasp partial-reset sidecar、fail-closed reset event与preload-aware action term；尚未装配scene、完整MDP或Gym注册，不得把局部runtime合同解释为任务已经可训练。
+本目录已建立独立Python package、generated canonical scene、pregrasp partial reset、structured observations/History30、contact state、fixed-axis command、reward、termination、diagnostics、preload-aware action与Gym注册。当前仅通过2/16资产zero-action runtime canary，尚未接入actor/critic网络或PPO，不得把环境可运行解释为策略已经可训练或具备旋转能力。
 
 ## 任务族边界
 

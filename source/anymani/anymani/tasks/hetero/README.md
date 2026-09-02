@@ -1,6 +1,6 @@
 # AnyMani Heterogeneous Generated-Hand Tasks
 
-`anymani.tasks.hetero`承载generated heterogeneous hand embodiments的ManagerBasedRLEnv任务。当前已实现pregrasp runtime state、partial-reset event与preload-aware action term；scene、其余MDP、Gym ID和训练入口仍未装配。
+`anymani.tasks.hetero`承载generated heterogeneous hand embodiments的ManagerBasedRLEnv任务。当前Gym ID为`AnyMani-Hetero-Generated-TactileRotation-v0`，已实现generated canonical scene、分层pregrasp reset、structured actor/critic observations、History30、contact、command、reward、termination、diagnostics与preload-aware action。Actor/critic网络、RL backend adapter和训练入口仍属于后续阶段。
 
 ## 研究对象
 
@@ -16,8 +16,8 @@ tasks/hetero/
 ├── README.md
 ├── __init__.py                       # 无eager Isaac import的package边界
 ├── config/generated/
-│   ├── asset_binding.py
-│   ├── tactile_rotation_env_cfg.py
+│   ├── asset_binding.py              # formal row、canonical artifact与pregrasp catalog唯一轴
+│   ├── tactile_rotation_env_cfg.py   # 完整ManagerBased scene/MDP配置
 │   └── agents/
 ├── mdp/
 │   ├── actions.py                    # 1/24 rad policy-step target与PD preload恢复
@@ -32,7 +32,7 @@ tasks/hetero/
 └── tests/
 ```
 
-图中未创建的模块仍只是实现地图；已列出的runtime文件具有可执行合同但不构成完整环境，不使用placeholder body或兼容壳。
+图中未创建的ADR与agent配置仍只是实现地图；当前scene/MDP文件具有可执行合同，不使用placeholder body或旧Gym alias。
 
 ## Structured MDP接口
 
@@ -51,7 +51,7 @@ Actor attention读取整手有效tokens，并由同一个shared head对每个con
 
 - Critic使用独立TASK readout token还是显式mask-aware pooling；
 - 当前固定任务是否需要actor TASK token；
-- 128/2048资产pregrasp coverage与scale interval扩展；
+- 128/2048资产pregrasp coverage与scale interval扩展；当前scale 1.2已有balanced16 support coverage；
 - Hetero ADR各scope的状态与升级单位；
 - 新任务验证后，`tasks/gm`旧多资产/canonical实现的精确删除清单。
 

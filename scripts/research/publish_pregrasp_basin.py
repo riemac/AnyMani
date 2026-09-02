@@ -124,10 +124,12 @@ def main() -> int:
     if any(record.lookup_key.physics_identity != nominal_record.lookup_key.physics_identity for record in trial_records):
         raise ValueError("nominal and basin trials disagree on physics identity")
 
-    # Env 0是协议显式保留的零扰动中心；状态、pose和twist必须与nominal candidate严格相符。
-    center_items = [point for point in trial_items if int(point["env_id"]) == 0]
+    # 每资产proposal-index 0是零扰动中心；round-robin batch中其env id等于local asset index。
+    summary = _select_row(basin["basin_summary"], args.dataset_row, label="basin summary")
+    center_env_id = int(summary["center_trial_env_id"])
+    center_items = [point for point in trial_items if int(point["env_id"]) == center_env_id]
     if len(center_items) != 1:
-        raise ValueError("single-asset basin artifact must contain exactly one env-0 center trial")
+        raise ValueError("basin artifact must contain exactly one declared zero-perturbation center trial")
     center_item = center_items[0]
     center_index = trial_items.index(center_item)
     center_record = trial_records[center_index]
@@ -138,7 +140,10 @@ def main() -> int:
         raise ValueError("basin center object position does not match nominal candidate")
     center_quaternion = tuple(float(value) for value in center_item["initial_object_orientation_h_wxyz"])
     quaternion_dot = abs(sum(left * right for left, right in zip(center_quaternion, candidate.object_orientation_wxyz)))
-    if 1.0 - quaternion_dot > 1.0e-7:  # $q$与$-q$表示同一SO(3) orientation
+    center_norm = math.sqrt(sum(value * value for value in center_quaternion))
+    candidate_norm = math.sqrt(sum(value * value for value in candidate.object_orientation_wxyz))
+    normalized_dot = min(1.0, quaternion_dot / (center_norm * candidate_norm))
+    if 1.0 - normalized_dot > 1.0e-7:  # 先归一化；$q$与$-q$表示同一SO(3) orientation
         raise ValueError("basin center object orientation does not match nominal candidate")
     if any(float(value) != 0.0 for value in center_item["initial_linear_velocity_h_m_s"]):
         raise ValueError("basin center linear velocity must be zero")
@@ -153,7 +158,6 @@ def main() -> int:
     tier_successes = sum(tier_satisfies(record.tier, minimum_tier) for record in trial_records)
     # $k$：完整minimum-tier point gate通过数；support与contact都先通过相同稳定物理门
     trial_count = len(trial_records)  # $n$：中心+随机local perturbations总数
-    summary = _select_row(basin["basin_summary"], args.dataset_row, label="basin summary")
     if "minimum_tier" in summary:
         if str(summary["minimum_tier"]) != minimum_tier.value:
             raise ValueError("basin summary minimum tier disagrees with publication request")

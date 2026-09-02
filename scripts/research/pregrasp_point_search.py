@@ -72,6 +72,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--random-candidates", type=int, default=128)
     parser.add_argument("--seed-artifact", type=Path, default=None, help="Point-search artifact for refine portfolio.")
+    parser.add_argument(
+        "--seed-frontier",
+        choices=("gate", "contact", "support", "selected"),
+        default="gate",
+        help="Saved per-asset candidate list used by verify/basin portfolios.",
+    )
     parser.add_argument("--refine-q-radius", type=float, default=0.1)
     parser.add_argument("--refine-position-radius", type=float, default=0.01)
     parser.add_argument("--refine-yaw-deg", type=float, default=15.0)
@@ -241,12 +247,39 @@ def main() -> int:
                     : args.elite_count
                 ]
         else:
-            source_key = "contact_frontier" if args.portfolio == "refine" else "gate_frontier"
+            source_key = (
+                "contact_frontier"
+                if args.portfolio == "refine" and args.seed_frontier != "support"
+                else {
+                    "gate": "gate_frontier",
+                    "contact": "contact_frontier",
+                    "support": "support_frontier",
+                    "selected": "selected",
+                }[args.seed_frontier]
+            )
             if source_key in seed_document:
                 refinement_records = {
                     int(item["dataset_row"]): dict(item["record"])
                     for item in seed_document[source_key]
                     if int(item["dataset_row"]) in rows
+                }
+            elif args.seed_frontier == "support":
+                refinement_records = {
+                    row: dict(
+                        max(
+                            (
+                                point
+                                for point in seed_document["points"]
+                                if int(point["dataset_row"]) == row and point["tier"] != "rejected"
+                            ),
+                            key=lambda point: (
+                                float(point["record"]["metrics"]["joint_limit_margin_min_rad"]),
+                                -float(point["record"]["metrics"]["target_tracking_error_rms_rad"]),
+                                -float(point["record"]["metrics"]["object_anchor_distance_max_m"]),
+                            ),
+                        )["record"]
+                    )
+                    for row in rows
                 }
             else:
                 # 早期point-search artifact尚无gate_frontier字段时，从完整strict records确定性恢复。
@@ -816,6 +849,9 @@ def main() -> int:
         gate_frontier_by_asset: list[list[tuple[tuple[float, ...], int, Any]]] = [
             [] for _ in range(asset_count)
         ]
+        support_frontier_by_asset: list[list[tuple[tuple[float, ...], int, Any]]] = [
+            [] for _ in range(asset_count)
+        ]
         tier_rank = {"rejected": 0, "support_basin": 1, "contact_basin": 2, "gravity_robust": 3}
         for env_id in range(num_envs):
             local_asset = env_id % asset_count
@@ -916,6 +952,13 @@ def main() -> int:
                 metrics.tip_ge_2_fraction,
             )
             gate_frontier_by_asset[local_asset].append((gate_rank, env_id, record))
+            support_rank = (
+                float(record.tier.value != "rejected"),
+                metrics.joint_limit_margin_min_rad,
+                -metrics.target_tracking_error_rms_rad,
+                -metrics.object_anchor_distance_max_m,
+            )
+            support_frontier_by_asset[local_asset].append((support_rank, env_id, record))
             point_records.append(
                 {
                     "env_id": env_id,
@@ -949,6 +992,7 @@ def main() -> int:
         selected_records = []
         frontier_records = []
         gate_frontier_records = []
+        support_frontier_records = []
         for local_asset, candidates in enumerate(ranked_by_asset):
             _, env_id, record = max(candidates, key=lambda item: item[0])
             selected_records.append(
@@ -984,6 +1028,16 @@ def main() -> int:
                         float(value) for value in non_tip_sensor_fraction[gate_env_id].tolist()
                     ],
                     "record": gate_record.to_dict(),
+                }
+            )
+            _, support_env_id, support_record = max(
+                support_frontier_by_asset[local_asset], key=lambda item: item[0]
+            )
+            support_frontier_records.append(
+                {
+                    "dataset_row": int(HETEROGENEOUS_SOURCE_DATASET_ROWS[local_asset]),
+                    "support_frontier_env_id": support_env_id,
+                    "record": support_record.to_dict(),
                 }
             )
 
@@ -1028,6 +1082,7 @@ def main() -> int:
             "selected": selected_records,
             "contact_frontier": frontier_records,
             "gate_frontier": gate_frontier_records,
+            "support_frontier": support_frontier_records,
             "basin_summary": basin_summary if args.portfolio == "basin" else None,
             "points": point_records,
         }
