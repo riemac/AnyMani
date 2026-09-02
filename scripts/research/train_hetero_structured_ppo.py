@@ -90,7 +90,8 @@ def _evaluate(
     palm_sum = 0.0
     non_tip_sum = 0.0
     terminal_extras: dict[str, float] = {}
-    with torch.inference_mode():
+    # Env managers会持久化/原地更新physics buffers；使用no_grad而非InferenceMode，避免生成不可变inference tensor。
+    with torch.no_grad():
         for _ in range(steps):
             transport = StructuredRlTransport.from_nested_observation(observation, prototype_index)
             actor_observation = StructuredActorObservation.from_task_dict(transport.policy_storage())
