@@ -108,6 +108,7 @@ class GeneratedAssetBinding:
         num_envs: int,
         object_scale: float,
         minimum_tier: PregraspTier,
+        exact_tier: PregraspTier | None = None,
         cache_root: Path = DEFAULT_PREGRASP_CACHE_ROOT,
     ) -> PregraspResetCfg:
         r"""为每个prototype选择唯一matching basin record并构造exact reset cfg。"""
@@ -118,6 +119,7 @@ class GeneratedAssetBinding:
                 runtime_identity=runtime_identity,
                 object_scale=object_scale,
                 minimum_tier=minimum_tier,
+                exact_tier=exact_tier,
             )
             for runtime_identity in self.runtime_identities
         )
@@ -196,6 +198,7 @@ def _select_pregrasp_binding(
     runtime_identity: PregraspRuntimeIdentity,
     object_scale: float,
     minimum_tier: PregraspTier,
+    exact_tier: PregraspTier | None,
 ) -> PregraspAssetBinding:
     r"""从已提交index中选择唯一runtime-identity/scale/tier basin record。"""
 
@@ -205,6 +208,8 @@ def _select_pregrasp_binding(
         if not entry.scale_min <= object_scale <= entry.scale_max:
             continue
         if entry.coverage != PregraspCoverage.BASIN or not tier_satisfies(entry.tier, minimum_tier):
+            continue
+        if exact_tier is not None and entry.tier != exact_tier:
             continue
         document = json.loads(cache.payload_path(entry).read_text(encoding="utf-8"))
         record = PregraspRecord.from_dict(cast(dict, document))
@@ -220,7 +225,8 @@ def _select_pregrasp_binding(
         raise RuntimeError(
             "pregrasp catalog must resolve exactly one basin record for "
             f"physical={runtime_identity.physical_geometry_hash} scale={object_scale} "
-            f"tier={minimum_tier.value}, got {len(matches)}"
+            f"minimum_tier={minimum_tier.value} exact_tier={exact_tier.value if exact_tier else None}, "
+            f"got {len(matches)}"
         )
     return PregraspAssetBinding.from_lookup_key(
         matches[0].lookup_key,

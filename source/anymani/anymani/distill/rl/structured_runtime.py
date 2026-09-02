@@ -20,7 +20,6 @@ from anymani.distill.models.structured_heterogeneous import (
     StructuredCriticOutput,
 )
 from anymani.distill.rl.runtime.retained_geometry import RetainedGeometryBatch, RetainedGeometryProvider
-from anymani.distill.rl.runtime.structured_geometry import resolve_structured_geometry
 
 
 @dataclass(frozen=True)
@@ -69,6 +68,9 @@ class StructuredHeterogeneousRuntime(nn.Module):
         actor_observation: StructuredActorObservation,
     ) -> StructuredGeometryContext:
         r"""从opaque local rows与current q计算一次共享$Z^e$。"""
+
+        # Builder链会导入robots/Isaac；延迟到AppLauncher后的真实runtime调用，保持纯PPO tests可收集。
+        from anymani.distill.rl.runtime.structured_geometry import resolve_structured_geometry
 
         tokens, retained = resolve_structured_geometry(
             self.geometry_provider, prototype_index, actor_observation

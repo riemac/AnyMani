@@ -40,7 +40,10 @@ from .asset_binding import GeneratedAssetBinding, build_generated_asset_binding
 OBJECT_SCALE = 1.2
 ASSET_BINDING: GeneratedAssetBinding = build_generated_asset_binding()
 ASSET_COUNT = ASSET_BINDING.asset_count
-ACTIVE_MASK_BY_ENV = ASSET_BINDING.active_joint_mask_by_env(ASSET_COUNT)
+NUM_ENVS = int(os.environ.get("ANYMANI_HETERO_NUM_ENVS", str(ASSET_COUNT)))
+if NUM_ENVS < ASSET_COUNT:
+    raise ValueError("ANYMANI_HETERO_NUM_ENVS must be at least the selected asset count")
+ACTIVE_MASK_BY_ENV = ASSET_BINDING.active_joint_mask_by_env(NUM_ENVS)
 CONTACT_LAYOUT = ASSET_BINDING.contact_layout
 
 
@@ -55,10 +58,13 @@ def _minimum_pregrasp_tier() -> PregraspTier:
 
 
 MINIMUM_PREGRASP_TIER = _minimum_pregrasp_tier()
+_exact_tier_raw = os.environ.get("ANYMANI_HETERO_EXACT_PREGRASP_TIER", "").strip()
+EXACT_PREGRASP_TIER = PregraspTier(_exact_tier_raw) if _exact_tier_raw else MINIMUM_PREGRASP_TIER
 PREGRASP_RESET_CFG = ASSET_BINDING.build_pregrasp_reset_cfg(
-    num_envs=ASSET_COUNT,
+    num_envs=NUM_ENVS,
     object_scale=OBJECT_SCALE,
     minimum_tier=MINIMUM_PREGRASP_TIER,
+    exact_tier=EXACT_PREGRASP_TIER,
 )
 
 
@@ -142,7 +148,7 @@ class GeneratedHeterogeneousCommandsCfg:
         position_success_threshold_m=0.025,
         speed_ema_time_constant_s=0.25,
         horizon_s=120.0,
-        dataset_row_by_env=ASSET_BINDING.dataset_row_by_env(ASSET_COUNT),
+        dataset_row_by_env=ASSET_BINDING.dataset_row_by_env(NUM_ENVS),
         log_asset_metrics=os.environ.get("ANYMANI_HETERO_LOG_ASSET_METRICS", "0") == "1",
     )
 
@@ -302,7 +308,7 @@ class GeneratedHeterogeneousTactileRotationEnvCfg(ManagerBasedRLEnvCfg):
     is_finite_horizon: bool = True
     seed: int | None = 42
     scene: GeneratedHeterogeneousSceneCfg = GeneratedHeterogeneousSceneCfg(
-        num_envs=ASSET_COUNT,
+        num_envs=NUM_ENVS,
         env_spacing=0.75,
         replicate_physics=False,
         filter_collisions=True,
