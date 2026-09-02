@@ -7,10 +7,12 @@ N040 static frontend可缓存，q-dependent final Z每次重算。B=4096使用20
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import statistics
+import subprocess
 import traceback
 from pathlib import Path
 from typing import cast
@@ -30,6 +32,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batches", default="16,128,4096")
+    parser.add_argument("--repeat-id", required=True, help="Independent post-fix measurement identity.")
     parser.add_argument(
         "--output",
         type=Path,
@@ -164,6 +167,20 @@ def main() -> int:
         "artifact_type": "anymani.hetero.structured_n040_actor_performance",
         "schema_version": "1.0.0",
         "device": str(device),
+        "repeat_id": args.repeat_id,
+        "git_commit": subprocess.run(
+            ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip(),
+        "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "measurement_contract": {
+            "gpu_resident_boundary": "current_q_provider_to_actor_distribution",
+            "batch": 4096,
+            "warmup": 20,
+            "cuda_events": 50,
+            "p95_gate_ms_strict_less_than": 48.0,
+            "cudagraph_mark_step_begin_per_full_forward": True,
+            "numerical_equivalence_atol": 1.0e-5,
+        },
         "dataset_rows": list(BALANCED_16_ROWS),
         "provider_identity": provider.identity,
         "frozen_geometry_parameters": sum(parameter.numel() for parameter in provider.parameters()),
@@ -320,9 +337,12 @@ def main() -> int:
     compiled_p95 = (
         full_4096.get("full_compiled_gated_actor", {}).get("p95_ms") if isinstance(full_4096, dict) else None
     )
-    available_p95 = [value for value in (eager_p95, compiled_p95) if isinstance(value, float)]
-    p95 = min(available_p95) if available_p95 else None
-    results["strict_full_actor_gate_passed"] = isinstance(p95, float) and p95 < 48.0
+    p95 = compiled_p95
+    equivalence = full_4096.get("compiled_numerical_equivalence") if isinstance(full_4096, dict) else None
+    compile_error = full_4096.get("compile_error") if isinstance(full_4096, dict) else "missing batch"
+    results["strict_full_actor_gate_passed"] = (
+        isinstance(p95, float) and p95 < 48.0 and isinstance(equivalence, dict) and compile_error is None
+    )
     results["selected_full_actor_p95_ms"] = p95
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
