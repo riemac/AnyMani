@@ -10,19 +10,22 @@ rl/
 ├── __init__.py                      distill-owned training aliases
 ├── rl_games_backend.py              任何 `rl_games.*` import 前固定本地 backend
 ├── rl_games_networks.py             compatibility adapter；实现来自 `distill.models`
-├── masked_ppo.py                    canonical active-action contract 与 Runner 注册
 ├── observers.py                     episode / TensorBoard 观察
-├── canonical_evidence.py            five-mother 静态 evidence
+├── canonical_evidence.py            canonical static geometry evidence builder
 ├── geo_obs.py                       legacy/deferred，不是 representation 真源
 ├── runtime/
-│   ├── evidence.py                  N040 artifact/source/provider 装配
-│   └── retained_geometry.py         冻结 q-dependent Z 与 static frontend cache
-├── agents/                          single-asset/canonical legacy YAML
+│   ├── source_config.py             N040 exact static source realization
+│   ├── structured_geometry.py       task binding到冻结q-dependent N040
+│   └── retained_geometry.py         冻结q-dependent Z与static frontend cache
+├── structured_runtime.py            named actor/critic与N040 package
+├── structured_masked_distribution.py active-joint Gaussian probability
+├── structured_ppo.py                direct GAE/clipped PPO
+├── agents/                          single-asset/LEAP rl_games YAML
 └── algorithms/                      未来 advantage/PPO update；scalar loss 仍归 objectives.rl
 ```
 
-Heterogeneous task-local YAML 位于 `tasks/gm/config/heterogeneous_asset/agents/`；Python网络仍属于
-`distill.models`。Tasks-owned env cfg仍在`anymani.tasks.gm`。不要修改外部`/home/hac/isaac/rl_games`。
+Generated heterogeneous task位于`tasks/hetero`，network仍属于`distill.models`；其baseline使用run-owned direct
+structured PPO，不通过GM flat observation或rl_games alias。不要修改外部`/home/hac/isaac/rl_games`。
 
 ## Development Style And Conventions
 
@@ -32,15 +35,14 @@ Heterogeneous task-local YAML 位于 `tasks/gm/config/heterogeneous_asset/agents
 
 ### Alias 与 YAML
 
-`AnyMani-GM-SingleAsset-MLP-v0`是single-asset MDP probe。`AnyMani-GM-HeterogeneousAsset-N040-History30-PPO-v0`
-绑定task-local N040 YAML与独立network name；旧`HeterogeneousAsset-TactileRotation-PPO`保留为69D hash-Z
-infrastructure baseline。History30属于observation，rl_games`seq_length`固定为1。
+`AnyMani-GM-SingleAsset-MLP-v0`、LEAP与single-asset tactile aliases继续走rl_games。Generated heterogeneous
+不注册兼容alias；入口显式给出pregrasp tier、env/update budget和structured checkpoint identity。
 
 ## Important Semantics
 
 ### 几何边界
 
-PALM/JOINT/TIP同索引。Heterogeneous N040 route使用固定`[B,21]` owner / `[B,16]` joint ABI；ghost
+PALM/JOINT/TIP同索引。Structured N040 route使用固定`[B,21]` owner / `[B,16]` joint ABI；ghost
 永远invalid。Encoder从schema-5 artifact严格恢复并保持冻结；只缓存与$q$无关的learned static frontend和
 graph bias，每步重算$q$ motion与geometry backbone。Contact、target、上一动作与History30只进入policy adapter。
 完整actor性能合同为RTX 5070 Ti、$B=4096$、20 warmups + 50 events、p95严格小于48 ms。

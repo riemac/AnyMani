@@ -21,9 +21,6 @@ from .observations_priv import (
     reward_release_coefficient,
 )
 from .observations_state import (
-    canonical_active_joint_mask,
-    canonical_asset_row,
-    canonical_morphology_cell_one_hot,
     joint_pos_limit_normalized,
     joint_pos_raw,
     joint_target,
@@ -39,13 +36,9 @@ from .observations_tactile import (
     tip_contact_bits_ema,
     tip_force_magnitude_ema,
 )
-from .observations_temporal import per_joint_policy_frame
 
 __all__ = [
     "adr_actual_state",
-    "canonical_active_joint_mask",
-    "canonical_asset_row",
-    "canonical_morphology_cell_one_hot",
     "finger_non_tip_contact_bits_ema",
     "fingertip_contact_binary",
     "fingertip_contact_force",
@@ -60,7 +53,6 @@ __all__ = [
     "object_orientation",
     "object_pos",
     "palm_force_magnitude_ema",
-    "per_joint_policy_frame",
     "reorient_command",
     "reward_release_coefficient",
     "tip_contact_bits_ema",

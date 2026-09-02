@@ -8,7 +8,7 @@
 - GPU: `NVIDIA GeForce RTX 5070 Ti`。
 - Isaac Sim: `5.1.0.0`。
 - IsaacLab repo: `v2.3.2-35-g8ddf2c7ac2c`，`VERSION=2.3.2`。
-- AnyMani 测试任务: `AnyMani-GM-Heterogeneous-Test-v0`。
+- AnyMani原始测试任务：历史3-hand GM spawn smoke；该route已由当前task结构替换。
 
 ## 原始现象
 
@@ -35,7 +35,7 @@ GUI 模式启动 IsaacLab / AnyMani 环境时段错误崩溃，backtrace 多次�
 
 - 官方 `Isaac-Cartpole-v0` headless 可创建、reset、step、close。
 - 官方 `multi_asset.py --headless --num_envs 9` 可进入稳定 reset 循环。
-- AnyMani `AnyMani-GM-Heterogeneous-Test-v0` headless 可输出：
+- 当时的AnyMani 3-hand spawn smoke headless可输出：
   - action space shape: `(9, 16)`
   - policy obs shape: `(9, 32)`
   - reward shape: `(9,)`
@@ -113,13 +113,13 @@ timeout 90s /home/hac/isaac/env_isaaclab/bin/python scripts/demos/multi_asset.py
 
 ```bash
 cd /home/hac/isaac/AnyMani
-PYTHONUNBUFFERED=1 /home/hac/isaac/env_isaaclab/bin/python -u -c "from isaaclab.app import AppLauncher; app_launcher=AppLauncher({'headless': False}); simulation_app=app_launcher.app; import gymnasium as gym, torch, isaaclab_tasks, anymani.tasks; from isaaclab_tasks.utils import parse_env_cfg; task='AnyMani-GM-Heterogeneous-Test-v0'; cfg=parse_env_cfg(task, device='cuda:0', num_envs=9); env=gym.make(task, cfg=cfg); obs,_=env.reset(); print('ANYMANI_GUI_RESET', obs['policy'].shape, flush=True); actions=torch.zeros(env.action_space.shape, device=env.unwrapped.device); [env.step(actions) for _ in range(10)]; print('ANYMANI_GUI_OK', flush=True); env.close(); simulation_app.close()"
+PYTHONUNBUFFERED=1 /home/hac/isaac/env_isaaclab/bin/python -u -c "from isaaclab.app import AppLauncher; app_launcher=AppLauncher({'headless': False}); simulation_app=app_launcher.app; import gymnasium as gym, torch, isaaclab_tasks, anymani.tasks; from isaaclab_tasks.utils import parse_env_cfg; task='AnyMani-GM-SingleAsset-v0'; cfg=parse_env_cfg(task, device='cuda:0', num_envs=2); env=gym.make(task, cfg=cfg); obs,_=env.reset(); print('ANYMANI_GUI_RESET', obs['policy'].shape, flush=True); actions=torch.zeros(env.action_space.shape, device=env.unwrapped.device); [env.step(actions) for _ in range(10)]; print('ANYMANI_GUI_OK', flush=True); env.close(); simulation_app.close()"
 ```
 
 结果：
 
 ```text
-ANYMANI_GUI_RESET torch.Size([9, 32])
+ANYMANI_GUI_RESET <policy observation shape>
 ANYMANI_GUI_OK
 ```
 

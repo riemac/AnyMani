@@ -1,6 +1,6 @@
 # AnyMani Heterogeneous Generated-Hand Tasks
 
-`anymani.tasks.hetero`承载generated heterogeneous hand embodiments的ManagerBasedRLEnv任务。当前Gym ID为`AnyMani-Hetero-Generated-TactileRotation-v0`，已实现generated canonical scene、分层pregrasp reset、structured actor/critic observations、History30、contact、command、reward、termination、diagnostics与preload-aware action。Actor/critic网络、RL backend adapter和训练入口仍属于后续阶段。
+`anymani.tasks.hetero`承载generated heterogeneous hand embodiments的ManagerBasedRLEnv任务。当前Gym ID为`AnyMani-Hetero-Generated-TactileRotation-v0`，已实现generated canonical scene、分层pregrasp reset、structured observations、History30、contact、command、reward、termination、diagnostics与preload-aware action。Actor/critic与direct PPO位于`distill`；当前matched小cohort已完成，但没有形成rotation能力。
 
 ## 研究对象
 
@@ -8,7 +8,7 @@
 
 首版支持域使用canonical-v1：最多16 JOINT、4 TIP和21 physical owners。Tensor shape固定padding以服务GPU并行，真实有效实体数量由每个asset的typed masks与graph决定。正式训练配置默认2048 unique assets；较小cohort只用于有界验证。
 
-## 计划结构
+## 当前结构
 
 ```text
 tasks/hetero/
@@ -17,8 +17,9 @@ tasks/hetero/
 ├── __init__.py                       # 无eager Isaac import的package边界
 ├── config/generated/
 │   ├── asset_binding.py              # formal row、canonical artifact与pregrasp catalog唯一轴
+│   ├── scene.py                      # formal/search共享且不查询cache的physical scene
+│   ├── pregrasp_harness_env_cfg.py   # 不注册Gym ID的搜索/physics harness
 │   ├── tactile_rotation_env_cfg.py   # 完整ManagerBased scene/MDP配置
-│   └── agents/
 ├── mdp/
 │   ├── actions.py                    # 1/24 rad policy-step target与PD preload恢复
 │   ├── observations.py
@@ -28,11 +29,10 @@ tasks/hetero/
 │   ├── events.py                     # identity provider解析与$q_s/q_t/T_{ho}$ partial reset
 │   ├── runtime_state.py              # 纯Torch sidecar、mask和stale-row合同
 │   ├── diagnostics.py
-│   └── adr.py
 └── tests/
 ```
 
-图中未创建的ADR与agent配置仍只是实现地图；当前scene/MDP文件具有可执行合同，不使用placeholder body或旧Gym alias。
+当前scene/MDP、structured network与PPO均有可执行合同，不使用placeholder body或旧GM Gym alias。ADR仍关闭。
 
 ## Structured MDP接口
 
@@ -47,12 +47,11 @@ distill       ──> frozen Z^e, actor/critic tokens, masked PPO
 
 Actor attention读取整手有效tokens，并由同一个shared head对每个contextual joint token输出action mean。Critic使用独立structured privileged backbone并输出每env一个scalar value。Canonical mask只属于padding/transport，不改变科学动作空间。
 
-## 当前未决项
+## 当前证据边界
 
-- Critic使用独立TASK readout token还是显式mask-aware pooling；
-- 当前固定任务是否需要actor TASK token；
 - 128/2048资产pregrasp coverage与scale interval扩展；当前scale 1.2已有balanced16 support coverage；
 - Hetero ADR各scope的状态与升级单位；
-- 新任务验证后，`tasks/gm`旧多资产/canonical实现的精确删除清单。
+- contact action-sequence basin与actor object-orientation可观测性；
+- 当前row16、seed42、204,800 transitions/arm的matched结果为0 subgoal/0 full turn，不能外推最终收敛。
 
-在这些问题完成Develop与Plan前，本目录不创建可执行源码。
+旧GM multi-asset/canonical配置与Gym IDs已出清；历史checkpoint通过原commit复现，不保留compatibility alias。

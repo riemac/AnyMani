@@ -61,7 +61,6 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
 
-from ..canonical_runtime import masked_mean
 from ..commands.tactile_rotation_command import ensure_post_physics_progress_updated
 from .rewards_common import curriculum_gain
 
@@ -73,9 +72,8 @@ def action_l2_curriculum(
 ) -> torch.Tensor:
     r"""Curriculum-gated action L2 regularizer。
 
-    本项目动作项 `ClampedRelativeJointPositionAction` 已将每步 raw rad delta 通过 `scale=0.1`
-    约束在温和范围内，并在下发前 clamp 到 soft joint limits。因而第一版严格模仿 AnyRotate，
-    把 action 正则放到 adaptive curriculum 后释放。
+    当前single-asset/LEAP action cfg已限制每步target变化。因而第一版严格模仿AnyRotate，把action正则放到
+    adaptive curriculum后释放。
 
     Args:
         env (ManagerBasedRLEnv): Isaac Lab manager-based RL env。
@@ -86,12 +84,7 @@ def action_l2_curriculum(
         torch.Tensor: gated action L2 penalty source，形状 `[num_envs]`；外部配置负权重。
     """
 
-    action = env.action_manager.action  # `[B,A]`，policy-facing normalized action
-    active_mask = getattr(env, "_anymani_canonical_active_joint_mask", None)
-    if isinstance(active_mask, torch.Tensor) and active_mask.shape == action.shape:
-        penalty = masked_mean(action.square(), active_mask)  # 按 active joint 数均值，ghost 不计入
-    else:
-        penalty = isaac_mdp.action_l2(env)
+    penalty = isaac_mdp.action_l2(env)  # `[B]`，当前GM配置均为真实、固定维度action axes
     return penalty * curriculum_gain(env, lambda_floor=lambda_floor, lambda_max=lambda_max)
 
 
@@ -115,12 +108,7 @@ def action_rate_l2_curriculum(
         torch.Tensor: gated action-rate L2 penalty source，形状 `[num_envs]`。
     """
 
-    delta = env.action_manager.action - env.action_manager.prev_action  # `[B,A]`，相邻 policy action 差
-    active_mask = getattr(env, "_anymani_canonical_active_joint_mask", None)
-    if isinstance(active_mask, torch.Tensor) and active_mask.shape == delta.shape:
-        penalty = masked_mean(delta.square(), active_mask)  # inactive slot 不形成高频动作惩罚
-    else:
-        penalty = isaac_mdp.action_rate_l2(env)
+    penalty = isaac_mdp.action_rate_l2(env)  # `[B]`，相邻policy action差的平方和
     return penalty * curriculum_gain(env, lambda_floor=lambda_floor, lambda_max=lambda_max)
 
 
@@ -156,12 +144,7 @@ def torque_l2_curriculum(
     if torque is None:
         return torch.zeros(env.num_envs, device=env.device)  # 保留接口，不因 backend 差异中断脚手架
 
-    active_mask = getattr(env, "_anymani_canonical_active_joint_mask", None)
-    if isinstance(active_mask, torch.Tensor):
-        active_mask = active_mask[:, asset_cfg.joint_ids]
-        penalty = masked_mean(torque.square(), active_mask)  # 只按 active joint 平均 $\tau_i^2$
-    else:
-        penalty = torch.sum(torque**2, dim=-1)  # `[B]`，$\|\tau\|_2^2$
+    penalty = torch.sum(torque**2, dim=-1)  # `[B]`，$\|\tau\|_2^2$
     return penalty * curriculum_gain(env, lambda_floor=lambda_floor, lambda_max=lambda_max)
 
 
@@ -232,9 +215,6 @@ def joint_pose_anchor_l2_curriculum(
     if not isinstance(anchor, torch.Tensor) or anchor.shape != current.shape:
         anchor = asset.data.default_joint_pos[:, asset_cfg.joint_ids]  # event 未安装时仅用于显式 smoke fallback
     error = current - anchor
-    active_mask = getattr(env, "_anymani_canonical_active_joint_mask", None)
-    if isinstance(active_mask, torch.Tensor):
-        error = error * active_mask[:, asset_cfg.joint_ids].to(dtype=error.dtype)
     penalty = torch.linalg.norm(error, dim=-1)  # $\|q-q_{anchor}\|_2$，不是平方范数
     return penalty * curriculum_gain(env, 0.0, 1.0)
 
@@ -252,12 +232,7 @@ def joint_mechanical_power_curriculum(
     torque = torque[:, asset_cfg.joint_ids]
     joint_velocity = asset.data.joint_vel[:, asset_cfg.joint_ids]
     power_values = torch.abs(torque * joint_velocity)  # `[B,J]`，$|\tau_i\dot q_i|$，单位 W
-    active_mask = getattr(env, "_anymani_canonical_active_joint_mask", None)
-    power = (
-        masked_mean(power_values, active_mask[:, asset_cfg.joint_ids])
-        if isinstance(active_mask, torch.Tensor)
-        else torch.sum(power_values, dim=-1)
-    )
+    power = torch.sum(power_values, dim=-1)  # `[B]`，真实fixed-DoF joints的总机械功率
     return power * curriculum_gain(env, 0.0, 1.0)
 
 

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-`gm` means generalized manipulation in embodiments. 本子项目主要负责“手型泛化的手内操作”中的 Isaac Lab 任务环境部分。
+`gm` means generalized manipulation in embodiments. 本子项目保留single-asset generated-hand probe、LEAP对照及其共享MDP原件；跨拓扑generated-hand任务属于并列的`tasks/hetero`。
 
 ## 边界
 
@@ -10,9 +10,8 @@
 
 不要把资产生成、validator、mesh 物理闭包、post-mutate 逻辑塞进这里。这些属于 `assets`。
 
-环境 variant 可以声明可复现的 asset binding、subset、routing 与 same-schema 约束，因为这些参数决定 scene
-能否实例化。资产生成、bank 构建和 train/validation split 仍不属于 `gm`；不要把实验 split policy 隐藏在
-底层 MDP term 中。训练入口可以覆盖 task cfg 的默认 selection，但不能反向接管 scene/MDP 语义。
+环境variant可以声明single-asset或LEAP所需的可复现asset binding。跨拓扑dataset selection、canonical masks与
+pregrasp provider由`tasks/hetero`装配；资产生成、bank构建和train/validation split仍不属于`gm`。
 
 reset 初始状态分布仍属 `gm` 任务语义：例如 hand joint reset、object pose reset、
 object reset anchor 记录、hand orientation reset scaffold。能直接复用 IsaacLab
@@ -23,9 +22,8 @@ object reset anchor 记录、hand orientation reset scaffold。能直接复用 I
 
 保持浅目录。任务差异优先通过 MDP 组件组合表达，不提前拆 `manipulation/`、`grasp/` 等深目录。
 
-`gm` 与 `tasks/inhand` 是并列任务族：前者承载 generalized manipulation 组件与 generated-hand 组合面，
-后者承载 LEAP-style in-hand 对照。不要把某一时刻的实验主线写成永久目录所有权，也不要假设一方已经
-替代另一方。跨拓扑 unified policy、teacher-student distillation 和网络结构仍由 `distill` 承接。
+`gm`、`tasks/inhand`与`tasks/hetero`是并列任务族：前两者保留single-hand/LEAP-style对照，后者拥有跨拓扑
+generated-hand组合面。跨手型policy、teacher-student distillation和网络结构仍由`distill`承接。
 
 ### 声明式配置驱动
 
@@ -35,11 +33,8 @@ ManagerBasedRLEnv 本身就是一个高度声明式、配置驱动的环境框�
 
 ### Config 变体结构
 
-`config/<variant>/` 放具体环境构型：single asset、某个真实手、某组 generated hand bank 或异构并行
-preset。每个 variant 可以自包含定义 scene / sim / command / action / observation / reward / reset /
-termination / curriculum group；不要为了“复用”牺牲当前实验文件的可读性。
-
-`inhand_env_cfg.py` 可以作为 GM in-hand manipulation 的参考 / base assembly surface，但不是强制继承对象。group 是实验组合面，不限定只能使用 `gm_mdp`；可以组合 IsaacLab 官方 `isaac_mdp`、AnyMani 自有 MDP，或未来从 LEAP / AnyRotate / 其他项目适配来的 term。外部参考逻辑一旦沉淀，应优先适配成 AnyMani 中命名清楚的 callable，并在配置注释中说明来源和实验语义。
+`config/<variant>/`只放single asset或LEAP环境构型。每个variant可自包含scene/sim/command/action/
+observation/reward/reset/termination/curriculum；不要把跨拓扑routing重新塞回GM兼容壳。
 
 single-asset generated probe 位于 `config/single_asset/`；真实 LEAP 对照位于 `config/leap/`。根目录不保留
 旧式 variant 兼容壳，避免废弃路径继续污染实验语义。

@@ -47,3 +47,21 @@ def test_hetero_production_code_has_no_legacy_gym_id_literals() -> None:
         if legacy_prefix in path.read_text(encoding="utf-8")
     ]
     assert occurrences == []
+
+
+def test_legacy_gm_multi_asset_ids_are_absent_from_gym_registry() -> None:
+    r"""Import当前task packages后，旧multi-asset IDs必须消失且唯一新hetero ID存在。"""
+
+    import gymnasium as gym
+
+    import anymani.tasks.gm  # noqa: F401  # 注册仍受支持的single-asset/LEAP环境
+    import anymani.tasks.hetero  # noqa: F401  # 注册当前generated heterogeneous环境
+
+    retired_prefixes = (
+        "AnyMani-GM-Heterogeneous",
+        "AnyMani-GM-Canonical",
+        "AnyMani-GM-InHand",
+    )
+    retired = sorted(env_id for env_id in gym.registry if env_id.startswith(retired_prefixes))
+    assert retired == []
+    assert "AnyMani-Hetero-Generated-TactileRotation-v0" in gym.registry

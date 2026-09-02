@@ -265,18 +265,10 @@ class GmSingleAssetCommandsCfg:
 
 @configclass
 class GmSingleAssetActionsCfg:
-    r"""单资产动作配置：IsaacLab 官方 relative joint-position action 减法实验。
+    r"""单资产动作配置：IsaacLab官方relative joint-position action。
 
-    当前实验有意去掉 AnyMani 自定义 soft-limit clamp，只保留
-    $q^{target}_{t}=q_t+0.1a_t$ 的官方相对位置动作语义，用来判断前几组
-    `ClampedRelativeJointPositionAction` 是否过度约束或改变了探索动力学。
+    控制律为$q^{target}_{t}=q_t+0.1a_t$；该single-asset probe不需要canonical ghost mask。
     """
-    # hand_joint_pos = gm_mdp.ClampedRelativeJointActionCfg(
-    #     asset_name="robot",
-    #     joint_names=[".*"],
-    #     scale=0.1,
-    #     preserve_order=True,
-    # )
 
     hand_joint_pos = isaac_mdp.RelativeJointPositionActionCfg(
         asset_name="robot",

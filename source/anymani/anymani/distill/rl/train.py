@@ -110,15 +110,11 @@ from rl_games.algos_torch import torch_ext  # noqa: E402
 from rl_games.common import env_configurations, vecenv  # noqa: E402
 from rl_games.torch_runner import Runner  # noqa: E402
 
-from anymani.distill.rl.masked_ppo import AnyManiMaskedRunner, register_anymani_masked_ppo  # noqa: E402
 from anymani.distill.rl.observers import OneShotIsaacAlgoObserver, mean_policy_action_std  # noqa: E402
 from anymani.distill.rl.rl_games_networks import register_anymani_rl_games_networks  # noqa: E402
-from anymani.distill.rl.runtime_evidence import attach_masked_runtime_evidence  # noqa: E402
 
 register_anymani_rl_games_networks()
 """注册未来 Transformer teacher adapter；当前 single-asset MLP YAML 不会使用该网络。"""
-register_anymani_masked_ppo()
-"""注册 canonical masked model 与 `anymani_masked_ppo` Runner factory。"""
 
 
 def _dump_agent_cfg(path: str, agent_cfg: dict) -> None:
@@ -504,13 +500,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     agent_cfg["params"]["config"]["num_actors"] = env.unwrapped.num_envs
     _fix_minibatch_size(agent_cfg, env.unwrapped.num_envs)
-    attach_masked_runtime_evidence(agent_cfg)
-    _dump_agent_cfg(agent_yaml_path, agent_cfg)  # masked run 补写 dataset/manifest/provider identity
-
-    if agent_cfg["params"]["algo"]["name"] == "anymani_masked_ppo":
-        runner = AnyManiMaskedRunner(_make_isaac_algo_observer(agent_cfg))
-    else:
-        runner = Runner(_make_isaac_algo_observer(agent_cfg))
+    _dump_agent_cfg(agent_yaml_path, agent_cfg)
+    runner = Runner(_make_isaac_algo_observer(agent_cfg))
     record_optional_rl_phase("runner_build", "start")
     runner.load(agent_cfg)
     runner.reset()

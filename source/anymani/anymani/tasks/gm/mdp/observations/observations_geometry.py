@@ -63,7 +63,7 @@ def joint_soft_pos_limits(
         tokenizer 侧若需要 `[B,N_j,2]`，应在 adapter 中按 joint 数 reshape 回结构化形式。
     """
 
-    # 用 soft 而非 hard limits：soft 才是 `ClampedRelativeJointPositionAction` clamp 的同一边界。
+    # 用soft而非hard limits：它表达policy可安全使用的控制域，也与Isaac relative action的运行边界一致。
     asset: Articulation = env.scene[asset_cfg.name]
     limits = asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids, :]  # `[B,N_j,2]`，rad
     return limits.flatten(start_dim=1)  # `[B,2*N_j]`，便于当前 rl_games 扁平 obs 消费

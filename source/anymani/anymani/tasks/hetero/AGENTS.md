@@ -2,7 +2,7 @@
 
 `hetero`固定表示：同一个object-manipulation任务下，并行实例化多种generated hand embodiments；这些手可以具有不同topology、active DoF、handedness、TIP数和几何参数。它不是multi-agent、多物体或通用multi-task命名空间。
 
-本目录已建立独立Python package、generated canonical scene、pregrasp partial reset、structured observations/History30、contact state、fixed-axis command、reward、termination、diagnostics、preload-aware action与Gym注册。当前仅通过2/16资产zero-action runtime canary，尚未接入actor/critic网络或PPO，不得把环境可运行解释为策略已经可训练或具备旋转能力。
+本目录已建立独立Python package、generated canonical scene、pregrasp partial reset、structured observations/History30、contact state、fixed-axis command、reward、termination、diagnostics、preload-aware action与Gym注册。`distill`侧actor/critic、N040和matched PPO也已闭合；row16小cohort仍为0 subgoal/0 full turn，不得把可运行、TIP contact或absolute speed解释为旋转能力。
 
 ## 任务族边界
 
@@ -85,10 +85,10 @@ Palm support合法，但support-only reset与contact-basin pregrasp是不同等�
 
 ## 迁移与出清
 
-新`hetero`任务通过contract、runtime、pregrasp与短训练验证后：
+新`hetero`任务完成contract、runtime、pregrasp与短训练验证后已执行：
 
-- 出清`tasks/gm`中的same-topology multi-asset、canonical unified、heterogeneous config/test和canonical-only MDP残留；
-- 删除旧`AnyMani-GM-Heterogeneous*` Gym IDs，不保留deprecated alias；
+- `tasks/gm`只保留single-asset/LEAP共享原件，不再新增same-topology或canonical multi-asset配置；
+- 不重新引入旧GM heterogeneous Gym IDs或deprecated alias；
 - 历史checkpoint使用其原始commit复现；
 - 只移动明确属于heterogeneous canonical ABI的实现。被`tasks/inhand`或single-asset GM消费的contact/action/event原件不得粗暴搬走。
 

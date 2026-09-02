@@ -24,8 +24,6 @@ from __future__ import annotations
 
 import gymnasium as gym
 
-from anymani.tasks.gm.config.heterogeneous_asset import agents as heterogeneous_agents
-
 from . import agents
 
 gym.register(
@@ -69,74 +67,6 @@ gym.register(
             "anymani.tasks.gm.config.single_asset.tactile_rotation_env_cfg:GmTactileRotationHistory30EnvCfg"
         ),
         "rl_games_cfg_entry_point": f"{agents.__name__}:gm_tactile_rotation_tcn_ppo.yaml",
-    },
-)
-
-gym.register(
-    id="AnyMani-GM-Canonical-Unified-PPO-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "anymani.tasks.gm.canonical_unified_env_cfg:CanonicalUnifiedInHandEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:gm_canonical_unified_ppo.yaml",
-    },
-)
-
-gym.register(
-    id="AnyMani-GM-HeterogeneousAsset-TactileRotation-PPO-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": (
-            "anymani.tasks.gm.config.heterogeneous_asset.tactile_rotation_env_cfg:"
-            "HeterogeneousTactileRotationEnvCfg"
-        ),
-        "rl_games_cfg_entry_point": f"{agents.__name__}:gm_heterogeneous_n000_ppo.yaml",
-    },
-)
-
-gym.register(
-    id="AnyMani-GM-HeterogeneousAsset-N040-History30-PPO-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": (
-            "anymani.tasks.gm.config.heterogeneous_asset.tactile_rotation_env_cfg:"
-            "HeterogeneousN040HistoryTactileRotationEnvCfg"
-        ),
-        "rl_games_cfg_entry_point": (
-            f"{heterogeneous_agents.__name__}:gm_heterogeneous_n040_history30_ppo.yaml"
-        ),
-    },
-)
-
-gym.register(
-    id="AnyMani-GM-HeterogeneousAsset-N040-History30-LegacyCritic-Eval-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": (
-            "anymani.tasks.gm.config.heterogeneous_asset.tactile_rotation_env_cfg:"
-            "HeterogeneousN040HistoryLegacyCriticEvalEnvCfg"
-        ),
-        "rl_games_cfg_entry_point": (
-            f"{heterogeneous_agents.__name__}:gm_heterogeneous_n040_history30_ppo.yaml"
-        ),
-    },
-)
-
-gym.register(
-    id="AnyMani-GM-HeterogeneousAsset-N040-History30-Failure100-PPO-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": (
-            "anymani.tasks.gm.config.heterogeneous_asset.tactile_rotation_env_cfg:"
-            "HeterogeneousN040Failure100TactileRotationEnvCfg"
-        ),
-        "rl_games_cfg_entry_point": (
-            f"{heterogeneous_agents.__name__}:gm_heterogeneous_n040_history30_ppo.yaml"
-        ),
     },
 )
 
