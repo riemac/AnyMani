@@ -228,7 +228,7 @@ def main() -> int:
     rows = tuple(int(item.strip()) for item in args.rows.split(",") if item.strip())
     if not rows or len(set(rows)) != len(rows):
         raise ValueError("--rows must contain one or more distinct dataset rows")
-    os.environ["ANYMANI_HETEROGENEOUS_ASSET_ROWS"] = ",".join(str(row) for row in rows)
+    os.environ["ANYMANI_HETERO_ASSET_ROWS"] = ",".join(str(row) for row in rows)
     refinement_records: dict[int, dict[str, Any]] = {}
     cem_points: dict[int, list[dict[str, Any]]] = {}
     if args.portfolio in {"refine", "verify", "cem", "basin"}:
@@ -302,14 +302,24 @@ def main() -> int:
             ) <= 0.0:
                 raise ValueError("basin velocity radii must be positive")
 
+    # Scene routing与ghost mask在task config import时冻结，因此先确定完整round-robin环境轴。
+    asset_count = len(rows)  # 每个requested physical asset拥有独立prototype
+    point_count_per_asset = (
+        len(Q_PROPOSAL_NAMES) * len(OBJECT_OFFSETS_H_M)
+        if args.portfolio == "grid"
+        else (1 if args.portfolio == "verify" else int(args.random_candidates))
+    )
+    if point_count_per_asset < 1:
+        raise ValueError("candidate count per asset must be positive")
+    num_envs = asset_count * point_count_per_asset  # MultiAssetSpawner按$e\bmod A$路由candidate replicas
+    os.environ["ANYMANI_HETERO_NUM_ENVS"] = str(num_envs)
+
     from isaaclab.app import AppLauncher
 
     app_launcher = AppLauncher(headless=True)
     simulation_app = app_launcher.app
     env = None
     try:
-        import anymani.tasks.gm  # noqa: F401  # P0001搜索暂借旧scene primitives，不消费旧reset manifest
-        import gymnasium as gym
         import isaaclab.sim as sim_utils
         import isaaclab.utils.math as math_utils
         import torch
@@ -328,51 +338,33 @@ def main() -> int:
             object_pose_h_from_world,
             object_pose_w_from_hand,
         )
-        from anymani.tasks.gm.config.heterogeneous_asset.asset_runtime import (
-            HETEROGENEOUS_ACTIVE_MASK_ROWS,
-            HETEROGENEOUS_CANONICAL_ARTIFACTS,
-            HETEROGENEOUS_CONTACT_LAYOUT,
-            HETEROGENEOUS_HAND_SPAWN_CFG,
-            HETEROGENEOUS_SOURCE_ASSETS,
-            HETEROGENEOUS_SOURCE_DATASET_ROWS,
+        from anymani.tasks.hetero.config.generated.pregrasp_harness_env_cfg import (
+            GeneratedPregraspHarnessEnvCfg,
         )
-        from anymani.tasks.gm.config.heterogeneous_asset.tactile_rotation_env_cfg import (
-            HeterogeneousTactileRotationEnvCfg,
-        )
-        from anymani.tasks.gm.contact_sensors import sensor_total_force_w
+        from anymani.tasks.hetero.config.generated.scene import ASSET_BINDING, CONTACT_LAYOUT
+        from anymani.tasks.hetero.contact_sensors import sensor_contact_magnitude
         from isaaclab.assets import Articulation, RigidObject
         from isaaclab.envs import ManagerBasedRLEnv
         from isaaclab.sensors import ContactSensor
         from isaaclab.utils.assets import retrieve_file_path
 
-        asset_count = len(rows)  # 每个requested physical asset拥有独立round-robin prototype
-        point_count_per_asset = (
-            len(Q_PROPOSAL_NAMES) * len(OBJECT_OFFSETS_H_M)
-            if args.portfolio == "grid"
-            else (1 if args.portfolio == "verify" else int(args.random_candidates))
-        )
-        if point_count_per_asset < 1:
-            raise ValueError("candidate count per asset must be positive")
-        num_envs = asset_count * point_count_per_asset  # round-robin routing保证每个proposal含两个assets
-
         # 每个scale由独立prestartup scene拥有；replicate_physics=False允许per-prototype scale/physics view。
-        cfg = HeterogeneousTactileRotationEnvCfg()
-        cfg.scene.num_envs = num_envs
+        cfg = GeneratedPregraspHarnessEnvCfg()
         cfg.scene.replicate_physics = False
         cfg.seed = args.seed
         object_spawn = cast(sim_utils.UsdFileCfg, cfg.scene.object.spawn)
         object_spawn.scale = (args.scale, args.scale, args.scale)
         if object_spawn.rigid_props is None:
             raise RuntimeError("DexCube spawn must expose rigid-body solver properties")
-        env = gym.make("AnyMani-GM-HeterogeneousAsset-TactileRotation-v0", cfg=cfg)
-        runtime_env = cast(ManagerBasedRLEnv, env.unwrapped)
+        runtime_env = ManagerBasedRLEnv(cfg=cfg)
+        env = runtime_env
         runtime_env.sim._app_control_on_stop_handle = None
         env.reset()
         robot = cast(Articulation, runtime_env.scene["robot"])
         object_asset = cast(RigidObject, runtime_env.scene["object"])
 
         # 构造每个env的canonical active mask与soft-limit-aware q proposal。
-        active_rows = torch.tensor(HETEROGENEOUS_ACTIVE_MASK_ROWS, dtype=torch.bool, device=runtime_env.device)
+        active_rows = torch.tensor(ASSET_BINDING.active_joint_masks, dtype=torch.bool, device=runtime_env.device)
         active = active_rows[torch.arange(num_envs, device=runtime_env.device) % asset_count]
         limits = robot.data.soft_joint_pos_limits
         lower, upper = limits[:, :, 0], limits[:, :, 1]
@@ -475,7 +467,7 @@ def main() -> int:
             q_state = torch.maximum(torch.minimum(q_state, upper), lower) * active
 
         # 从default object pose构造确定性$T_{ho}$，不继承reset event随机yaw。
-        frame = HETEROGENEOUS_HAND_SPAWN_CFG.frame
+        frame = ASSET_BINDING.hand_spawn_cfg.frame
         hand_pos_w, hand_quat_w = hand_semantic_pose_w(
             robot.data.root_pos_w,
             robot.data.root_quat_w,
@@ -644,7 +636,7 @@ def main() -> int:
         # 共享EMA严格使用task contract的alpha=0.5与0.25 N阈值；不依赖common_step_counter。
         tip_ema = torch.zeros(num_envs, 4, device=runtime_env.device)
         non_tip_ema = torch.zeros(
-            num_envs, len(HETEROGENEOUS_CONTACT_LAYOUT.finger_non_tip_sensor_names), device=runtime_env.device
+            num_envs, len(CONTACT_LAYOUT.finger_non_tip_sensor_names), device=runtime_env.device
         )
         palm_ema = torch.zeros(num_envs, device=runtime_env.device)
         tip_ge2_samples, tip_ge3_samples, tip_count_samples = [], [], []
@@ -654,12 +646,12 @@ def main() -> int:
         orientation_samples, tracking_sq_samples, effort_sq_samples = [], [], []
         penetration_max = torch.zeros(num_envs, device=runtime_env.device)
         tip_body_ids, _ = robot.find_bodies(
-            list(HETEROGENEOUS_CONTACT_LAYOUT.fingertip_link_names), preserve_order=True
+            list(CONTACT_LAYOUT.fingertip_links), preserve_order=True
         )
         all_sensor_names = (
-            *HETEROGENEOUS_CONTACT_LAYOUT.fingertip_sensor_names,
-            *HETEROGENEOUS_CONTACT_LAYOUT.finger_non_tip_sensor_names,
-            HETEROGENEOUS_CONTACT_LAYOUT.palm_sensor_name,
+            *CONTACT_LAYOUT.fingertip_sensor_names,
+            *CONTACT_LAYOUT.finger_non_tip_sensor_names,
+            CONTACT_LAYOUT.palm_sensor_name,
         )
         sensors = {name: cast(ContactSensor, runtime_env.scene[name]) for name in all_sensor_names}
 
@@ -673,21 +665,19 @@ def main() -> int:
                 continue
             tip_force = torch.stack(
                 [
-                    torch.linalg.vector_norm(sensor_total_force_w(runtime_env, name), dim=-1)
-                    for name in HETEROGENEOUS_CONTACT_LAYOUT.fingertip_sensor_names
+                    sensor_contact_magnitude(runtime_env, name)
+                    for name in CONTACT_LAYOUT.fingertip_sensor_names
                 ],
                 dim=-1,
             )
             non_tip_force = torch.stack(
                 [
-                    torch.linalg.vector_norm(sensor_total_force_w(runtime_env, name), dim=-1)
-                    for name in HETEROGENEOUS_CONTACT_LAYOUT.finger_non_tip_sensor_names
+                    sensor_contact_magnitude(runtime_env, name)
+                    for name in CONTACT_LAYOUT.finger_non_tip_sensor_names
                 ],
                 dim=-1,
             )
-            palm_force = torch.linalg.vector_norm(
-                sensor_total_force_w(runtime_env, HETEROGENEOUS_CONTACT_LAYOUT.palm_sensor_name), dim=-1
-            )
+            palm_force = sensor_contact_magnitude(runtime_env, CONTACT_LAYOUT.palm_sensor_name)
             tip_ema = 0.5 * tip_force + 0.5 * tip_ema
             non_tip_ema = 0.5 * non_tip_force + 0.5 * non_tip_ema
             palm_ema = 0.5 * palm_force + 0.5 * palm_ema
@@ -855,8 +845,8 @@ def main() -> int:
         tier_rank = {"rejected": 0, "support_basin": 1, "contact_basin": 2, "gravity_robust": 3}
         for env_id in range(num_envs):
             local_asset = env_id % asset_count
-            artifact = HETEROGENEOUS_CANONICAL_ARTIFACTS[local_asset]
-            source_asset = HETEROGENEOUS_SOURCE_ASSETS[local_asset]
+            artifact = ASSET_BINDING.canonical_artifacts[local_asset]
+            source_asset = ASSET_BINDING.source_assets[local_asset]
             metrics = PregraspMetrics(
                 finite=bool(finite[env_id].item()),
                 dropped=bool(anchor_max[env_id].item() >= 0.07),
@@ -962,7 +952,7 @@ def main() -> int:
             point_records.append(
                 {
                     "env_id": env_id,
-                    "dataset_row": int(HETEROGENEOUS_SOURCE_DATASET_ROWS[local_asset]),
+                    "dataset_row": int(ASSET_BINDING.dataset_rows[local_asset]),
                     "q_proposal": q_names[env_id],
                     "object_offset_index": int(offset_index[env_id].item()),
                     "initial_q_state_rad": [float(value) for value in q_state[env_id].tolist()],
@@ -997,7 +987,7 @@ def main() -> int:
             _, env_id, record = max(candidates, key=lambda item: item[0])
             selected_records.append(
                 {
-                    "dataset_row": int(HETEROGENEOUS_SOURCE_DATASET_ROWS[local_asset]),
+                    "dataset_row": int(ASSET_BINDING.dataset_rows[local_asset]),
                     "selected_env_id": env_id,
                     "record": record.to_dict(),
                 }
@@ -1005,7 +995,7 @@ def main() -> int:
             _, frontier_env_id, frontier_record = max(frontier_by_asset[local_asset], key=lambda item: item[0])
             frontier_records.append(
                 {
-                    "dataset_row": int(HETEROGENEOUS_SOURCE_DATASET_ROWS[local_asset]),
+                    "dataset_row": int(ASSET_BINDING.dataset_rows[local_asset]),
                     "frontier_env_id": frontier_env_id,
                     "tip_sensor_occupancy_fraction": [
                         float(value) for value in tip_sensor_fraction[frontier_env_id].tolist()
@@ -1019,7 +1009,7 @@ def main() -> int:
             _, gate_env_id, gate_record = max(gate_frontier_by_asset[local_asset], key=lambda item: item[0])
             gate_frontier_records.append(
                 {
-                    "dataset_row": int(HETEROGENEOUS_SOURCE_DATASET_ROWS[local_asset]),
+                    "dataset_row": int(ASSET_BINDING.dataset_rows[local_asset]),
                     "gate_frontier_env_id": gate_env_id,
                     "tip_sensor_occupancy_fraction": [
                         float(value) for value in tip_sensor_fraction[gate_env_id].tolist()
@@ -1035,7 +1025,7 @@ def main() -> int:
             )
             support_frontier_records.append(
                 {
-                    "dataset_row": int(HETEROGENEOUS_SOURCE_DATASET_ROWS[local_asset]),
+                    "dataset_row": int(ASSET_BINDING.dataset_rows[local_asset]),
                     "support_frontier_env_id": support_env_id,
                     "record": support_record.to_dict(),
                 }

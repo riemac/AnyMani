@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-r"""离线准备 heterogeneous PPO train partition 的 canonical artifacts。
+r"""离线准备generated heterogeneous PPO partition的canonical artifacts。
 
 该入口启动 AppLauncher 以满足 robots adapter 的 IsaacLab cfg imports，但不创建 environment、Stage
 scene 或 PhysX view；只执行：``ppo.yaml train resolve``、canonical URDF/manifest materialization、
-group manifest 与全局 startup-pose 计算。训练与预热共享同一
-``outputs/canonical_runtime/v1``，因此可用父 recorder 分别测首次准备和 cache-hit 准备。
+ordered manifest digest 与全局startup-pose计算。训练与预热共享同一``outputs/canonical_runtime/v1`` artifact cache，
+因此可用父recorder分别测首次准备和cache-hit准备；本入口不查询pregrasp cache。
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 
 
 def _parse_args() -> argparse.Namespace:
@@ -28,10 +27,6 @@ def main() -> int:
     r"""物化并打印有序资产、group manifest 与 boot-pose 摘要。"""
 
     args = _parse_args()
-    if args.max_assets is None:
-        os.environ.pop("ANYMANI_HETEROGENEOUS_ASSET_LIMIT", None)
-    else:
-        os.environ["ANYMANI_HETEROGENEOUS_ASSET_LIMIT"] = str(args.max_assets)
     from anymani.distill.diagnostics.recording.rl import record_optional_rl_phase
 
     record_optional_rl_phase("app_launcher", "start", headless=True)
@@ -40,21 +35,20 @@ def main() -> int:
     app_launcher = AppLauncher(headless=True)
     _simulation_app = app_launcher.app  # 保持 Kit app 生命周期覆盖全部 IsaacLab cfg imports
     record_optional_rl_phase("app_launcher", "complete")
-    from anymani.tasks.gm.config.heterogeneous_asset.asset_runtime import (
-        HETEROGENEOUS_CANONICAL_ARTIFACTS,
-        HETEROGENEOUS_GROUP_MANIFEST_DIGEST,
-        HETEROGENEOUS_GROUP_MANIFEST_PATH,
-        HETEROGENEOUS_HAND_SPAWN_CFG,
-    )
+    from anymani.distill.rl.runtime.structured_geometry import canonical_group_manifest_digest
+    from anymani.tasks.hetero.config.generated.asset_binding import build_generated_asset_binding
+
+    rows = None if args.max_assets is None else tuple(range(args.max_assets))
+    binding = build_generated_asset_binding(rows)
+    group_manifest_digest = canonical_group_manifest_digest(binding.canonical_artifacts)
 
     print(
         {
-            "asset_count": len(HETEROGENEOUS_CANONICAL_ARTIFACTS),
-            "first_asset_id": HETEROGENEOUS_CANONICAL_ARTIFACTS[0].asset_id,
-            "last_asset_id": HETEROGENEOUS_CANONICAL_ARTIFACTS[-1].asset_id,
-            "group_manifest": str(HETEROGENEOUS_GROUP_MANIFEST_PATH),
-            "group_manifest_digest": HETEROGENEOUS_GROUP_MANIFEST_DIGEST,
-            "startup_joint_pos": dict(HETEROGENEOUS_HAND_SPAWN_CFG.joint_init.joint_pos),
+            "asset_count": len(binding.canonical_artifacts),
+            "first_asset_id": binding.canonical_artifacts[0].asset_id,
+            "last_asset_id": binding.canonical_artifacts[-1].asset_id,
+            "group_manifest_digest": group_manifest_digest,
+            "startup_joint_pos": dict(binding.hand_spawn_cfg.joint_init.joint_pos),
         }
     )
     return 0

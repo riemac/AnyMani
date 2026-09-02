@@ -1,8 +1,8 @@
-r"""用4-env ManagerBased scene验证hetero pregrasp event/action partial-reset生命周期。
+r"""用4-env cache-independent hetero harness验证pregrasp event/action partial-reset生命周期。
 
-本脚本暂借旧GM scene作为Isaac harness，但被测``tasks/hetero``源码不import GM/inhand。它覆盖full reset、一次
-policy update、六次physics apply、乱序partial reset与bad-identity fail-closed；输出只证明reset/action runtime
-合同，不代表完整新任务、reward或PPO已经可用。
+Harness与正式task共享canonical scene、DexCube与结构碰撞，但自身不查询cache；本脚本显式安装待测exact record。
+它覆盖full reset、一次policy update、六次physics apply、乱序partial reset与bad-identity fail-closed；输出只证明
+reset/action runtime合同，不代表完整任务、reward或PPO能力。
 """
 
 from __future__ import annotations
@@ -15,7 +15,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
-os.environ["ANYMANI_HETEROGENEOUS_ASSET_ROWS"] = "16"  # 单个已认证physical asset prototype
+os.environ["ANYMANI_HETERO_ASSET_ROWS"] = "16"  # 单个已认证physical asset prototype
+os.environ["ANYMANI_HETERO_NUM_ENVS"] = "4"  # 四个round-robin replicas用于partial-reset逐位对照
 
 from isaaclab.app import AppLauncher  # noqa: E402  # environment routing必须在task import前固定
 
@@ -44,21 +45,15 @@ def _clone_rows(tensors: dict[str, Any], rows: list[int]) -> dict[str, Any]:
 def main() -> int:
     r"""运行真实ManagerBased reset/action smoke并输出关键误差。"""
 
-    import anymani.tasks.gm  # noqa: F401  # 仅注册临时scene harness，不被tasks/hetero源码消费
-    import gymnasium as gym
     import isaaclab.sim as sim_utils
     import torch
     from anymani.pregrasp import AtomicPregraspCache, PregraspMissError, PregraspRecord, active_mask_digest
     from anymani.pregrasp.isaac_runtime import hand_semantic_pose_w, object_pose_w_from_hand
-    from anymani.tasks.gm.config.heterogeneous_asset.asset_runtime import (
-        HETEROGENEOUS_ACTIVE_MASK_ROWS,
-        HETEROGENEOUS_CANONICAL_ARTIFACTS,
-        HETEROGENEOUS_HAND_SPAWN_CFG,
+    from anymani.tasks.hetero.config.generated.pregrasp_harness_env_cfg import (
+        GeneratedPregraspHarnessEnvCfg,
+        PregraspHarnessEventsCfg,
     )
-    from anymani.tasks.gm.config.heterogeneous_asset.tactile_rotation_env_cfg import (
-        HeterogeneousEventsCfg,
-        HeterogeneousTactileRotationEnvCfg,
-    )
+    from anymani.tasks.hetero.config.generated.scene import ASSET_BINDING
     from anymani.tasks.hetero.mdp.actions import (
         POLICY_STEP_AUTHORITY_RAD,
         PreloadAwareMaskedRelativeJointPositionAction,
@@ -87,13 +82,13 @@ def main() -> int:
         entry for entry in cache_index.entries if entry.anchor == "1.2" and entry.tier.value == "contact_basin"
     )
     record = PregraspRecord.from_dict(json.loads(cache.payload_path(scale_entry).read_text()))
-    frame = HETEROGENEOUS_HAND_SPAWN_CFG.frame  # generated-hand$T_{ha}$ calibration
-    artifact = HETEROGENEOUS_CANONICAL_ARTIFACTS[0]  # env routing已固定为formal row16
+    frame = ASSET_BINDING.hand_spawn_cfg.frame  # generated-hand$T_{ha}$ calibration
+    artifact = ASSET_BINDING.canonical_artifacts[0]  # env routing已固定为formal row16
     runtime_identity = PregraspRuntimeIdentity(
         source_content_hash=artifact.source_content_hash,
         physical_geometry_hash=artifact.physical_geometry_hash,
         canonical_schema_digest=artifact.schema_digest,
-        routing_digest=active_mask_digest(HETEROGENEOUS_ACTIVE_MASK_ROWS[0]),
+        routing_digest=active_mask_digest(ASSET_BINDING.active_joint_masks[0]),
     )
     support_entry = next(
         entry for entry in cache_index.entries if entry.anchor == "1.2" and entry.tier.value == "support_basin"
@@ -142,14 +137,12 @@ def main() -> int:
         )
 
     @configclass
-    class SmokeEventsCfg(HeterogeneousEventsCfg):
-        r"""保留scene startup原件，以新pregrasp event作为robot/object唯一reset writer。"""
+    class SmokeEventsCfg(PregraspHarnessEventsCfg):
+        r"""保留hetero scene startup原件，以exact pregrasp event作为唯一reset writer。"""
 
         reset_robot_joints = None
         reset_object = None
-        apply_object_offset = None
-        record_object_anchor = None
-        reset_from_cache = EventTerm(
+        pregrasp_reset = EventTerm(
             func=reset_from_pregrasp_cache,
             mode="reset",
             params={"config": reset_cfg},
@@ -157,15 +150,14 @@ def main() -> int:
 
     env = None
     try:
-        cfg = HeterogeneousTactileRotationEnvCfg()
-        cfg.scene.num_envs = 4  # 两个reset、两个non-reset rows足以证伪stale污染
+        cfg = GeneratedPregraspHarnessEnvCfg()
         cfg.scene.replicate_physics = False
-        cfg.actions = SmokeActionsCfg()  # type: ignore[assignment]  # harness有意替换旧action config类型
+        cfg.actions = SmokeActionsCfg()  # type: ignore[assignment]  # harness action替换为待测preload-aware term
         cfg.events = SmokeEventsCfg()
         object_spawn = cast(sim_utils.UsdFileCfg, cfg.scene.object.spawn)
         object_spawn.scale = (1.2, 1.2, 1.2)  # 与cache退化interval$[1.2,1.2]$ exact匹配
-        env = gym.make("AnyMani-GM-HeterogeneousAsset-TactileRotation-v0", cfg=cfg)
-        runtime_env = cast(ManagerBasedRLEnv, env.unwrapped)
+        runtime_env = ManagerBasedRLEnv(cfg=cfg)
+        env = runtime_env
         runtime_env.sim._app_control_on_stop_handle = None
         env.reset()  # 真顺序：event reset -> action manager reset
 

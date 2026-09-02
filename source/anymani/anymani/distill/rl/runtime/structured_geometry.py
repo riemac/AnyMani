@@ -25,8 +25,8 @@ from anymani.assets.canonical_runtime import (
 from anymani.distill.methods.density_material_jacobian.artifact import load_se3_retained_encoder_artifact
 from anymani.distill.models.structured_heterogeneous import GeometryTokenBatch, StructuredActorObservation
 from anymani.distill.rl.canonical_evidence import build_canonical_evidence_bank
-from anymani.distill.rl.runtime.evidence import N040_PPO_SOURCE_CFG
 from anymani.distill.rl.runtime.retained_geometry import RetainedGeometryBatch, RetainedGeometryProvider
+from anymani.distill.rl.runtime.source_config import N040_PPO_SOURCE_CFG
 from anymani.robots.hand_spawn import HandSpawnCfg
 
 N040_RETAINED_ARTIFACT_PATH = Path(
@@ -129,11 +129,11 @@ def resolve_structured_geometry(
 
     q_rad = actor_observation.jnt_current[..., 0] * torch.pi
     retained = provider.resolve(prototype_index, q_rad)
-    torch._assert_async(
+    torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]
         torch.all(retained.owner_valid_mask == actor_observation.owner_valid),
         "N040 owner routing disagrees with structured task",
     )
-    torch._assert_async(
+    torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]
         torch.all(retained.joint_valid_mask == actor_observation.jnt_valid),
         "N040 joint routing disagrees with structured task",
     )

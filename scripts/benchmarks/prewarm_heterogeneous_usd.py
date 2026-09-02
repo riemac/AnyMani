@@ -8,7 +8,6 @@ r"""使用正式 heterogeneous child cfg 顺序预热 IsaacLab URDF->USD cache�
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 from typing import cast
 
@@ -31,11 +30,6 @@ def main() -> int:
     r"""顺序触发 converter lazy hit/miss，并输出创建/复用计数。"""
 
     args = _parse_args()
-    if args.max_assets is None:
-        os.environ.pop("ANYMANI_HETEROGENEOUS_ASSET_LIMIT", None)
-    else:
-        os.environ["ANYMANI_HETEROGENEOUS_ASSET_LIMIT"] = str(args.max_assets)
-
     from anymani.distill.diagnostics.recording.rl import record_optional_rl_phase
 
     record_optional_rl_phase("app_launcher", "start", headless=True)
@@ -45,21 +39,20 @@ def main() -> int:
     _simulation_app = app_launcher.app  # 保持 URDF importer extension 生命周期覆盖全部转换
     record_optional_rl_phase("app_launcher", "complete")
 
-    from anymani.tasks.gm.config.heterogeneous_asset.asset_runtime import (
-        HETEROGENEOUS_CANONICAL_ARTIFACTS,
-        HETEROGENEOUS_HAND_ADAPTER,
-    )
+    from anymani.tasks.hetero.config.generated.asset_binding import build_generated_asset_binding
     from isaaclab.sim.converters import UrdfConverter
     from isaaclab.sim.spawners.from_files.from_files_cfg import UrdfFileCfg
 
-    children = cast(list[UrdfFileCfg], HETEROGENEOUS_HAND_ADAPTER.build_multi_hand_spawn_cfg().assets_cfg)
-    if len(children) != len(HETEROGENEOUS_CANONICAL_ARTIFACTS):
+    rows = None if args.max_assets is None else tuple(range(args.max_assets))
+    binding = build_generated_asset_binding(rows)
+    children = cast(list[UrdfFileCfg], binding.hand_adapter.build_multi_hand_spawn_cfg().assets_cfg)
+    if len(children) != len(binding.canonical_artifacts):
         raise RuntimeError("heterogeneous child cfg count does not match canonical artifact count")
 
     changed = 0
     reused = 0
     record_optional_rl_phase("usd_cache_prewarm", "start", asset_count=len(children))
-    for row, (child, artifact) in enumerate(zip(children, HETEROGENEOUS_CANONICAL_ARTIFACTS, strict=True)):
+    for row, (child, artifact) in enumerate(zip(children, binding.canonical_artifacts, strict=True)):
         usd_path = Path(child.usd_dir or "") / (child.usd_file_name or "")
         mtime_before = usd_path.stat().st_mtime_ns if usd_path.is_file() else None
         try:

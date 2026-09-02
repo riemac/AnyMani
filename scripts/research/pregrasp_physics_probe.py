@@ -40,7 +40,8 @@ def main() -> int:
     rows = tuple(int(item.strip()) for item in args.rows.split(",") if item.strip())
     if len(rows) != 2 or len(set(rows)) != 2:
         raise ValueError("--rows must contain exactly two distinct dataset rows")
-    os.environ["ANYMANI_HETEROGENEOUS_ASSET_ROWS"] = ",".join(str(row) for row in rows)
+    os.environ["ANYMANI_HETERO_ASSET_ROWS"] = ",".join(str(row) for row in rows)
+    os.environ["ANYMANI_HETERO_NUM_ENVS"] = "2"
 
     # AppLauncher必须早于IsaacLab/pxr/runtime imports；每个scale由一个独立进程拥有SimulationContext。
     from isaaclab.app import AppLauncher
@@ -49,8 +50,6 @@ def main() -> int:
     simulation_app = app_launcher.app
     env = None
     try:
-        import anymani.tasks.gm  # noqa: F401  # 注册当前只读physics probe所需旧Gym ID
-        import gymnasium as gym
         import isaaclab.sim as sim_utils
         import torch
         from anymani.pregrasp.isaac_runtime import (
@@ -61,31 +60,24 @@ def main() -> int:
             object_pose_h_from_world,
             object_pose_w_from_hand,
         )
-        from anymani.tasks.gm.config.heterogeneous_asset.asset_runtime import (
-            HETEROGENEOUS_CANONICAL_ARTIFACTS,
-            HETEROGENEOUS_CONTACT_LAYOUT,
-            HETEROGENEOUS_HAND_SPAWN_CFG,
-            HETEROGENEOUS_SOURCE_ASSETS,
-            HETEROGENEOUS_SOURCE_DATASET_ROWS,
+        from anymani.tasks.hetero.config.generated.pregrasp_harness_env_cfg import (
+            GeneratedPregraspHarnessEnvCfg,
         )
-        from anymani.tasks.gm.config.heterogeneous_asset.tactile_rotation_env_cfg import (
-            HeterogeneousTactileRotationEnvCfg,
-        )
+        from anymani.tasks.hetero.config.generated.scene import ASSET_BINDING, CONTACT_LAYOUT
         from isaaclab.assets import Articulation, RigidObject
         from isaaclab.envs import ManagerBasedRLEnv
         from isaaclab.sensors import ContactSensor
         from isaaclab.utils.assets import retrieve_file_path
 
         # Scale是absolute USD scale；普通episode event不能改变已经创建的collision geometry。
-        cfg = HeterogeneousTactileRotationEnvCfg()
-        cfg.scene.num_envs = 2
+        cfg = GeneratedPregraspHarnessEnvCfg()
         cfg.scene.replicate_physics = False
         object_spawn = cast(sim_utils.UsdFileCfg, cfg.scene.object.spawn)
         object_spawn.scale = (args.scale, args.scale, args.scale)
         if object_spawn.rigid_props is None:
             raise RuntimeError("DexCube spawn must expose rigid-body solver properties")
-        env = gym.make("AnyMani-GM-HeterogeneousAsset-TactileRotation-v0", cfg=cfg)
-        runtime_env = cast(ManagerBasedRLEnv, env.unwrapped)
+        runtime_env = ManagerBasedRLEnv(cfg=cfg)
+        env = runtime_env
         runtime_env.sim._app_control_on_stop_handle = None
         env.reset()
 
@@ -102,7 +94,7 @@ def main() -> int:
         object_sha256 = file_sha256(object_local_path)
 
         # 从$T_{wa}$与静态$T_{ah}=T_{ha}^{-1}$构造hand semantic world pose。
-        frame = HETEROGENEOUS_HAND_SPAWN_CFG.frame
+        frame = ASSET_BINDING.hand_spawn_cfg.frame
         pos_wh, quat_wh = hand_semantic_pose_w(
             robot.data.root_pos_w,
             robot.data.root_quat_w,
@@ -128,9 +120,9 @@ def main() -> int:
 
         # 24个object-filtered sensor逐项读取detailed contact separation；palm合法且单独报告。
         sensor_names = (
-            *HETEROGENEOUS_CONTACT_LAYOUT.fingertip_sensor_names,
-            *HETEROGENEOUS_CONTACT_LAYOUT.finger_non_tip_sensor_names,
-            HETEROGENEOUS_CONTACT_LAYOUT.palm_sensor_name,
+            *CONTACT_LAYOUT.fingertip_sensor_names,
+            *CONTACT_LAYOUT.finger_non_tip_sensor_names,
+            CONTACT_LAYOUT.palm_sensor_name,
         )
         contact_summary = {}
         penetration_per_env = torch.zeros(2, device=runtime_env.device)
@@ -154,9 +146,9 @@ def main() -> int:
         applied_torque = robot.data.applied_torque.detach().cpu()
         artifacts = []
         for dataset_row, source_asset, artifact in zip(
-            HETEROGENEOUS_SOURCE_DATASET_ROWS,
-            HETEROGENEOUS_SOURCE_ASSETS,
-            HETEROGENEOUS_CANONICAL_ARTIFACTS,
+            ASSET_BINDING.dataset_rows,
+            ASSET_BINDING.source_assets,
+            ASSET_BINDING.canonical_artifacts,
         ):
             artifacts.append(
                 {

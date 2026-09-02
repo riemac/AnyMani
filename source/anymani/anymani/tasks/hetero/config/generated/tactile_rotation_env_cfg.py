@@ -10,8 +10,6 @@ import math
 import os
 
 import isaaclab.envs.mdp as isaac_mdp
-import isaaclab.sim as sim_utils
-from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.common import ViewerCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -19,15 +17,12 @@ from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import TerminationTermCfg as DoneTerm
-from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from anymani.pregrasp import PregraspTier
 
-from ...contact_sensors import install_contact_sensors
 from ...mdp import commands as command_mdp
 from ...mdp import observations as observation_mdp
 from ...mdp import rewards as reward_mdp
@@ -35,16 +30,14 @@ from ...mdp import terminations as termination_mdp
 from ...mdp.actions import POLICY_STEP_AUTHORITY_RAD, PreloadAwareMaskedRelativeJointPositionActionCfg
 from ...mdp.contact_state import reset_contact_state
 from ...mdp.events import apply_structural_collision_filter, lock_ghost_joint_limits, reset_from_pregrasp_cache
-from .asset_binding import GeneratedAssetBinding, build_generated_asset_binding
-
-OBJECT_SCALE = 1.2
-ASSET_BINDING: GeneratedAssetBinding = build_generated_asset_binding()
-ASSET_COUNT = ASSET_BINDING.asset_count
-NUM_ENVS = int(os.environ.get("ANYMANI_HETERO_NUM_ENVS", str(ASSET_COUNT)))
-if NUM_ENVS < ASSET_COUNT:
-    raise ValueError("ANYMANI_HETERO_NUM_ENVS must be at least the selected asset count")
-ACTIVE_MASK_BY_ENV = ASSET_BINDING.active_joint_mask_by_env(NUM_ENVS)
-CONTACT_LAYOUT = ASSET_BINDING.contact_layout
+from .scene import (
+    ACTIVE_MASK_BY_ENV,
+    ASSET_BINDING,
+    CONTACT_LAYOUT,
+    GeneratedHeterogeneousSceneCfg,
+    NUM_ENVS,
+    OBJECT_SCALE,
+)
 
 
 def _minimum_pregrasp_tier() -> PregraspTier:
@@ -77,47 +70,6 @@ def _contact_params() -> dict[str, object]:
         "ema_alpha": 0.5,
         "force_threshold_N": 0.25,
     }
-
-
-@configclass
-class GeneratedHeterogeneousSceneCfg(InteractiveSceneCfg):
-    r"""Canonical generated hands、fixed-scale DexCube、ground/light与24 contact sensors。"""
-
-    robot = ASSET_BINDING.hand_adapter.build_articulation_cfg(prim_path="{ENV_REGEX_NS}/Robot")
-    object: RigidObjectCfg = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/object",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=False,
-                disable_gravity=False,
-                enable_gyroscopic_forces=True,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=0,
-                sleep_threshold=0.005,
-                stabilization_threshold=0.0025,
-                max_depenetration_velocity=1000.0,
-            ),
-            mass_props=sim_utils.MassPropertiesCfg(density=400.0),
-            scale=(OBJECT_SCALE, OBJECT_SCALE, OBJECT_SCALE),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.6), rot=(1.0, 0.0, 0.0, 0.0)),
-    )
-    ground = AssetBaseCfg(
-        prim_path="/World/ground",
-        spawn=sim_utils.GroundPlaneCfg(),
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -0.1)),
-    )
-    light = AssetBaseCfg(
-        prim_path="/World/skyLight",
-        spawn=sim_utils.DomeLightCfg(intensity=750.0),
-    )
-
-    def __post_init__(self) -> None:
-        r"""安装固定object-filtered sensor ABI。"""
-
-        super().__post_init__()  # pyright: ignore[reportAttributeAccessIssue]
-        install_contact_sensors(self, CONTACT_LAYOUT)
 
 
 @configclass
