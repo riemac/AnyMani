@@ -16,6 +16,7 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import CommandTerm, CommandTermCfg
 from isaaclab.utils import configclass
 
+from .contact_state import HeterogeneousContactState
 from .diagnostics import asset_episode_sufficient_statistics
 from .task_math import (
     axis_angle_from_quaternion_wxyz,
@@ -91,6 +92,36 @@ class HeterogeneousRotationCommand(CommandTerm):
         self.goal_success_count = torch.zeros(self.num_envs, device=self.device)
         self.subgoal_throughput_per_horizon_s = torch.zeros(self.num_envs, device=self.device)
 
+        # RewardManager最后一个term在任何automatic reset之前覆盖这些full-env tensors。Command/event reset不清它们，
+        # 因而env.step返回后done rows仍对应terminal physics frame，而不是新episode的零值。
+        dataset_rows = (
+            torch.tensor(cfg.dataset_row_by_env, dtype=torch.long, device=self.device)
+            if len(cfg.dataset_row_by_env) == self.num_envs
+            else torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
+        )
+        self.post_physics_evaluation_snapshot: dict[str, torch.Tensor] = {
+            "valid": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            "step": torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device),
+            "dataset_row": dataset_rows,
+            "axis_speed_rad_s": torch.zeros(self.num_envs, device=self.device),
+            "net_rotation_rad": torch.zeros(self.num_envs, device=self.device),
+            "completed_subgoals": torch.zeros(self.num_envs, device=self.device),
+            "goal_success_pulse": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            "episode_duration_s": torch.zeros(self.num_envs, device=self.device),
+            "tip_active_count": torch.zeros(self.num_envs, device=self.device),
+            "palm_contact": torch.zeros(self.num_envs, device=self.device),
+            "finger_non_tip_contact": torch.zeros(self.num_envs, device=self.device),
+            "orientation_keypoint_error_m": torch.zeros(self.num_envs, device=self.device),
+            "position_error_m": torch.zeros(self.num_envs, device=self.device),
+            "termination_object_out_of_anchor": torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device
+            ),
+            "termination_goal_axis_misaligned": torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device
+            ),
+            "termination_time_out": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+        }
+
         self.metrics.update(
             {
                 "rotation/delta_psi_rad": self.delta_psi,
@@ -163,6 +194,47 @@ class HeterogeneousRotationCommand(CommandTerm):
             termination_bits=termination,
             horizon_s=float(self.cfg.horizon_s),
         )
+
+    def capture_post_physics_evaluation_snapshot(
+        self,
+        contact: HeterogeneousContactState,
+        termination_bits: dict[str, torch.Tensor],
+    ) -> None:
+        r"""冻结当前post-physics、pre-reset frame的trajectory充分状态。
+
+        调用点必须位于RewardManager最后一个term：TerminationManager已计算当前failure bits，contact rewards已刷新
+        20 Hz EMA，而ManagerBasedRLEnv尚未执行``scene.reset``、pregrasp event或command reset。Snapshot保持full
+        environment axis；下一step覆盖它，automatic reset本身不得清除。
+        """
+
+        required_terms = ("object_out_of_anchor", "goal_axis_misaligned", "time_out")
+        if set(termination_bits) != set(required_terms):
+            raise ValueError("evaluation snapshot requires exact drop/axis/timeout termination terms")
+        if any(bits.shape != (self.num_envs,) for bits in termination_bits.values()):
+            raise ValueError("evaluation snapshot termination bits must share the environment axis")
+        self.ensure_post_physics_progress_updated()
+        contact.ensure_updated(self._env)
+        snapshot = self.post_physics_evaluation_snapshot
+        snapshot["valid"].fill_(True)
+        snapshot["step"].fill_(int(self._env.common_step_counter))
+        snapshot["axis_speed_rad_s"].copy_(self.axis_speed_rad_s)
+        snapshot["net_rotation_rad"].copy_(self.net_rotation_rad)
+        snapshot["completed_subgoals"].copy_(
+            self.goal_success_count + self.goal_success_pulse.to(dtype=self.goal_success_count.dtype)
+        )
+        snapshot["goal_success_pulse"].copy_(self.goal_success_pulse)
+        snapshot["episode_duration_s"].copy_(
+            self._env.episode_length_buf.to(dtype=torch.float32) * float(self._env.step_dt)
+        )
+        snapshot["tip_active_count"].copy_(contact.tip_bits.sum(dim=-1).to(dtype=torch.float32))
+        snapshot["palm_contact"].copy_(contact.palm_bits[:, 0].to(dtype=torch.float32))
+        snapshot["finger_non_tip_contact"].copy_(
+            contact.finger_non_tip_bits.any(dim=-1).to(dtype=torch.float32)
+        )
+        snapshot["orientation_keypoint_error_m"].copy_(self.orientation_keypoint_error_m)
+        snapshot["position_error_m"].copy_(self.position_error_m)
+        for term_name in required_terms:
+            snapshot[f"termination_{term_name}"].copy_(termination_bits[term_name])
 
     def ensure_post_physics_progress_updated(self) -> None:
         r"""按common-step stamp幂等刷新signed progress、goal error与success pulse。"""

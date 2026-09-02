@@ -37,6 +37,14 @@ def test_terminal_statistics_include_success_pulse_and_ignore_nonreset_stale_bit
     assert extras["asset/20/termination_goal_axis_misaligned_sum"] == 1.0
     assert extras["asset/10/termination_time_out_sum"] == 0.0  # stale row1 timeout被隔离
     assert abs(extras["asset/20/net_rotation_turns_signed_sum"] + 0.5) < 1.0e-7
+    assert extras["asset/10/episode_any_success_pulse_sum"] == 1.0
+    assert extras["asset/10/reached_positive_30deg_sum"] == 1.0
+    assert extras["asset/20/reached_negative_30deg_sum"] == 1.0
+    assert extras["asset/10/reached_positive_full_turn_sum"] == 0.0
+    assert extras["asset/20/reached_negative_full_turn_sum"] == 0.0
+    assert math.isclose(
+        extras["asset/10/time_weighted_signed_speed_rad_s_sum"], math.pi / 10.0, abs_tol=1.0e-7
+    )
 
 
 def test_equal_asset_reducer_uses_per_asset_means() -> None:

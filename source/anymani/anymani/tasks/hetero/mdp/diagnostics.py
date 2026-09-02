@@ -41,6 +41,9 @@ def asset_episode_sufficient_statistics(
     completed_subgoals = goal_success_count + goal_success_pulse.to(dtype=goal_success_count.dtype)
     signed_turns = net_rotation_rad / (2.0 * torch.pi)
     reached_full_turn = net_rotation_rad >= 2.0 * torch.pi
+    reached_negative_full_turn = net_rotation_rad <= -2.0 * torch.pi
+    reached_positive_30deg = net_rotation_rad >= torch.pi / 6.0
+    reached_negative_30deg = net_rotation_rad <= -torch.pi / 6.0
     extras: dict[str, float] = {}
     selected_rows = dataset_row_by_env[reset_env_ids]
     for dataset_row in sorted(set(int(value) for value in selected_rows.tolist())):
@@ -48,6 +51,9 @@ def asset_episode_sufficient_statistics(
         prefix = f"asset/{dataset_row}"
         extras[f"{prefix}/episode_count"] = float(member_ids.numel())
         extras[f"{prefix}/goal_success_count_sum"] = float(completed_subgoals[member_ids].sum().item())
+        extras[f"{prefix}/episode_any_success_pulse_sum"] = float(
+            (completed_subgoals[member_ids] > 0.0).to(dtype=torch.float32).sum().item()
+        )
         extras[f"{prefix}/subgoal_throughput_fixed_horizon_sum"] = float(
             (completed_subgoals[member_ids] / horizon_s).sum().item()
         )
@@ -58,6 +64,19 @@ def asset_episode_sufficient_statistics(
         )
         extras[f"{prefix}/reached_positive_full_turn_sum"] = float(
             reached_full_turn[member_ids].to(dtype=torch.float32).sum().item()
+        )
+        extras[f"{prefix}/reached_negative_full_turn_sum"] = float(
+            reached_negative_full_turn[member_ids].to(dtype=torch.float32).sum().item()
+        )
+        extras[f"{prefix}/reached_positive_30deg_sum"] = float(
+            reached_positive_30deg[member_ids].to(dtype=torch.float32).sum().item()
+        )
+        extras[f"{prefix}/reached_negative_30deg_sum"] = float(
+            reached_negative_30deg[member_ids].to(dtype=torch.float32).sum().item()
+        )
+        safe_duration = episode_duration_s[member_ids].clamp_min(torch.finfo(torch.float32).eps)
+        extras[f"{prefix}/time_weighted_signed_speed_rad_s_sum"] = float(
+            (net_rotation_rad[member_ids] / safe_duration).sum().item()
         )
         extras[f"{prefix}/episode_duration_s_sum"] = float(episode_duration_s[member_ids].sum().item())
         for term_name, term_bits in termination_bits.items():

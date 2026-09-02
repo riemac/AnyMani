@@ -219,7 +219,11 @@ class GeneratedHeterogeneousRewardsCfg:
     failure = RewTerm(
         func=reward_mdp.failure_termination_impulse_rate,
         weight=-50.0,
-        params={"termination_term_names": ("object_out_of_anchor", "goal_axis_misaligned")},
+        params={
+            "command_name": "goal_pose",
+            "termination_term_names": ("object_out_of_anchor", "goal_axis_misaligned"),
+            **_contact_params(),
+        },
     )
 
 

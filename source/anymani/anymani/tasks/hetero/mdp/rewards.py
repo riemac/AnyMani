@@ -56,15 +56,33 @@ def goal_success_impulse_rate(env: ManagerBasedRLEnv, command_name: str) -> torc
 def failure_termination_impulse_rate(
     env: ManagerBasedRLEnv,
     *,
+    command_name: str,
     termination_term_names: Sequence[str],
+    layout: HeterogeneousContactLayout,
+    active_joint_mask_by_env: Sequence[Sequence[bool]],
+    ema_alpha: float = 0.5,
+    force_threshold_N: float = 0.25,
 ) -> torch.Tensor:
-    r"""对非timeout failure terms做OR并转换为one-step rate。"""
+    r"""冻结pre-reset evaluation snapshot，再对非timeout failures做OR并转换为rate。"""
 
     if not termination_term_names:
         raise ValueError("failure reward requires at least one termination term")
+    termination_bits = {
+        term_name: env.termination_manager.get_term(term_name)
+        for term_name in (*termination_term_names, "time_out")
+    }
+    command = get_rotation_command(env, command_name)
+    contact = get_contact_state(
+        env,
+        layout=layout,
+        active_joint_mask_by_env=active_joint_mask_by_env,
+        ema_alpha=ema_alpha,
+        force_threshold_N=force_threshold_N,
+    )
+    command.capture_post_physics_evaluation_snapshot(contact, termination_bits)
     failure = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     for term_name in termination_term_names:
-        failure |= env.termination_manager.get_term(term_name)
+        failure |= termination_bits[term_name]
     return impulse_to_rate(failure, float(env.step_dt)).to(device=env.device)
 
 

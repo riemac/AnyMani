@@ -129,6 +129,9 @@ def main() -> int:
         reward_sum = torch.zeros(runtime_env.num_envs, device=runtime_env.device)
         termination_count = torch.zeros(runtime_env.num_envs, device=runtime_env.device)
         first_step_history = None
+        command = runtime_env.command_manager.get_term("goal_pose")
+        if not isinstance(command, HeterogeneousRotationCommand):
+            raise AssertionError("new environment did not instantiate hetero command")
         for step in range(args.steps):
             # 小幅确定性动作形成可检查history shift，同时不把random policy当能力实验。
             action = torch.zeros(runtime_env.num_envs, 16, device=runtime_env.device)
@@ -143,6 +146,11 @@ def main() -> int:
                 raise AssertionError("structured env reward became non-finite")
             reward_sum += reward
             termination_count += (terminated | truncated).to(dtype=torch.float32)
+            snapshot = command.post_physics_evaluation_snapshot
+            if not bool(snapshot["valid"].all().item()) or not bool(
+                (snapshot["step"] == int(runtime_env.common_step_counter)).all().item()
+            ):
+                raise AssertionError("reward did not capture a current pre-reset evaluation snapshot")
             if step == 0:
                 first_step_history = observation["policy"]["jnt_history"].clone()
                 if torch.equal(first_step_history[:, -1], reset_history[:, -1]):
@@ -153,6 +161,9 @@ def main() -> int:
 
         # 乱序之外的单row partial reset：row0重复新frame，row1保留旧history并正常shift一次。
         history_before = observation["policy"]["jnt_history"].clone()
+        snapshot_before_reset = {
+            name: value[0].clone() for name, value in command.post_physics_evaluation_snapshot.items()
+        }
         runtime_env._reset_idx([0])
         observation_after = cast(dict[str, dict[str, torch.Tensor]], runtime_env.observation_manager.compute(update_history=True))
         history_after = observation_after["policy"]["jnt_history"]
@@ -160,10 +171,11 @@ def main() -> int:
             raise AssertionError("partial reset did not refill selected History30 row")
         if not torch.equal(history_after[1, :-1], history_before[1, 1:]):
             raise AssertionError("partial reset destroyed non-selected history instead of shifting once")
-
-        command = runtime_env.command_manager.get_term("goal_pose")
-        if not isinstance(command, HeterogeneousRotationCommand):
-            raise AssertionError("new environment did not instantiate hetero command")
+        if any(
+            not torch.equal(command.post_physics_evaluation_snapshot[name][0], value)
+            for name, value in snapshot_before_reset.items()
+        ):
+            raise AssertionError("automatic reset semantics cleared the pre-reset evaluation snapshot")
         evidence = {
             "artifact_type": "anymani.hetero.structured_env_smoke",
             "schema_version": "1.0.0",
@@ -175,6 +187,7 @@ def main() -> int:
             "critic_shapes": {name: list(shape) for name, shape in expected_critic_shapes.items()},
             "history_reset_repeat_passed": True,
             "history_partial_reset_passed": True,
+            "pre_reset_evaluation_snapshot_passed": True,
             "reward_sum": [float(value) for value in reward_sum.tolist()],
             "termination_count": [float(value) for value in termination_count.tolist()],
             "signed_net_rotation_rad": [float(value) for value in command.net_rotation_rad.tolist()],

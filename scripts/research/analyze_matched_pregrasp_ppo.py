@@ -7,6 +7,7 @@ support差值。结论只限单physical asset、单seed和204,800-transition早�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import statistics
 from pathlib import Path
@@ -37,11 +38,13 @@ def _load(path: Path, artifact_type: str) -> dict[str, Any]:
 
 
 def _validate_pair(support: dict[str, Any], contact: dict[str, Any], label: str) -> None:
-    r"""验证matched pair只有tier与pregrasp record不同。"""
+    r"""验证matched pair的source/task/evaluation/PPO身份，只允许arm tier/record不同。"""
 
-    for field in ("seed", "num_envs", "updates", "transitions", "ppo_config", "network"):
+    for field in ("seed", "num_envs", "updates", "transitions", "ppo_config", "network", "schema_version"):
         if support[field] != contact[field]:
             raise ValueError(f"{label} pair differs in matched field {field}")
+    if support["schema_version"] != "2.0.0":
+        raise ValueError(f"{label} pair does not use pre-reset evaluation schema 2.0.0")
     support_provider = dict(support["provider_identity"])
     contact_provider = dict(contact["provider_identity"])
     if support_provider != contact_provider:
@@ -50,6 +53,46 @@ def _validate_pair(support: dict[str, Any], contact: dict[str, Any], label: str)
         raise ValueError(f"{label} pair does not contain support/contact arms")
     if support["pregrasp_record_digest"] == contact["pregrasp_record_digest"]:
         raise ValueError(f"{label} pair unexpectedly shares one pregrasp record")
+    support_identity = support["run_identity"]
+    contact_identity = contact["run_identity"]
+    for field in (
+        "source",
+        "matched_task_contract",
+        "matched_task_contract_digest",
+        "formal_cache_index_digest",
+        "provider_identity_digest",
+    ):
+        if support_identity[field] != contact_identity[field]:
+            raise ValueError(f"{label} pair differs in run identity field {field}")
+    for summary, expected_tier in ((support, "support_basin"), (contact, "contact_basin")):
+        identity = summary["run_identity"]
+        if identity["arm"]["tier"] != expected_tier:
+            raise ValueError(f"{label} arm identity disagrees with tier")
+        if identity["arm"]["pregrasp_record_digest"] != summary["pregrasp_record_digest"]:
+            raise ValueError(f"{label} arm identity disagrees with record digest")
+        launch = dict(identity["launch_arguments"])
+        if launch["eval_steps"] != identity["matched_task_contract"]["evaluation"]["eval_steps"]:
+            raise ValueError(f"{label} evaluation step identity is inconsistent")
+        for name in ("initial_evaluation_trajectories", "final_evaluation_trajectories"):
+            reference = summary[name]
+            path = Path(reference["path"])
+            payload = path.read_bytes()
+            if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
+                raise ValueError(f"{label} {name} SHA-256 mismatch")
+            if len(payload.splitlines()) != int(reference["count"]):
+                raise ValueError(f"{label} {name} count mismatch")
+        checkpoint_path = Path(summary["checkpoint"])
+        if hashlib.sha256(checkpoint_path.read_bytes()).hexdigest() != summary["checkpoint_sha256"]:
+            raise ValueError(f"{label} checkpoint SHA-256 mismatch")
+        if not summary["checkpoint_strict_restore_passed"] or not summary["optimizer_checkpoint_restore_passed"]:
+            raise ValueError(f"{label} checkpoint restore gates did not pass")
+    support_launch = dict(support_identity["launch_arguments"])
+    contact_launch = dict(contact_identity["launch_arguments"])
+    for launch in (support_launch, contact_launch):
+        for arm_specific in ("tier", "run_dir", "argv"):
+            launch.pop(arm_specific)
+    if support_launch != contact_launch:
+        raise ValueError(f"{label} pair differs in normalized launch arguments")
 
 
 def _evaluation_delta(support: dict[str, float], contact: dict[str, float]) -> dict[str, float]:
@@ -58,7 +101,7 @@ def _evaluation_delta(support: dict[str, float], contact: dict[str, float]) -> d
     return {
         name: float(contact[name]) - float(support[name])
         for name in support.keys() & contact.keys()
-        if isinstance(support[name], (int, float)) and isinstance(contact[name], (int, float))
+        if type(support[name]) in {int, float} and type(contact[name]) in {int, float}
     }
 
 
@@ -93,6 +136,15 @@ def main() -> int:
     contact_survival = _load(args.contact_survival, "anymani.hetero.pregrasp_exploration_survival")
     _validate_pair(standard_support, standard_contact, "standard exploration")
     _validate_pair(low_support, low_contact, "low exploration")
+    for field in (
+        "source",
+        "matched_task_contract",
+        "matched_task_contract_digest",
+        "formal_cache_index_digest",
+        "provider_identity_digest",
+    ):
+        if standard_support["run_identity"][field] != low_support["run_identity"][field]:
+            raise ValueError(f"exploration conditions differ in invariant run identity field {field}")
     if standard_support["network"].get("initial_log_std", -0.5) != -0.5:
         raise ValueError("standard pair does not use logstd=-0.5")
     if abs(float(low_support["network"]["initial_log_std"]) - (-1.203972804)) > 1.0e-9:
@@ -113,9 +165,16 @@ def main() -> int:
     )
     artifact = {
         "artifact_type": "anymani.hetero.matched_pregrasp_ppo_analysis",
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "estimand": "contact_basin minus support_basin on row16 under matched early PPO",
         "matched_fields": ["physical asset", "N040", "actor/critic", "seed", "PPO", "budget", "evaluation"],
+        "matched_identity": {
+            "standard": standard_support["run_identity"]["matched_task_contract_digest"],
+            "low_exploration": low_support["run_identity"]["matched_task_contract_digest"],
+            "source_bundle_digest": standard_support["run_identity"]["source"]["source_bundle_digest"],
+            "git_commit": standard_support["run_identity"]["source"]["git_commit"],
+            "evaluation_lifecycle": "task_post_physics_pre_reset_snapshot",
+        },
         "standard_exploration": {
             "initial_log_std": -0.5,
             "support": standard_final["support"],
@@ -153,6 +212,7 @@ def main() -> int:
             "204800 transitions per arm",
             "early-learning comparison, not convergence",
             "trajectories within one shared policy run are correlated",
+            "no seed-level confidence interval is reported because the independent training-seed count is one",
         ],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
