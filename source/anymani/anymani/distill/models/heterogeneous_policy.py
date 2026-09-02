@@ -7,6 +7,7 @@ memory tokens。Critic拥有完全独立参数，只共享同一份冻结geometr
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -45,6 +46,7 @@ class StructuredActorCfg:
     temporal_width: int = 32
     coordination: CoordinationKind = "gated_pool"
     attention_heads: int = 4
+    initial_log_std: float = -0.5
 
     def __post_init__(self) -> None:
         r"""验证width、heads与候选名称。"""
@@ -55,6 +57,8 @@ class StructuredActorCfg:
             raise ValueError("actor hidden width must be divisible by attention heads")
         if self.coordination not in {"local", "gated_pool", "cross_attention"}:
             raise ValueError(f"unsupported coordination candidate {self.coordination!r}")
+        if not math.isfinite(self.initial_log_std):
+            raise ValueError("actor initial_log_std must be finite")
 
 
 @dataclass(frozen=True)
@@ -104,8 +108,12 @@ class StructuredHeterogeneousActor(nn.Module):
                 width, cfg.attention_heads, dropout=0.0, batch_first=True
             )
             self.cross_attention_norm = nn.LayerNorm(width)
-        self.action_head = nn.Sequential(nn.LayerNorm(width), nn.Linear(width, 1))
-        self.global_log_std = nn.Parameter(torch.zeros(()))  # 唯一$\theta^{av}$，无absolute-slot parameters
+        output_layer = nn.Linear(width, 1)
+        nn.init.orthogonal_(output_layer.weight, gain=0.01)  # type: ignore[arg-type]  # torch stub误标gain为int
+        if output_layer.bias is not None:
+            nn.init.zeros_(output_layer.bias)
+        self.action_head = nn.Sequential(nn.LayerNorm(width), output_layer)
+        self.global_log_std = nn.Parameter(torch.tensor(float(cfg.initial_log_std)))  # 唯一$\theta^{av}$
 
     def forward(
         self,
@@ -116,7 +124,7 @@ class StructuredHeterogeneousActor(nn.Module):
 
         if observation.jnt_current.shape[0] != geometry.tokens.shape[0]:
             raise ValueError("actor observation and geometry batch sizes disagree")
-        torch._assert_async(
+        torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]  # 避免GPU host sync的PyTorch runtime原语
             torch.all(observation.owner_valid == geometry.owner_valid),
             "actor and geometry owner masks disagree",
         )
@@ -196,7 +204,7 @@ class StructuredHeterogeneousCritic(nn.Module):
 
         if observation.jnt_state.shape[0] != geometry.tokens.shape[0]:
             raise ValueError("critic observation and geometry batch sizes disagree")
-        torch._assert_async(
+        torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]  # 避免GPU host sync的PyTorch runtime原语
             torch.all(observation.owner_valid == geometry.owner_valid),
             "critic and geometry owner masks disagree",
         )

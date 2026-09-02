@@ -93,6 +93,8 @@ def test_actor_candidates_output_shared_scalar_distribution_and_critic_scalar() 
         output = actor(actor_obs, geometry)
         assert output.mean.shape == (3, 16)
         assert output.log_std.shape == () and output.log_std.numel() == 1
+        assert float(output.log_std.item()) == -0.5
+        assert float(output.mean.abs().max().item()) < 0.1  # gain0.01保证初始策略近似hold pregrasp
         assert torch.equal(output.mean[~actor_obs.jnt_valid], torch.zeros_like(output.mean[~actor_obs.jnt_valid]))
     critic = StructuredHeterogeneousCritic(StructuredCriticCfg(hidden_width=128))
     assert critic(critic_obs, geometry).value.shape == (3,)
