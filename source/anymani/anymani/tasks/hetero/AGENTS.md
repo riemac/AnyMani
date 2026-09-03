@@ -2,12 +2,12 @@
 
 `hetero`固定表示：同一个object-manipulation任务下，并行实例化多种generated hand embodiments；这些手可以具有不同topology、active DoF、handedness、TIP数和几何参数。它不是multi-agent、多物体或通用multi-task命名空间。
 
-本目录已建立独立Python package、generated canonical scene、pregrasp partial reset、structured observations/History30、contact state、fixed-axis command、reward、termination、diagnostics、preload-aware action与Gym注册。`distill`侧actor/critic、N040和matched PPO也已闭合；row16小cohort仍为0 subgoal/0 full turn，不得把可运行、TIP contact或absolute speed解释为旋转能力。
+本目录已建立独立Python package、generated canonical scene、good-pregrasp partial reset、structured observations/History30、contact state、fixed-axis command、reward、termination、preload-aware action与Gym注册。学习能力由`distill`侧固定评估判定；可运行、TIP contact或absolute speed本身不表示连续有向旋转。
 
 ## 任务族边界
 
 - 首版只覆盖generated canonical assets；official LEAP/Allegro后续作为held-out或zero-shot suites，不进入首版训练支持域。
-- 正式配置默认消费2048-asset generated partition。16/128资产只用于contract、physics、pregrasp、runtime和短训练门禁；具体canary规模可按证据调整。
+- 通用formal配置可消费2048-asset generated partition；掌托旋转MVP显式消费版本化80-row manifest。2/16/80资产用于contract、physics、pregrasp与runtime门，不能替代训练能力评估。
 - `hetero`独立装配ManagerBasedRLEnv的scene、observation、action、command、reward、reset、termination、ADR state和diagnostics。
 - 不import`anymani.tasks.gm`或`anymani.tasks.inhand`。N000 single-asset command/reward/ADR实现只能作为经过验证的科学参照；复制或适配后必须重新通过heterogeneous mask、frame、partial-reset和variable-cardinality contracts。
 - `assets`负责dataset/physical identity与typed geometry semantics；`robots`负责canonical articulation lowering；`pregrasp`负责自动搜索、cache与identity；`tasks/hetero`只消费这些接口并定义任务MDP。
@@ -51,7 +51,7 @@ $$
 O_t^c=\left(O_{t,\mathrm{palm}}^c,O_{t,\mathrm{jnt}}^c,O_{t,\mathrm{tip}}^c,O_{t,\mathrm{obj}}^c,O_{t,\mathrm{task}}^c\right).
 $$
 
-All-link contact、object state、goal/anchor error、actuator state与actual ADR state只进入critic/diagnostics或显式oracle actor ablation。Morphology cell ID只服务分层诊断，不作为主actor/critic输入。
+固定仿真MVP向actor交付PALM/JOINT/TIP all-owner binary contact，但不交付force magnitude；all-link force、object state、goal/anchor error、actuator state与actual ADR state只进入critic/diagnostics或显式oracle actor ablation。该能力边界不外推为TIP-only部署结论。Morphology cell ID只服务分层诊断，不作为主actor/critic输入。
 
 ## Variable-cardinality与canonical transport
 
@@ -67,21 +67,23 @@ $$
 \mathcal A_{\mathfrak m}=\prod_{j\in\mathcal J_{\mathfrak m}}[-1,1].
 $$
 
-Shared per-joint head读取整手attention后的contextual joint token；它不是独立joint actor。首个科学基线使用一个global shared log-standard-deviation$\theta^{av}$。若后续比较state-dependent exploration，只允许shared contextual variance head，不建立16个absolute-slot variance参数。
+掌托旋转MVP由逐JOINT TCN与dynamic-first FiLM-MLP形成local state：低维$q,u,a$/limits/history先编码，冻结$Z_j^e$通过末层零初始化的有界FiLM调制，不与低维向量直接拼接。Finger-first summary输出base action，一层整手graph context只输出幅度不超过0.2的zero-init action residual。首个科学基线使用一个global shared log-standard-deviation$\theta^{av}$。若后续比较state-dependent exploration，只允许shared contextual variance head，不建立16个absolute-slot variance参数。
 
 ## Critic语义
 
-Critic使用与actor完全分参的structured token backbone，每个environment输出一个hand-level scalar value。主线不使用127D flat MLP或8-cell one-hot作为最终形态表示。Critic通过有效tokens、冻结geometry、graph和privileged object/contact state理解形态；TASK token readout与显式mask-aware pooling尚待后续合意，不能在实现中静默选择。
+Critic使用与actor完全分参的两层structured graph backbone，每个environment输出一个hand-level scalar value。主线不使用flat MLP或8-cell one-hot作为形态表示。Critic通过有效tokens、冻结geometry、graph、privileged object/contact/task state和显式mask-aware PALM/mean/max readout理解形态。
 
 ## Pregrasp与reset门禁
 
-Pregrasp provider必须按physical geometry hash、cube identity/hash、scale interval、support mode、physics identity和search identity查询认证cache；无覆盖候选时fail closed。Dataset row JSON不是cache identity。
+掌托旋转MVP provider必须按physical geometry hash、cube identity/hash、exact scale、physics identity和generation identity查询schema-3 Top-8 good-pregrasp catalog；无覆盖候选时fail closed。Dataset row不是cache identity。
 
-Palm support合法，但support-only reset与contact-basin pregrasp是不同等级。正式contact basin必须保留至少两个TIP的硬门、限制finger non-tip，并记录drop、penetration、drift/twist、joint margin、effort、scale stress和局部扰动成功率。不得通过把TIP threshold降为0或把non-tip上限放宽为1来宣布门禁通过。
+Good pregrasp表示hand-object-scale耦合的cold-reset安全准备态。PALM/JOINT/TIP contact均是metadata，TIP数量不定义查询tier；硬门关注联合指间包络、joint reserve、穿透、位移/倾斜、速度峰值、palm support及训练同路径1 s hold。MVP固定消费rank-0并要求$q_0=u_0$、object upright和零速度。
 
 ## ADR边界
 
 首版可以建立mask-aware actual ADR state、diagnostics以及global/group/asset/env scope接口，但第一个科学baseline关闭ADR。只有固定easy-tier能力与分层证据建立后，才引入group、asset residual、per-env或hierarchical scheduler。ADR状态必须记录实际采样值、scope、level、升降级事件与固定tier评估，不把curriculum变化误写成策略进步。
+
+逐关节stable reward以N000的16-DoF数值为参考：sum类项使用$\frac{16}{n_i}\sum_{j\in\mathcal J_i}$，pose $L_2$使用$\sqrt{\frac{16}{n_i}\sum_j(\cdot)^2}$。该归约在16-DoF资产上逐值恢复N000，在少DoF资产上保持相同per-joint量级；ghost不进入分子或分母。
 
 ## 迁移与出清
 
@@ -98,7 +100,7 @@ Palm support合法，但support-only reset与contact-basin pregrasp是不同等�
 2. owner/joint permutation、ghost mask、action probability与scalar critic invariance；
 3. physical-hash pregrasp cache、scale interval和fail-closed lookup；
 4. left/right semantic frame与action-sign counterfactual；
-5. 2/16/128资产Isaac reset/step/contact/checkpoint smokes；
+5. 2/16/80资产Isaac reset/step/contact/checkpoint smokes；
 6. 正式2048资产capacity与固定逐资产evaluation；
 7. ADR或TOPPO组件只在baseline证据之后进入。
 

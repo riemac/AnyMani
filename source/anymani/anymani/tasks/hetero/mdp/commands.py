@@ -80,6 +80,7 @@ class HeterogeneousRotationCommand(CommandTerm):
 
         self.delta_psi = torch.zeros(self.num_envs, device=self.device)  # signed rad/policy step
         self.net_rotation_rad = torch.zeros(self.num_envs, device=self.device)  # signed$\Psi$
+        self.absolute_path_rotation_rad = torch.zeros(self.num_envs, device=self.device)  # $\sum_t|\Delta\psi_t|$
         self.net_rotation_turns = torch.zeros(self.num_envs, device=self.device)  # signed$\Psi/(2\pi)$
         self.positive_net_rotation_turns = torch.zeros(self.num_envs, device=self.device)
         self.reached_positive_full_turn = torch.zeros(self.num_envs, device=self.device)
@@ -105,6 +106,7 @@ class HeterogeneousRotationCommand(CommandTerm):
             "dataset_row": dataset_rows,
             "axis_speed_rad_s": torch.zeros(self.num_envs, device=self.device),
             "net_rotation_rad": torch.zeros(self.num_envs, device=self.device),
+            "absolute_path_rotation_rad": torch.zeros(self.num_envs, device=self.device),
             "completed_subgoals": torch.zeros(self.num_envs, device=self.device),
             "goal_success_pulse": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
             "episode_duration_s": torch.zeros(self.num_envs, device=self.device),
@@ -126,6 +128,7 @@ class HeterogeneousRotationCommand(CommandTerm):
             {
                 "rotation/delta_psi_rad": self.delta_psi,
                 "rotation/net_rotation_rad": self.net_rotation_rad,
+                "rotation/absolute_path_rotation_rad": self.absolute_path_rotation_rad,
                 "rotation/net_rotation_turns_signed": self.net_rotation_turns,
                 "rotation/positive_net_rotation_turns": self.positive_net_rotation_turns,
                 "rotation/reached_positive_full_turn": self.reached_positive_full_turn,
@@ -219,6 +222,7 @@ class HeterogeneousRotationCommand(CommandTerm):
         snapshot["step"].fill_(int(self._env.common_step_counter))
         snapshot["axis_speed_rad_s"].copy_(self.axis_speed_rad_s)
         snapshot["net_rotation_rad"].copy_(self.net_rotation_rad)
+        snapshot["absolute_path_rotation_rad"].copy_(self.absolute_path_rotation_rad)
         snapshot["completed_subgoals"].copy_(
             self.goal_success_count + self.goal_success_pulse.to(dtype=self.goal_success_count.dtype)
         )
@@ -255,6 +259,7 @@ class HeterogeneousRotationCommand(CommandTerm):
                 self.previous_quat_w[valid], current_quaternion[valid], self.axis_w[valid]
             )
         self.net_rotation_rad[ids] += self.delta_psi[ids]
+        self.absolute_path_rotation_rad[ids] += self.delta_psi[ids].abs()
         self.net_rotation_turns[ids] = self.net_rotation_rad[ids] / (2.0 * math.pi)
         self.positive_net_rotation_turns[ids] = torch.clamp(self.net_rotation_rad[ids], min=0.0) / (2.0 * math.pi)
         self.reached_positive_full_turn[ids] = (self.net_rotation_rad[ids] >= 2.0 * math.pi).to(torch.float32)
@@ -310,6 +315,7 @@ class HeterogeneousRotationCommand(CommandTerm):
         self.has_previous[ids] = True
         self.delta_psi[ids] = 0.0
         self.net_rotation_rad[ids] = 0.0
+        self.absolute_path_rotation_rad[ids] = 0.0
         self.net_rotation_turns[ids] = 0.0
         self.positive_net_rotation_turns[ids] = 0.0
         self.reached_positive_full_turn[ids] = 0.0

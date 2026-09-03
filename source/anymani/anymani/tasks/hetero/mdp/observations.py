@@ -18,9 +18,11 @@ from .commands import get_rotation_command
 from .contact_state import get_contact_state
 from .object_state import object_state_in_hand_frame, task_state
 from .observation_state import (
+    actor_joint_contact_frame,
     actor_joint_current,
     actor_joint_history_frame,
     actor_joint_limits,
+    actor_owner_contact,
     actor_tip_contact,
     critic_joint_state,
 )
@@ -118,6 +120,61 @@ def actor_joint_history_frame_term(
         contact.tip_bits,
         mask,
     )
+
+
+def actor_joint_contact_frame_term(
+    env: ManagerBasedRLEnv,
+    *,
+    active_joint_mask_by_env: Sequence[Sequence[bool]],
+    action_name: str,
+    layout: HeterogeneousContactLayout,
+    robot_name: str = "robot",
+    ema_alpha: float = 0.5,
+    force_threshold_N: float = 0.25,
+) -> torch.Tensor:
+    r"""返回MVP actor当前/History30共用的`[N,16,5]` own-JOINT＋TIP-contact帧。"""
+
+    robot = cast(Articulation, env.scene[robot_name])
+    action = _action_term(env, action_name)
+    mask = _mask_tensor(env, active_joint_mask_by_env)
+    contact = get_contact_state(
+        env,
+        layout=layout,
+        active_joint_mask_by_env=active_joint_mask_by_env,
+        ema_alpha=ema_alpha,
+        force_threshold_N=force_threshold_N,
+    )
+    _, owner_bits = contact.owner_force_and_bits()
+    return actor_joint_contact_frame(
+        robot.data.joint_pos,
+        action.current_targets,
+        action.executed_actions,
+        owner_bits[:, 1:17],
+        contact.tip_bits,
+        mask,
+    )
+
+
+def actor_owner_contact_term(
+    env: ManagerBasedRLEnv,
+    *,
+    active_joint_mask_by_env: Sequence[Sequence[bool]],
+    layout: HeterogeneousContactLayout,
+    ema_alpha: float = 0.5,
+    force_threshold_N: float = 0.25,
+) -> torch.Tensor:
+    r"""返回MVP global residual消费的`[N,21,1]` owner binary contact。"""
+
+    mask = _mask_tensor(env, active_joint_mask_by_env)
+    contact = get_contact_state(
+        env,
+        layout=layout,
+        active_joint_mask_by_env=active_joint_mask_by_env,
+        ema_alpha=ema_alpha,
+        force_threshold_N=force_threshold_N,
+    )
+    _, owner_bits = contact.owner_force_and_bits()
+    return actor_owner_contact(owner_bits, mask)
 
 
 def actor_joint_limits_term(
@@ -229,8 +286,10 @@ def critic_task_term(env: ManagerBasedRLEnv, *, command_name: str) -> torch.Tens
 __all__ = [
     "actor_joint_current_term",
     "actor_joint_history_frame_term",
+    "actor_joint_contact_frame_term",
     "actor_joint_limits_term",
     "actor_tip_contact_term",
+    "actor_owner_contact_term",
     "critic_joint_state_term",
     "critic_object_term",
     "critic_owner_contact_term",

@@ -12,6 +12,73 @@ import math
 import torch
 
 
+def active_reference_sum(
+    values: torch.Tensor,
+    active_mask: torch.Tensor,
+    *,
+    reference_dof: int = 16,
+) -> torch.Tensor:
+    r"""把逐关节和式折算到固定参考DoF，兼顾N000数值锚点与异构公平。
+
+    对第$i$只手的$n_i$个有效关节，返回：
+
+    $$
+    \widetilde P_i=\frac{n_{ref}}{n_i}\sum_{j\in\mathcal J_i}p_{i,j},
+    \qquad n_{ref}=16.
+    $$
+
+    因而16-DoF手严格恢复N000的原始sum；少DoF手按有效关节均值再投影到同一个16-DoF参考尺度。
+    Canonical ghost只属于padding，即使其storage中出现任意有限值，也不进入分子或分母。
+
+    Args:
+        values (torch.Tensor): 逐关节非负penalty contributions，末维为canonical joint轴。
+        active_mask (torch.Tensor): 与``values``同shape的bool有效关节mask。
+        reference_dof (int): 参考手有效DoF；当前N000锚点固定16。
+
+    Returns:
+        torch.Tensor: 去除joint轴后的reference-DoF equivalent penalty。
+    """
+
+    if values.shape != active_mask.shape or active_mask.dtype != torch.bool:
+        raise ValueError("reference-DoF reward reduction requires matching values and bool active_mask")
+    if reference_dof < 1:
+        raise ValueError("reference_dof must be positive")
+    weights = active_mask.to(dtype=values.dtype)  # $m_{i,j}\in\{0,1\}$，shape与values一致
+    active_count = weights.sum(dim=-1)  # $n_i$，每只手真实有效DoF
+    if bool((active_count < 1).any().item()):
+        raise ValueError("reference-DoF reward reduction requires at least one active joint per environment")
+    active_sum = (values * weights).sum(dim=-1)  # $\sum_{j\in\mathcal J_i}p_{i,j}$
+    return active_sum * (float(reference_dof) / active_count)  # $n_{ref}/n_i$折算后的N000尺度
+
+
+def active_reference_l2(
+    values: torch.Tensor,
+    active_mask: torch.Tensor,
+    *,
+    reference_dof: int = 16,
+) -> torch.Tensor:
+    r"""返回固定参考DoF下的masked $L_2$幅度。
+
+    $$
+    \widetilde L_i
+    =\sqrt{\frac{n_{ref}}{n_i}\sum_{j\in\mathcal J_i}x_{i,j}^2}.
+    $$
+
+    该定义在$n_i=16$时逐值等于N000的$\|x_i\|_2$，在不同DoF间比较时保持相同的典型
+    per-joint偏移对应相同惩罚量级。
+
+    Args:
+        values (torch.Tensor): 可带符号逐关节物理量，末维为canonical joint轴。
+        active_mask (torch.Tensor): bool有效关节mask，与``values``同shape。
+        reference_dof (int): 参考有效DoF，当前固定16。
+
+    Returns:
+        torch.Tensor: 去除joint轴后的reference-DoF equivalent $L_2$幅度。
+    """
+
+    return torch.sqrt(active_reference_sum(values.square(), active_mask, reference_dof=reference_dof))
+
+
 def normalize_quaternion_wxyz(quaternion: torch.Tensor) -> torch.Tensor:
     r"""归一化最后一维为4的finite quaternion batch。"""
 
@@ -307,6 +374,8 @@ def equal_asset_mean(metric_sum: torch.Tensor, episode_count: torch.Tensor) -> t
 
 
 __all__ = [
+    "active_reference_l2",
+    "active_reference_sum",
     "axis_angle_from_quaternion_wxyz",
     "contact_role_reward",
     "equal_asset_mean",

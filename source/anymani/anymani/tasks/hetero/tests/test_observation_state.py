@@ -8,9 +8,11 @@ import pytest
 import torch
 
 from anymani.tasks.hetero.mdp.observation_state import (
+    actor_joint_contact_frame,
     actor_joint_current,
     actor_joint_history_frame,
     actor_joint_limits,
+    actor_owner_contact,
     actor_tip_contact,
     broadcast_tip_contact_to_joints,
     critic_joint_state,
@@ -92,6 +94,31 @@ def test_actor_current_and_history_mask_every_ghost_channel() -> None:
     assert torch.equal(current[~mask], torch.zeros_like(current[~mask]))
     assert torch.equal(history_frame[~mask], torch.zeros_like(history_frame[~mask]))
     assert torch.allclose(current[0, 0, :2], torch.tensor((0.0, 0.25 / math.pi)))
+
+
+def test_mvp_joint_frame_keeps_own_and_finger_tip_contact_distinct() -> None:
+    r"""JOINT local frame同时保留自身link contact与所属finger TIP release信号。"""
+
+    mask = _prefix_mask()
+    q = torch.zeros(1, 16)
+    target = torch.full((1, 16), 0.1)
+    action = torch.zeros(1, 16)
+    own_bits = torch.zeros(1, 16, dtype=torch.bool)
+    own_bits[0, 4] = True  # depth1 index JOINT自身接触
+    tip_bits = torch.tensor(((False, True, False, True),))  # middle/thumb TIP接触
+    frame = actor_joint_contact_frame(q, target, action, own_bits, tip_bits, mask)
+    assert frame.shape == (1, 16, 5)
+    assert bool(frame[0, 4, 3])  # own-contact只落到index depth1
+    assert not bool(frame[0, 4, 4])  # index TIP当前未接触
+    assert bool(frame[0, 1, 4]) and bool(frame[0, 5, 4])  # middle TIP沿有效depth广播
+    assert bool(frame[0, 3, 4])  # thumb唯一active depth仍读取thumb TIP
+    assert torch.equal(frame[~mask], torch.zeros_like(frame[~mask]))
+
+    owner_bits = torch.ones(1, 21, dtype=torch.bool)
+    owner_contact = actor_owner_contact(owner_bits, mask)
+    _, owner_mask = derive_tip_and_owner_masks(mask)
+    assert owner_contact.shape == (1, 21, 1)
+    assert torch.equal(owner_contact[..., 0].bool(), owner_mask)
 
 
 def test_limits_tip_and_critic_keep_named_axes_and_units() -> None:

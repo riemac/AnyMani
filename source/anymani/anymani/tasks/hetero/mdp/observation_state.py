@@ -75,6 +75,45 @@ def actor_joint_history_frame(
     return torch.cat((current, contact.unsqueeze(-1)), dim=-1)
 
 
+def actor_joint_contact_frame(
+    joint_pos_rad: torch.Tensor,
+    joint_target_rad: torch.Tensor,
+    previous_policy_action: torch.Tensor,
+    joint_owner_contact_bits: torch.Tensor,
+    tip_contact_bits: torch.Tensor,
+    active_joint_mask: torch.Tensor,
+) -> torch.Tensor:
+    r"""构造MVP actor逐JOINT帧$[q/\pi,u/\pi,a_{t-1},c_j,c_{tip(f(j))}]$。
+
+    $c_j$是该JOINT owner自身对object的EMA binary contact；$c_{tip(f(j))}$把所属finger的TIP bit广播到
+    depth-major joint slots。二者同时保留，使local TCN既感知当前link支撑，也继承N000已验证的TIP
+    release-recontact事件。返回形状`[B,16,5]`，ghost五个通道严格为零。
+    """
+
+    _validate_joint_inputs(
+        active_joint_mask,
+        joint_pos_rad,
+        joint_target_rad,
+        previous_policy_action,
+    )
+    if joint_owner_contact_bits.shape != active_joint_mask.shape or joint_owner_contact_bits.dtype != torch.bool:
+        raise ValueError("joint owner contact bits must be bool [B,16]")
+    current = actor_joint_current(joint_pos_rad, joint_target_rad, previous_policy_action, active_joint_mask)
+    own_contact = joint_owner_contact_bits & active_joint_mask  # 本JOINT link的object contact
+    finger_tip_contact = broadcast_tip_contact_to_joints(tip_contact_bits, active_joint_mask)
+    contacts = torch.stack((own_contact, finger_tip_contact), dim=-1).to(dtype=current.dtype)
+    return torch.cat((current, contacts), dim=-1)  # `[B,16,5]`
+
+
+def actor_owner_contact(owner_contact_bits: torch.Tensor, active_joint_mask: torch.Tensor) -> torch.Tensor:
+    r"""返回PALM+JOINT16+TIP4当前binary contact tokens，形状`[B,21,1]`。"""
+
+    _, owner_mask = derive_tip_and_owner_masks(active_joint_mask)
+    if owner_contact_bits.shape != owner_mask.shape or owner_contact_bits.dtype != torch.bool:
+        raise ValueError("owner contact bits must be bool [B,21]")
+    return (owner_contact_bits & owner_mask).to(dtype=torch.float32).unsqueeze(-1)
+
+
 def actor_joint_limits(soft_joint_limits_rad: torch.Tensor, active_joint_mask: torch.Tensor) -> torch.Tensor:
     r"""返回静态$[q_{min}/\pi,q_{max}/\pi]$，形状$[B,16,2]$，ghost为零。"""
 
@@ -121,8 +160,10 @@ def critic_joint_state(
 __all__ = [
     "actor_joint_current",
     "actor_joint_history_frame",
+    "actor_joint_contact_frame",
     "actor_joint_limits",
     "actor_tip_contact",
+    "actor_owner_contact",
     "broadcast_tip_contact_to_joints",
     "critic_joint_state",
 ]
