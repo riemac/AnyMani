@@ -8,6 +8,20 @@ from .cache import (
     PregraspIndexEntry,
     PregraspIndexError,
 )
+from .good_catalog import (
+    GOOD_PREGRASP_SCHEMA_VERSION,
+    GOOD_PREGRASP_TOP_K,
+    UPRIGHT_QUATERNION_WXYZ,
+    GoodPregraspCandidate,
+    GoodPregraspCatalog,
+    GoodPregraspCatalogError,
+    GoodPregraspConflictError,
+    GoodPregraspEntry,
+    GoodPregraspKey,
+    GoodPregraspMember,
+    GoodPregraspMetrics,
+    GoodPregraspMissError,
+)
 from .provider import (
     FilePregraspProvider,
     PregraspCorruptError,
@@ -36,14 +50,28 @@ from .schema import (
     certify_pregrasp,
     tier_satisfies,
 )
+from .strict_gate import MVP80_STRICT_GOOD_PREGRASP_GATE, StrictGoodPregraspGate
 
 __all__ = [
     "PREGRASP_INDEX_ARTIFACT_TYPE",
     "PREGRASP_RECORD_ARTIFACT_TYPE",
     "PREGRASP_SCHEMA_VERSION",
     "SCALE_ANCHORS",
+    "GOOD_PREGRASP_SCHEMA_VERSION",
+    "GOOD_PREGRASP_TOP_K",
+    "UPRIGHT_QUATERNION_WXYZ",
     "AtomicPregraspCache",
     "FilePregraspProvider",
+    "GoodPregraspCandidate",
+    "GoodPregraspCatalog",
+    "GoodPregraspCatalogError",
+    "GoodPregraspConflictError",
+    "GoodPregraspEntry",
+    "GoodPregraspKey",
+    "GoodPregraspMember",
+    "GoodPregraspMetrics",
+    "GoodPregraspMissError",
+    "MVP80_STRICT_GOOD_PREGRASP_GATE",
     "PregraspCacheError",
     "PregraspCandidate",
     "PregraspConflictError",
@@ -63,6 +91,7 @@ __all__ = [
     "PregraspRecord",
     "PregraspResolution",
     "PregraspTier",
+    "StrictGoodPregraspGate",
     "ScaleCertificate",
     "ScaleStressSample",
     "active_mask_digest",

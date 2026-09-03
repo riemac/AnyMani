@@ -19,6 +19,7 @@ from anymani.assets.bank.prepared_train import resolve_prepared_train
 from anymani.assets.canonical_runtime import CANONICAL_HAND_SCHEMA_V1, CanonicalHandArtifact
 from anymani.pregrasp import (
     AtomicPregraspCache,
+    GoodPregraspKey,
     PregraspCoverage,
     PregraspRecord,
     PregraspTier,
@@ -28,8 +29,20 @@ from anymani.pregrasp import (
 from anymani.robots.hand_spawn import CanonicalRuntimeCfg, HandSpawnAdapter, HandSpawnCfg, HandUrdfSpawnCfg
 
 from ...contact_layout import HeterogeneousContactLayout, build_canonical_contact_layout
-from ...mdp.events import PregraspAssetBinding, PregraspResetCfg
+from ...mdp.events import (
+    GoodPregraspAssetBinding,
+    GoodPregraspResetCfg,
+    PregraspAssetBinding,
+    PregraspResetCfg,
+)
 from ...mdp.runtime_state import PregraspRuntimeIdentity
+from .good_pregrasp_identity import (
+    GOOD_PREGRASP_CATALOG_ROOT,
+    GOOD_PREGRASP_GENERATION_DIGEST,
+    GOOD_PREGRASP_OBJECT_SCALE,
+    GOOD_PREGRASP_PHYSICS_DIGEST,
+    GOOD_PREGRASP_REQUIRE_STRICT,
+)
 from .pregrasp_identity import DEX_CUBE_SHA256, FormalPregraspCatalogIdentity
 
 FORMAL_PPO_ASSET_COUNT = 2048
@@ -37,6 +50,7 @@ PPO_DATASET_PATH = (
     resolve_anymani_root() / "source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ppo.yaml"
 )
 DEFAULT_PREGRASP_CACHE_ROOT = resolve_anymani_root() / "outputs/pregrasp/schema_v2/formal-cache-v2"
+DEFAULT_GOOD_PREGRASP_CATALOG_ROOT = resolve_anymani_root() / GOOD_PREGRASP_CATALOG_ROOT
 
 
 def selected_formal_dataset_rows() -> tuple[int, ...]:
@@ -140,6 +154,57 @@ class GeneratedAssetBinding:
             require_basin=True,
         )
 
+    def build_good_pregrasp_reset_cfg(
+        self,
+        *,
+        num_envs: int,
+        rank: int = 0,
+        catalog_root: Path = DEFAULT_GOOD_PREGRASP_CATALOG_ROOT,
+    ) -> GoodPregraspResetCfg:
+        r"""为每个prototype构造scale-1.1 schema-3 exact Top-K reset binding。
+
+        Key由scene拥有的source/physical/canonical/routing identity和模块级object/physics/generation身份正向构造；
+        runtime不会扫描catalog后反向接受任意generation protocol。
+        """
+
+        bindings = tuple(
+            GoodPregraspAssetBinding.from_key(
+                GoodPregraspKey(
+                    asset_id=source_asset.asset_id,
+                    source_content_hash=artifact.source_content_hash,
+                    physical_geometry_hash=artifact.physical_geometry_hash,
+                    canonical_schema_digest=artifact.schema_digest,
+                    routing_digest=active_mask_digest(artifact.routing.active_joint_mask),
+                    object_asset_id="DexCube",
+                    object_asset_sha256=DEX_CUBE_SHA256,
+                    object_scale=GOOD_PREGRASP_OBJECT_SCALE,
+                    physics_identity_digest=GOOD_PREGRASP_PHYSICS_DIGEST,
+                    generation_identity_digest=GOOD_PREGRASP_GENERATION_DIGEST,
+                ),
+                runtime_identity=runtime_identity,
+            )
+            for source_asset, artifact, runtime_identity in zip(
+                self.source_assets,
+                self.canonical_artifacts,
+                self.runtime_identities,
+                strict=True,
+            )
+        )
+        frame = self.hand_spawn_cfg.frame
+        return GoodPregraspResetCfg(
+            catalog_root=str(catalog_root.resolve()),
+            bindings=bindings,
+            asset_index_by_env=self.asset_index_by_env(num_envs),
+            semantic_R_ha=tuple(float(value) for value in frame.semantic_R_ha),
+            semantic_p_ha=(
+                float(frame.semantic_p_ha[0]),
+                float(frame.semantic_p_ha[1]),
+                float(frame.semantic_p_ha[2]),
+            ),
+            rank=rank,
+            require_strict=GOOD_PREGRASP_REQUIRE_STRICT,
+        )
+
 
 def build_generated_asset_binding(dataset_rows: tuple[int, ...] | None = None) -> GeneratedAssetBinding:
     r"""解析formal train、选择rows并由单一HandSpawnAdapter lower canonical artifacts。"""
@@ -165,7 +230,7 @@ def build_generated_asset_binding(dataset_rows: tuple[int, ...] | None = None) -
             validate_artifact=True,
         ),
         asset_routing="round_robin",
-        restore_visual_materials=False,
+        restore_visual_materials=os.environ.get("ANYMANI_HETERO_RESTORE_VISUAL_MATERIALS", "0") == "1",
         validate_same_schema=True,
     )
     adapter = HandSpawnAdapter(spawn_cfg, resolved_assets=source_assets)
@@ -242,6 +307,7 @@ def _select_pregrasp_binding(
 
 __all__ = [
     "DEFAULT_PREGRASP_CACHE_ROOT",
+    "DEFAULT_GOOD_PREGRASP_CATALOG_ROOT",
     "DEX_CUBE_SHA256",
     "FORMAL_PPO_ASSET_COUNT",
     "GeneratedAssetBinding",

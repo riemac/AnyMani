@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import torch
 
-from anymani.pregrasp import PregraspLookupKey, PregraspRecord
+from anymani.pregrasp import GoodPregraspEntry, GoodPregraspKey, PregraspLookupKey, PregraspRecord
 
 HETERO_PREGRASP_STATE_ATTR = "_anymani_hetero_pregrasp_reset_state"  # env上的唯一preload sidecar名称
 CANONICAL_JOINT_COUNT = 16  # canonical-v1 fixed transport width；逻辑cardinality由active mask决定
@@ -57,6 +57,18 @@ class PregraspRuntimeIdentity:
             raise ValueError("pregrasp lookup canonical schema disagrees with runtime asset")
         if lookup_key.routing_digest != self.routing_digest:
             raise ValueError("pregrasp lookup routing disagrees with runtime asset")
+
+    def validate_good_key(self, key: GoodPregraspKey) -> None:
+        r"""拒绝schema-3 good-pregrasp key与实际scene hand identity的任何分歧。"""
+
+        if key.source_content_hash != self.source_content_hash:
+            raise ValueError("good-pregrasp source content disagrees with runtime asset")
+        if key.physical_geometry_hash != self.physical_geometry_hash:
+            raise ValueError("good-pregrasp physical geometry disagrees with runtime asset")
+        if key.canonical_schema_digest != self.canonical_schema_digest:
+            raise ValueError("good-pregrasp canonical schema disagrees with runtime asset")
+        if key.routing_digest != self.routing_digest:
+            raise ValueError("good-pregrasp routing disagrees with runtime asset")
 
 
 def normalize_env_ids(
@@ -216,6 +228,51 @@ class ResolvedPregraspBatch:
             ),
             record_digests=tuple(record.digest for record in records),
             lookup_digests=tuple(record.lookup_key.digest for record in records),
+        )
+
+    @classmethod
+    def from_good_entries(
+        cls,
+        entries: Sequence[GoodPregraspEntry],
+        *,
+        rank: int,
+        device: torch.device | str,
+        dtype: torch.dtype = torch.float32,
+    ) -> ResolvedPregraspBatch:
+        r"""把schema-3 Top-K entries的同一rank堆叠为runtime reset batch。
+
+        Args:
+            entries (Sequence[GoodPregraspEntry]): 与selected env rows同序的exact catalog entries。
+            rank (int): 所有资产共同消费的candidate rank；MVP固定0。
+            device (torch.device | str): Isaac scene device。
+            dtype (torch.dtype): state/pose tensor dtype，默认FP32。
+
+        Returns:
+            ResolvedPregraspBatch: $q_0=u_0$、upright $T_{ho,0}$与provenance同序batch。
+        """
+
+        if not entries:
+            raise ValueError("cannot build an empty good-pregrasp batch")
+        if rank < 0 or any(rank >= len(entry.members) for entry in entries):
+            raise ValueError("good-pregrasp rank lies outside one or more Top-K entries")
+        members = [entry.members[rank] for entry in entries]
+        candidates = [member.candidate for member in members]
+        return cls(
+            q_state_rad=torch.tensor([candidate.q_state_rad for candidate in candidates], device=device, dtype=dtype),
+            q_target_rad=torch.tensor(
+                [candidate.q_target_rad for candidate in candidates], device=device, dtype=dtype
+            ),
+            active_joint_mask=torch.tensor(
+                [candidate.active_joint_mask for candidate in candidates], device=device, dtype=torch.bool
+            ),
+            object_position_h_m=torch.tensor(
+                [candidate.object_position_h_m for candidate in candidates], device=device, dtype=dtype
+            ),
+            object_quat_h_wxyz=torch.tensor(
+                [candidate.object_orientation_h_wxyz for candidate in candidates], device=device, dtype=dtype
+            ),
+            record_digests=tuple(entry.digest for entry in entries),
+            lookup_digests=tuple(entry.key.digest for entry in entries),
         )
 
 

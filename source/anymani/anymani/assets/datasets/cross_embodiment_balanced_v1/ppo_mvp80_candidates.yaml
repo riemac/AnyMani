@@ -1,0 +1,2415 @@
+artifact_type: anymani.hand_asset_representative_selection
+schema_version: 1.0.0
+selection_name: heterogeneous_rotation_mvp80_v1
+parent_dataset_path: source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ppo.yaml
+parent_dataset_sha256: 22320b8e00c8df73699d20cd0f56e68fbab720e8d63b36bba898ee964334a8dc
+selection_algorithm: cell-paired-categorical-coverage-farthest-v1
+pairs_per_cell: 10
+candidate_pairs_per_cell: 32
+selected_asset_count: 80
+initial_selected_rows:
+- 416
+- 432
+- 1966
+- 1976
+- 933
+- 955
+- 1929
+- 1946
+- 1383
+- 1401
+- 873
+- 894
+- 1382
+- 1397
+- 1953
+- 1970
+- 1380
+- 1395
+- 868
+- 889
+- 352
+- 368
+- 1000
+- 1019
+- 966
+- 991
+- 2031
+- 2033
+- 490
+- 501
+- 460
+- 469
+- 1421
+- 1428
+- 1889
+- 1909
+- 1993
+- 2006
+- 1519
+- 1525
+- 0
+- 16
+- 1609
+- 1617
+- 810
+- 824
+- 1581
+- 1590
+- 1103
+- 1119
+- 1864
+- 1880
+- 1706
+- 1722
+- 1774
+- 1778
+- 1346
+- 1369
+- 1167
+- 1171
+- 64
+- 80
+- 583
+- 598
+- 1667
+- 1682
+- 1541
+- 1567
+- 1229
+- 1244
+- 1025
+- 1055
+- 1185
+- 1213
+- 1285
+- 1299
+- 1129
+- 1147
+- 1794
+- 1817
+cells:
+- label: tips3_thumb3dof
+  tip_count: 3
+  thumb_dof: 3
+  selected_pair_count: 10
+  candidate_pairs:
+  - rank: 0
+    topology: t3_i3_r3
+    family_signature: index:allegro|middle:missing|ring:allegro|thumb:allegro
+    reflection_distance: 0.0
+    left:
+      row: 416
+      asset_id: 571f2d13
+      geometry_identity: b4e8c51d06ae600c1b2405ca9db5a8100868d079932f715f4ed490e91302d1af
+      handedness: left
+      active_dof: 9
+      asset_role: mother
+    right:
+      row: 432
+      asset_id: 80869a46
+      geometry_identity: a35fb29280a7a508b3bd408cae9ff4537b1143d98eacbd7b90bd0781cd626ce4
+      handedness: right
+      active_dof: 9
+      asset_role: mother
+  - rank: 1
+    topology: leap_t3_allegro_m3_leap_r1
+    family_signature: index:missing|middle:allegro|ring:leap|thumb:leap
+    reflection_distance: 4.786324541632162
+    left:
+      row: 1966
+      asset_id: c66e9a42
+      geometry_identity: da80ba9fbd6a3098f354dde4b7fd4a9353a06144fa34e54259751e7969938b52
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 1976
+      asset_id: 9bee5728
+      geometry_identity: a2d34ddc292fc86b4acc6f0808affda92f2c0507a316eaacb0acd8d74df43435
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 2
+    topology: t3_i4_r4
+    family_signature: index:leap|middle:missing|ring:leap|thumb:leap
+    reflection_distance: 2.8112139888266694
+    left:
+      row: 933
+      asset_id: 4386a114
+      geometry_identity: 6eb1ef0bb565a04b0c3b719251b536fd2f37ade49d0f98e74ae0c2db2e99f495
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 955
+      asset_id: d80c331e
+      geometry_identity: f41ca47551f538a9cbab47333492ad5bbfc3bf06bab76220e6cdb77ca31721ab
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 3
+    topology: leap_t3_allegro_i3_leap_r4
+    family_signature: index:allegro|middle:missing|ring:leap|thumb:leap
+    reflection_distance: 2.3528443860761064
+    left:
+      row: 1929
+      asset_id: 8e64f925
+      geometry_identity: e3f518c0c5f9b55cc883073b62993df9ae064faf0ba9f5632dd25dd8e9ad5bb4
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1946
+      asset_id: 9bf8ffa9
+      geometry_identity: 66a2f86f1db30dd6dd2a216cc4b1edff2b3dedac91e6e5d26cf62ba2329d38ca
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 4
+    topology: allegro_t3_i3_leap_m1
+    family_signature: index:allegro|middle:leap|ring:missing|thumb:allegro
+    reflection_distance: 5.920152732392635
+    left:
+      row: 1383
+      asset_id: 578f519c
+      geometry_identity: 7981ed112d6dcbc137e723d9f95e3cfaadd2b2778421337ab4fc49093ab5a291
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 1401
+      asset_id: 8a6fde67
+      geometry_identity: 1ead3f61f439b7232c137d89d8cee9d393ce0e37988498a052d498ba543c1976
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 5
+    topology: t3_m1_r3
+    family_signature: index:missing|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 2.5047858338921647
+    left:
+      row: 873
+      asset_id: a311de0c
+      geometry_identity: b1c6f1f80f5a5a0606e9f8dd5c1c17e930c1d3a77e9cd65e5f4a5b28d88247e7
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 894
+      asset_id: cc3a6815
+      geometry_identity: 7d9d3f93c281cd49a385a0867827ba56c58d8c8f2b7ecc1e7108756b696b8449
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 6
+    topology: allegro_t3_i3_leap_m1
+    family_signature: index:allegro|middle:leap|ring:missing|thumb:allegro
+    reflection_distance: 3.090792127362482
+    left:
+      row: 1382
+      asset_id: 479ca136
+      geometry_identity: a56462e65b39bbda26b20f8d257ab645619e5335e6bc9198d4a23dc46c40efb0
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 1397
+      asset_id: 6c3a4c0f
+      geometry_identity: 4595236ef3a181a30b2c79512b95335bd11ab5e19069043a3c0827e0e7020700
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 7
+    topology: leap_t3_allegro_m3_leap_r1
+    family_signature: index:missing|middle:allegro|ring:leap|thumb:leap
+    reflection_distance: 2.3478865781745255
+    left:
+      row: 1953
+      asset_id: 08428111
+      geometry_identity: b9b84b09d0c69c060fa665b1647049274d1a734d5c66e5ea52ef167c2abf7598
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 1970
+      asset_id: 3880b2e3
+      geometry_identity: 3fdbd61a3cf95887504d8e970d3e011d41d2becdf6b622f45f2986fc0bf77bc7
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 8
+    topology: allegro_t3_i3_leap_m1
+    family_signature: index:allegro|middle:leap|ring:missing|thumb:allegro
+    reflection_distance: 4.5141794141998215
+    left:
+      row: 1380
+      asset_id: 2bdad65f
+      geometry_identity: bd06c99ced06ff87795ed75600961107834ace3ad43e637312df1f8e00760966
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 1395
+      asset_id: 56f9eeee
+      geometry_identity: 77908a43e8ac7dc49b2ec4f7e1f6fef28c32deb9e7fcc12c222a6902bf3aaa0e
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 9
+    topology: t3_m1_r3
+    family_signature: index:missing|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 4.798499051436001
+    left:
+      row: 868
+      asset_id: 4427a821
+      geometry_identity: b66a1823f652ceb78962f38d17a199158513985959cd938835c500668587e3f8
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 889
+      asset_id: 5b7f8ee5
+      geometry_identity: daf1809833889aa66a4d6d85cab0cfae07175a32b4e920e068cc2c07d98fc7b0
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 10
+    topology: leap_t3_allegro_m3_leap_r1
+    family_signature: index:missing|middle:allegro|ring:leap|thumb:leap
+    reflection_distance: 4.774754328191383
+    left:
+      row: 1965
+      asset_id: b3a1b3f2
+      geometry_identity: 2dd2ab06b205a8285d1310d4dfdf807265f905cd843712cf79899d8f33be79c4
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 1975
+      asset_id: 874a0e62
+      geometry_identity: b4e369f55b72578330b5756199658b2bb04ecfd736c5a22e00edd49ace0e0111
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 11
+    topology: t3_i4_r4
+    family_signature: index:leap|middle:missing|ring:leap|thumb:leap
+    reflection_distance: 4.237358177605998
+    left:
+      row: 931
+      asset_id: 33a00681
+      geometry_identity: b9a467517ed7a52b9400fd567c869a41bb22e71bce95702a6a09d07083a53f08
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 954
+      asset_id: d08b523a
+      geometry_identity: ee68182e1940b97f38447255332c04bae7f89def4ced49c61972c04db04f6162
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 12
+    topology: t3_i3_r3
+    family_signature: index:allegro|middle:missing|ring:allegro|thumb:allegro
+    reflection_distance: 3.5528711303768774
+    left:
+      row: 418
+      asset_id: 12e39658
+      geometry_identity: 3fe5c62d180bda35a286868bf2805c233026f905937658175f673f687095e823
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 437
+      asset_id: 5394ddb7
+      geometry_identity: 9d282831bca98d39cb2fdd46a9808ec2438451064a7c9b7f21278bddf1d743e4
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 13
+    topology: t3_i4_r4
+    family_signature: index:leap|middle:missing|ring:leap|thumb:leap
+    reflection_distance: 2.9337940394739213
+    left:
+      row: 942
+      asset_id: d5b5e46d
+      geometry_identity: e6755686007bb19a329c2b2644fff54de61187ff03e3a89b16d21e0d6dcaf417
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 953
+      asset_id: c1f21ada
+      geometry_identity: 8d6d68d9f7e3230f4c73648374de27439de41cc392d197122ab18c12875a75a5
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 14
+    topology: t3_m1_r3
+    family_signature: index:missing|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 6.509428782144689
+    left:
+      row: 879
+      asset_id: f3e4b5de
+      geometry_identity: 086cfe117083241ac1af6d475c9f0172a1a77cc7e790890f9a19e619a2e4326d
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 883
+      asset_id: 2173e82a
+      geometry_identity: f5594d9b50bce3ff92fd666998a700a19fa73e66d531bb9300d1ffcec530f2d2
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 15
+    topology: leap_t3_allegro_m3_leap_r1
+    family_signature: index:missing|middle:allegro|ring:leap|thumb:leap
+    reflection_distance: 4.4025873876651795
+    left:
+      row: 1956
+      asset_id: 4dfbefe5
+      geometry_identity: 6d34d7e2e8d313c3084f53ff39fdecf2f04e0daa828e2b8982b1e8ea4fbc73e3
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 1979
+      asset_id: d10b395a
+      geometry_identity: 51ea1e6e749235fad85fc01bdb36b44095df26e8edc1ad01a58214d51f8653f4
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 16
+    topology: leap_t3_allegro_i3_leap_r4
+    family_signature: index:allegro|middle:missing|ring:leap|thumb:leap
+    reflection_distance: 4.206860366124354
+    left:
+      row: 1928
+      asset_id: 8bf3a604
+      geometry_identity: b5ca425914947acb299c69edada32065917cfb9c5589feb827ef6e4eda8617b8
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1951
+      asset_id: f28fc063
+      geometry_identity: f14eeecd46d49ae7bc4c96a43951c2e954f8f3936fa040b77916336f9b46c46c
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 17
+    topology: t3_i3_r3
+    family_signature: index:allegro|middle:missing|ring:allegro|thumb:allegro
+    reflection_distance: 3.6762385747029476
+    left:
+      row: 423
+      asset_id: 43c7b7d7
+      geometry_identity: cebbfeec65265a5ad57c60ce4537b20a37920d444df7eb2e81434a451142c644
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 439
+      asset_id: 610ed38a
+      geometry_identity: 0784842caa4b5e9c183b5cc51bb7744bf2e1da831d8a8c4bdee241ba6e19f022
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 18
+    topology: t3_i4_r4
+    family_signature: index:leap|middle:missing|ring:leap|thumb:leap
+    reflection_distance: 4.715681968868687
+    left:
+      row: 939
+      asset_id: a5693688
+      geometry_identity: 3a6fbaf9787e4f67be7e34c204bf7e6ceea300a9aaf96a3b4fe2f727034d47df
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 948
+      asset_id: 6dd91e55
+      geometry_identity: 7b19f25643a52c542903aa7f2b4001af174ed1b35572e492ca820de3095194b6
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 19
+    topology: leap_t3_allegro_i3_leap_r4
+    family_signature: index:allegro|middle:missing|ring:leap|thumb:leap
+    reflection_distance: 3.051679638150674
+    left:
+      row: 1930
+      asset_id: 93cfca3f
+      geometry_identity: c58d6b79f07781eb4f9447ffb3714fc2728d476d389753a59ca6d29aad5ff950
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1939
+      asset_id: '58010328'
+      geometry_identity: 3a4e8f1c0fea992cff9b7d62f66a0336408594b0be2779ff51b8a9f34e93fd53
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 20
+    topology: t3_i3_r3
+    family_signature: index:allegro|middle:missing|ring:allegro|thumb:allegro
+    reflection_distance: 4.1834366866687756
+    left:
+      row: 426
+      asset_id: '87623654'
+      geometry_identity: 318c571650d35b3f0ac7e408084a37c94df5c3e66bbe4723ee1a6c76b42483db
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 434
+      asset_id: 310e8da2
+      geometry_identity: 016b84d5d12d66cf0eb73d600357a93ab505fea7e23cf3271a66aa846c575c72
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 21
+    topology: leap_t3_allegro_m3_leap_r1
+    family_signature: index:missing|middle:allegro|ring:leap|thumb:leap
+    reflection_distance: 6.888806938017886
+    left:
+      row: 1967
+      asset_id: d6d39fac
+      geometry_identity: 44809483009ba6e2d45580e53691d7de32200d51835fa4dd2619cb54cd9cf6f9
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 1978
+      asset_id: ca174faf
+      geometry_identity: 3b8b7d2cf80f1d607e8b4254a399b45899a1ed1dcb56e1df379d2f76106c2bf5
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 22
+    topology: allegro_t3_i3_leap_m1
+    family_signature: index:allegro|middle:leap|ring:missing|thumb:allegro
+    reflection_distance: 4.7711520542751344
+    left:
+      row: 1388
+      asset_id: c97e817f
+      geometry_identity: a3366e3147c8bba0e993532c9aff4e7a57b9c6c91cc5f51f26bc931bd048087a
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 1394
+      asset_id: 5512ef95
+      geometry_identity: fd5bdb8e8a3d019138e351d2e6b12a7166cf3d9c6f558ea8e622a4efc09f168f
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 23
+    topology: leap_t3_allegro_i3_leap_r4
+    family_signature: index:allegro|middle:missing|ring:leap|thumb:leap
+    reflection_distance: 5.452313315335528
+    left:
+      row: 1935
+      asset_id: f5eb5817
+      geometry_identity: 7c9059e942b234d2f671c3bf7dd7934085b159e4eb5e17957c4e110ac5d11455
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1947
+      asset_id: b738e8fc
+      geometry_identity: 90d7a8c5f84f04d3a05f38c48c350953304e7c6f72f0cf9f4fbcf5c08fc6875c
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 24
+    topology: t3_i4_r4
+    family_signature: index:leap|middle:missing|ring:leap|thumb:leap
+    reflection_distance: 4.5754649952418855
+    left:
+      row: 941
+      asset_id: b6242c34
+      geometry_identity: e8402ce58b88f1502919441534b6702b943d553ecde9d46eac52b7a34dd6db42
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 950
+      asset_id: a90f3ce7
+      geometry_identity: 9e6018cff63895bdc6ffb7fde19c68dec4736580e0704d391bce03199ab4fe7e
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 25
+    topology: allegro_t3_i3_leap_m1
+    family_signature: index:allegro|middle:leap|ring:missing|thumb:allegro
+    reflection_distance: 2.7940116703499913
+    left:
+      row: 1377
+      asset_id: 02567ea3
+      geometry_identity: 82b9e120c9b19f281ec9611254896d64ef780774dfb1dd5f0001951f19ef3aea
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 1400
+      asset_id: 89b2158d
+      geometry_identity: 5fd8413bdb00fe98a252d8e456c605b1b0ac605a55ec88023b7aeae4a35cdaab
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 26
+    topology: leap_t3_allegro_m3_leap_r1
+    family_signature: index:missing|middle:allegro|ring:leap|thumb:leap
+    reflection_distance: 2.249205915414184
+    left:
+      row: 1957
+      asset_id: 609d6adf
+      geometry_identity: 6e01e28491ee1dccc8bf031d254c3aa375f649bd492b999b99d967b518752d54
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 1973
+      asset_id: '70368777'
+      geometry_identity: 08f8a57c4e65440c13a193835bb789fc6b63e7aeb166029dd4e7212928a5ebca
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 27
+    topology: t3_m1_r3
+    family_signature: index:missing|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 3.887053679762217
+    left:
+      row: 876
+      asset_id: b81af4f1
+      geometry_identity: ae7776928db05e27fc5ec5bd31d27a15cb1fad3790c877091dfd096c89ec680a
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 888
+      asset_id: 58a3c4df
+      geometry_identity: 8f87be065e3407aff445f55bf107cf6886e567280882c1ae2b9f67c98d475ae1
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 28
+    topology: leap_t3_allegro_i3_leap_r4
+    family_signature: index:allegro|middle:missing|ring:leap|thumb:leap
+    reflection_distance: 4.506823436282821
+    left:
+      row: 1932
+      asset_id: cf92f8d3
+      geometry_identity: 0f4d32aa41d89a3db5d039e7d710d695016c124fe3228ae33cd4b68108327d1e
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1949
+      asset_id: cd13c7be
+      geometry_identity: 472ac98656b0a887c95395f68549a4b1b20b33ec6415cd9e1f05c4b20bb6d240
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 29
+    topology: allegro_t3_i3_leap_m1
+    family_signature: index:allegro|middle:leap|ring:missing|thumb:allegro
+    reflection_distance: 4.562679511116819
+    left:
+      row: 1390
+      asset_id: e2bc64e3
+      geometry_identity: 936c97300d3136a71d26e0c69c29105767f7ee263b5a43bbdea2848dd98cd7d9
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 1407
+      asset_id: f6d81153
+      geometry_identity: dd80eff52c3152e3917194a360f3bc6b5170ba7781c01d6de83d942dcf271796
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+  - rank: 30
+    topology: t3_i3_r3
+    family_signature: index:allegro|middle:missing|ring:allegro|thumb:allegro
+    reflection_distance: 1.763218273010329
+    left:
+      row: 427
+      asset_id: 8c3b19b4
+      geometry_identity: d6d8b404729b2fa552294de56bd57743409cdfe946f72462173a81068e21046b
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 438
+      asset_id: 6088fd8b
+      geometry_identity: 7647f6587fdec7c47ef165b38717760ae2de9381dbcf078aba93100fe9440af0
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 31
+    topology: t3_m1_r3
+    family_signature: index:missing|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 3.230148195905169
+    left:
+      row: 874
+      asset_id: a5471485
+      geometry_identity: 82d20660ec2d493261abf6eec5f437a1cd2168b98885b2f6de07410d1cbdc7c4
+      handedness: left
+      active_dof: 7
+      asset_role: variant
+    right:
+      row: 882
+      asset_id: 18e8c413
+      geometry_identity: 6b56728500cd7e837975d1fc1b8dc7d9b8106d1e913c77d37c753df4990b3123
+      handedness: right
+      active_dof: 7
+      asset_role: variant
+- label: tips3_thumb4dof
+  tip_count: 3
+  thumb_dof: 4
+  selected_pair_count: 10
+  candidate_pairs:
+  - rank: 0
+    topology: t4_m4_r3
+    family_signature: index:missing|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 0.0
+    left:
+      row: 352
+      asset_id: 8f7178ca
+      geometry_identity: ca14bace48ad32437b17ccf0c521ec94d4f7b71c8a66e55292ac34f0fe995e75
+      handedness: left
+      active_dof: 11
+      asset_role: mother
+    right:
+      row: 368
+      asset_id: d431de35
+      geometry_identity: 4c1cec615389d3036e1770ddba22f4c6b36c5ab0cc3c6c38f4b98d4a4852e77e
+      handedness: right
+      active_dof: 11
+      asset_role: mother
+  - rank: 1
+    topology: t4_i3_m1
+    family_signature: index:leap|middle:leap|ring:missing|thumb:leap
+    reflection_distance: 4.6967626696140865
+    left:
+      row: 1000
+      asset_id: 635c799a
+      geometry_identity: ee0ff4f17190660b592350ee5eed58505531729c9b734f990c397954fbf3366a
+      handedness: left
+      active_dof: 8
+      asset_role: variant
+    right:
+      row: 1019
+      asset_id: a0ecf50c
+      geometry_identity: c3ff265f8ac5b776662f2cb2508b6aaa0f042fb23df58942945697da76ca93d5
+      handedness: right
+      active_dof: 8
+      asset_role: variant
+  - rank: 2
+    topology: t4_i4_r4
+    family_signature: index:leap|middle:missing|ring:leap|thumb:leap
+    reflection_distance: 5.427205120595724
+    left:
+      row: 966
+      asset_id: 3236702f
+      geometry_identity: d0ff091904489c1bdcc5c99ce96e50e2c341dd8f945cbf8e09c64a3147cc03b9
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 991
+      asset_id: f939349f
+      geometry_identity: be0138747ff202fa1a707296faaf424865f4f1341111d786f0c7436e8c04bfc5
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 3
+    topology: leap_t4_m3_allegro_r2
+    family_signature: index:missing|middle:leap|ring:allegro|thumb:leap
+    reflection_distance: 5.740234019694479
+    left:
+      row: 2031
+      asset_id: e989017d
+      geometry_identity: ff0dee2cf68953d7c150f4f3301dd712838d4d3dd46809083421725e83a4ce63
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 2033
+      asset_id: 0f672036
+      geometry_identity: 3416311eb2f46f3c5a331b11b0e7b145f68b943c02a7a9443a2a3c5a1b2dac2a
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 4
+    topology: t4_i4_m4
+    family_signature: index:allegro|middle:allegro|ring:missing|thumb:allegro
+    reflection_distance: 5.281227710655147
+    left:
+      row: 490
+      asset_id: ad1f285a
+      geometry_identity: c28c071f33f9c82ab9458296f6dfb68ab78bc68065d7f81fcc7e20fbd6909ec7
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 501
+      asset_id: 39233e2b
+      geometry_identity: f18cf2eed8b340a8827f0a891404d05867c02d557d04df12345d828ca0aec7a2
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 5
+    topology: t4_i4_r3
+    family_signature: index:allegro|middle:missing|ring:allegro|thumb:allegro
+    reflection_distance: 4.862920688819406
+    left:
+      row: 460
+      asset_id: ca63f2eb
+      geometry_identity: d39e2d12587620673e1e0b5c53fbfb8b70d376c608e3db8ccd66437740091a1e
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 469
+      asset_id: 46a7211a
+      geometry_identity: c9cd13a0af2ae40dc977376a4a7b1182adde9d643320a59f5cd87eadc04cc4bd
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 6
+    topology: allegro_t4_leap_i4_allegro_m4
+    family_signature: index:leap|middle:allegro|ring:missing|thumb:allegro
+    reflection_distance: 5.004087297093234
+    left:
+      row: 1421
+      asset_id: d290b3b2
+      geometry_identity: d5c0957ce4d837c7818aa499ce8adb5ffa86ccbd848c96978288d96337b27df9
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1428
+      asset_id: 2c9fc039
+      geometry_identity: aa5f5254e7d45eccc5417f121b0ec70015b7fd88193380bc61267f0bd1e3089f
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 7
+    topology: leap_t4_allegro_i4_leap_m4
+    family_signature: index:allegro|middle:leap|ring:missing|thumb:leap
+    reflection_distance: 5.929329886400163
+    left:
+      row: 1889
+      asset_id: 0561180c
+      geometry_identity: 478cec6058994dbfe8de06e1b0e9415b29eff78fde2904bf9a1eb7bf5e2451bf
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1909
+      asset_id: 4be521a4
+      geometry_identity: 0b30f4e35bd6bcc4278a3d82145bcc30971ed0e6e3764fc9289699394c3c33d4
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 8
+    topology: leap_t4_i3_allegro_r4
+    family_signature: index:leap|middle:missing|ring:allegro|thumb:leap
+    reflection_distance: 5.022714681331768
+    left:
+      row: 1993
+      asset_id: 70c1234e
+      geometry_identity: 9183c337dd43ebf16ec508746990542270132cec68fd64da0c08a016b5ce8640
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 2006
+      asset_id: 546c106c
+      geometry_identity: 723ce889cc9f726305cc775bd9568936920e7d298a6ad4acd8c16c1458c3e533
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 9
+    topology: allegro_t4_m4_leap_r4
+    family_signature: index:missing|middle:allegro|ring:leap|thumb:allegro
+    reflection_distance: 5.5089403319541725
+    left:
+      row: 1519
+      asset_id: f89c32ca
+      geometry_identity: 9cb43a850534b79e17c7ee96d2fddda342bf3b62e7553a30d1a3c8ce7516eb6d
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1525
+      asset_id: 657aff8f
+      geometry_identity: ef7e1ca23858af389319d0fb1be330421ee5d5487643594c47efa253bbf7c11c
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 10
+    topology: allegro_t4_leap_i3_allegro_r4
+    family_signature: index:leap|middle:missing|ring:allegro|thumb:allegro
+    reflection_distance: 3.954719878261253
+    left:
+      row: 1442
+      asset_id: 0a873b87
+      geometry_identity: 130cc6de8ccff3f7807eea8cdd6a98180ffc8f5036d860260d9acf1822c85629
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 1463
+      asset_id: 588d842a
+      geometry_identity: 1a27b78ccc3a0baade7971ecc8297ded11e7abd885ee94eec49758e3f795e1b9
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 11
+    topology: t4_m3_r4
+    family_signature: index:missing|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 2.72351953436588
+    left:
+      row: 904
+      asset_id: 7254ed2a
+      geometry_identity: d0337975c8e1cad246e26766517d57ec40b028b9f69c68b36a7100cba189ea2f
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 916
+      asset_id: 50b981cf
+      geometry_identity: 190f6eb079945553fbd890b981669d992022cd3fd45fcaed95e9f6fa8e01bedb
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 12
+    topology: allegro_t4_leap_m4_allegro_r4
+    family_signature: index:missing|middle:leap|ring:allegro|thumb:allegro
+    reflection_distance: 3.7148182463118125
+    left:
+      row: 1479
+      asset_id: 632194e3
+      geometry_identity: 1bf4979d9d50a150dbe07d800c3ffc663f0371d612bcb80d8885aaf964d2ae55
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1493
+      asset_id: 2fba5659
+      geometry_identity: a921bd7beafb4cac27f3a982c9785f7828f18d0b487727f40da557e58764cec3
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 13
+    topology: t4_m4_r4
+    family_signature: index:missing|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 3.013849351508851
+    left:
+      row: 397
+      asset_id: ce32c3fb
+      geometry_identity: 4fef8a149b64dd92e51f2cd223fa465e56cd1cc8c57bb5710271bfca1e86d074
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 414
+      asset_id: c71e0fc5
+      geometry_identity: 786ed5c2c053623fc36e7cdeda80a8abe31b355e00c77e201086b16602a1882d
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 14
+    topology: leap_t4_allegro_i4_leap_m4
+    family_signature: index:allegro|middle:leap|ring:missing|thumb:leap
+    reflection_distance: 5.061991098098354
+    left:
+      row: 1896
+      asset_id: 530c5b83
+      geometry_identity: 3bc7ce28c74a9968e1b7dd9cca03485e09bf2845f6d14ac5af7efd120cf3883b
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1913
+      asset_id: 8c9c47e9
+      geometry_identity: 4894920eae76909657298778a79966c6dc7c7bc92ea9fefb40743e7b03baf4f4
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 15
+    topology: t4_i4_m4
+    family_signature: index:allegro|middle:allegro|ring:missing|thumb:allegro
+    reflection_distance: 2.300289693517154
+    left:
+      row: 483
+      asset_id: 1fa4e5c7
+      geometry_identity: 8597981c7ad9c935219f8415334c3b337ea50af032832c6e7287c1ec5db763a6
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 499
+      asset_id: 1553e891
+      geometry_identity: 517035855b7c761a30665f0dc38a3e1a729e65d87a8f4b8dce0e895a65c85414
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 16
+    topology: t4_i4_r4
+    family_signature: index:leap|middle:missing|ring:leap|thumb:leap
+    reflection_distance: 2.760434078874538
+    left:
+      row: 962
+      asset_id: 126da242
+      geometry_identity: 17ad6594ae853a4bd5f9a492e6a61d67626ff8b004d2e25c28c3d54a12df85c7
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 990
+      asset_id: efc74d17
+      geometry_identity: f82f351622655be6efcf35937332881dbb22e7b86910384bcc47d2d28cc678f0
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 17
+    topology: t4_i3_m1
+    family_signature: index:leap|middle:leap|ring:missing|thumb:leap
+    reflection_distance: 2.3532845266242033
+    left:
+      row: 1001
+      asset_id: 75f27ab7
+      geometry_identity: 977436c6d9d0115a32da5d8c73f5d9c143c99748deed99c2317a26c76873bddd
+      handedness: left
+      active_dof: 8
+      asset_role: variant
+    right:
+      row: 1016
+      asset_id: 67bffa95
+      geometry_identity: b07b7e91cab0096a9a9be05fa7a1314ac3578a80a28d7d85718944b1a078906c
+      handedness: right
+      active_dof: 8
+      asset_role: variant
+  - rank: 18
+    topology: allegro_t4_leap_i4_allegro_m4
+    family_signature: index:leap|middle:allegro|ring:missing|thumb:allegro
+    reflection_distance: 5.326982269199051
+    left:
+      row: 1423
+      asset_id: ee6d9505
+      geometry_identity: 43fc0e3560bc9ca0c4c0b55dd5e54d0bd84ae7e62557472254132b544338a04c
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1425
+      asset_id: 066d4daf
+      geometry_identity: 72bfda09908fea9f9dbdd740e266cf9ae1df11cd1e1ea14af23a8172d515658d
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 19
+    topology: leap_t4_allegro_i4_leap_m4
+    family_signature: index:allegro|middle:leap|ring:missing|thumb:leap
+    reflection_distance: 3.1131766013337443
+    left:
+      row: 1895
+      asset_id: 4a0fa5e9
+      geometry_identity: 8c4cbe96daff666d80c1c53be0d389127cab7346100100a168918416d73de761
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1911
+      asset_id: 62efffa2
+      geometry_identity: 59bb9b5890ee10c6b12e991b6d4e0239b42593d1efb8958b07c2b0e3d57f1c5a
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 20
+    topology: leap_t4_i3_allegro_r4
+    family_signature: index:leap|middle:missing|ring:allegro|thumb:leap
+    reflection_distance: 4.06014175521554
+    left:
+      row: 1985
+      asset_id: 05cab195
+      geometry_identity: 403c4114d36f7f19424a2e279a1ac1073816213f4ecf5ca8974915fb9af5a2f8
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 2010
+      asset_id: c00d507c
+      geometry_identity: b69ca818595258b82c8a321f04b35b60e13e14e5bb17e126ddf9b35a32eb8ff0
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 21
+    topology: allegro_t4_m4_leap_r4
+    family_signature: index:missing|middle:allegro|ring:leap|thumb:allegro
+    reflection_distance: 5.242740146780984
+    left:
+      row: 1506
+      asset_id: 35281fb8
+      geometry_identity: b0ad2dab0bfa88f9a9ee0b841a3e19f797a37dab9bcdaa80ec2915177db88213
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1524
+      asset_id: 5cc297fb
+      geometry_identity: 6fd9b8d37769f1691fd212a248f7a1540ac3e5f7835b0ab2741cc8b4d552b0df
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 22
+    topology: allegro_t4_leap_i3_allegro_r4
+    family_signature: index:leap|middle:missing|ring:allegro|thumb:allegro
+    reflection_distance: 5.9148118240551115
+    left:
+      row: 1454
+      asset_id: f70ca587
+      geometry_identity: 147b20393511ff629105ed7bd42a1ade3edfd1bf58f8fa9333d40531a2575d0e
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 1460
+      asset_id: 2c23d949
+      geometry_identity: 6f9b761189a7450a9823ecdcdc7ae382810cba7b33a83a262fec1b5d52e337cc
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 23
+    topology: t4_m4_r3
+    family_signature: index:missing|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 5.776620995180283
+    left:
+      row: 360
+      asset_id: 5fe9ec78
+      geometry_identity: 9c21ba20eecee95ff756c34e753f7814dc731583147017ebd4ddb84ad184041a
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 382
+      asset_id: d92e5eac
+      geometry_identity: 69b063fd8636b43f8961ef08be6130ed44da02d24ddb05372f5ca54797596c2f
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 24
+    topology: t4_i4_m4
+    family_signature: index:allegro|middle:allegro|ring:missing|thumb:allegro
+    reflection_distance: 3.4116330569768594
+    left:
+      row: 491
+      asset_id: c70013c2
+      geometry_identity: bd21338abeb1c376aee266dbc815ecce3e55eb1e79dc8c34d5bacb0f3b4ad218
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 508
+      asset_id: da0b3432
+      geometry_identity: 5f48871cb6e0ec8ca84f99df767c9a5740bccbbc15bc6b11bfe412190cf64603
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 25
+    topology: t4_i4_m4
+    family_signature: index:allegro|middle:allegro|ring:missing|thumb:allegro
+    reflection_distance: 4.26481668475626
+    left:
+      row: 494
+      asset_id: eea1c38b
+      geometry_identity: 457234dfcea6c73fb96920dc94d95d24d237d04fab344b31d6ccddf429397b9b
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 509
+      asset_id: de679854
+      geometry_identity: 04e7e9b42c3e32b22f476d8823cecc18d69689fa12322316cd6e753bd7ffa428
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 26
+    topology: allegro_t4_leap_i4_allegro_m4
+    family_signature: index:leap|middle:allegro|ring:missing|thumb:allegro
+    reflection_distance: 5.486632087696307
+    left:
+      row: 1422
+      asset_id: d741c480
+      geometry_identity: 58990f5a842d29d7852a9c6968af36ffbcb20589929223c214a3c05ae2b55e68
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1427
+      asset_id: 0f0922c5
+      geometry_identity: b864891dc08778c7ec91f2c6b97f9d8bcf9d8e4640b29387f2dd4a0548603283
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 27
+    topology: t4_i3_m1
+    family_signature: index:leap|middle:leap|ring:missing|thumb:leap
+    reflection_distance: 2.771366771071487
+    left:
+      row: 999
+      asset_id: 5b2c2d6f
+      geometry_identity: 412f717b4e0dd4b647be362b3ed0f864fc5dcd6a18b6ff355e0206fa3da1ac0f
+      handedness: left
+      active_dof: 8
+      asset_role: variant
+    right:
+      row: 1018
+      asset_id: 9ed09686
+      geometry_identity: 63398ca487ea83de8d99fe242f9fe269a91229088e2b8aa0b3b131fb1a2a01f5
+      handedness: right
+      active_dof: 8
+      asset_role: variant
+  - rank: 28
+    topology: t4_m3_r4
+    family_signature: index:missing|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 3.0733739050921014
+    left:
+      row: 900
+      asset_id: 3fd26fe6
+      geometry_identity: 1a2f5d637670616f5e86938bdd2889f599941b792f35c1af0351e50df91b3643
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 925
+      asset_id: e9bfea7b
+      geometry_identity: 76d4aef05795933fadbbbc1af280dc001715cb4dd3b217ad5308453f3bec3f58
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 29
+    topology: leap_t4_allegro_i4_leap_m4
+    family_signature: index:allegro|middle:leap|ring:missing|thumb:leap
+    reflection_distance: 3.2091587264399264
+    left:
+      row: 1894
+      asset_id: 4634cc2f
+      geometry_identity: 26acbc1328069b591958572964d27f32c7a94198f4bbfd854ba30e71426567dc
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1912
+      asset_id: 6e84c98a
+      geometry_identity: ea1f5cc1483fca882ddf9d93c2c075d2c32f3f98e29a5aad93259ba0ca2591f4
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 30
+    topology: t4_i4_r3
+    family_signature: index:allegro|middle:missing|ring:allegro|thumb:allegro
+    reflection_distance: 3.492458552091082
+    left:
+      row: 454
+      asset_id: 79e8d006
+      geometry_identity: c1416591b6a4266f48404fdc92c6a9888cf8a1f57a84abe55cec5bba430d90ff
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 477
+      asset_id: f20c9028
+      geometry_identity: 19c8a5969dbb08ae89876fbcdebafa525d1e8b9c58f0a7f61c6e45388c8d210c
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 31
+    topology: allegro_t4_leap_m4_allegro_r4
+    family_signature: index:missing|middle:leap|ring:allegro|thumb:allegro
+    reflection_distance: 6.467133336321163
+    left:
+      row: 1487
+      asset_id: ce437bc6
+      geometry_identity: 15cf4ec2a501aeab20f4f41d1157102851bb48580412aed6e5655772ce25803f
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1492
+      asset_id: 2ad669c7
+      geometry_identity: 88311758a73616d512ca28302fbfad24b93a72c5845b168e50336ddc23fe0cf0
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+- label: tips4_thumb3dof
+  tip_count: 4
+  thumb_dof: 3
+  selected_pair_count: 10
+  candidate_pairs:
+  - rank: 0
+    topology: t3_i3_m2_r2
+    family_signature: index:allegro|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 0.0
+    left:
+      row: 0
+      asset_id: 74244d8e
+      geometry_identity: b229a017c8888e42dbee7adc59936dd54f6040815fb8f2e9fcfdbf77111db97e
+      handedness: left
+      active_dof: 10
+      asset_role: mother
+    right:
+      row: 16
+      asset_id: 9e51bb6f
+      geometry_identity: 7d6ed960e858d3830fed5454b5cd8bbb441f79fc24d84dc00b6788fad245dcf3
+      handedness: right
+      active_dof: 10
+      asset_role: mother
+  - rank: 1
+    topology: leap_t3_allegro_i4_leap_m1_r1
+    family_signature: index:allegro|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 5.891477912755768
+    left:
+      row: 1609
+      asset_id: a8ff24ac
+      geometry_identity: 060d3eecdc0d325ec2b272c3ddc3b74d3f0b0e3da50d4b9a9d8447869d7d01b4
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 1617
+      asset_id: 06f8f399
+      geometry_identity: f2e6c3b5c93db4959016a55cb716e5db7c9b4bdd0fa158aa2ed705185078153b
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 2
+    topology: t3_i4_m4_r4
+    family_signature: index:leap|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 6.905258779290157
+    left:
+      row: 810
+      asset_id: 9a471201
+      geometry_identity: 488befe0866bf00912b3a6f80faf0b31f8614cfc3c5783d0891971cbea26e5f5
+      handedness: left
+      active_dof: 15
+      asset_role: variant
+    right:
+      row: 824
+      asset_id: 72fdd8f6
+      geometry_identity: a4e6798fbebf0054d9edba646d5fe36398fecd0398ac36b7cf763c15edacc00c
+      handedness: right
+      active_dof: 15
+      asset_role: variant
+  - rank: 3
+    topology: leap_t3_allegro_i3_leap_m4_allegro_r3
+    family_signature: index:allegro|middle:leap|ring:allegro|thumb:leap
+    reflection_distance: 6.567512442705906
+    left:
+      row: 1581
+      asset_id: b8b59104
+      geometry_identity: 2272ee4a06d405da902ee07ea71c315493b3e0cfb1c088ad326e15a1e5b4b253
+      handedness: left
+      active_dof: 13
+      asset_role: variant
+    right:
+      row: 1590
+      asset_id: 5bda92cb
+      geometry_identity: 84c6619901ec2089a8ee65346b1aa109aa8dede9fcd5276bd3619c92824ad731
+      handedness: right
+      active_dof: 13
+      asset_role: variant
+  - rank: 4
+    topology: allegro_t3_i3_leap_m2_r3
+    family_signature: index:allegro|middle:leap|ring:leap|thumb:allegro
+    reflection_distance: 8.790177467990315
+    left:
+      row: 1103
+      asset_id: eca1d35c
+      geometry_identity: cd8ba988b330e8238791ba9feca47f58ecf66cffa5d4735891276a8f64511e2f
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 1119
+      asset_id: ee12bb13
+      geometry_identity: 0f5ec8981b183971cc7cacfa79159113a236c6f96f702840391f855c920d6686
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 5
+    topology: leap_t3_i3_m4_allegro_r2
+    family_signature: index:leap|middle:leap|ring:allegro|thumb:leap
+    reflection_distance: 4.418770507546583
+    left:
+      row: 1864
+      asset_id: '61649112'
+      geometry_identity: af38f9fe3b7a308d42049617b9b33d8894af544e5bbb2408764d491caa1211b8
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1880
+      asset_id: 729f9088
+      geometry_identity: dd0a914ac49d80e2e4735ae17b8c30af41586db82e1585a9bd9ba070e971d8e0
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 6
+    topology: leap_t3_i1_allegro_m4_leap_r1
+    family_signature: index:leap|middle:allegro|ring:leap|thumb:leap
+    reflection_distance: 5.717162697534888
+    left:
+      row: 1706
+      asset_id: be29e876
+      geometry_identity: a51df7938aff6885d9bdd440d01111a87b4678fadd8ca6591c2111276e15fd71
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 1722
+      asset_id: 81f8e1ec
+      geometry_identity: baf24d2aea47d666521a458e7b5a100dd2b34b2d2add805484f8a4e150cccf6a
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 7
+    topology: leap_t3_i1_allegro_m3_r2
+    family_signature: index:leap|middle:allegro|ring:allegro|thumb:leap
+    reflection_distance: 5.484953714060223
+    left:
+      row: 1774
+      asset_id: f5ed4aff
+      geometry_identity: 86b5babf8c7147a05d2503a5b33442f87c12f09979c8dc7efa61a690f14cf15b
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 1778
+      asset_id: 5c9f0758
+      geometry_identity: 88d842a2232407733620eb427c0addf9e9951c8d3b9ecbc84d372fd403c3e99d
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 8
+    topology: allegro_t3_leap_i4_m2_allegro_r4
+    family_signature: index:leap|middle:leap|ring:allegro|thumb:allegro
+    reflection_distance: 7.601809391978188
+    left:
+      row: 1346
+      asset_id: 3762ff22
+      geometry_identity: e5a99d79f5c8b0457b7b8fa0e912d4a1d471b32e996b2888f31cb43af0a5dbe1
+      handedness: left
+      active_dof: 13
+      asset_role: variant
+    right:
+      row: 1369
+      asset_id: 73bcbbf6
+      geometry_identity: bfe8293a37172504e3d0503528965b9c6fb80980b26a860101b7d605457107d1
+      handedness: right
+      active_dof: 13
+      asset_role: variant
+  - rank: 9
+    topology: allegro_t3_i3_m3_leap_r1
+    family_signature: index:allegro|middle:allegro|ring:leap|thumb:allegro
+    reflection_distance: 8.658058381477838
+    left:
+      row: 1167
+      asset_id: fcfefc8b
+      geometry_identity: 73481e94894ba88a987a4e322e144950d7b15a27e25aadb9ec497dbaf8deb267
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1171
+      asset_id: 7e91da10
+      geometry_identity: 9f3079c2f817a6603bc880c8e3b770df630bb572768258e8560d33a8db821905
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 10
+    topology: t3_i1_m3_r1
+    family_signature: index:leap|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 7.954302910710812
+    left:
+      row: 514
+      asset_id: 1faeb5a1
+      geometry_identity: 9c83ec21d8995cb9c6a2fbd5dc2c5b18c0b7602f4a1975c5d5290c7bf78aa5ed
+      handedness: left
+      active_dof: 8
+      asset_role: variant
+    right:
+      row: 543
+      asset_id: fdcb7fd8
+      geometry_identity: 910c540aef3c84bf75433167e5db3f5657378b0ce3db02642ba6b16c0760d7eb
+      handedness: right
+      active_dof: 8
+      asset_role: variant
+  - rank: 11
+    topology: t3_i4_m4_r3
+    family_signature: index:leap|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 4.515506839508677
+    left:
+      row: 744
+      asset_id: ad91cb83
+      geometry_identity: 80bccfaffe114da7f690b389f2bbae49fd3ff3e13ac17389a02d8c56473b0a03
+      handedness: left
+      active_dof: 14
+      asset_role: variant
+    right:
+      row: 767
+      asset_id: fe7be8ba
+      geometry_identity: 37ce73bc5778628b9f35899ff50676d9ae16d7d2ea3c4fdd446321ac9206000a
+      handedness: right
+      active_dof: 14
+      asset_role: variant
+  - rank: 12
+    topology: leap_t3_i2_m1_allegro_r4
+    family_signature: index:leap|middle:leap|ring:allegro|thumb:leap
+    reflection_distance: 8.020124999201768
+    left:
+      row: 1836
+      asset_id: ac713092
+      geometry_identity: 58dff6f8d2f22fae877e3b966a26a9cfded1c4be416b7f7498d5e9a914d06ce8
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1843
+      asset_id: 2db06413
+      geometry_identity: fceebe697e77b2150be1f422c9ee5f0c50b0a67761e1219ee39766b439173d99
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 13
+    topology: t3_i3_m2_r1
+    family_signature: index:leap|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 7.775818284791527
+    left:
+      row: 558
+      asset_id: c74fc936
+      geometry_identity: dc2de33e0536c8d47a38775fea5eb16e594400d4e187a40408b068e74c54df65
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 562
+      asset_id: 15caedd6
+      geometry_identity: fc9abdd3f2922a7cf2c44e98e1b7f53b98f594fb3e6ea1b651074eaa46d1e930
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 14
+    topology: leap_t3_i1_allegro_m3_leap_r3
+    family_signature: index:leap|middle:allegro|ring:leap|thumb:leap
+    reflection_distance: 6.504526065891136
+    left:
+      row: 1734
+      asset_id: 7959ab39
+      geometry_identity: 107af714e312e7bbff457d671f190ca385439beb45d8b094f39b723717357ec6
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1747
+      asset_id: 1ebf3775
+      geometry_identity: be1799a99ab3a3157c95323da62b9c2277f184568de2756c1e2495cdaab47790
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 15
+    topology: t3_i3_m4_r1
+    family_signature: index:leap|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 7.5122268556999385
+    left:
+      row: 643
+      asset_id: 3878f63f
+      geometry_identity: 11cc3abd31d086f5c3abae43a820fc4d89d34772e29c3d849cc45b809d4189ae
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 671
+      asset_id: f3af24c6
+      geometry_identity: 0c3f7b5307df50b6616bf7cf19f0ad2cb2cfcde2b3a60c325e18b9c8ba86cafd
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 16
+    topology: t3_i2_m3_r3
+    family_signature: index:leap|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 4.951431796118838
+    left:
+      row: 614
+      asset_id: 8261a65b
+      geometry_identity: 8bc14b382498b546cd1f8df0e5f1fdcbfd4dfb23ba3b493253677f9758af493f
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 627
+      asset_id: 480b83bc
+      geometry_identity: 541d06a68d265ecfcdadef59f41647546760908184efd936ee0fb837108b9c28
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 17
+    topology: t3_i4_m3_r3
+    family_signature: index:allegro|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 6.315824295947252
+    left:
+      row: 172
+      asset_id: c604e5d5
+      geometry_identity: 794b28f7d7d7f1218a51b259ac1f0eed3f6bb4cfbc0dac2d75f8998ae9086ba3
+      handedness: left
+      active_dof: 13
+      asset_role: variant
+    right:
+      row: 180
+      asset_id: 57538cbb
+      geometry_identity: 5272e3935c2dd4c8171a2c17cd3c47c082f222f72b2bbccdf2b1a187c5991d7a
+      handedness: right
+      active_dof: 13
+      asset_role: variant
+  - rank: 18
+    topology: t3_i4_m3_r4
+    family_signature: index:allegro|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 6.569258404712169
+    left:
+      row: 203
+      asset_id: b3dcd2bb
+      geometry_identity: 861fe18ab667c73a05be66f3589ac7609e3b08c18295f1c97daea6367f13b4a7
+      handedness: left
+      active_dof: 14
+      asset_role: variant
+    right:
+      row: 210
+      asset_id: 1cd191d4
+      geometry_identity: f0d9eafe22992bce5f092835e1323624898498a333ae39ecc5777d5334ed385f
+      handedness: right
+      active_dof: 14
+      asset_role: variant
+  - rank: 19
+    topology: t3_i3_m3_r2
+    family_signature: index:allegro|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 4.68198283285616
+    left:
+      row: 33
+      asset_id: 0acdf7a9
+      geometry_identity: f764a56291bb0662de1aa409ae0b3a6168a9038320249c98acac176065366403
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 53
+      asset_id: 6db9f1b6
+      geometry_identity: 66391d0031058634745b51e54391b98869282ae162048f85ea6d230f89985822
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 20
+    topology: leap_t3_allegro_i4_leap_m1_r1
+    family_signature: index:allegro|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 5.077604649074944
+    left:
+      row: 1602
+      asset_id: 2dedeb28
+      geometry_identity: 26c76e41a0aab92826cf55b684ef8117fb9444fcadd9ec060f998c0e1d3cc5d5
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 1621
+      asset_id: 7e1b07c7
+      geometry_identity: 5c678471c35aaef8804ee5231778d11cddfbb97a365b4e7ec2a4aa171bbf8a8c
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 21
+    topology: leap_t3_i1_allegro_m3_r2
+    family_signature: index:leap|middle:allegro|ring:allegro|thumb:leap
+    reflection_distance: 5.6555802482688735
+    left:
+      row: 1775
+      asset_id: fa08deaf
+      geometry_identity: 0a9f376635ebd5affa5146bbc795f048eb4f1cf5d29b1da5351dbcb98f81c508
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 1782
+      asset_id: 81198df8
+      geometry_identity: af083984981e75da4fed3d2e724193630eb1221929facca2d3d89b566408f87c
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 22
+    topology: allegro_t3_i3_m3_leap_r1
+    family_signature: index:allegro|middle:allegro|ring:leap|thumb:allegro
+    reflection_distance: 5.831442807288906
+    left:
+      row: 1163
+      asset_id: ddd0d8d4
+      geometry_identity: 2c5ae7fc892d69572024ab32e6368efa1525db9c9a7ac65afca373523e58be94
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1174
+      asset_id: a6b1b351
+      geometry_identity: 49465cbdf26663d27573d0b26df4c15dc04f3220e769576e0bfa36ee116d2bfb
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 23
+    topology: allegro_t3_leap_i4_m2_allegro_r4
+    family_signature: index:leap|middle:leap|ring:allegro|thumb:allegro
+    reflection_distance: 4.225183568771886
+    left:
+      row: 1351
+      asset_id: 6aaf573c
+      geometry_identity: 14fac3f35b995fddaa572caf30dd8565da16c4870409d31609302f29ef9ad872
+      handedness: left
+      active_dof: 13
+      asset_role: variant
+    right:
+      row: 1365
+      asset_id: 36d7c6aa
+      geometry_identity: e7d1024b81f21fdb3cef09183f266fc2868cfa83a75c55aff965993599bdce67
+      handedness: right
+      active_dof: 13
+      asset_role: variant
+  - rank: 24
+    topology: leap_t3_allegro_i4_leap_m1_r1
+    family_signature: index:allegro|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 6.694506315135325
+    left:
+      row: 1614
+      asset_id: db1eb5c9
+      geometry_identity: 7fbf4ca6cf2a528259f23c9de779920729dccd92638f60c361fa113d8e06d920
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 1630
+      asset_id: ed5a0ea9
+      geometry_identity: 6267724beb27b6a899cdb78fb9cd5dc6165de3c75e69cfd9575d8f9fb601dd27
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 25
+    topology: leap_t3_i2_m1_allegro_r4
+    family_signature: index:leap|middle:leap|ring:allegro|thumb:leap
+    reflection_distance: 8.239195874071166
+    left:
+      row: 1839
+      asset_id: f1a02068
+      geometry_identity: 28270effb67165a159270b9cccd9cdbf93fcdfd3ba6cad245a54dc75b54568fa
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1847
+      asset_id: 465d1d0f
+      geometry_identity: 8e09358a28e0fda4a1b022344f340c34c8391a0dbb1539903adfed216cba9f63
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 26
+    topology: leap_t3_i1_allegro_m3_r2
+    family_signature: index:leap|middle:allegro|ring:allegro|thumb:leap
+    reflection_distance: 5.017445895907174
+    left:
+      row: 1768
+      asset_id: 83c28929
+      geometry_identity: aca76b949b8c1a5ea8204b1d75d71877913abd0aa7103d2296546f984864edb0
+      handedness: left
+      active_dof: 9
+      asset_role: variant
+    right:
+      row: 1788
+      asset_id: deedeb51
+      geometry_identity: 57bd5e1813e0596b26ca227852661a196f4ecccc2b21d241b01b57a7ea406aec
+      handedness: right
+      active_dof: 9
+      asset_role: variant
+  - rank: 27
+    topology: t3_i3_m4_r1
+    family_signature: index:leap|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 6.4277854274780255
+    left:
+      row: 653
+      asset_id: dd2a9d5b
+      geometry_identity: 942ee58e0287366f137b86df3636db340302eab367b793958c17fe4170241f98
+      handedness: left
+      active_dof: 11
+      asset_role: variant
+    right:
+      row: 669
+      asset_id: c56f228b
+      geometry_identity: 5f18fb232f889e9a0d1bf1a2d1cc0961b70269d445f7085604f2980a53616b29
+      handedness: right
+      active_dof: 11
+      asset_role: variant
+  - rank: 28
+    topology: t3_i1_m3_r1
+    family_signature: index:leap|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 4.131131219285015
+    left:
+      row: 518
+      asset_id: 6105c464
+      geometry_identity: 4f53f355a9339f4b064a11fd1a50725f84e1f08a303107e3cb1ce823a1c93551
+      handedness: left
+      active_dof: 8
+      asset_role: variant
+    right:
+      row: 541
+      asset_id: e19d0599
+      geometry_identity: d73982f85d7ad9be8d72cd2df6dfd775ef5750de389b96327d95a3af5c8bad27
+      handedness: right
+      active_dof: 8
+      asset_role: variant
+  - rank: 29
+    topology: leap_t3_i3_m4_allegro_r2
+    family_signature: index:leap|middle:leap|ring:allegro|thumb:leap
+    reflection_distance: 7.098233696897525
+    left:
+      row: 1865
+      asset_id: 6260abb0
+      geometry_identity: f7900bfacf3a6a9b0f7fc8afca1e2babdee0c4470a182bdca8f57c1e796fe4fe
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1874
+      asset_id: 0bf1470b
+      geometry_identity: 69cb24c983a1242bbaaf2919ac3d2250ea4181c472754329059a99dc54e8b7f3
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 30
+    topology: leap_t3_allegro_i3_leap_m4_allegro_r3
+    family_signature: index:allegro|middle:leap|ring:allegro|thumb:leap
+    reflection_distance: 3.971907213922781
+    left:
+      row: 1572
+      asset_id: 36a502cc
+      geometry_identity: 58549025e5142186699bcf244d13d205c65fc1b6a6bc350dd35c0954c3b64b38
+      handedness: left
+      active_dof: 13
+      asset_role: variant
+    right:
+      row: 1592
+      asset_id: 90b2adb0
+      geometry_identity: 5750420e2d46a6b75ef2d3e732ba800509d004e33b72c8b1e6d503b2d03d3a5a
+      handedness: right
+      active_dof: 13
+      asset_role: variant
+  - rank: 31
+    topology: leap_t3_i1_allegro_m3_leap_r3
+    family_signature: index:leap|middle:allegro|ring:leap|thumb:leap
+    reflection_distance: 7.236165081168879
+    left:
+      row: 1731
+      asset_id: 410a7565
+      geometry_identity: c0ad132b56a91773ddbe99949620b762b33b140a865e93d08284b04ff90b6078
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1756
+      asset_id: d711e964
+      geometry_identity: e62be827ca853bd66b7998256df4f9aa1bb6391fd7d186785bd5832c2589aae4
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+- label: tips4_thumb4dof
+  tip_count: 4
+  thumb_dof: 4
+  selected_pair_count: 10
+  candidate_pairs:
+  - rank: 0
+    topology: t4_i2_m3_r2
+    family_signature: index:allegro|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 0.0
+    left:
+      row: 64
+      asset_id: afb95c07
+      geometry_identity: 958c96529cec1b33697d5aa5d81b77ea763aca949d357b050a5d251418687209
+      handedness: left
+      active_dof: 11
+      asset_role: mother
+    right:
+      row: 80
+      asset_id: 9340eaf1
+      geometry_identity: 271be4523bda5ef1186d96d547ea312d3ff494c538cc07be297315731ecc215d
+      handedness: right
+      active_dof: 11
+      asset_role: mother
+  - rank: 1
+    topology: t4_i2_m3_r1
+    family_signature: index:leap|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 6.366562970674724
+    left:
+      row: 583
+      asset_id: 4c5fc7f2
+      geometry_identity: 0a9c1fa72fd054116350a511ce7a8ad567d695864a47cbf63c0930fd34a02626
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 598
+      asset_id: 57210f81
+      geometry_identity: cc31cb5844b72a5a7417e793ead929953925b8e967aec5844e2de298cb5cc73c
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 2
+    topology: leap_t4_allegro_i4_m4_leap_r4
+    family_signature: index:allegro|middle:allegro|ring:leap|thumb:leap
+    reflection_distance: 4.4288587611466275
+    left:
+      row: 1667
+      asset_id: 2e4c8f3d
+      geometry_identity: 8a51d91df440dd984e3cedc1f44f1024d2e109c28e2c4e0cf79a903293822ab9
+      handedness: left
+      active_dof: 16
+      asset_role: variant
+    right:
+      row: 1682
+      asset_id: 4c8756a8
+      geometry_identity: 18689813de34eb38f2bfa1bb007f9ef5ff886d1d9d1ceca0b91fec51e98c0214
+      handedness: right
+      active_dof: 16
+      asset_role: variant
+  - rank: 3
+    topology: leap_t4_allegro_i3_leap_m3_allegro_r2
+    family_signature: index:allegro|middle:leap|ring:allegro|thumb:leap
+    reflection_distance: 4.87284863053439
+    left:
+      row: 1541
+      asset_id: 581c51a0
+      geometry_identity: 45370a2a67ed2cea45631000eb1d1f5f6e05aba9ffe53bba4f319cb818db9d6c
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1567
+      asset_id: f923d569
+      geometry_identity: 9f2cce8c1cd0175c049af3ea453c72adc76e1d4ca0d9a13ab731da485154f9d8
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 4
+    topology: allegro_t4_leap_i2_allegro_m4_leap_r4
+    family_signature: index:leap|middle:allegro|ring:leap|thumb:allegro
+    reflection_distance: 5.645902093715022
+    left:
+      row: 1229
+      asset_id: f2cb58f4
+      geometry_identity: 3356d094a22bad4fd23f4ffb44c7e27d352cfbb094dab11167fececa17b42415
+      handedness: left
+      active_dof: 14
+      asset_role: variant
+    right:
+      row: 1244
+      asset_id: af6a806d
+      geometry_identity: 932468b30fb834e86f56c8f214f000c14e5ef0e18278cb1ef8c9c2e368635696
+      handedness: right
+      active_dof: 14
+      asset_role: variant
+  - rank: 5
+    topology: allegro_t4_i3_leap_m4_allegro_r2
+    family_signature: index:allegro|middle:leap|ring:allegro|thumb:allegro
+    reflection_distance: 7.432678097175036
+    left:
+      row: 1025
+      asset_id: 25ca9c6c
+      geometry_identity: c547c510edb0117b13dd730bec4805c9bd5083be39bd803eac1b683ebdf76042
+      handedness: left
+      active_dof: 13
+      asset_role: variant
+    right:
+      row: 1055
+      asset_id: ca1dd3fa
+      geometry_identity: 317fb24018394f85b625506e7676e1ee77a9cd4552aa1b9b0e51900ead1899c9
+      handedness: right
+      active_dof: 13
+      asset_role: variant
+  - rank: 6
+    topology: allegro_t4_i3_m4_leap_r4
+    family_signature: index:allegro|middle:allegro|ring:leap|thumb:allegro
+    reflection_distance: 3.3337635338982867
+    left:
+      row: 1185
+      asset_id: 0950b539
+      geometry_identity: 146e9f736d38beea7a2b26f08ddc99c5d22244c9f966c50d72948f23156203fe
+      handedness: left
+      active_dof: 15
+      asset_role: variant
+    right:
+      row: 1213
+      asset_id: e38d99a3
+      geometry_identity: 03c93aaec9e3a77381365f7a01868ab4dc5c94eeee0918586cee72eee8c0edda
+      handedness: right
+      active_dof: 15
+      asset_role: variant
+  - rank: 7
+    topology: allegro_t4_leap_i1_allegro_m2_r3
+    family_signature: index:leap|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 6.227087420453097
+    left:
+      row: 1285
+      asset_id: 4e7abbd5
+      geometry_identity: 38050690bffc572d3bb3af244e9fc685a54e297d8776fcd287ec852426ab6b0a
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1299
+      asset_id: 4204ed26
+      geometry_identity: fb00928c2db4a21405cf3268b8d88099265efbc8294bb12e2018c696317c9f91
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 8
+    topology: allegro_t4_i3_leap_m3_r2
+    family_signature: index:allegro|middle:leap|ring:leap|thumb:allegro
+    reflection_distance: 6.294215942490875
+    left:
+      row: 1129
+      asset_id: 8442c0c4
+      geometry_identity: 345c07a48ec521fa9592bf0212860b12dc152209686ef447c03784e43d898e0a
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1147
+      asset_id: e05eebd4
+      geometry_identity: 87ae14bc54ce961ffd9525fcfe44d4ac8f0e86c9509715ce78690a35d1dc4662
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 9
+    topology: leap_t4_i4_allegro_m4_r4
+    family_signature: index:leap|middle:allegro|ring:allegro|thumb:leap
+    reflection_distance: 5.21558039991303
+    left:
+      row: 1794
+      asset_id: 2897171f
+      geometry_identity: 85bbb8fb833123abd3c06f40784e19d79b5b648cc55f45e012fb4a3dd6d1f12d
+      handedness: left
+      active_dof: 16
+      asset_role: variant
+    right:
+      row: 1817
+      asset_id: 9906e874
+      geometry_identity: 9e21afbc9042a2794f769418f3b37e7ed040450397bf9f042a61294aa40ca9a3
+      handedness: right
+      active_dof: 16
+      asset_role: variant
+  - rank: 10
+    topology: t4_i2_m4_r2
+    family_signature: index:leap|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 4.096608915523408
+    left:
+      row: 677
+      asset_id: 69a441c7
+      geometry_identity: 222cf6deb67e0ba324aadf492868e06871cefd16a40f9d740cf4490fa8207d7c
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 690
+      asset_id: 3919cf4d
+      geometry_identity: 05cb700f1797c3a3711403391040e9bb9dd7b71255ae81442f35c169b5e81fcd
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 11
+    topology: allegro_t4_leap_i4_allegro_m2_r2
+    family_signature: index:leap|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 6.291463668838502
+    left:
+      row: 1323
+      asset_id: c60e1cc2
+      geometry_identity: a193aedbf6b3e538d9ff6ca62fc0dfdc2eebd18546e57a5c8fff625b06f2daa6
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1341
+      asset_id: c3dd9fc6
+      geometry_identity: 9f35df04b8a217bc44b5ac332bb06165e5dbfd428cdc0c9f4d0848434c0cf35d
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 12
+    topology: allegro_t4_leap_i4_allegro_m4_leap_r4
+    family_signature: index:leap|middle:allegro|ring:leap|thumb:allegro
+    reflection_distance: 9.759090468892937
+    left:
+      row: 1263
+      asset_id: d70a1c08
+      geometry_identity: 9e3618ef0d18ebf482cc04653411595a84b12ee17d2bc56ee2616b7654f67481
+      handedness: left
+      active_dof: 16
+      asset_role: variant
+    right:
+      row: 1279
+      asset_id: f605f47f
+      geometry_identity: 2e66ea29ada704d20c2f2912e6d028e7b9474505454d44ef2197e889d4ea0ea5
+      handedness: right
+      active_dof: 16
+      asset_role: variant
+  - rank: 13
+    topology: allegro_t4_i4_leap_m4_allegro_r4
+    family_signature: index:allegro|middle:leap|ring:allegro|thumb:allegro
+    reflection_distance: 7.299140445237927
+    left:
+      row: 1071
+      asset_id: ed394215
+      geometry_identity: 6210278df90353d8774ea5bb3a45a82d0f1f41d45e85bef846acb9b8a21ef808
+      handedness: left
+      active_dof: 16
+      asset_role: variant
+    right:
+      row: 1085
+      asset_id: a6a69144
+      geometry_identity: 53ea5572a3e81f39f0cafbe71379e63c88f9a65e3df6160b3e6305bafec361da
+      handedness: right
+      active_dof: 16
+      asset_role: variant
+  - rank: 14
+    topology: t4_i2_m2_r4
+    family_signature: index:allegro|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 7.521653114245126
+    left:
+      row: 138
+      asset_id: ecec9102
+      geometry_identity: d9754c0e56605a8d302cc2a6cd37d892944ea7b236e53e984ffbfe3b104f42c0
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 145
+      asset_id: 02a4de8d
+      geometry_identity: c33be91ea71012caafad2d85e8d969037111ab589af564fe48db3c711bf7d520
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 15
+    topology: t4_i3_m4_r4
+    family_signature: index:allegro|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 6.255113256711485
+    left:
+      row: 260
+      asset_id: 616c3e74
+      geometry_identity: 20d66ce1997a3db51602f79aec3cb06ddf794b1f5d3e1d6ff927e6eb5ae76a06
+      handedness: left
+      active_dof: 15
+      asset_role: variant
+    right:
+      row: 278
+      asset_id: be9ca2bf
+      geometry_identity: 857868bf26bf0bf1da16d197ad7d8c4fbade83d88f624e848c87fba563ca4697
+      handedness: right
+      active_dof: 15
+      asset_role: variant
+  - rank: 16
+    topology: t4_i4_m4_r2
+    family_signature: index:leap|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 5.188328621417805
+    left:
+      row: 773
+      asset_id: 3d1e0c37
+      geometry_identity: 49b9f1216f8d551b9a4642a90b8f0e3fdb66d13cf7632afe2a24f4569473d793
+      handedness: left
+      active_dof: 14
+      asset_role: variant
+    right:
+      row: 785
+      asset_id: 0d1a3770
+      geometry_identity: 4e777d4a803c4c91ee013f663e288ede5bafa0ce024a84f352b4d5bf2db3689d
+      handedness: right
+      active_dof: 14
+      asset_role: variant
+  - rank: 17
+    topology: leap_t4_allegro_i4_m4_leap_r3
+    family_signature: index:allegro|middle:allegro|ring:leap|thumb:leap
+    reflection_distance: 3.125491648802938
+    left:
+      row: 1633
+      asset_id: 07aed49f
+      geometry_identity: deae49c3cca655953f6d079c93972e9e25e898faa6114f0a8991bac62a250b18
+      handedness: left
+      active_dof: 15
+      asset_role: variant
+    right:
+      row: 1650
+      asset_id: 046dbaca
+      geometry_identity: 69ad6b9871928085d6f0ea3bbe6989972887fd6d486460c9769378c74ba61cde
+      handedness: right
+      active_dof: 15
+      asset_role: variant
+  - rank: 18
+    topology: t4_i4_m4_r3
+    family_signature: index:allegro|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 9.73541914465479
+    left:
+      row: 302
+      asset_id: e2e9782c
+      geometry_identity: fa7860855d228342135989939687d74888568a7ad20997aca3d730359f1cbd79
+      handedness: left
+      active_dof: 15
+      asset_role: variant
+    right:
+      row: 310
+      asset_id: 57d32e72
+      geometry_identity: f714acb885017ea3d97a3b504ad93f8f98bfb0fdf0cc8f6a6e1d552d8f8f0a26
+      handedness: right
+      active_dof: 15
+      asset_role: variant
+  - rank: 19
+    topology: t4_i4_m4_r4
+    family_signature: index:leap|middle:leap|ring:leap|thumb:leap
+    reflection_distance: 6.700696679199057
+    left:
+      row: 836
+      asset_id: 152ec049
+      geometry_identity: 2dbeb425704db7941e662714f10112a8fc1da2577dc22fdecf010f1349e1dbb7
+      handedness: left
+      active_dof: 16
+      asset_role: variant
+    right:
+      row: 859
+      asset_id: 951d5fa1
+      geometry_identity: a8d346c3bd946a33b4b201b84fbedf97c7bc69d2885c3d71ec1df651f2b741dd
+      handedness: right
+      active_dof: 16
+      asset_role: variant
+  - rank: 20
+    topology: t4_i4_m3_r3
+    family_signature: index:allegro|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 5.681766485081031
+    left:
+      row: 234
+      asset_id: 940d7dab
+      geometry_identity: 7f95b4f656809f5244a9d35575fea84d894f1712b7361dec9a80dcd7ac067d81
+      handedness: left
+      active_dof: 14
+      asset_role: variant
+    right:
+      row: 248
+      asset_id: 47326f33
+      geometry_identity: 8b59684ec7b48b36146434c220673b22b41d429d87feda8f22b5bb911cea9f75
+      handedness: right
+      active_dof: 14
+      asset_role: variant
+  - rank: 21
+    topology: allegro_t4_i3_leap_m4_allegro_r2
+    family_signature: index:allegro|middle:leap|ring:allegro|thumb:allegro
+    reflection_distance: 5.4516171779479174
+    left:
+      row: 1033
+      asset_id: b1500fd3
+      geometry_identity: b15d8b45a6514e9851c857848f3f7c9624ae498c72022ffd909a928e6ca3117b
+      handedness: left
+      active_dof: 13
+      asset_role: variant
+    right:
+      row: 1041
+      asset_id: 07535cc6
+      geometry_identity: fe490e4de3ba532bb71d51e0033c4f0facb67e1a63b629f6606190174f2d4c68
+      handedness: right
+      active_dof: 13
+      asset_role: variant
+  - rank: 22
+    topology: allegro_t4_leap_i4_allegro_m4_leap_r4
+    family_signature: index:leap|middle:allegro|ring:leap|thumb:allegro
+    reflection_distance: 6.925008418170652
+    left:
+      row: 1254
+      asset_id: 5eda3ec0
+      geometry_identity: 40425fe2323a33e0dbe0cf05424243cd923982db3e5d1ab502e0ac2a82f381c3
+      handedness: left
+      active_dof: 16
+      asset_role: variant
+    right:
+      row: 1275
+      asset_id: e3d467f3
+      geometry_identity: 7a3a0ae2ba08af7beee2aee56c5e8cab767f89f9b467161fc1d2f8b1beb13668
+      handedness: right
+      active_dof: 16
+      asset_role: variant
+  - rank: 23
+    topology: allegro_t4_leap_i4_allegro_m2_r2
+    family_signature: index:leap|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 8.355228003198638
+    left:
+      row: 1326
+      asset_id: f5881236
+      geometry_identity: efde5911dbb27aea6cd2368a7cfe01edd4bb9b65d4477667ea24dffd51a46f8b
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1342
+      asset_id: cd4dcb62
+      geometry_identity: 0b31466f3a5cd26cbbe62159df1bfaf74606e426d2ec96d68bded2d6ffbe17b3
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 24
+    topology: allegro_t4_leap_i1_allegro_m2_r3
+    family_signature: index:leap|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 6.851298609768913
+    left:
+      row: 1294
+      asset_id: dd258ebf
+      geometry_identity: 2672dbbdc62f31f6f28448d341b256819071ff5a7028b1cbeadb4a05810f49e5
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1297
+      asset_id: 0711c7f3
+      geometry_identity: d2ae51da75acaeeef7fcffc40cfa190b504113db69feed52bda071d467f42b66
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 25
+    topology: t4_i2_m2_r4
+    family_signature: index:allegro|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 6.1656712727858825
+    left:
+      row: 137
+      asset_id: d6ab646c
+      geometry_identity: 5ae3c7309301c7dfbc6436534a490628a894911b3fd9bceb5efbc8b851f0d19c
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 154
+      asset_id: abbdf82e
+      geometry_identity: 73ede1d6f6026e4527428c35dce397add1beaddbb28a6d4df5206b8db40003eb
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 26
+    topology: allegro_t4_i3_leap_m3_r2
+    family_signature: index:allegro|middle:leap|ring:leap|thumb:allegro
+    reflection_distance: 9.86671571861941
+    left:
+      row: 1135
+      asset_id: ff1e123f
+      geometry_identity: 4920087a5e011058f0053b664793d011cb052b14987eae667ee66e1d7801cd74
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 1139
+      asset_id: 4b2b310c
+      geometry_identity: 4854bf3a87355ae6a4cd95e03e09304c3ee5abed31c65f7e66e0954e47546960
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 27
+    topology: allegro_t4_leap_i4_allegro_m4_leap_r4
+    family_signature: index:leap|middle:allegro|ring:leap|thumb:allegro
+    reflection_distance: 8.034319661853678
+    left:
+      row: 1260
+      asset_id: 907ae0d6
+      geometry_identity: 1c93dccd40f552813f695d9995f7c543212d703f9663eb496607c4ef81aba399
+      handedness: left
+      active_dof: 16
+      asset_role: variant
+    right:
+      row: 1271
+      asset_id: 92ea5b57
+      geometry_identity: bc88ab455fd9fd543567ee776179c34dd7a42fdf05616df46ffafe9ee4574640
+      handedness: right
+      active_dof: 16
+      asset_role: variant
+  - rank: 28
+    topology: t4_i2_m4_r2
+    family_signature: index:allegro|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 4.350678828310054
+    left:
+      row: 110
+      asset_id: f52a5128
+      geometry_identity: 5403fd1880d503dfe75463f718de024c1d0bb47abca8585791f71cd5eccef48d
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 115
+      asset_id: 32d45b2d
+      geometry_identity: aaa6571273779b640e60beda283b87dd1e5c1f8051c5a5822faff63fdee2bacb
+      handedness: right
+      active_dof: 12
+      asset_role: variant
+  - rank: 29
+    topology: allegro_t4_leap_i1_allegro_m2_r3
+    family_signature: index:leap|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 3.888851732584107
+    left:
+      row: 1284
+      asset_id: 4a7e788d
+      geometry_identity: 2b73c490f5c4a3308a8e2cea1491d51fd2972553d11e63822412f945139736de
+      handedness: left
+      active_dof: 10
+      asset_role: variant
+    right:
+      row: 1310
+      asset_id: ea5aa306
+      geometry_identity: 2c31a6967ba8ec522829b03889964646fc6e34fa6b671aaf1f54ac308a337170
+      handedness: right
+      active_dof: 10
+      asset_role: variant
+  - rank: 30
+    topology: allegro_t4_i3_leap_m4_allegro_r2
+    family_signature: index:allegro|middle:leap|ring:allegro|thumb:allegro
+    reflection_distance: 5.624050751515172
+    left:
+      row: 1032
+      asset_id: aebccefb
+      geometry_identity: b36556b8d4db38ee567aa726f5365aabbffe8df32f8018294b19c222212d7535
+      handedness: left
+      active_dof: 13
+      asset_role: variant
+    right:
+      row: 1050
+      asset_id: '75653691'
+      geometry_identity: b2295ede1e48c195548b097c50353e0e6b462fb9eb8b8a44bdafb9d86f607372
+      handedness: right
+      active_dof: 13
+      asset_role: variant
+  - rank: 31
+    topology: t4_i2_m2_r4
+    family_signature: index:allegro|middle:allegro|ring:allegro|thumb:allegro
+    reflection_distance: 9.171140242575627
+    left:
+      row: 143
+      asset_id: fd38c989
+      geometry_identity: 41f6d95567ca3b472015dee7d52036c07e2e9afecf72cdc39ea0db6fe2194131
+      handedness: left
+      active_dof: 12
+      asset_role: variant
+    right:
+      row: 148
+      asset_id: 398e36e5
+      geometry_identity: b03d25fbf7cede0b4402c1a46c3474255af7700d2eabc0e61bfc19c7958116e1
+      handedness: right
+      active_dof: 12
+      asset_role: variant

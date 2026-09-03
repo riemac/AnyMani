@@ -83,8 +83,18 @@ class GeneratedHeterogeneousSceneCfg(InteractiveSceneCfg):
     )
     light = AssetBaseCfg(
         prim_path="/World/skyLight",
-        spawn=sim_utils.DomeLightCfg(intensity=750.0),
-    )
+        spawn=(
+            sim_utils.DomeLightCfg(
+                intensity=750.0,
+                texture_file=(
+                    f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/"
+                    "kloofendal_43d_clear_puresky_4k.hdr"
+                ),
+            )
+            if os.environ.get("ANYMANI_HETERO_N000_VISUAL_STYLE", "0") == "1"
+            else sim_utils.DomeLightCfg(intensity=750.0)
+        ),
+    )  # HDRI和URDF palette只服务viewer；headless training默认不加载纹理或author materials
 
     def __post_init__(self) -> None:
         r"""安装与formal task完全相同的object-filtered sensor集合。"""

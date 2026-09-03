@@ -2,6 +2,7 @@ r"""Shared contact pair-max、EMA、owner reduction与partial-reset合同。"""
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -9,7 +10,7 @@ import torch
 
 import anymani.tasks.hetero.mdp.contact_state as contact_module
 from anymani.tasks.hetero.contact_layout import build_canonical_contact_layout
-from anymani.tasks.hetero.contact_sensors import sensor_contact_magnitude
+from anymani.tasks.hetero.contact_sensors import make_contact_sensor_cfg, sensor_contact_magnitude
 from anymani.tasks.hetero.mdp.contact_state import HeterogeneousContactState
 
 
@@ -18,6 +19,14 @@ def _joint_mask(batch_size: int = 2) -> tuple[tuple[bool, ...], ...]:
 
     row = (True, True, True, True, True, True, True, True, True, False, False, True, False, False, False, False)
     return (row,) * batch_size
+
+
+def test_contact_sensor_keeps_n000_pair_capacity_without_physics_history() -> None:
+    r"""All-owner force reduction保留64 pairs/prim；History30只由20 Hz task state维护。"""
+
+    source = inspect.getsource(make_contact_sensor_cfg)
+    assert "max_contact_data_count_per_prim=64" in source
+    assert "history_length=0" in source and "track_air_time=False" in source
 
 
 def test_sensor_contact_magnitude_uses_pair_max_not_vector_sum() -> None:

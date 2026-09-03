@@ -491,11 +491,17 @@ class HandSpawnAdapter:
             raise NotImplementedError(f"HandSpawnAdapter spawn_backend={self.cfg.spawn_backend!r} is not implemented")
 
         assets = self.selection.assets  # resolved post-mutate hand variants；同一个 spawner 内应为 same-schema
-        visual_material_plan = (
-            _build_visual_material_restore_plan(assets[0].urdf_path)
+        # Heterogeneous GUI从visual覆盖最完整的资产提取canonical palette；3指或短链首项不能让后续visual保持灰色。
+        visual_reference = (
+            max(assets, key=lambda asset: len(asset.visual_rgba_by_name))
             if (self.cfg.restore_visual_materials and len(assets) > 0)
             else None
-        )  # 同拓扑颜色/visual-link contract 只从 reference URDF 解析一次
+        )
+        visual_material_plan = (
+            _build_visual_material_restore_plan(visual_reference.urdf_path)
+            if visual_reference is not None
+            else None
+        )  # 只解析一次最大coverage reference；颜色方案不进入collision/physics identity
         assets_cfg = [
             _build_hand_urdf_file_cfg(container, self.cfg, visual_material_plan=visual_material_plan)
             for container in assets

@@ -5,6 +5,14 @@ from __future__ import annotations
 import pytest
 import torch
 
+from anymani.pregrasp import (
+    GoodPregraspCandidate,
+    GoodPregraspEntry,
+    GoodPregraspKey,
+    GoodPregraspMember,
+    GoodPregraspMetrics,
+)
+
 from anymani.tasks.hetero.mdp.runtime_state import (
     HeterogeneousPregraspState,
     ResolvedPregraspBatch,
@@ -75,6 +83,60 @@ def test_batch_rejects_nonzero_ghost_and_non_unit_object_quaternion() -> None:
             record_digests=valid.record_digests,
             lookup_digests=valid.lookup_digests,
         )
+
+
+def test_good_pregrasp_entry_rank_builds_equal_state_target_batch() -> None:
+    r"""Schema-3 Top-8的指定rank必须保留$q_0=u_0$与upright object pose。"""
+
+    active = (True, *([False] * 15))
+    key = GoodPregraspKey(
+        asset_id="asset-a",
+        source_content_hash="1" * 64,
+        physical_geometry_hash="2" * 64,
+        canonical_schema_digest="3" * 64,
+        routing_digest="4" * 64,
+        object_asset_id="DexCube",
+        object_asset_sha256="5" * 64,
+        object_scale=1.1,
+        physics_identity_digest="6" * 64,
+        generation_identity_digest="7" * 64,
+    )
+    metrics = GoodPregraspMetrics(
+        joint_limit_margin_fraction=0.2,
+        envelope_fingers=("thumb", "index", "ring"),
+        envelope_sector_min_deg=45.0,
+        envelope_tip_center_distance_m=(0.08, 0.09, 0.09),
+        penetration_depth_max_m=0.0,
+        object_displacement_max_m=0.001,
+        object_tilt_max_deg=1.0,
+        peak_linear_velocity_m_s=0.02,
+        peak_off_axis_angular_velocity_rad_s=0.1,
+        palm_contact_fraction=1.0,
+        owner_contact_fraction=(1.0, *([0.0] * 20)),
+    )
+    members = []
+    for rank in range(8):
+        q = (0.01 * rank, *([0.0] * 15))
+        members.append(
+            GoodPregraspMember(
+                rank=rank,
+                candidate=GoodPregraspCandidate(
+                    q_state_rad=q,
+                    q_target_rad=q,
+                    active_joint_mask=active,
+                    object_position_h_m=(0.0, 0.08 + rank * 1.0e-4, 0.054),
+                ),
+                metrics=metrics,
+                selection_score=(1.0, -float(rank)),
+            )
+        )
+    entry = GoodPregraspEntry(key=key, members=tuple(members))
+    batch = ResolvedPregraspBatch.from_good_entries((entry,), rank=3, device="cpu")
+    assert torch.equal(batch.q_state_rad, batch.q_target_rad)
+    assert batch.q_state_rad[0, 0].item() == pytest.approx(0.03)
+    assert torch.equal(batch.object_quat_h_wxyz, torch.tensor(((1.0, 0.0, 0.0, 0.0),)))
+    assert batch.record_digests == (entry.digest,)
+    assert batch.lookup_digests == (entry.key.digest,)
 
 
 def test_partial_reset_installs_preload_without_touching_other_rows() -> None:

@@ -1,3 +1,12 @@
+0.8.2 - 2026-09-03
+==================
+
+- 从2048项PPO父资产轴确定性构造pair-aware 80手MVP：4个handedness-neutral morphology cells各保留10组left/right pairs，strict pregrasp固定预算失败时整pair退出，最终manifest记录9组fallback及完整asset/geometry identity。
+- 新增schema-3 strict Top-8 good-pregrasp流程：每资产256个13维scrambled Sobol提案、真实FK三指包络、geometry Top-32、1秒cold-reset PhysX筛选，以及最多3轮×128个4D joint-PCA+3D object-position CEM候选；contact normal与落距只反馈下一轮proposal，不改变统一硬门。
+- 固定并实现joint margin、TIP距离、sector、penetration、位移、倾角、线速度、总角速度与PALM support九项门限；最终catalog含80个entries/640个全部通过成员，rank-0在正式task路径1秒zero-action保持80/80存活。
+- Good-pregrasp catalog增加多key单次index解析和runtime首次全轴strict预载，后续partial reset只做内存gather；active identity切换到v5，宽松v4 identity独立冻结供历史复现。
+- 新增五页时间全景、80张逐手近景及SHA证据清单，并以paper flavor整理`pregrasp/README.md`与人话版阶段报告。2048全库尚未生成pregrasp cache；asset sharding、断点恢复、active-set压缩和batch publication保留为下一规模化阶段。
+
 0.8.1 - 2026-08-30
 ==================
 

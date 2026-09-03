@@ -15,7 +15,17 @@ from typing import TYPE_CHECKING, cast
 import torch
 from isaaclab.assets import Articulation, RigidObject
 
-from anymani.pregrasp import FilePregraspProvider, PregraspLookupKey, PregraspQuery, PregraspRecord, PregraspTier
+from anymani.pregrasp import (
+    MVP80_STRICT_GOOD_PREGRASP_GATE,
+    FilePregraspProvider,
+    GoodPregraspCatalog,
+    GoodPregraspEntry,
+    GoodPregraspKey,
+    PregraspLookupKey,
+    PregraspQuery,
+    PregraspRecord,
+    PregraspTier,
+)
 from anymani.pregrasp.isaac_runtime import hand_semantic_pose_w, object_pose_w_from_hand
 
 from ..contact_layout import structural_collision_filter_pairs
@@ -235,6 +245,71 @@ class PregraspResetCfg:
         object.__setattr__(self, "minimum_tier", PregraspTier(self.minimum_tier))
 
 
+@dataclass(frozen=True)
+class GoodPregraspAssetBinding:
+    r"""一个runtime prototype对应的schema-3 exact key transport。"""
+
+    key_json: str  # configclass/deepcopy安全的canonical key JSON
+    runtime_identity: PregraspRuntimeIdentity  # scene独立交付的hand physical identity
+
+    def __post_init__(self) -> None:
+        r"""构造期立即恢复key并核对实际hand identity。"""
+
+        document = json.loads(self.key_json)
+        if not isinstance(document, dict):
+            raise ValueError("good-pregrasp key JSON must contain an object")
+        self.runtime_identity.validate_good_key(GoodPregraspKey.from_dict(document))
+
+    @classmethod
+    def from_key(
+        cls,
+        key: GoodPregraspKey,
+        *,
+        runtime_identity: PregraspRuntimeIdentity,
+    ) -> GoodPregraspAssetBinding:
+        r"""由validated key创建稳定JSON transport。"""
+
+        return cls(
+            key_json=json.dumps(key.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False),
+            runtime_identity=runtime_identity,
+        )
+
+    def resolve_key(self) -> GoodPregraspKey:
+        r"""在reset调用边界恢复exact key。"""
+
+        document = json.loads(self.key_json)
+        if not isinstance(document, dict):
+            raise ValueError("good-pregrasp key JSON must contain an object")
+        return GoodPregraspKey.from_dict(document)
+
+
+@dataclass(frozen=True)
+class GoodPregraspResetCfg:
+    r"""Top-8 good-pregrasp catalog的ManagerBased reset配置。"""
+
+    catalog_root: str  # schema-3 GoodPregraspCatalog根
+    bindings: tuple[GoodPregraspAssetBinding, ...]  # 每个scene prototype一个exact key
+    asset_index_by_env: tuple[int, ...]  # static env-to-prototype routing$[N]$
+    semantic_R_ha: tuple[float, ...]  # row-major$R_{ha}$
+    semantic_p_ha: tuple[float, float, float]  # $p_{ha}$，m
+    rank: int = 0  # MVP固定消费Top-1/rank-0
+    require_strict: bool = False  # strict v5逐项重放hard gate；v4历史catalog保持可读
+    robot_name: str = "robot"
+    object_name: str = "object"
+
+    def __post_init__(self) -> None:
+        r"""验证catalog、routing、frame与共同candidate rank。"""
+
+        if not self.catalog_root or not self.bindings or not self.asset_index_by_env:
+            raise ValueError("good-pregrasp reset requires catalog root, bindings and env routing")
+        if len(self.semantic_R_ha) != 9 or len(self.semantic_p_ha) != 3:
+            raise ValueError("good-pregrasp hand calibration must contain 9 rotation and 3 translation values")
+        if self.rank < 0:
+            raise ValueError("good-pregrasp reset rank must be non-negative")
+        if any(index < 0 or index >= len(self.bindings) for index in self.asset_index_by_env):
+            raise ValueError("good-pregrasp env routing references a missing prototype binding")
+
+
 def _resolve_records(
     *,
     config: PregraspResetCfg,
@@ -260,6 +335,100 @@ def _resolve_records(
         )
         resolved_by_asset[asset_index] = resolution.record
     return [resolved_by_asset[index] for index in selected_asset_indices]  # 与env_ids顺序严格一致
+
+
+def _resolve_good_entries(
+    *,
+    env: ManagerBasedEnv,
+    config: GoodPregraspResetCfg,
+    selected_asset_indices: Sequence[int],
+) -> list[GoodPregraspEntry]:
+    r"""首次reset预载并验证全asset轴，后续partial resets只做内存gather。"""
+
+    cache_attr = "_anymani_good_pregrasp_entry_cache"
+    cache_identity = (
+        config.catalog_root,
+        tuple(binding.key_json for binding in config.bindings),
+        bool(config.require_strict),
+    )
+    cache = getattr(env, cache_attr, None)
+    if not isinstance(cache, tuple) or len(cache) != 2 or cache[0] != cache_identity:
+        keys = tuple(binding.resolve_key() for binding in config.bindings)
+        for binding, key in zip(config.bindings, keys, strict=True):
+            binding.runtime_identity.validate_good_key(key)
+        entries = GoodPregraspCatalog(Path(config.catalog_root)).resolve_many(keys)
+        if config.require_strict:
+            for entry in entries:
+                MVP80_STRICT_GOOD_PREGRASP_GATE.validate_entry(entry)
+        cache = (cache_identity, entries)
+        setattr(env, cache_attr, cache)  # immutable catalog/preload cache，不随episode reset清除
+    entries = cast(tuple[GoodPregraspEntry, ...], cache[1])
+    return [entries[index] for index in selected_asset_indices]
+
+
+def _install_resolved_pregrasp_batch(
+    env: ManagerBasedEnv,
+    ids: torch.Tensor,
+    batch: ResolvedPregraspBatch,
+    *,
+    semantic_R_ha: Sequence[float],
+    semantic_p_ha: Sequence[float],
+    robot_name: str,
+    object_name: str,
+) -> None:
+    r"""完成joint-limit/frame/sidecar preflight后原子语义地写入一个reset batch。"""
+
+    robot = cast(Articulation, env.scene[robot_name])
+    object_asset = cast(RigidObject, env.scene[object_name])
+    if robot.num_joints != CANONICAL_JOINT_COUNT:
+        raise ValueError("heterogeneous pregrasp reset requires canonical 16-joint transport")
+
+    # $q_0/u_0$必须位于每个selected environment自己的soft limits；ghost已由batch合同证明为零。
+    limits = robot.data.soft_joint_pos_limits[ids]  # `[K,16,2]`，rad
+    lower, upper = limits[..., 0], limits[..., 1]
+    tolerance = 1.0e-6  # 只吸收FP32序列化边界
+    if bool(((batch.q_state_rad < lower - tolerance) | (batch.q_state_rad > upper + tolerance)).any().item()):
+        raise ValueError("pregrasp q_state lies outside runtime soft joint limits")
+    if bool(((batch.q_target_rad < lower - tolerance) | (batch.q_target_rad > upper + tolerance)).any().item()):
+        raise ValueError("pregrasp q_target lies outside runtime soft joint limits")
+
+    # Frame chain$T_{wo}=T_{wh}T_{ho}$把每资产hand-frame object pose写入共同world scene。
+    hand_pos_w, hand_quat_w = hand_semantic_pose_w(
+        robot.data.root_pos_w[ids],
+        robot.data.root_quat_w[ids],
+        semantic_R_ha,
+        semantic_p_ha,
+    )
+    object_pos_w, object_quat_w = object_pose_w_from_hand(
+        hand_pos_w,
+        hand_quat_w,
+        batch.object_position_h_m,
+        batch.object_quat_h_wxyz,
+    )
+    object_pose_w = torch.cat((object_pos_w, object_quat_w), dim=-1)  # `[K,7]`
+    zero_joint_velocity = torch.zeros_like(batch.q_state_rad)  # $\dot q_0=0$ rad/s
+    zero_object_velocity = torch.zeros(ids.numel(), 6, device=env.device)  # world twist$[K,6]=0$
+
+    # Sidecar同样先完成类型/shape preflight，避免任一异常留下半完成PhysX state。
+    existing_sidecar = getattr(env, HETERO_PREGRASP_STATE_ATTR, None)
+    if existing_sidecar is None:
+        sidecar = HeterogeneousPregraspState(num_envs=env.num_envs, device=env.device)
+    elif isinstance(existing_sidecar, HeterogeneousPregraspState):
+        sidecar = existing_sidecar
+    else:
+        raise RuntimeError("environment pregrasp sidecar attribute has incompatible type")
+    if sidecar.num_envs != env.num_envs or sidecar.device != torch.device(env.device):
+        raise RuntimeError("environment pregrasp sidecar disagrees with scene shape/device")
+
+    # 所有可失败检查完成后才连续写joint state/target与object pose/velocity。
+    robot.write_joint_state_to_sim(batch.q_state_rad, zero_joint_velocity, env_ids=ids)  # type: ignore[arg-type]
+    robot.set_joint_position_target(batch.q_target_rad, env_ids=ids)  # type: ignore[arg-type]
+    robot.set_joint_velocity_target(zero_joint_velocity, env_ids=ids)  # type: ignore[arg-type]
+    object_asset.write_root_pose_to_sim(object_pose_w, env_ids=ids)  # type: ignore[arg-type]
+    object_asset.write_root_velocity_to_sim(zero_object_velocity, env_ids=ids)  # type: ignore[arg-type]
+    sidecar.install(ids, batch)
+    if existing_sidecar is None:
+        setattr(env, HETERO_PREGRASP_STATE_ATTR, sidecar)
 
 
 def reset_from_pregrasp_cache(
@@ -288,67 +457,52 @@ def reset_from_pregrasp_cache(
     # Provider与schema验证先于asset访问/写入，cache miss保证零reset副作用。
     records = _resolve_records(config=config, selected_asset_indices=selected_asset_indices)
     batch = ResolvedPregraspBatch.from_records(records, device=env.device)  # $[K,16]$+hand-frame pose
-    robot = cast(Articulation, env.scene[config.robot_name])
-    object_asset = cast(RigidObject, env.scene[config.object_name])
-    if robot.num_joints != CANONICAL_JOINT_COUNT:
-        raise ValueError("heterogeneous pregrasp reset requires canonical 16-joint transport")
-
-    # Actual与target都必须处于selected env自己的soft limits；ghost已由batch合同验证为零。
-    limits = robot.data.soft_joint_pos_limits[ids]  # $[K,16,2]$，单位rad
-    lower, upper = limits[..., 0], limits[..., 1]
-    tolerance = 1.0e-6  # 仅容忍FP32序列化边界，不放宽物理joint limit
-    if bool(((batch.q_state_rad < lower - tolerance) | (batch.q_state_rad > upper + tolerance)).any().item()):
-        raise ValueError("pregrasp q_state lies outside runtime soft joint limits")
-    if bool(((batch.q_target_rad < lower - tolerance) | (batch.q_target_rad > upper + tolerance)).any().item()):
-        raise ValueError("pregrasp q_target lies outside runtime soft joint limits")
-
-    # Frame chain严格使用$T_{wh}=T_{wa}T_{ah}$和$T_{wo}=T_{wh}T_{ho}$。
-    hand_pos_w, hand_quat_w = hand_semantic_pose_w(
-        robot.data.root_pos_w[ids],
-        robot.data.root_quat_w[ids],
-        config.semantic_R_ha,
-        config.semantic_p_ha,
+    _install_resolved_pregrasp_batch(
+        env,
+        ids,
+        batch,
+        semantic_R_ha=config.semantic_R_ha,
+        semantic_p_ha=config.semantic_p_ha,
+        robot_name=config.robot_name,
+        object_name=config.object_name,
     )
-    object_pos_w, object_quat_w = object_pose_w_from_hand(
-        hand_pos_w,
-        hand_quat_w,
-        batch.object_position_h_m,
-        batch.object_quat_h_wxyz,
+
+
+def reset_from_good_pregrasp_catalog(
+    env: ManagerBasedEnv,
+    env_ids: Sequence[int] | torch.Tensor | None,
+    *,
+    config: GoodPregraspResetCfg,
+) -> None:
+    r"""按schema-3 exact Top-K entry执行partial good-pregrasp reset。"""
+
+    ids = normalize_env_ids(env_ids, num_envs=env.num_envs, device=env.device)
+    if len(config.asset_index_by_env) != env.num_envs:
+        raise ValueError("good-pregrasp env routing disagrees with ManagerBased scene")
+    selected_asset_indices = [config.asset_index_by_env[index] for index in ids.detach().cpu().tolist()]
+    entries = _resolve_good_entries(env=env, config=config, selected_asset_indices=selected_asset_indices)
+    batch = ResolvedPregraspBatch.from_good_entries(
+        entries,
+        rank=config.rank,
+        device=env.device,
     )
-    object_pose_w = torch.cat((object_pos_w, object_quat_w), dim=-1)  # $[K,7]$，world actor/root pose
-    zero_joint_velocity = torch.zeros_like(batch.q_state_rad)  # reset$\dot q_s=0$ rad/s
-    zero_object_velocity = torch.zeros(ids.numel(), 6, device=env.device)  # world CoM twist$[K,6]=0$
-
-    # Sidecar类型/shape同样在PhysX写入前验证；新对象暂不挂到env，避免preflight失败留下半状态。
-    existing_sidecar = getattr(env, HETERO_PREGRASP_STATE_ATTR, None)
-    if existing_sidecar is None:
-        sidecar = HeterogeneousPregraspState(num_envs=env.num_envs, device=env.device)
-    elif isinstance(existing_sidecar, HeterogeneousPregraspState):
-        sidecar = existing_sidecar
-    else:
-        raise RuntimeError("environment pregrasp sidecar attribute has incompatible type")
-    if sidecar.num_envs != env.num_envs or sidecar.device != torch.device(env.device):
-        raise RuntimeError("environment pregrasp sidecar disagrees with scene shape/device")
-
-    # 所有可能失败的identity/shape/frame preflight完成后，再执行四个selected-row simulator writes。
-    # IsaacLab注解写Sequence，但writer实现执行``env_ids[:,None]``；必须保留device Tensor实参。
-    robot.write_joint_state_to_sim(
-        batch.q_state_rad, zero_joint_velocity, env_ids=ids  # type: ignore[arg-type]
+    _install_resolved_pregrasp_batch(
+        env,
+        ids,
+        batch,
+        semantic_R_ha=config.semantic_R_ha,
+        semantic_p_ha=config.semantic_p_ha,
+        robot_name=config.robot_name,
+        object_name=config.object_name,
     )
-    robot.set_joint_position_target(batch.q_target_rad, env_ids=ids)  # type: ignore[arg-type]
-    robot.set_joint_velocity_target(zero_joint_velocity, env_ids=ids)  # type: ignore[arg-type]
-    object_asset.write_root_pose_to_sim(object_pose_w, env_ids=ids)  # type: ignore[arg-type]
-    object_asset.write_root_velocity_to_sim(zero_object_velocity, env_ids=ids)  # type: ignore[arg-type]
-
-    # Sidecar是event与后续ActionManager.reset之间的commit marker；partial rows以外保持不变。
-    sidecar.install(ids, batch)
-    if existing_sidecar is None:
-        setattr(env, HETERO_PREGRASP_STATE_ATTR, sidecar)  # tensor install完成后才发布新sidecar
 
 
 __all__ = [
+    "GoodPregraspAssetBinding",
+    "GoodPregraspResetCfg",
     "PregraspAssetBinding",
     "PregraspResetCfg",
     "reset_from_pregrasp_cache",
+    "reset_from_good_pregrasp_catalog",
     "validate_formal_object_physics",
 ]

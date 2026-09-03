@@ -21,6 +21,8 @@ from typing import Any
 import isaaclab.utils.math as math_utils
 import torch
 
+from .mvp80_strict_search import deepest_contact_normal_from_buffers
+
 
 def file_sha256(path: Path | str) -> str:
     r"""流式计算已解析本地object bytes的SHA-256。"""
@@ -158,9 +160,32 @@ def contact_penetration_depth_per_env(sensor: Any, physics_dt: float) -> torch.T
     return torch.where(torch.isfinite(pair_minimum), torch.clamp(-pair_minimum, min=0.0), 0.0)
 
 
+def deepest_contact_normal_per_env(sensor: Any, physics_dt: float) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""返回每个environment最深contact的penetration与PhysX world normal。
+
+    Normal方向保持PhysX原定义，不在通用helper中假设应移动sensor还是filter object。Pregrasp搜索中sensor是
+    robot link、filter是object；若要给object做depenetration proposal，应由调用方显式验证并选择normal符号。
+
+    Returns:
+        tuple: penetration depth `[B]`，m；对应world normal `[B,3]`。无penetration rows返回全零。
+    """
+
+    _, _, normals, separations, counts, starts = sensor.contact_physx_view.get_contact_data(dt=float(physics_dt))
+    environment_count = sensor.body_physx_view.count // sensor.num_bodies
+    return deepest_contact_normal_from_buffers(
+        normals,
+        separations,
+        counts,
+        starts,
+        environment_count=environment_count,
+        body_count=sensor.num_bodies,
+    )
+
+
 __all__ = [
     "contact_separation_summary",
     "contact_penetration_depth_per_env",
+    "deepest_contact_normal_per_env",
     "file_sha256",
     "hand_semantic_pose_w",
     "object_pose_h_from_world",

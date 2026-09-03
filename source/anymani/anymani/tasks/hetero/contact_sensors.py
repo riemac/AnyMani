@@ -18,7 +18,7 @@ def make_contact_sensor_cfg(
     r"""构造一个robot link对DexCube的一对多filtered contact sensor。
 
     Physics-rate history与air-time关闭；任务只维护20 Hz共享EMA。Friction开启，使force magnitude包含normal与
-    tangential分量；每prim最多16条contact records。
+    tangential分量；每prim保留最多64条contact records，与N000容量一致，避免复杂掌托接触截断pair reduction。
     """
 
     from isaaclab.sensors import ContactSensorCfg
@@ -30,7 +30,7 @@ def make_contact_sensor_cfg(
         history_length=0,
         track_air_time=False,
         track_friction_forces=True,
-        max_contact_data_count_per_prim=16,
+        max_contact_data_count_per_prim=64,
         force_threshold=0.125,
         debug_vis=False,
     )
