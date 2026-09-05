@@ -7,7 +7,11 @@ from pathlib import Path
 
 import yaml
 from anymani.distill.diagnostics.analysis.rl import summarize_rl_runtime_artifacts
-from anymani.distill.diagnostics.recording.rl import RlRunRecorder, read_linux_process_resources
+from anymani.distill.diagnostics.recording.rl import (
+    RlRunRecorder,
+    read_linux_process_resources,
+    scan_appended_fatal_log,
+)
 
 
 def test_recorder_writes_identity_events_resources_and_atomic_summary(tmp_path: Path) -> None:
@@ -143,3 +147,18 @@ def test_linux_resource_reader_rejects_invalid_pid_and_reads_current_process() -
     assert snapshot["process_alive"] is True
     assert isinstance(snapshot["process_rss_bytes"], int)
     assert isinstance(snapshot["system_available_ram_bytes"], int)
+
+
+def test_runtime_watchdog_detects_fatal_line_across_incremental_log_boundary(tmp_path: Path) -> None:
+    r"""父进程应在append后识别PhysX scene corruption，且无故障前保持静默。"""
+
+    log_path = tmp_path / "stdout.log"
+    log_path.write_text("normal startup\n", encoding="utf-8")
+    size, fatal = scan_appended_fatal_log(log_path, 0)
+    assert fatal is None and size == log_path.stat().st_size
+
+    with log_path.open("a", encoding="utf-8") as stream:
+        stream.write("PhysX error: Scene state is corrupted. Simulation cannot continue!\n")
+    new_size, fatal = scan_appended_fatal_log(log_path, size)
+    assert new_size > size
+    assert fatal == "PhysX error: Scene state is corrupted. Simulation cannot continue!"

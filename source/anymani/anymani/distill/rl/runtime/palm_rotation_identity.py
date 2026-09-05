@@ -28,6 +28,7 @@ TASK_ID = "AnyMani-Hetero-Generated-PalmRotation-MVP-RLGames-v0"
 _IMPLEMENTATION_PATHS = (
     "source/anymani/anymani/distill/models/palm_rotation_policy.py",
     "source/anymani/anymani/distill/rl/palm_rotation_ppo.py",
+    "source/anymani/anymani/distill/rl/algorithms/gradient_audit.py",
     "source/anymani/anymani/distill/rl/train_palm_rotation_mvp.py",
     "source/anymani/anymani/distill/rl/masked_ppo.py",
     "source/anymani/anymani/distill/rl/runtime/palm_rotation_geometry.py",
@@ -131,14 +132,14 @@ def build_palm_rotation_method_identity(
 ) -> dict[str, Any]:
     r"""构造训练resume与独立evaluation共同使用的exact method identity。"""
 
-    if arm not in {"base", "residual"}:
-        raise ValueError("palm-rotation arm must be base or residual")
-    if len(selected_rows) != 80 or len(set(selected_rows)) != 80:
-        raise ValueError("palm-rotation identity requires exactly 80 unique selected rows")
+    if arm not in {"base", "residual", "direct", "direct_token"}:
+        raise ValueError("palm-rotation arm must be base, residual, direct or direct_token")
+    if not selected_rows or len(set(selected_rows)) != len(selected_rows):
+        raise ValueError("palm-rotation identity requires non-empty unique selected rows")
     if not run_contract:
         raise ValueError("palm-rotation identity requires a non-empty PPO run contract")
-    if not pregrasp.require_strict or int(pregrasp.rank) != 0 or len(pregrasp.bindings) != 80:
-        raise ValueError("palm-rotation method requires strict rank-0 bindings for all 80 assets")
+    if not pregrasp.require_strict or int(pregrasp.rank) != 0 or len(pregrasp.bindings) != len(selected_rows):
+        raise ValueError("palm-rotation method requires one strict rank-0 binding per selected asset")
     root = resolve_anymani_root()
     resolved_manifest = manifest_path if manifest_path.is_absolute() else root / manifest_path
     catalog_root = Path(pregrasp.catalog_root)
@@ -156,24 +157,45 @@ def build_palm_rotation_method_identity(
             "object_scale": 1.1,
             "rotation_axis_h": [0.0, 0.0, 1.0],
             "subgoal_degrees": 30.0,
+            "training_mdp_anchor": "N000-gm-tactile-rotation-v0.5.0",
+            "training_goal_bonus": "strict-full-pose-and-position-2p5cm",
+            "evaluation_primary": "physical-frontier-net-turns-directionality-and-survival",
+            "rotation_frontier_degrees": 30.0,
+            "rotation_frontier_reward_weight": 0.0,
+            "strict_tracking_reward_weight": 10.0,
+            "critic_task_state": "axis-goal-error-max-positive-net-and-current-net",
             "episode_seconds": 120.0,
             "adr_enabled": False,
             "pregrasp_rank": 0,
             "pregrasp_strict": True,
             "stable_joint_reduction": "reference-dof-16",
             "linear_velocity_penalty": "world-l2-squared",
-            "reward_release": "per-asset-ema-to-handedness-inclusive-cell-median",
+            "reward_release": {
+                "aggregation": "per-asset-ema-to-handedness-inclusive-cell-median",
+                "start_turns": float(run_contract.get("reward_release_start_turns", 1.0)),
+                "end_turns": float(run_contract.get("reward_release_end_turns", 2.0)),
+                "ema_alpha": float(run_contract.get("reward_release_ema_alpha", 0.05)),
+            },
         },
         "policy": {
             "arm": arm,
             "actor_contact": "all-owner-binary-no-force",
             "distribution": "mean-preserving-tanh-squashed-active-joint-diagonal-normal",
             "action_authority_rad_per_policy_step": 1.0 / 24.0,
-            "residual_decomposition": "bounded-0p8-dynamic-film-base-plus-bounded-0p2-global-action-residual",
+            "residual_decomposition": (
+                "bounded-0p8-dynamic-film-base-plus-bounded-0p2-global-action-residual"
+                if arm in {"base", "residual"}
+                else None
+            ),
+            "direct_decomposition": {
+                "direct": "full-authority-contextual-plus-local-skip",
+                "direct_token": "full-authority-contextual-token-only",
+            }.get(arm),
         },
         "manifest": {
             "path": _relative_or_absolute(resolved_manifest, root),
             "sha256": _sha256(resolved_manifest),
+            "support_asset_count": len(selected_rows),
             "selected_rows": list(selected_rows),
         },
         "pregrasp": {

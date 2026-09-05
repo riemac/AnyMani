@@ -27,6 +27,7 @@ from .task_math import (
     quaternion_inverse_wxyz,
     quaternion_multiply_wxyz,
     quaternion_to_matrix_wxyz,
+    rotation_frontier_update,
 )
 
 if TYPE_CHECKING:
@@ -81,6 +82,14 @@ class HeterogeneousRotationCommand(CommandTerm):
         self.delta_psi = torch.zeros(self.num_envs, device=self.device)  # signed rad/policy step
         self.net_rotation_rad = torch.zeros(self.num_envs, device=self.device)  # signed$\Psi$
         self.absolute_path_rotation_rad = torch.zeros(self.num_envs, device=self.device)  # $\sum_t|\Delta\psi_t|$
+        self.max_positive_net_rotation_rad = torch.zeros(self.num_envs, device=self.device)  # $M_t$，rad
+        self._rotation_frontier_count_int = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )  # 精确整数$K_t=\lfloor M_t/(\pi/6)\rfloor$
+        self.rotation_frontier_count = torch.zeros(self.num_envs, device=self.device)  # float镜像供metric/reward
+        self.rotation_frontier_delta = torch.zeros(self.num_envs, device=self.device)  # $\Delta K_t$，可大于1
+        self.rotation_frontier_pulse = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.rotation_frontier_throughput_per_horizon_s = torch.zeros(self.num_envs, device=self.device)
         self.net_rotation_turns = torch.zeros(self.num_envs, device=self.device)  # signed$\Psi/(2\pi)$
         self.positive_net_rotation_turns = torch.zeros(self.num_envs, device=self.device)
         self.reached_positive_full_turn = torch.zeros(self.num_envs, device=self.device)
@@ -107,6 +116,10 @@ class HeterogeneousRotationCommand(CommandTerm):
             "axis_speed_rad_s": torch.zeros(self.num_envs, device=self.device),
             "net_rotation_rad": torch.zeros(self.num_envs, device=self.device),
             "absolute_path_rotation_rad": torch.zeros(self.num_envs, device=self.device),
+            "max_positive_net_rotation_rad": torch.zeros(self.num_envs, device=self.device),
+            "rotation_frontier_count": torch.zeros(self.num_envs, device=self.device),
+            "rotation_frontier_delta": torch.zeros(self.num_envs, device=self.device),
+            "rotation_frontier_pulse": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
             "completed_subgoals": torch.zeros(self.num_envs, device=self.device),
             "goal_success_pulse": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
             "episode_duration_s": torch.zeros(self.num_envs, device=self.device),
@@ -129,6 +142,10 @@ class HeterogeneousRotationCommand(CommandTerm):
                 "rotation/delta_psi_rad": self.delta_psi,
                 "rotation/net_rotation_rad": self.net_rotation_rad,
                 "rotation/absolute_path_rotation_rad": self.absolute_path_rotation_rad,
+                "rotation/max_positive_net_rotation_rad": self.max_positive_net_rotation_rad,
+                "rotation/frontier_count": self.rotation_frontier_count,
+                "rotation/frontier_delta": self.rotation_frontier_delta,
+                "rotation/frontier_throughput_per_horizon_s": self.rotation_frontier_throughput_per_horizon_s,
                 "rotation/net_rotation_turns_signed": self.net_rotation_turns,
                 "rotation/positive_net_rotation_turns": self.positive_net_rotation_turns,
                 "rotation/reached_positive_full_turn": self.reached_positive_full_turn,
@@ -193,6 +210,8 @@ class HeterogeneousRotationCommand(CommandTerm):
             goal_success_pulse=torch.zeros_like(self.goal_success_pulse),
             net_rotation_rad=self.net_rotation_rad,
             positive_net_rotation_turns=self.positive_net_rotation_turns,
+            max_positive_net_rotation_rad=self.max_positive_net_rotation_rad,
+            rotation_frontier_count=self.rotation_frontier_count,
             episode_duration_s=duration_s,
             termination_bits=termination,
             horizon_s=float(self.cfg.horizon_s),
@@ -223,6 +242,10 @@ class HeterogeneousRotationCommand(CommandTerm):
         snapshot["axis_speed_rad_s"].copy_(self.axis_speed_rad_s)
         snapshot["net_rotation_rad"].copy_(self.net_rotation_rad)
         snapshot["absolute_path_rotation_rad"].copy_(self.absolute_path_rotation_rad)
+        snapshot["max_positive_net_rotation_rad"].copy_(self.max_positive_net_rotation_rad)
+        snapshot["rotation_frontier_count"].copy_(self.rotation_frontier_count)
+        snapshot["rotation_frontier_delta"].copy_(self.rotation_frontier_delta)
+        snapshot["rotation_frontier_pulse"].copy_(self.rotation_frontier_pulse)
         snapshot["completed_subgoals"].copy_(
             self.goal_success_count + self.goal_success_pulse.to(dtype=self.goal_success_count.dtype)
         )
@@ -260,6 +283,20 @@ class HeterogeneousRotationCommand(CommandTerm):
             )
         self.net_rotation_rad[ids] += self.delta_psi[ids]
         self.absolute_path_rotation_rad[ids] += self.delta_psi[ids].abs()
+        maximum, count, delta, pulse = rotation_frontier_update(
+            self.net_rotation_rad[ids],
+            self.max_positive_net_rotation_rad[ids],
+            self._rotation_frontier_count_int[ids],
+            frontier_interval_rad=float(self.cfg.rotation_frontier_interval_rad),
+        )
+        self.max_positive_net_rotation_rad[ids] = maximum  # $M_t$，只增不减的正向净转角包络
+        self._rotation_frontier_count_int[ids] = count  # 整数真源避免float反复floor/round-trip
+        self.rotation_frontier_count[ids] = count.to(dtype=torch.float32)  # CommandManager metric可求均值
+        self.rotation_frontier_delta[ids] = delta.to(dtype=torch.float32)  # reward保留单步跨多档幅度
+        self.rotation_frontier_pulse[ids] = pulse
+        self.rotation_frontier_throughput_per_horizon_s[ids] = self.rotation_frontier_count[ids] / float(
+            self.cfg.horizon_s
+        )
         self.net_rotation_turns[ids] = self.net_rotation_rad[ids] / (2.0 * math.pi)
         self.positive_net_rotation_turns[ids] = torch.clamp(self.net_rotation_rad[ids], min=0.0) / (2.0 * math.pi)
         self.reached_positive_full_turn[ids] = (self.net_rotation_rad[ids] >= 2.0 * math.pi).to(torch.float32)
@@ -316,6 +353,12 @@ class HeterogeneousRotationCommand(CommandTerm):
         self.delta_psi[ids] = 0.0
         self.net_rotation_rad[ids] = 0.0
         self.absolute_path_rotation_rad[ids] = 0.0
+        self.max_positive_net_rotation_rad[ids] = 0.0
+        self._rotation_frontier_count_int[ids] = 0
+        self.rotation_frontier_count[ids] = 0.0
+        self.rotation_frontier_delta[ids] = 0.0
+        self.rotation_frontier_pulse[ids] = False
+        self.rotation_frontier_throughput_per_horizon_s[ids] = 0.0
         self.net_rotation_turns[ids] = 0.0
         self.positive_net_rotation_turns[ids] = 0.0
         self.reached_positive_full_turn[ids] = 0.0
@@ -380,6 +423,7 @@ class HeterogeneousRotationCommandCfg(CommandTermCfg):
     fixed_axis_h: tuple[float, float, float] = (0.0, 0.0, 1.0)
     semantic_R_ha: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     subgoal_angle_rad: float = math.pi / 6.0
+    rotation_frontier_interval_rad: float = math.pi / 6.0  # 核心物理success区间$\delta=30^\circ$
     keypoint_radius_m: float = 0.05
     orientation_success_threshold_m: float = 0.005
     position_success_threshold_m: float = 0.025
@@ -405,6 +449,7 @@ class HeterogeneousRotationCommandCfg(CommandTermCfg):
             self.position_success_threshold_m,
             self.speed_ema_time_constant_s,
             self.horizon_s,
+            self.rotation_frontier_interval_rad,
         )
         if any(not math.isfinite(value) or value <= 0.0 for value in positive):
             raise ValueError("command distance/time parameters must be finite and positive")

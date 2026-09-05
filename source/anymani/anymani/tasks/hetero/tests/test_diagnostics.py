@@ -22,6 +22,8 @@ def test_terminal_statistics_include_success_pulse_and_ignore_nonreset_stale_bit
         goal_success_pulse=torch.tensor((True, True, False, True)),
         net_rotation_rad=torch.tensor((math.pi, 99.0, -math.pi, 99.0)),
         positive_net_rotation_turns=torch.tensor((0.5, 99.0, 0.0, 99.0)),
+        max_positive_net_rotation_rad=torch.tensor((math.pi, 99.0, math.pi / 6.0, 99.0)),
+        rotation_frontier_count=torch.tensor((6.0, 999.0, 1.0, 999.0)),
         episode_duration_s=torch.tensor((10.0, 99.0, 20.0, 99.0)),
         termination_bits={
             "object_out_of_anchor": torch.tensor((True, True, False, True)),
@@ -39,7 +41,10 @@ def test_terminal_statistics_include_success_pulse_and_ignore_nonreset_stale_bit
     assert abs(extras["asset/20/net_rotation_turns_signed_sum"] + 0.5) < 1.0e-7
     assert extras["asset/10/episode_any_success_pulse_sum"] == 1.0
     assert extras["asset/10/reached_positive_30deg_sum"] == 1.0
+    assert extras["asset/20/reached_positive_30deg_sum"] == 1.0  # terminal虽为负，历史frontier已到30°
     assert extras["asset/20/reached_negative_30deg_sum"] == 1.0
+    assert extras["asset/10/rotation_frontier_count_sum"] == 6.0
+    assert extras["asset/20/rotation_frontier_count_sum"] == 1.0
     assert extras["asset/10/reached_positive_full_turn_sum"] == 0.0
     assert extras["asset/20/reached_negative_full_turn_sum"] == 0.0
     assert math.isclose(

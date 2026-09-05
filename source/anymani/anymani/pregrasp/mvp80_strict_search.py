@@ -8,6 +8,7 @@ joint slots上独立拟合，而从已做物理筛选的elite joint states提取
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 import torch
@@ -39,6 +40,21 @@ N000_CANONICAL_Q = (
     0.44,
     1.63,
 )  # depth-major index/middle/ring/thumb，rad
+
+
+def stable_asset_stream_key(*identity_parts: str) -> int:
+    r"""把source/physical identity字符串映射为确定性的正整数随机流key。
+
+    Dataset row只是单个manifest内的坐标；同一资产可在``ppo.yaml``与``ssl.yaml``拥有不同row。Cohort搜索
+    因而从不可变content/physical identity导出proposal流。31-bit正整数使``seed + key*104729``保持在保守的
+    跨backend整数范围，同时保证cohort重排不改变同一资产的候选序列。
+    """
+
+    parts = tuple(str(part).strip() for part in identity_parts)  # 有序identity字段，顺序本身属于随机流协议
+    if not parts or any(not part for part in parts):
+        raise ValueError("asset stream key requires non-empty identity parts")
+    payload = b"\0".join(part.encode("utf-8") for part in parts)  # NUL不出现在SHA/ID中，可无歧义分隔字段
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big") % (2**31 - 1) + 1  # $[1,2^{31}-1]$
 
 
 @dataclass(frozen=True)
@@ -99,27 +115,27 @@ def deepest_contact_normal_from_buffers(
 
 
 def sobol_bank(
-    dataset_rows: tuple[int, ...],
+    asset_keys: tuple[int, ...],
     *,
     candidate_count: int,
     seed: int,
     device: torch.device | str,
 ) -> torch.Tensor:
-    r"""为每个formal row生成独立、cohort-order-invariant scrambled Sobol序列。
+    r"""为每个稳定asset key生成独立、cohort-order-invariant scrambled Sobol序列。
 
     Returns:
         torch.Tensor: `[A,C,13]`，每项位于开区间近似$[0,1]$。
     """
 
-    if candidate_count < 1 or not dataset_rows or len(set(dataset_rows)) != len(dataset_rows):
-        raise ValueError("Sobol bank requires positive candidates and unique dataset rows")
+    if candidate_count < 1 or not asset_keys or len(set(asset_keys)) != len(asset_keys):
+        raise ValueError("Sobol bank requires positive candidates and unique asset keys")
     rows = []
-    for dataset_row in dataset_rows:
+    for asset_key in asset_keys:
         engine = torch.quasirandom.SobolEngine(
             dimension=STRICT_SOBOL_DIMENSION,
             scramble=True,
-            seed=int(seed + dataset_row * 104729),
-        )  # row-local scramble使selection前缀或顺序不改变候选
+            seed=int(seed + asset_key * 104729),
+        )  # asset-local scramble使selection前缀或顺序不改变候选
         rows.append(engine.draw(candidate_count, dtype=torch.float32))
     return torch.stack(rows, dim=0).to(device)  # `[A,C,13]`
 
@@ -417,7 +433,7 @@ def low_rank_cem_candidates(
         asset_key = asset_index if asset_keys is None else int(asset_keys[asset_index])
         generator = torch.Generator(device=elite_q.device).manual_seed(
             int(seed + round_index * 1_000_003 + asset_key * 104729)
-        )  # formal row而非selection-local index决定stream
+        )  # 调用方提供manifest row（legacy）或physical identity key（cohort）
         noise = torch.randn(candidate_count, rank + 3, generator=generator, device=elite_q.device)
         if elite_count == len(CEM_PROPOSAL_CENTER_COUNTS) and candidate_count == sum(CEM_PROPOSAL_CENTER_COUNTS):
             center_indices = torch.repeat_interleave(
@@ -454,5 +470,6 @@ __all__ = [
     "low_rank_cem_candidates",
     "normalized_gate_violation",
     "sobol_bank",
+    "stable_asset_stream_key",
     "strict_pass_mask",
 ]

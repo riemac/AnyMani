@@ -2,6 +2,7 @@ r"""MVP80 base-action、zero-init residual与independent critic纯Torch合同。
 
 from __future__ import annotations
 
+import pytest
 import torch
 from anymani.distill.models.palm_rotation_policy import (
     BASE_ACTION_LIMIT,
@@ -10,6 +11,7 @@ from anymani.distill.models.palm_rotation_policy import (
     PalmRotationActorObservation,
     PalmRotationCriticObservation,
     PalmRotationGeometry,
+    masked_max,
 )
 
 
@@ -64,8 +66,9 @@ def test_zero_initialized_action_residual_is_exact_base_policy() -> None:
     r"""初始化时global branch不得对任一active/ghost action产生数值影响。"""
 
     actor_observation, _, geometry = _fixture()
-    package = PalmRotationActorCritic(residual_enabled=True)
+    package = PalmRotationActorCritic(arm="residual")
     output = package.actor(actor_observation, geometry)
+    assert output.base_mean is not None and output.residual_mean is not None
     assert torch.equal(output.mean, output.base_mean)
     assert torch.equal(output.residual_mean, torch.zeros_like(output.residual_mean))
     assert torch.equal(output.mean[~actor_observation.jnt_valid], torch.zeros_like(output.mean[~actor_observation.jnt_valid]))
@@ -82,16 +85,47 @@ def test_global_exploration_projection_enforces_n000_early_budget_ceiling() -> N
     torch.testing.assert_close(package.actor.global_log_std, torch.tensor(-0.43))
 
 
+def test_raw_history_actor_reads_all_150_lagged_scalars_without_temporal_bottleneck() -> None:
+    r"""Raw-stack arm应直接扩大local MLP输入，同时保持动作mask、bound与完整backward。"""
+
+    actor_observation, _, geometry = _fixture()
+    package = PalmRotationActorCritic(arm="residual", history_encoder="raw_stack")
+    first_local_linear = package.actor.local_encoder[1]
+    assert isinstance(first_local_linear, torch.nn.Linear)
+    assert first_local_linear.in_features == 5 + 2 + 2 + 30 * 5  # current/limits/lag/q/raw History30
+    output = package.actor(actor_observation, geometry)
+    output.mean.square().mean().backward()
+
+    assert output.mean.shape == (3, 16)
+    assert torch.equal(output.mean[~actor_observation.jnt_valid], torch.zeros_like(output.mean[~actor_observation.jnt_valid]))
+    assert any(parameter.grad is not None for parameter in package.actor.local_encoder.parameters())
+
+
+def test_masked_max_empty_group_has_exact_zero_output_and_finite_zero_gradient() -> None:
+    r"""全padding finger不得让dtype-min哨兵进入compiled backward；值与梯度都应为0。"""
+
+    tokens = torch.randn(2, 4, 3, requires_grad=True)
+    mask = torch.tensor([[True, False, True, False], [False, False, False, False]])
+    output = masked_max(tokens, mask, dim=1)
+    output.square().sum().backward()
+
+    torch.testing.assert_close(output[1], torch.zeros(3), rtol=0.0, atol=0.0)
+    assert tokens.grad is not None
+    torch.testing.assert_close(tokens.grad[1], torch.zeros(4, 3), rtol=0.0, atol=0.0)
+    assert bool(torch.isfinite(tokens.grad).all())
+
+
 def test_residual_head_is_bounded_and_cannot_write_ghost_actions() -> None:
     r"""即使residual raw logit饱和，物理修正也严格位于$[-0.2,0.2]$。"""
 
     actor_observation, _, geometry = _fixture()
-    package = PalmRotationActorCritic(residual_enabled=True)
+    package = PalmRotationActorCritic(arm="residual")
     final = package.actor.residual_head[-1]
     assert isinstance(final, torch.nn.Linear)
     with torch.no_grad():
         final.bias.fill_(20.0)
     output = package.actor(actor_observation, geometry)
+    assert output.base_mean is not None and output.residual_mean is not None
     active = actor_observation.jnt_valid
     assert bool((output.residual_mean[active].abs() <= RESIDUAL_LIMIT).all())
     assert bool((output.residual_mean[active] > 0.19).all())
@@ -104,7 +138,7 @@ def test_actor_and_two_layer_critic_are_disjoint_and_backward_finite() -> None:
     r"""Actor/critic共享输入tensor但不共享可训练参数或optimizer梯度。"""
 
     actor_observation, critic_observation, geometry = _fixture()
-    package = PalmRotationActorCritic(residual_enabled=True)
+    package = PalmRotationActorCritic(arm="residual")
     actor_ids, critic_ids = package.trainable_parameter_sets()
     assert actor_ids.isdisjoint(critic_ids)
     actor_output = package.actor(actor_observation, geometry)
@@ -118,7 +152,35 @@ def test_actor_and_two_layer_critic_are_disjoint_and_backward_finite() -> None:
     assert residual_final.weight.grad is not None
 
 
-def test_consistent_finger_permutation_is_actor_equivariant_and_critic_invariant() -> None:
+def test_palm_rotation_graph_bias_uses_exact_indexed_embedding_semantics() -> None:
+    r"""PPO专用图偏置应等于三表直接查值，并向每个被访问关系桶传播梯度。"""
+
+    package = PalmRotationActorCritic(arm="residual")
+    backbone = package.actor.global_backbone  # PPO专用indexed lookup；参数namespace与共享backbone一致
+    shortest = torch.tensor([[[0, 1], [2, 3]], [[4, 5], [6, 7]]], dtype=torch.long)
+    parent = shortest.roll(1, dims=-1)
+    child = shortest.roll(1, dims=-2)
+    actual = backbone._graph_bias(shortest, parent, child)
+    expected = (
+        backbone.shortest_path_bias(shortest)
+        + backbone.parent_direction_bias(parent)
+        + backbone.child_direction_bias(child)
+    ).permute(0, 3, 1, 2)
+
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+    parameters = (
+        backbone.shortest_path_bias.weight,
+        backbone.parent_direction_bias.weight,
+        backbone.child_direction_bias.weight,
+    )
+    actual_gradients = torch.autograd.grad(actual.square().sum(), parameters, retain_graph=True)
+    expected_gradients = torch.autograd.grad(expected.square().sum(), parameters)
+    for actual_gradient, expected_gradient in zip(actual_gradients, expected_gradients, strict=True):
+        torch.testing.assert_close(actual_gradient, expected_gradient, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize("arm", ("residual", "direct", "direct_token"))
+def test_consistent_finger_permutation_is_actor_equivariant_and_critic_invariant(arm: str) -> None:
     r"""同步重排JOINT/TIP/owner/graph后，动作随关节变换而hand-level value不变。
 
     Canonical JOINT轴是depth-major，故finger permutation必须在每个depth block内同步作用；只重排连续
@@ -126,7 +188,7 @@ def test_consistent_finger_permutation_is_actor_equivariant_and_critic_invariant
     """
 
     actor_observation, critic_observation, geometry = _fixture(batch=1)
-    package = PalmRotationActorCritic(residual_enabled=True).eval()
+    package = PalmRotationActorCritic(arm=arm).eval()  # type: ignore[arg-type]
     original_action = package.actor(actor_observation, geometry).mean
     original_value = package.critic(critic_observation, geometry)
 
@@ -169,3 +231,48 @@ def test_consistent_finger_permutation_is_actor_equivariant_and_critic_invariant
     permuted_value = package.critic(permuted_critic, permuted_geometry)
     torch.testing.assert_close(permuted_action, original_action[:, joint_permutation], rtol=1.0e-5, atol=1.0e-6)
     torch.testing.assert_close(permuted_value, original_value, rtol=1.0e-5, atol=1.0e-6)
+
+
+def test_direct_actor_has_full_authority_null_residual_diagnostics_and_matched_capacity() -> None:
+    r"""Direct由contextual JOINT直接输出，ghost为0，且参数量与residual相差不超过5%。"""
+
+    actor_observation, _, geometry = _fixture()
+    residual = PalmRotationActorCritic(arm="residual")
+    direct = PalmRotationActorCritic(arm="direct")
+    output = direct.actor(actor_observation, geometry)
+
+    assert output.base_mean is None and output.residual_mean is None
+    assert output.direct_mean is not None and torch.equal(output.mean, output.direct_mean)
+    assert bool((output.mean[actor_observation.jnt_valid].abs() <= 1.0).all())
+    assert torch.equal(output.mean[~actor_observation.jnt_valid], torch.zeros_like(output.mean[~actor_observation.jnt_valid]))
+    assert not hasattr(direct.actor, "base_head") and not hasattr(direct.actor, "residual_head")
+    residual_parameters = sum(parameter.numel() for parameter in residual.actor.parameters())
+    direct_parameters = sum(parameter.numel() for parameter in direct.actor.parameters())
+    assert abs(direct_parameters / residual_parameters - 1.0) <= 0.05
+
+    output.mean.square().mean().backward()
+    assert any(parameter.grad is not None for parameter in direct.actor.direct_head.parameters())  # type: ignore[union-attr]
+
+
+def test_token_direct_head_reads_only_contextual_joint_token_at_matched_capacity() -> None:
+    r"""Canonical Direct必须由$H^a_{t,j}$单独读出动作，不得把局部latent再次旁路到policy head。"""
+
+    actor_observation, _, geometry = _fixture()
+    residual = PalmRotationActorCritic(arm="residual")
+    local_skip = PalmRotationActorCritic(arm="direct")
+    token_direct = PalmRotationActorCritic(arm="direct_token")
+    output = token_direct.actor(actor_observation, geometry)
+
+    token_norm = token_direct.actor.direct_head[0]  # type: ignore[union-attr]  # policy head的唯一输入边界
+    token_projection = token_direct.actor.direct_head[1]  # type: ignore[union-attr]
+    local_skip_projection = local_skip.actor.direct_head[1]  # type: ignore[union-attr]
+    assert isinstance(token_norm, torch.nn.LayerNorm) and token_norm.normalized_shape == (128,)
+    assert isinstance(token_projection, torch.nn.Linear) and token_projection.in_features == 128
+    assert token_projection.out_features == 96  # $128\times96=192\times64$，匹配两种Direct首层权重数
+    assert isinstance(local_skip_projection, torch.nn.Linear) and local_skip_projection.in_features == 192
+    assert output.direct_mean is not None and torch.equal(output.mean, output.direct_mean)
+    assert output.base_mean is None and output.residual_mean is None
+
+    residual_parameters = sum(parameter.numel() for parameter in residual.actor.parameters())
+    token_parameters = sum(parameter.numel() for parameter in token_direct.actor.parameters())
+    assert abs(token_parameters / residual_parameters - 1.0) <= 0.05

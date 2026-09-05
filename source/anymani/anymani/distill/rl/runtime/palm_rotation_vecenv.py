@@ -144,6 +144,9 @@ class PalmRotationRlGamesVecEnv(IVecEnv):
             for name in (
                 "reward_mean",
                 "goal_count_mean",
+                "frontier_count_mean",
+                "frontier_pulse_rate",
+                "max_positive_net_turns_mean",
                 "net_turns_mean",
                 "drop_rate",
                 "axis_failure_rate",
@@ -162,6 +165,8 @@ class PalmRotationRlGamesVecEnv(IVecEnv):
             name: torch.zeros(self._asset_count, device=self._rl_device)
             for name in (
                 "terminal_goal_count_mean",
+                "terminal_frontier_count_mean",
+                "terminal_max_positive_net_turns_mean",
                 "terminal_net_turns_mean",
                 "terminal_absolute_path_turns_mean",
                 "terminal_directional_consistency_mean",
@@ -279,8 +284,10 @@ class PalmRotationRlGamesVecEnv(IVecEnv):
         self._current_joint_valid = joint_valid  # 该state采样的下一action沿相同有效集合裁剪/统计
         for name, expected in (("jnt_valid", joint_valid), ("tip_valid", tip_valid), ("owner_valid", owner_valid)):
             actual = critic[name].to(self._rl_device, dtype=torch.bool)  # critic同名mask
-            if not torch.equal(actual, expected):
-                raise RuntimeError(f"actor/critic {name} masks disagree at rollout transport")
+            torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]
+                torch.all(actual == expected),
+                f"actor/critic {name} masks disagree at rollout transport",
+            )  # 每policy state仍逐位fail closed，但不执行三次GPU→CPU同步
 
         # N040只读取actor current physical q和masks；contact/history/limits不进入geometry encoder。
         actor_observation = PalmRotationActorObservation(
@@ -324,12 +331,24 @@ class PalmRotationRlGamesVecEnv(IVecEnv):
 
         command = self.unwrapped.command_manager.get_term("goal_pose")  # N000 moving-subgoal command
         snapshot = getattr(command, "post_physics_evaluation_snapshot", None)
-        if not isinstance(snapshot, dict) or not bool(snapshot.get("valid", torch.tensor(False)).all().item()):
+        if not isinstance(snapshot, dict):
             raise RuntimeError("palm-rotation rollout requires a valid post-physics evaluation snapshot")
+        valid = snapshot.get("valid")
+        if not isinstance(valid, torch.Tensor):
+            raise RuntimeError("palm-rotation post-physics snapshot lacks a tensor validity certificate")
+        torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]
+            valid.all(),
+            "palm-rotation rollout requires a valid post-physics evaluation snapshot",
+        )  # snapshot producer仍被逐step验证，设备断言避免同步整个physics stream
         two_pi = 2.0 * torch.pi  # signed net rad -> physical turns
         values = {
             "reward_mean": reward.reshape(-1).float(),
             "goal_count_mean": snapshot["completed_subgoals"].to(self._rl_device).float(),
+            "frontier_count_mean": snapshot["rotation_frontier_count"].to(self._rl_device).float(),
+            "frontier_pulse_rate": snapshot["rotation_frontier_pulse"].to(self._rl_device).float(),
+            "max_positive_net_turns_mean": (
+                snapshot["max_positive_net_rotation_rad"].to(self._rl_device).float() / two_pi
+            ),
             "net_turns_mean": snapshot["net_rotation_rad"].to(self._rl_device).float() / two_pi,
             "drop_rate": snapshot["termination_object_out_of_anchor"].to(self._rl_device).float(),
             "axis_failure_rate": snapshot["termination_goal_axis_misaligned"].to(self._rl_device).float(),
@@ -351,23 +370,26 @@ class PalmRotationRlGamesVecEnv(IVecEnv):
         terminal_axis = snapshot["termination_goal_axis_misaligned"].to(self._rl_device).bool()
         terminal_timeout = snapshot["termination_time_out"].to(self._rl_device).bool()
         terminal = terminal_drop | terminal_axis | terminal_timeout
-        if bool(terminal.any().item()):
-            labels = self.prototype_index[terminal]  # completed trajectory对应selection-local asset
-            net_turns = snapshot["net_rotation_rad"].to(self._rl_device).float()[terminal] / two_pi
-            path_turns = snapshot["absolute_path_rotation_rad"].to(self._rl_device).float()[terminal] / two_pi
-            directional = torch.clamp(net_turns, min=0.0) / path_turns.clamp_min(torch.finfo(torch.float32).eps)
-            terminal_values = {
-                "terminal_goal_count_mean": snapshot["completed_subgoals"].to(self._rl_device).float()[terminal],
-                "terminal_net_turns_mean": net_turns,
-                "terminal_absolute_path_turns_mean": path_turns,
-                "terminal_directional_consistency_mean": directional.clamp(max=1.0),
-                "terminal_timeout_rate": terminal_timeout[terminal].float(),
-                "terminal_drop_rate": terminal_drop[terminal].float(),
-                "terminal_axis_failure_rate": terminal_axis[terminal].float(),
-            }
-            self._terminal_count.scatter_add_(0, labels, torch.ones_like(labels, dtype=torch.float32))
-            for name, value in terminal_values.items():
-                self._terminal_sums[name].scatter_add_(0, labels, value)
+        labels = self.prototype_index[terminal]  # 无terminal时为空tensor，scatter_add是合法no-op
+        net_turns = snapshot["net_rotation_rad"].to(self._rl_device).float()[terminal] / two_pi
+        path_turns = snapshot["absolute_path_rotation_rad"].to(self._rl_device).float()[terminal] / two_pi
+        directional = torch.clamp(net_turns, min=0.0) / path_turns.clamp_min(torch.finfo(torch.float32).eps)
+        terminal_values = {
+            "terminal_goal_count_mean": snapshot["completed_subgoals"].to(self._rl_device).float()[terminal],
+            "terminal_frontier_count_mean": snapshot["rotation_frontier_count"].to(self._rl_device).float()[terminal],
+            "terminal_max_positive_net_turns_mean": (
+                snapshot["max_positive_net_rotation_rad"].to(self._rl_device).float()[terminal] / two_pi
+            ),
+            "terminal_net_turns_mean": net_turns,
+            "terminal_absolute_path_turns_mean": path_turns,
+            "terminal_directional_consistency_mean": directional.clamp(max=1.0),
+            "terminal_timeout_rate": terminal_timeout[terminal].float(),
+            "terminal_drop_rate": terminal_drop[terminal].float(),
+            "terminal_axis_failure_rate": terminal_axis[terminal].float(),
+        }  # branch-free empty selection移除每step的`terminal.any().item()`同步
+        self._terminal_count.scatter_add_(0, labels, torch.ones_like(labels, dtype=torch.float32))
+        for name, value in terminal_values.items():
+            self._terminal_sums[name].scatter_add_(0, labels, value)
 
     def drain_rollout_metrics(self) -> dict[str, torch.Tensor]:
         r"""返回上个PPO rollout的per-asset均值并清零accumulator。

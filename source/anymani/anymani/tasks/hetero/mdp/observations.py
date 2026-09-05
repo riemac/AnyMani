@@ -272,14 +272,14 @@ def critic_object_term(
 
 
 def critic_task_term(env: ManagerBasedRLEnv, *, command_name: str) -> torch.Tensor:
-    r"""返回privileged task$[N,1,8]$，含signed net progress。"""
+    r"""返回privileged task$[N,1,8]$，含当前净转角与历史正向frontier。"""
 
     command = get_rotation_command(env, command_name)
     return task_state(
         command.axis_h,
         command.goal_error_so3_h,
         command.net_rotation_rad,
-        subgoal_angle_rad=float(command.cfg.subgoal_angle_rad),
+        command.max_positive_net_rotation_rad,
     )
 
 

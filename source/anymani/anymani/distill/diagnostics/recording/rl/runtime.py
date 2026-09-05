@@ -25,6 +25,14 @@ import yaml
 RL_RUNTIME_EVIDENCE_SCHEMA_VERSION = "1.0.0"
 """RL runtime evidence 的结构版本；与 SSL artifact schema 相互独立。"""
 
+FATAL_RUNTIME_PATTERNS = (
+    "Scene state is corrupted",
+    "compressContactStage",
+    "getRigidDynamicData: CUDA error",
+    "CUDA error, code 2",
+)
+"""一旦出现便不再允许写入后续科学trajectory/checkpoint的PhysX/CUDA故障标记。"""
+
 
 def _utc_now() -> str:
     r"""返回带 UTC 时区的 ISO-8601 墙钟，供跨进程事件对齐。"""
@@ -78,6 +86,34 @@ def record_optional_rl_phase(phase: str, event: str, **fields: Any) -> None:
             **fields,
         },
     )
+
+
+def scan_appended_fatal_log(path: Path, previous_size: int) -> tuple[int, str | None]:
+    r"""增量扫描stdout/stderr，并返回首个PhysX/CUDA不可恢复故障行。
+
+    每次从旧文件尾前512 bytes开始，避免错误标记恰好跨越两次采样写入边界。该函数只供父进程调用，
+    不触碰Isaac/PyTorch CUDA stream；重复overlap不会产生二次动作，因为首个match后父进程立即终止child。
+
+    Args:
+        path (Path): 子进程stdout或stderr日志。
+        previous_size (int): 上次成功读取时的文件byte数。
+
+    Returns:
+        tuple[int, str | None]: 当前文件大小与首个匹配行；无匹配时第二项为``None``。
+    """
+
+    try:
+        current_size = path.stat().st_size  # append-only日志当前byte边界
+        start = max(0, min(previous_size, current_size) - 512)  # 保留跨采样边界的有限overlap
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            stream.seek(start)
+            appended = stream.read()  # 低频父进程I/O，不进入被测训练进程
+    except FileNotFoundError:
+        return previous_size, None  # child尚未创建日志时等待下一采样
+    for line in appended.splitlines():
+        if any(pattern in line for pattern in FATAL_RUNTIME_PATTERNS):
+            return current_size, line.strip()  # 保存原始错误行供failure manifest审计
+    return current_size, None
 
 
 def _read_kib_fields(path: Path, names: set[str]) -> dict[str, int]:
@@ -269,8 +305,10 @@ class RlRunRecorder:
 
 
 __all__ = [
+    "FATAL_RUNTIME_PATTERNS",
     "RL_RUNTIME_EVIDENCE_SCHEMA_VERSION",
     "RlRunRecorder",
     "record_optional_rl_phase",
     "read_linux_process_resources",
+    "scan_appended_fatal_log",
 ]

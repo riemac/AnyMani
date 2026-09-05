@@ -331,6 +331,12 @@ class TactileRotationCommandCfg(CommandTermCfg):
     diagnostics_contact_force_threshold: float = 0.25
     """Episode diagnostics 复用 contact state 时的激活阈值，单位 N。"""
 
+    diagnostics_log_asset_metrics: bool = False
+    """只在显式fixed evaluation中按asset输出terminal sum/count；训练默认关闭。"""
+
+    diagnostics_asset_dataset_rows: tuple[int, ...] = ()
+    """Local canonical asset row到formal dataset row的有序映射，仅用于诊断标签。"""
+
     make_quat_unique: bool = False
     """只控制 goal quaternion buffer 的符号规范；progress 通过 rotation matrix 保持符号不变。"""
 
@@ -365,3 +371,5 @@ class TactileRotationCommandCfg(CommandTermCfg):
             raise ValueError("diagnostics_contact_ema_alpha must lie in (0,1].")
         if self.diagnostics_contact_force_threshold < 0.0:
             raise ValueError("diagnostics_contact_force_threshold must be non-negative.")
+        if len(set(self.diagnostics_asset_dataset_rows)) != len(self.diagnostics_asset_dataset_rows):
+            raise ValueError("diagnostics_asset_dataset_rows must be unique.")

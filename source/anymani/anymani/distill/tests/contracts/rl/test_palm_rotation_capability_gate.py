@@ -6,11 +6,15 @@ from dataclasses import replace
 
 import pytest
 from anymani.distill.diagnostics.evaluation.rl.palm_rotation import (
+    PalmRotationPhysicalAssetResult,
     PalmRotationReference,
     evaluate_asset,
     evaluate_cohort,
     evaluate_pairs,
+    evaluate_physical_support_trajectory_medians,
+    evaluate_scale_ladder_cohort,
     evaluate_seed_confirmation,
+    evaluate_support_trajectory_medians,
     evaluate_trajectory_medians,
 )
 
@@ -156,6 +160,25 @@ def test_trajectory_medians_apply_replica_failure_and_finite_rules() -> None:
     assert not non_finite.finite_and_identity_valid and not non_finite.passed
 
 
+def test_single_support_trajectory_reduction_does_not_fabricate_cohort_gate() -> None:
+    r"""Single closure应形成一个逐资产结果与finite证书，而不要求80-row cell population。"""
+
+    assets, finite = evaluate_support_trajectory_medians(
+        dataset_rows=(873,),
+        cell_ids=(0,),
+        goal_counts=((48.0, 48.0),),
+        net_turns=((4.0, 4.0),),
+        absolute_path_turns=((5.0, 5.0),),
+        termination_drop=((False, False),),
+        termination_axis=((False, False),),
+        termination_timeout=((True, True),),
+        reference=REFERENCE,
+    )
+
+    assert finite and len(assets) == 1
+    assert assets[0].dataset_row == 873 and assets[0].passed
+
+
 def test_pair_diagnostics_do_not_change_asset_cohort_gate() -> None:
     r"""左右pair只报告双过/单侧/双失败与能力差，不追溯改变54/80硬门。"""
 
@@ -165,3 +188,72 @@ def test_pair_diagnostics_do_not_change_asset_cohort_gate() -> None:
     assert pairs[0].outcome == "left_only"
     assert sum(pair.outcome == "both_passed" for pair in pairs) == 39
     assert evaluate_cohort(seed=42, asset_results=assets, finite_and_identity_valid=True).passed
+
+
+def _physical_result(row: int, mother: str, *, passed: bool) -> PalmRotationPhysicalAssetResult:
+    r"""构造只改变scale-ready布尔值的cohort组合fixture。"""
+
+    return PalmRotationPhysicalAssetResult(
+        dataset_row=row,
+        cell_id=7,
+        mother_id=mother,
+        frontier_count_median=48.0 if passed else 12.0,
+        max_positive_net_turns_median=4.0 if passed else 1.0,
+        net_turns_median=3.0 if passed else 1.0,
+        absolute_path_turns_median=3.2 if passed else 2.0,
+        directional_consistency=0.9375 if passed else 0.5,
+        safe_replica_fraction=1.0,
+        replica_count=16,
+        finite=True,
+        viability_passed=passed,
+        scale_ready_passed=passed,
+        failure_labels=() if passed else ("net-turns-below-two",),
+    )
+
+
+def test_physical_asset_gate_uses_two_turns_directionality_and_joint_survival() -> None:
+    r"""Strict goal不进入输入；恰好12/16安全replicas满足0.75闭边界。"""
+
+    results, finite = evaluate_physical_support_trajectory_medians(
+        dataset_rows=(0,),
+        cell_ids=(7,),
+        mother_ids=("right_t4_i4_m4_r4",),
+        frontier_counts=((24.0,) * 16,),
+        max_positive_net_turns=((2.1,) * 16,),
+        net_turns=((2.0,) * 16,),
+        absolute_path_turns=((2.2,) * 16,),
+        termination_drop=((False,) * 12 + (True,) * 4,),
+        termination_axis=((False,) * 16,),
+    )
+    result = results[0]
+    assert finite and result.scale_ready_passed
+    assert result.directional_consistency == pytest.approx(2.0 / 2.2)
+    assert result.safe_replica_fraction == 0.75
+    assert result.frontier_count_median == 24.0
+
+
+def test_scale_ladder_requires_asset_and_mother_coverage_independently() -> None:
+    r"""A64即使48项通过，少于12条mother达到3/4时仍不能晋级。"""
+
+    # 10条mother全过、4条各2项通过，共48项，但只有10条达到3/4。
+    weak_mothers = []
+    for mother_index in range(16):
+        passing_members = 4 if mother_index < 10 else 2 if mother_index < 14 else 0
+        weak_mothers.extend(
+            _physical_result(4 * mother_index + member, f"mother-{mother_index}", passed=member < passing_members)
+            for member in range(4)
+        )
+    failed = evaluate_scale_ladder_cohort(weak_mothers, finite_and_identity_valid=True)
+    assert failed.scale_ready_assets == 48
+    assert failed.mothers_with_three_of_four == 10
+    assert not failed.passed
+
+    # 12条mother各4项通过，恰好同时满足48/64与12/16 mother门。
+    balanced = [
+        _physical_result(row, f"mother-{row // 4}", passed=row // 4 < 12)
+        for row in range(64)
+    ]
+    passed = evaluate_scale_ladder_cohort(balanced, finite_and_identity_valid=True)
+    assert passed.scale_ready_assets == 48
+    assert passed.mothers_with_three_of_four == 12
+    assert passed.passed

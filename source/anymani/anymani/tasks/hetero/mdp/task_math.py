@@ -201,6 +201,56 @@ def projected_space_rotation_delta(
     return torch.sum(delta_rotation_vector * (axis_w / axis_norm), dim=-1)
 
 
+def rotation_frontier_update(
+    net_rotation_rad: torch.Tensor,
+    previous_max_positive_rad: torch.Tensor,
+    previous_frontier_count: torch.Tensor,
+    *,
+    frontier_interval_rad: float = math.pi / 6.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    r"""更新episode内只增不减的正向物理旋转前沿。
+
+    令有符号累计净转角为$\Psi_t$，历史正向最大值与30°前沿计数定义为：
+
+    $$
+    M_t=\max\{M_{t-1},\max(0,\Psi_t)\},\qquad
+    K_t=\left\lfloor\frac{M_t}{\delta}\right\rfloor,\qquad
+    \Delta K_t=K_t-K_{t-1},\quad \delta=\pi/6.
+    $$
+
+    $M_t$和$K_t$不会因反向运动下降，因此回到旧角度、在阈值附近往返或重新越过旧阈值均不产生奖励。
+    单个policy step若真实跨越多个30°区间，$\Delta K_t$保留完整整数增量而不是压成一个布尔事件。
+
+    Args:
+        net_rotation_rad (torch.Tensor): 当前$\Psi_t$，形状$[N]$，单位rad，可正可负。
+        previous_max_positive_rad (torch.Tensor): $M_{t-1}$，形状$[N]$，单位rad且非负。
+        previous_frontier_count (torch.Tensor): $K_{t-1}$，形状$[N]$的整数张量。
+        frontier_interval_rad (float): 相邻物理前沿间隔$\delta$，首版固定$\pi/6$ rad。
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: 依次为$M_t$（rad）、$K_t$、
+        $\Delta K_t$和布尔pulse $[\Delta K_t>0]$，均保持输入的环境轴$[N]$。
+    """
+
+    if net_rotation_rad.ndim != 1 or previous_max_positive_rad.shape != net_rotation_rad.shape:
+        raise ValueError("frontier net rotation and historical maximum must share rank-1 environment axis")
+    if previous_frontier_count.shape != net_rotation_rad.shape or previous_frontier_count.dtype not in (
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    ):
+        raise TypeError("previous frontier count must be an integer tensor on the same environment axis")
+    if not math.isfinite(frontier_interval_rad) or frontier_interval_rad <= 0.0:
+        raise ValueError("frontier interval must be finite and positive")
+
+    positive_net = torch.clamp(net_rotation_rad, min=0.0)  # $\max(0,\Psi_t)$，rad
+    maximum = torch.maximum(previous_max_positive_rad, positive_net)  # $M_t$，历史正向包络
+    count = torch.floor(maximum / frontier_interval_rad).to(dtype=previous_frontier_count.dtype)  # $K_t$
+    delta = torch.clamp(count - previous_frontier_count, min=0)  # $\Delta K_t\ge0$，允许单步跨多档
+    return maximum, count, delta, delta > 0
+
+
 def hand_axis_to_world(
     axis_h: torch.Tensor,
     root_quat_wxyz: torch.Tensor,
@@ -387,6 +437,7 @@ __all__ = [
     "normalize_quaternion_wxyz",
     "orientation_keypoint_distance",
     "projected_space_rotation_delta",
+    "rotation_frontier_update",
     "quaternion_apply_wxyz",
     "quaternion_from_angle_axis_wxyz",
     "quaternion_inverse_wxyz",

@@ -51,6 +51,15 @@ def test_even_median_averages_middle_assets() -> None:
     assert released.tolist()[:4] == [0.0, 0.0, 1.0, 1.0]
 
 
+def test_zero_start_two_turn_release_is_conservative_early_ramp() -> None:
+    r"""$[0,2]$圈调度应让0.2圈EMA只释放10%塑形，而不是把稳定项从第一步满权重开启。"""
+
+    values = torch.tensor((0.0, 0.2, 1.0, 2.0, 3.0))
+    released = release_from_net_turns(values, release_start_turns=0.0, release_end_turns=2.0)
+
+    torch.testing.assert_close(released, torch.tensor((0.0, 0.1, 0.5, 1.0, 1.0)))
+
+
 def test_asset_ema_updates_independently_and_cell_median_controls_env_gain() -> None:
     r"""极快单asset不能替整个cell释放reward；env coefficient按asset所属cell广播。"""
 

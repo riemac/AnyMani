@@ -1,0 +1,41 @@
+{
+  "cohort_id": "pure-leap-right-a1-mother",
+  "members": [
+    {
+      "asset_id": "f5d8c069",
+      "cohort_index": 0,
+      "content_hash": "f56739f0fd808d7c3ff52f0b5bb53e7807066756ecf33509e4fcd271747cee59",
+      "mutation_descriptor": {
+        "kind": "mother"
+      },
+      "provenance": {
+        "asset_role": "mother",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": ""
+      },
+      "source_alias": "ppo",
+      "source_row": 848
+    }
+  ],
+  "schema_version": "1.1.0",
+  "selection": {
+    "algorithm": "explicit-current-mother-control-v1",
+    "asset_role": "mother",
+    "parent_canonical_lock_sha256": "cf15a2e892c4be8241c3956c2bce956edca762598acd22dd23558a8937d27ca2",
+    "parent_cohort_id": "pure-leap-right-a16",
+    "parent_cohort_index": 0,
+    "purpose": "high-replica-residual-local-closure"
+  },
+  "sources": {
+    "ppo": {
+      "manifest_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ppo.yaml",
+      "manifest_sha256": "22320b8e00c8df73699d20cd0f56e68fbab720e8d63b36bba898ee964334a8dc"
+    }
+  }
+}

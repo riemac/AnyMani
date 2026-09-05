@@ -379,8 +379,57 @@ class PerJointHistoryStackEncoder(nn.Module):
         return temporal * joint_valid_mask.unsqueeze(-1).to(dtype=temporal.dtype)
 
 
+class PerJointRawHistoryStack(nn.Module):
+    r"""只重排并展平逐JOINT History30，不在时间信息进入local MLP前压缩。
+
+    对$Y\in\mathbb R^{B\times30\times N_J\times F}$执行：
+
+    $$
+    Y\longrightarrow
+    \operatorname{vec}_{time,feature}(Y)
+    \in\mathbb R^{B\times N_J\times30F}.
+    $$
+
+    oldest-to-latest列位置就是绝对lag编码。该module没有参数；后续共享local FiLM-MLP直接读取完整$30F$
+    历史，适合$F=5$、$30F=150$的掌旋低维观测。Ghost rows在进入MLP前精确清零。
+    """
+
+    history_length: int = 30
+    """固定1.5 s、20 Hz History30，与TCN对照使用同一观测窗口。"""
+
+    def __init__(self, *, joint_count: int = 16, frame_dim: int = 5) -> None:
+        r"""冻结JOINT、单帧与输出stack宽度。"""
+
+        super().__init__()
+        if joint_count < 1 or frame_dim < 1:
+            raise ValueError("per-joint raw history dimensions must be positive")
+        self.joint_count = int(joint_count)  # canonical JOINT槽数$N_J$
+        self.frame_dim = int(frame_dim)  # 每帧$q/u/a/contact$宽度$F$
+        self.output_dim = self.history_length * self.frame_dim  # 固定raw stack宽度$30F$
+
+    def forward(self, history: torch.Tensor, joint_valid_mask: torch.Tensor) -> torch.Tensor:
+        r"""返回oldest-to-latest `[B,N_J,30F]` raw stack并屏蔽ghost。"""
+
+        expected = (self.history_length, self.joint_count, self.frame_dim)  # sample-level History30 shape
+        if history.ndim != 4 or history.shape[1:] != expected:
+            raise ValueError(
+                "per-joint raw history must have shape "
+                f"[B,{self.history_length},{self.joint_count},{self.frame_dim}], got {tuple(history.shape)}"
+            )
+        batch_size = history.shape[0]  # environment/transition batch$B$
+        if joint_valid_mask.shape != (batch_size, self.joint_count) or joint_valid_mask.dtype != torch.bool:
+            raise ValueError(f"joint_valid_mask must be bool [{batch_size},{self.joint_count}]")
+        stacked = history.permute(0, 2, 1, 3).reshape(
+            batch_size,
+            self.joint_count,
+            self.output_dim,
+        )  # `[B,N_J,30F]`，固定列位置保持全部lag identity
+        return stacked * joint_valid_mask.unsqueeze(-1).to(dtype=stacked.dtype)  # ghost整行精确为0
+
+
 __all__ = [
     "PerJointHistoryStackEncoder",
+    "PerJointRawHistoryStack",
     "PerJointTactileTemporalEncoder",
     "TactileTemporalConvEncoder",
 ]

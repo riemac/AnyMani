@@ -126,6 +126,45 @@ def test_catalog_resolve_many_reads_shared_index_once(tmp_path, monkeypatch) -> 
     assert calls == 1
 
 
+def test_catalog_publish_many_commits_one_index_after_all_payloads(tmp_path, monkeypatch) -> None:
+    r"""Cohort batch只产生一个index可见性切换，并保持输入顺序。"""
+
+    catalog = GoodPregraspCatalog(tmp_path / "catalog")
+    requested = (_entry(scale=1.2), _entry(scale=1.1))
+    original = catalog._atomic_write
+    writes = []
+
+    def counted_write(path, data):
+        r"""记录payload与index提交顺序，同时执行真实原子写。"""
+
+        writes.append(path)
+        original(path, data)
+
+    monkeypatch.setattr(catalog, "_atomic_write", counted_write)
+    published = catalog.publish_many(requested)
+    assert tuple(item.key_digest for item in published) == tuple(entry.key.digest for entry in requested)
+    assert writes[-1] == catalog.index_path
+    assert sum(path == catalog.index_path for path in writes) == 1
+    assert catalog.resolve_many(tuple(entry.key for entry in requested)) == requested
+
+
+def test_catalog_batch_conflict_writes_nothing_from_other_batch_members(tmp_path) -> None:
+    r"""任一既有key冲突必须在新payload落盘前拒绝整批。"""
+
+    catalog = GoodPregraspCatalog(tmp_path / "catalog")
+    original = _entry(scale=1.1)
+    catalog.publish(original)
+    changed = replace(
+        original,
+        members=(replace(original.members[0], selection_score=(2.0, 0.0)), *original.members[1:]),
+    )
+    uncommitted = _entry(scale=1.2)
+    with pytest.raises(GoodPregraspConflictError):
+        catalog.publish_many((uncommitted, changed))
+    with pytest.raises(GoodPregraspMissError):
+        catalog.resolve(uncommitted.key)
+
+
 def test_catalog_rejects_same_key_with_changed_top8(tmp_path) -> None:
     r"""同一物理key不能静默覆盖另一组ranked candidates。"""
 

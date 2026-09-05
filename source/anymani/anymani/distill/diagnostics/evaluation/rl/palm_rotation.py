@@ -7,10 +7,12 @@ S_i=\min\left(\frac{G_i}{G_0},\frac{N_i}{N_0}\right),\qquad
 C_i=\frac{\max(0,\Psi_i)}{\sum_t|\Delta\psi_{i,t}|+\epsilon}.
 $$
 
-其中$G_i$是连续30°目标数，$N_i=\Psi_i/(2\pi)$是实际signed净圈数。单资产还要求
-$N_i\ge1$、$C_i\ge0.7$，且$G_i/12$与$N_i$在调用方显式给定的容差内一致。Cohort要求
-80项中至少54项通过且8个handedness×tip×thumb cells各至少5/10；最终固定seeds 42/43/44
-至少2条独立通过，不以额外seed替换失败seed。
+其中$G_i$是完整SO(3) orientation-keypoint与固定position-anchor双门的strict moving-goal命中数，
+$N_i=\Psi_i/(2\pi)$是实际signed净圈数。二者分别衡量tracking与物理旋转，不构成恒等的30°计数关系。历史正式资产pass要求
+$S_i\ge2/3$、$N_i\ge1$、$C_i\ge0.7$，且$G_i/12$与$N_i$在调用方显式给定的容差内一致；
+single debug closure只使用1净圈、0.7方向性及多数replica不发生drop/axis的较低门。Cohort要求80项中
+至少54项正式pass且8个handedness×tip×thumb cells各至少5/10；最终固定seeds 42/43/44至少2条独立通过，
+不以额外seed替换失败seed。
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from dataclasses import dataclass
 class PalmRotationReference:
     r"""固定scale-1.1、ADR-0、120 s下的accepted N000参考能力。"""
 
-    goal_count_median: float  # $G_0$，连续30°目标数中位数
+    goal_count_median: float  # $G_0$，strict full-pose+position goal hits中位数
     net_turns_median: float  # $N_0$，实际signed净圈数中位数
 
     def __post_init__(self) -> None:
@@ -50,7 +52,7 @@ class PalmRotationAssetResult:
 
     dataset_row: int  # formal ppo.yaml row
     cell_id: int  # handedness×tip×thumb cell，0..7
-    goal_count_median: float  # $G_i$
+    goal_count_median: float  # $G_i$，strict moving-goal tracking hits
     net_turns_median: float  # $N_i$
     absolute_path_turns_median: float  # $\sum_t|\Delta\psi_t|/(2\pi)$
     score: float  # $S_i$
@@ -92,6 +94,45 @@ class PalmRotationPairResult:
     net_turn_gap_right_minus_left: float
 
 
+@dataclass(frozen=True)
+class PalmRotationPhysicalAssetResult:
+    r"""一个资产在固定ADR-0 first trajectories上的物理旋转能力。
+
+    ``scale_ready_passed``只读取净圈、方向一致性和drop/axis联合生存率；strict moving-goal hit不进入判定。
+    ``viability_passed``保留较低的一圈探索门，不能替代两圈scale-ready门。
+    """
+
+    dataset_row: int  # cohort运行时为selection-local index，source-qualified身份由上层artifact保存
+    cell_id: int  # handedness×tip×thumb诊断cell，0..7
+    mother_id: str  # cohort lock中的mother lineage稳定标签
+    frontier_count_median: float  # $K_T$中位数，30°历史物理前沿数
+    max_positive_net_turns_median: float  # $M_T/(2\pi)$中位数
+    net_turns_median: float  # $\Psi_T/(2\pi)$中位数
+    absolute_path_turns_median: float  # $\sum_t|\Delta\psi_t|/(2\pi)$中位数
+    directional_consistency: float  # $\max(0,N_i)/(P_i+\epsilon)$
+    safe_replica_fraction: float  # 未发生drop且未发生axis failure的联合比例
+    replica_count: int
+    finite: bool
+    viability_passed: bool
+    scale_ready_passed: bool
+    failure_labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PalmRotationScaleCohortResult:
+    r"""A16/A64/A128固定规模晋级门，不混入strict tracking或人工批准。"""
+
+    asset_count: int
+    required_scale_ready_assets: int
+    scale_ready_assets: int
+    mother_count: int
+    required_mothers_with_three_of_four: int
+    mothers_with_three_of_four: int
+    scale_ready_by_mother: tuple[tuple[str, int], ...]
+    finite_and_identity_valid: bool
+    passed: bool
+
+
 def _relative_tier(score: float) -> str:
     r"""按计划边界把$S_i$映射到互斥层级。"""
 
@@ -125,8 +166,9 @@ def evaluate_asset(
 ) -> PalmRotationAssetResult:
     r"""计算一个资产的N000-relative score、方向质量与能力门。
 
-    Moving goal在姿态容差内提前成功，故N000本身通常有$(G_0/12)/N_0\ne1$。一致性检查比较资产
-    ratio与N000 ratio的相对偏差；tolerance必须由evaluation protocol显式保存。
+    Moving goal在姿态容差内提前成功，position gate也可与周期姿态窗口形成相位锁定，故通常有
+    $(G/12)/N\ne1$。历史一致性检查比较资产ratio与N000 ratio的相对偏差；该量属于strict tracking
+    calibration，不是物理净圈真值。Tolerance必须由evaluation protocol显式保存。
     """
 
     values = (
@@ -226,8 +268,49 @@ def evaluate_trajectory_medians(
     ``median``前静默删除。
     """
 
-    rows = tuple(int(value) for value in dataset_rows)
-    cells = tuple(int(value) for value in cell_ids)
+    asset_results, finite_and_identity_valid = evaluate_support_trajectory_medians(
+        dataset_rows=dataset_rows,
+        cell_ids=cell_ids,
+        goal_counts=goal_counts,
+        net_turns=net_turns,
+        absolute_path_turns=absolute_path_turns,
+        termination_drop=termination_drop,
+        termination_axis=termination_axis,
+        termination_timeout=termination_timeout,
+        reference=reference,
+        command_turn_ratio_relative_tolerance=command_turn_ratio_relative_tolerance,
+    )
+    return evaluate_cohort(
+        seed=seed,
+        asset_results=asset_results,
+        finite_and_identity_valid=finite_and_identity_valid,
+    )
+
+
+def evaluate_support_trajectory_medians(
+    *,
+    dataset_rows: Sequence[int],
+    cell_ids: Sequence[int],
+    goal_counts: Sequence[Sequence[float]],
+    net_turns: Sequence[Sequence[float]],
+    absolute_path_turns: Sequence[Sequence[float]],
+    termination_drop: Sequence[Sequence[bool]],
+    termination_axis: Sequence[Sequence[bool]],
+    termination_timeout: Sequence[Sequence[bool]],
+    reference: PalmRotationReference,
+    command_turn_ratio_relative_tolerance: float = 0.10,
+) -> tuple[tuple[PalmRotationAssetResult, ...], bool]:
+    r"""归约任意非空single/few/full支持集的fixed first trajectories。
+
+    该函数只形成逐资产N000-relative结果与完整finite证书，不定义支持集级成功比例。正式MVP80调用方仍需
+    经过 :func:`evaluate_cohort` 的54/80与8-cell门；single-embodiment closure可独立读取净圈和方向一致性。
+
+    Returns:
+        tuple: ``(asset_results, finite_and_identity_valid)``，资产顺序与输入rows一致。
+    """
+
+    rows = tuple(int(value) for value in dataset_rows)  # 当前evaluation有序支持轴$[A]$
+    cells = tuple(int(value) for value in cell_ids)  # handedness-inclusive cell$[A]$
     matrices = (
         goal_counts,
         net_turns,
@@ -236,10 +319,13 @@ def evaluate_trajectory_medians(
         termination_axis,
         termination_timeout,
     )
-    if len(rows) != 80 or len(set(rows)) != 80 or len(cells) != 80:
-        raise ValueError("trajectory evaluation requires 80 unique rows and 80 cell labels")
-    if any(len(matrix) != 80 for matrix in matrices):
-        raise ValueError("trajectory evaluation matrices must share the 80-asset axis")
+    asset_count = len(rows)  # $A=1$ closure或$A=80$正式cohort
+    if asset_count < 1 or len(set(rows)) != asset_count or len(cells) != asset_count:
+        raise ValueError("trajectory evaluation requires non-empty unique rows aligned with cell labels")
+    if any(cell not in range(8) for cell in cells):
+        raise ValueError("trajectory evaluation cell labels must lie in [0,7]")
+    if any(len(matrix) != asset_count for matrix in matrices):
+        raise ValueError("trajectory evaluation matrices must share the selected asset axis")
     replica_counts = {len(row) for matrix in matrices for row in matrix}
     if len(replica_counts) != 1 or not replica_counts or next(iter(replica_counts)) < 1:
         raise ValueError("trajectory evaluation requires one positive shared replica count")
@@ -255,7 +341,7 @@ def evaluate_trajectory_medians(
         asset_finite = all(math.isfinite(value) for value in (*goal, *net, *path))
         finite_and_identity_valid &= asset_finite
         if not asset_finite:
-            goal = net = path = (0.0,) * replica_count  # 保留80项axis并使该资产确定性失败
+            goal = net = path = (0.0,) * replica_count  # 保留支持轴并使该资产确定性失败
         drop = tuple(bool(value) for value in termination_drop[asset_index])
         axis = tuple(bool(value) for value in termination_axis[asset_index])
         timeout = tuple(bool(value) for value in termination_timeout[asset_index])
@@ -279,10 +365,165 @@ def evaluate_trajectory_medians(
                 timeout_rate=timeout_rate,
             )
         )
-    return evaluate_cohort(
-        seed=seed,
-        asset_results=asset_results,
-        finite_and_identity_valid=finite_and_identity_valid,
+    return tuple(asset_results), bool(finite_and_identity_valid)
+
+
+def evaluate_physical_support_trajectory_medians(
+    *,
+    dataset_rows: Sequence[int],
+    cell_ids: Sequence[int],
+    mother_ids: Sequence[str],
+    frontier_counts: Sequence[Sequence[float]],
+    max_positive_net_turns: Sequence[Sequence[float]],
+    net_turns: Sequence[Sequence[float]],
+    absolute_path_turns: Sequence[Sequence[float]],
+    termination_drop: Sequence[Sequence[bool]],
+    termination_axis: Sequence[Sequence[bool]],
+) -> tuple[tuple[PalmRotationPhysicalAssetResult, ...], bool]:
+    r"""按资产归约固定replicas，并计算物理viability与scale-ready门。
+
+    对资产$i$，先分别取净圈与绝对路径的trajectory中位数，再定义方向一致性：
+
+    $$
+    C_i=\frac{\max(0,\operatorname{med}_r N_{ir})}
+    {\max(\operatorname{med}_r P_{ir},\epsilon)}.
+    $$
+
+    Scale-ready要求$N_i\ge2$、$C_i\ge0.85$、至少75% replicas同时无drop/axis；viability要求
+    $N_i\ge1$、$C_i\ge0.7$、严格多数replicas同时安全。Strict goal count不属于输入，保证tracking与物理能力
+    在证据层保持独立。
+
+    Returns:
+        tuple: ``(asset_results, finite_and_identity_valid)``，顺序与``dataset_rows``完全一致。
+    """
+
+    rows = tuple(int(value) for value in dataset_rows)  # 评估支持轴$[A]$
+    cells = tuple(int(value) for value in cell_ids)
+    mothers = tuple(str(value).strip() for value in mother_ids)
+    matrices = (
+        frontier_counts,
+        max_positive_net_turns,
+        net_turns,
+        absolute_path_turns,
+        termination_drop,
+        termination_axis,
+    )
+    asset_count = len(rows)
+    if asset_count < 1 or len(set(rows)) != asset_count:
+        raise ValueError("physical trajectory evaluation requires non-empty unique asset rows")
+    if len(cells) != asset_count or any(cell not in range(8) for cell in cells):
+        raise ValueError("physical trajectory evaluation requires one cell_id in [0,7] per asset")
+    if len(mothers) != asset_count or any(not mother for mother in mothers):
+        raise ValueError("physical trajectory evaluation requires one non-empty mother ID per asset")
+    if any(len(matrix) != asset_count for matrix in matrices):
+        raise ValueError("physical trajectory matrices must share the selected asset axis")
+    replica_counts = {len(row) for matrix in matrices for row in matrix}
+    if len(replica_counts) != 1 or not replica_counts or next(iter(replica_counts)) < 1:
+        raise ValueError("physical trajectory evaluation requires one positive shared replica count")
+    replica_count = next(iter(replica_counts))
+
+    finite_and_identity_valid = True
+    results: list[PalmRotationPhysicalAssetResult] = []
+    for asset_index, (dataset_row, cell_id, mother_id) in enumerate(zip(rows, cells, mothers, strict=True)):
+        frontier = tuple(float(value) for value in frontier_counts[asset_index])
+        maximum = tuple(float(value) for value in max_positive_net_turns[asset_index])
+        net = tuple(float(value) for value in net_turns[asset_index])
+        path = tuple(float(value) for value in absolute_path_turns[asset_index])
+        finite = all(math.isfinite(value) for value in (*frontier, *maximum, *net, *path))
+        finite_and_identity_valid &= finite
+        if not finite:
+            frontier = maximum = net = path = (0.0,) * replica_count  # 保留支持轴并确定性判失败
+        if any(value < 0.0 for value in (*frontier, *maximum, *path)):
+            raise ValueError("frontier, maximum-positive and absolute-path values must be non-negative")
+
+        drop = tuple(bool(value) for value in termination_drop[asset_index])
+        axis = tuple(bool(value) for value in termination_axis[asset_index])
+        safe_fraction = sum(not (drop_bit or axis_bit) for drop_bit, axis_bit in zip(drop, axis, strict=True)) / replica_count
+        frontier_median = statistics.median(frontier)
+        maximum_median = statistics.median(maximum)
+        net_median = statistics.median(net)
+        path_median = statistics.median(path)
+        directional = min(
+            max(0.0, net_median) / max(path_median, float.fromhex("0x1.0p-23")),
+            1.0,
+        )
+        viability = finite and net_median >= 1.0 and directional >= 0.7 and safe_fraction > 0.5
+        scale_ready = finite and net_median >= 2.0 and directional >= 0.85 and safe_fraction >= 0.75
+        labels: list[str] = []
+        if net_median < 2.0:
+            labels.append("net-turns-below-two")
+        if directional < 0.85:
+            labels.append("directional-consistency-below-0p85")
+        if safe_fraction < 0.75:
+            labels.append("safe-replica-fraction-below-0p75")
+        if not finite:
+            labels.append("non-finite")
+        results.append(
+            PalmRotationPhysicalAssetResult(
+                dataset_row=dataset_row,
+                cell_id=cell_id,
+                mother_id=mother_id,
+                frontier_count_median=frontier_median,
+                max_positive_net_turns_median=maximum_median,
+                net_turns_median=net_median,
+                absolute_path_turns_median=path_median,
+                directional_consistency=directional,
+                safe_replica_fraction=safe_fraction,
+                replica_count=replica_count,
+                finite=finite,
+                viability_passed=viability,
+                scale_ready_passed=scale_ready,
+                failure_labels=tuple(labels),
+            )
+        )
+    return tuple(results), bool(finite_and_identity_valid)
+
+
+def evaluate_scale_ladder_cohort(
+    asset_results: Sequence[PalmRotationPhysicalAssetResult],
+    *,
+    finite_and_identity_valid: bool,
+) -> PalmRotationScaleCohortResult:
+    r"""执行固定A16/A64/A128资产数与mother内3/4晋级门。
+
+    A16只要求12/16资产；A64要求48/64且16条mother中至少12条有3/4成员通过；A128要求96/128且
+    32条mother中至少24条有3/4成员通过。A64/A128每条mother必须恰含4项，否则cohort recipe本身无效。
+    """
+
+    results = tuple(asset_results)
+    requirements = {16: (12, 0), 64: (48, 12), 128: (96, 24)}
+    asset_count = len(results)
+    if asset_count not in requirements or len({result.dataset_row for result in results}) != asset_count:
+        raise ValueError("scale ladder cohort must contain exactly 16, 64 or 128 unique assets")
+    required_assets, required_mothers = requirements[asset_count]
+    by_mother: dict[str, list[PalmRotationPhysicalAssetResult]] = {}
+    for result in results:
+        by_mother.setdefault(result.mother_id, []).append(result)
+    if asset_count in (64, 128) and any(len(members) != 4 for members in by_mother.values()):
+        raise ValueError("A64/A128 scale cohort requires exactly four members per mother lineage")
+    passed_by_mother = tuple(
+        sorted(
+            (mother_id, sum(member.scale_ready_passed for member in members))
+            for mother_id, members in by_mother.items()
+        )
+    )
+    passed_assets = sum(result.scale_ready_passed for result in results)
+    passed_mothers = sum(count >= 3 for _, count in passed_by_mother)
+    passed = bool(
+        finite_and_identity_valid
+        and passed_assets >= required_assets
+        and (required_mothers == 0 or passed_mothers >= required_mothers)
+    )
+    return PalmRotationScaleCohortResult(
+        asset_count=asset_count,
+        required_scale_ready_assets=required_assets,
+        scale_ready_assets=passed_assets,
+        mother_count=len(by_mother),
+        required_mothers_with_three_of_four=required_mothers,
+        mothers_with_three_of_four=passed_mothers,
+        scale_ready_by_mother=passed_by_mother,
+        finite_and_identity_valid=bool(finite_and_identity_valid),
+        passed=passed,
     )
 
 
@@ -366,10 +607,15 @@ __all__ = [
     "PalmRotationAssetResult",
     "PalmRotationCohortResult",
     "PalmRotationPairResult",
+    "PalmRotationPhysicalAssetResult",
     "PalmRotationReference",
+    "PalmRotationScaleCohortResult",
     "evaluate_asset",
     "evaluate_cohort",
     "evaluate_pairs",
+    "evaluate_physical_support_trajectory_medians",
+    "evaluate_scale_ladder_cohort",
     "evaluate_seed_confirmation",
+    "evaluate_support_trajectory_medians",
     "evaluate_trajectory_medians",
 ]

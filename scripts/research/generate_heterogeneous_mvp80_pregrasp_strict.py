@@ -1,4 +1,4 @@
-r"""生成MVP80 DexCube scale-1.1 strict v5 Top-8 good-pregrasp catalog。
+r"""生成MVP80或resolved cohort的DexCube scale-1.1 strict Top-8 good-pregrasp catalog。
 
 每资产先生成256个13维scrambled-Sobol几何提案，仅选Top-32进入训练同路径的1 s cold-reset物理筛选。
 若任一资产不足8个严格候选，从其已测physical elites拟合4D joint-PCA + 3D object-position CEM，最多
@@ -8,12 +8,14 @@ r"""生成MVP80 DexCube scale-1.1 strict v5 Top-8 good-pregrasp catalog。
 - penetration≤0.5 mm；1 s位移≤5 mm；倾角≤10°；
 - 前0.2 s线速度≤0.25 m/s、**总**角速度≤2 rad/s；后0.5 s PALM support≥50%。
 
-只有80只资产各自至少8个候选通过同一谓词时才发布catalog；否则只保存候选证据与失败分解并返回非零。
+Legacy MVP80要求80只资产全部通过；``--cohort-lock``要求该lock的全部成员通过。任一成员不足8项时只保存
+候选证据与失败分解并返回非零，避免训练时把缺失资产静默替换成其他reset分布。
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import traceback
@@ -33,6 +35,8 @@ DEFAULT_SELECTION = Path(
 )
 DEFAULT_CATALOG = Path("outputs/pregrasp/catalogs/heterogeneous_rotation_mvp80_dexcube_s1p1_v5")
 DEFAULT_EVIDENCE = Path("outputs/pregrasp/search/heterogeneous_rotation_mvp80_dexcube_s1p1_v5")
+DEFAULT_COHORT_CATALOG = Path("outputs/pregrasp/catalogs/heterogeneous_rotation/strict-v1/dexcube/scale-1p1")
+DEFAULT_COHORT_EVIDENCE = Path("outputs/pregrasp/search/heterogeneous_rotation/strict-v1/dexcube/scale-1p1")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -40,6 +44,7 @@ def _parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--selection", type=Path, default=DEFAULT_SELECTION)
+    parser.add_argument("--cohort-lock", type=Path, default=None, help="待完整覆盖并发布的resolved member-level cohort lock。")
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
     parser.add_argument("--asset-limit", type=int, default=None, help="Development-only ordered prefix; never publish.")
@@ -56,6 +61,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--asset-limit must lie in [1,80]")
     if args.asset_limit is not None and args.rows is not None:
         parser.error("--asset-limit and --rows are mutually exclusive")
+    if args.cohort_lock is not None and (args.asset_limit is not None or args.rows is not None or args.publish_selection):
+        parser.error("--cohort-lock is mutually exclusive with legacy --asset-limit/--rows/--publish-selection")
     if args.publish_selection and (args.rows is None or args.asset_limit is not None):
         parser.error("--publish-selection requires --rows and forbids --asset-limit")
     if not 0 <= args.max_cem_rounds <= 3:
@@ -64,30 +71,56 @@ def _parse_args() -> argparse.Namespace:
 
 
 ARGS = _parse_args()
-SELECTION_DOCUMENT = yaml.safe_load(ARGS.selection.read_text(encoding="utf-8"))
-FORMAL_SELECTED_ROWS = tuple(int(row) for row in SELECTION_DOCUMENT["initial_selected_rows"])
-if len(FORMAL_SELECTED_ROWS) != ASSETS_PER_RUN or len(set(FORMAL_SELECTED_ROWS)) != ASSETS_PER_RUN:
-    raise ValueError("strict MVP pregrasp generation requires exactly 80 unique initial selection rows")
-FROZEN_CANDIDATE_ROWS = {
-    int(side["row"])
-    for cell in SELECTION_DOCUMENT["cells"]
-    for pair in cell["candidate_pairs"]
-    for side in (pair["left"], pair["right"])
-}
-if ARGS.rows is not None:
-    SELECTED_ROWS = tuple(int(value.strip()) for value in ARGS.rows.split(",") if value.strip())
-    if not SELECTED_ROWS or len(set(SELECTED_ROWS)) != len(SELECTED_ROWS):
-        raise ValueError("--rows must contain unique formal selection rows")
-    if not set(SELECTED_ROWS).issubset(FROZEN_CANDIDATE_ROWS):
-        raise ValueError("development --rows must be drawn from the frozen pair-candidate manifest")
+COHORT_RUN = ARGS.cohort_lock is not None
+COHORT_DOCUMENT: dict[str, Any] | None = None
+COHORT_LOCK_SHA256 = ""
+if COHORT_RUN:
+    cohort_path = cast(Path, ARGS.cohort_lock).resolve()
+    cohort_bytes = cohort_path.read_bytes()
+    loaded = yaml.safe_load(cohort_bytes)
+    if not isinstance(loaded, dict) or not isinstance(loaded.get("members"), list) or not loaded["members"]:
+        raise ValueError("--cohort-lock must contain a non-empty resolved members list")
+    COHORT_DOCUMENT = cast(dict[str, Any], loaded)
+    cohort_indices = tuple(int(member["cohort_index"]) for member in COHORT_DOCUMENT["members"])
+    if cohort_indices != tuple(range(len(cohort_indices))):
+        raise ValueError("cohort lock members must have dense ordered cohort_index values")
+    SELECTED_ROWS = cohort_indices  # Runtime transport axis; source rows remain provenance only.
+    COHORT_LOCK_SHA256 = hashlib.sha256(cohort_bytes).hexdigest()
+    cohort_id = str(COHORT_DOCUMENT.get("cohort_id", "")).strip()
+    if not cohort_id or any(character in cohort_id for character in ("/", "\\", "\0")):
+        raise ValueError("cohort_id must be a non-empty path-safe identifier")
+    if ARGS.catalog == DEFAULT_CATALOG:
+        ARGS.catalog = DEFAULT_COHORT_CATALOG
+    if ARGS.evidence == DEFAULT_EVIDENCE:
+        ARGS.evidence = DEFAULT_COHORT_EVIDENCE / f"{cohort_id}--{COHORT_LOCK_SHA256[:12]}"
+    os.environ.pop("ANYMANI_HETERO_ASSET_ROWS", None)
+    os.environ["ANYMANI_HETERO_COHORT_LOCK"] = str(cohort_path)
 else:
-    SELECTED_ROWS = FORMAL_SELECTED_ROWS[: ARGS.asset_limit] if ARGS.asset_limit is not None else FORMAL_SELECTED_ROWS
-DEVELOPMENT_RUN = ARGS.asset_limit is not None or ARGS.rows is not None
+    SELECTION_DOCUMENT = yaml.safe_load(ARGS.selection.read_text(encoding="utf-8"))
+    FORMAL_SELECTED_ROWS = tuple(int(row) for row in SELECTION_DOCUMENT["initial_selected_rows"])
+    if len(FORMAL_SELECTED_ROWS) != ASSETS_PER_RUN or len(set(FORMAL_SELECTED_ROWS)) != ASSETS_PER_RUN:
+        raise ValueError("strict MVP pregrasp generation requires exactly 80 unique initial selection rows")
+    FROZEN_CANDIDATE_ROWS = {
+        int(side["row"])
+        for cell in SELECTION_DOCUMENT["cells"]
+        for pair in cell["candidate_pairs"]
+        for side in (pair["left"], pair["right"])
+    }
+    if ARGS.rows is not None:
+        SELECTED_ROWS = tuple(int(value.strip()) for value in ARGS.rows.split(",") if value.strip())
+        if not SELECTED_ROWS or len(set(SELECTED_ROWS)) != len(SELECTED_ROWS):
+            raise ValueError("--rows must contain unique formal selection rows")
+        if not set(SELECTED_ROWS).issubset(FROZEN_CANDIDATE_ROWS):
+            raise ValueError("development --rows must be drawn from the frozen pair-candidate manifest")
+    else:
+        SELECTED_ROWS = FORMAL_SELECTED_ROWS[: ARGS.asset_limit] if ARGS.asset_limit is not None else FORMAL_SELECTED_ROWS
+    os.environ.pop("ANYMANI_HETERO_COHORT_LOCK", None)
+    os.environ["ANYMANI_HETERO_ASSET_ROWS"] = ",".join(str(row) for row in SELECTED_ROWS)
+DEVELOPMENT_RUN = not COHORT_RUN and (ARGS.asset_limit is not None or ARGS.rows is not None)
 ASSET_COUNT = len(SELECTED_ROWS)
 if ARGS.publish_selection and ASSET_COUNT != ASSETS_PER_RUN:
     raise ValueError("--publish-selection requires exactly 80 rows")
 NUM_ENVS = ASSET_COUNT * CANDIDATES_PER_PHYSICS_BATCH
-os.environ["ANYMANI_HETERO_ASSET_ROWS"] = ",".join(str(row) for row in SELECTED_ROWS)
 os.environ["ANYMANI_HETERO_NUM_ENVS"] = str(NUM_ENVS)
 
 from isaaclab.app import AppLauncher  # noqa: E402  # asset/env routing必须先冻结
@@ -127,9 +160,16 @@ def main() -> int:
         low_rank_cem_candidates,
         normalized_gate_violation,
         sobol_bank,
+        stable_asset_stream_key,
         strict_pass_mask,
     )
     from anymani.pregrasp.strict_gate import MVP80_STRICT_GOOD_PREGRASP_GATE
+    from anymani.tasks.hetero.config.generated.cohort_good_pregrasp_identity import (
+        COHORT_GOOD_PREGRASP_CATALOG_ROOT,
+        COHORT_GOOD_PREGRASP_GENERATION_DIGEST,
+        COHORT_GOOD_PREGRASP_GENERATION_IDENTITY,
+        COHORT_GOOD_PREGRASP_PHYSICS_DIGEST,
+    )
     from anymani.tasks.hetero.config.generated.pregrasp_harness_env_cfg import GeneratedPregraspHarnessEnvCfg
     from anymani.tasks.hetero.config.generated.scene import (
         ASSET_BINDING,
@@ -154,12 +194,33 @@ def main() -> int:
     from isaaclab.envs import ManagerBasedRLEnv
     from isaaclab.sensors import ContactSensor
 
+    generation_identity = (
+        COHORT_GOOD_PREGRASP_GENERATION_IDENTITY if COHORT_RUN else STRICT_GOOD_PREGRASP_GENERATION_IDENTITY
+    )
+    generation_identity_digest = (
+        COHORT_GOOD_PREGRASP_GENERATION_DIGEST if COHORT_RUN else STRICT_GOOD_PREGRASP_GENERATION_DIGEST
+    )
+    physics_identity_digest = (
+        COHORT_GOOD_PREGRASP_PHYSICS_DIGEST if COHORT_RUN else STRICT_GOOD_PREGRASP_PHYSICS_DIGEST
+    )
+    if COHORT_RUN and Path(COHORT_GOOD_PREGRASP_CATALOG_ROOT) != DEFAULT_COHORT_CATALOG:
+        raise RuntimeError("script and runtime cohort catalog defaults drifted")
+
     # Formal invocation必须与runtime候选身份逐值一致；development prefix只允许减少资产，不改算法数字。
     if ARGS.seed != STRICT_GOOD_PREGRASP_SEED or ARGS.max_cem_rounds != STRICT_GOOD_PREGRASP_CEM_ROUNDS:
         if not DEVELOPMENT_RUN or ARGS.publish_selection:
             raise ValueError("formal strict generation requires shared seed and three CEM rounds")
     if ASSET_BINDING.dataset_rows != SELECTED_ROWS or ASSET_BINDING.asset_count != ASSET_COUNT:
         raise RuntimeError("scene asset binding disagrees with strict selection")
+    if COHORT_RUN:
+        if ASSET_BINDING.cohort_lock_sha256 != COHORT_LOCK_SHA256:
+            raise RuntimeError("scene asset binding loaded different cohort lock bytes")
+        expected_member_keys = tuple(
+            f"{member['source_alias']}#{int(member['source_row'])}"
+            for member in cast(dict[str, Any], COHORT_DOCUMENT)["members"]
+        )
+        if ASSET_BINDING.source_member_keys != expected_member_keys:
+            raise RuntimeError("scene source provenance disagrees with cohort lock")
     if STRICT_GOOD_PREGRASP_OBJECT_SCALE != 1.1:
         raise RuntimeError("strict generation identity must fix DexCube scale 1.1")
 
@@ -185,6 +246,17 @@ def main() -> int:
         }
         sensor_owner_indices = torch.tensor(CONTACT_LAYOUT.sensor_owner_indices, dtype=torch.long, device=device)
         active_by_asset = torch.tensor(ASSET_BINDING.active_joint_masks, dtype=torch.bool, device=device)
+        asset_stream_keys = tuple(
+            stable_asset_stream_key(
+                artifact.source_content_hash,
+                artifact.physical_geometry_hash,
+                artifact.schema_digest,
+                active_mask_digest(artifact.routing.active_joint_mask),
+            )
+            for artifact in ASSET_BINDING.canonical_artifacts
+        )
+        if len(set(asset_stream_keys)) != ASSET_COUNT:
+            raise RuntimeError("cohort physical identity produced duplicate RNG stream keys")
         active_tip_by_asset, active_owner_by_asset = derive_tip_and_owner_masks(active_by_asset)
         active_tip_by_env = active_tip_by_asset.repeat(CANDIDATES_PER_PHYSICS_BATCH, 1)
         active_owner_by_env = active_owner_by_asset.repeat(CANDIDATES_PER_PHYSICS_BATCH, 1)
@@ -460,7 +532,7 @@ def main() -> int:
 
         # Stage 0：256 Sobol proposals -> geometry Top-32 -> full physics。
         sobol = sobol_bank(
-            SELECTED_ROWS,
+            asset_stream_keys if COHORT_RUN else SELECTED_ROWS,
             candidate_count=STRICT_GOOD_PREGRASP_SOBOL_CANDIDATES,
             seed=ARGS.seed,
             device=device,
@@ -528,7 +600,7 @@ def main() -> int:
                 candidate_count=STRICT_GOOD_PREGRASP_CEM_CANDIDATES,
                 seed=ARGS.seed,
                 round_index=round_index,
-                asset_keys=SELECTED_ROWS,
+                asset_keys=asset_stream_keys if COHORT_RUN else SELECTED_ROWS,
             )
             # 已找到strict或violation≤0.35的近门态时，下一轮前96项做微扰复验，扩展窄稳定盆而不增加预算。
             passed_so_far = concatenate(results, "passed")
@@ -552,7 +624,9 @@ def main() -> int:
                     torch.arange(exploit_count, device=device) % basin_indices.numel()
                 ]
                 generator = torch.Generator(device=device).manual_seed(
-                    ARGS.seed + round_index * 10_000_019 + int(SELECTED_ROWS[asset_index]) * 104729
+                    ARGS.seed
+                    + round_index * 10_000_019
+                    + int((asset_stream_keys if COHORT_RUN else SELECTED_ROWS)[asset_index]) * 104729
                 )
                 q_noise = torch.randn(exploit_count, 16, generator=generator, device=device) * 5.0e-4
                 q_exploit = q_so_far[asset_index, center_indices] + q_noise * active_by_asset[asset_index]
@@ -630,6 +704,9 @@ def main() -> int:
         np.savez_compressed(
             evidence_root / "candidates.npz",
             dataset_rows=np.asarray(SELECTED_ROWS, dtype=np.int64),
+            source_rows=np.asarray(ASSET_BINDING.source_rows, dtype=np.int64),
+            source_member_keys=np.asarray(ASSET_BINDING.source_member_keys),
+            asset_stream_keys=np.asarray(asset_stream_keys, dtype=np.int64),
             **evidence,
         )
 
@@ -642,6 +719,8 @@ def main() -> int:
                     {
                         "asset_index": asset_index,
                         "dataset_row": SELECTED_ROWS[asset_index],
+                        "source_row": ASSET_BINDING.source_rows[asset_index],
+                        "source_member_key": ASSET_BINDING.source_member_keys[asset_index],
                         "asset_id": ASSET_BINDING.source_assets[asset_index].asset_id,
                         "strict_passed_candidates": int(count),
                         "cell_id": ASSET_BINDING.morphology_cell_ids[asset_index],
@@ -652,6 +731,8 @@ def main() -> int:
             {
                 "asset_index": asset_index,
                 "dataset_row": SELECTED_ROWS[asset_index],
+                "source_row": ASSET_BINDING.source_rows[asset_index],
+                "source_member_key": ASSET_BINDING.source_member_keys[asset_index],
                 "asset_id": ASSET_BINDING.source_assets[asset_index].asset_id,
                 "cell_id": ASSET_BINDING.morphology_cell_ids[asset_index],
                 "strict_passed_candidates": int(passed_all[asset_index].sum().item()),
@@ -681,7 +762,10 @@ def main() -> int:
 
         published: list[dict[str, Any]] = []
         entries: list[GoodPregraspEntry] = []
-        if not failed_assets and ASSET_COUNT == ASSETS_PER_RUN and (not DEVELOPMENT_RUN or ARGS.publish_selection):
+        publication_ready = not failed_assets and (
+            COHORT_RUN or (ASSET_COUNT == ASSETS_PER_RUN and (not DEVELOPMENT_RUN or ARGS.publish_selection))
+        )
+        if publication_ready:
             finger_names = ("index", "middle", "ring", "thumb")
             all_values = {name: concatenate(results, name) for name in evidence_names}
             quality = physical_quality(results)
@@ -749,24 +833,26 @@ def main() -> int:
                     object_asset_id="DexCube",
                     object_asset_sha256=RESOLVED_DEX_CUBE_SHA256,
                     object_scale=1.1,
-                    physics_identity_digest=STRICT_GOOD_PREGRASP_PHYSICS_DIGEST,
-                    generation_identity_digest=STRICT_GOOD_PREGRASP_GENERATION_DIGEST,
+                    physics_identity_digest=physics_identity_digest,
+                    generation_identity_digest=generation_identity_digest,
                 )
                 entry = GoodPregraspEntry(key=key, members=tuple(members))
                 MVP80_STRICT_GOOD_PREGRASP_GATE.validate_entry(entry)
                 entries.append(entry)
 
-            # 全部80 entries先在内存验证完成，再开始atomic per-entry/index发布。
+            # 全部entries先在内存验证，再以一次index replace提交；resolver不会看见部分cohort。
             catalog = GoodPregraspCatalog(ARGS.catalog.resolve())
-            for dataset_row, entry in zip(SELECTED_ROWS, entries, strict=True):
-                index_entry = catalog.publish(entry)
+            index_entries = catalog.publish_many(entries)
+            for asset_index, (dataset_row, entry, index_entry) in enumerate(
+                zip(SELECTED_ROWS, entries, index_entries, strict=True)
+            ):
                 published.append(
                     {
                         "dataset_row": dataset_row,
+                        "source_row": ASSET_BINDING.source_rows[asset_index],
+                        "source_member_key": ASSET_BINDING.source_member_keys[asset_index],
                         "asset_id": entry.key.asset_id,
-                        "strict_passed_candidates": int(
-                            passed_all[SELECTED_ROWS.index(dataset_row)].sum().item()
-                        ),
+                        "strict_passed_candidates": int(passed_all[asset_index].sum().item()),
                         "key_digest": index_entry.key_digest,
                         "entry_digest": index_entry.entry_digest,
                     }
@@ -775,12 +861,18 @@ def main() -> int:
         summary = {
             "artifact_type": "anymani.good_pregrasp.strict_generation_summary",
             "schema_version": "1.0.0",
-            "selection_path": str(ARGS.selection),
+            "selection_path": None if COHORT_RUN else str(ARGS.selection),
+            "cohort_id": ASSET_BINDING.cohort_id,
+            "cohort_lock_path": str(cast(Path, ARGS.cohort_lock).resolve()) if COHORT_RUN else None,
+            "cohort_lock_sha256": ASSET_BINDING.cohort_lock_sha256 or None,
             "dataset_rows": list(SELECTED_ROWS),
+            "source_rows": list(ASSET_BINDING.source_rows),
+            "source_member_keys": list(ASSET_BINDING.source_member_keys),
+            "asset_stream_keys": list(asset_stream_keys),
             "object": {"asset_id": "DexCube", "scale": 1.1, "orientation_h_wxyz": [1.0, 0.0, 0.0, 0.0]},
-            "generation_identity": STRICT_GOOD_PREGRASP_GENERATION_IDENTITY,
-            "generation_identity_digest": STRICT_GOOD_PREGRASP_GENERATION_DIGEST,
-            "physics_identity_digest": STRICT_GOOD_PREGRASP_PHYSICS_DIGEST,
+            "generation_identity": generation_identity,
+            "generation_identity_digest": generation_identity_digest,
+            "physics_identity_digest": physics_identity_digest,
             "strict_gate_digest": MVP80_STRICT_GOOD_PREGRASP_GATE.digest,
             "sobol_proposals_per_asset": STRICT_GOOD_PREGRASP_SOBOL_CANDIDATES,
             "initial_physics_candidates_per_asset": STRICT_GOOD_PREGRASP_PHYSICS_TOP_K,
@@ -797,7 +889,8 @@ def main() -> int:
             "published": published,
             "catalog_root": str(ARGS.catalog.resolve()) if published else None,
             "candidate_npz": str((evidence_root / "candidates.npz").resolve()),
-            "formal_all_80_top8_passed": len(published) == 80,
+            "all_selected_top8_passed": len(published) == ASSET_COUNT,
+            "formal_all_80_top8_passed": not COHORT_RUN and len(published) == 80,
         }
         summary_path = evidence_root / "summary.json"
         temporary = summary_path.with_suffix(".json.tmp")
@@ -814,7 +907,7 @@ def main() -> int:
         )
         if DEVELOPMENT_RUN:
             return 0 if not failed_assets else 3  # development prefix不发布formal catalog
-        return 0 if len(published) == ASSETS_PER_RUN else 3
+        return 0 if len(published) == ASSET_COUNT else 3
     finally:
         runtime_env.close()
 

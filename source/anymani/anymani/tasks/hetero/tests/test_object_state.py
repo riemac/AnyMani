@@ -75,7 +75,9 @@ def test_object_orientation_is_current_pose_not_goal_error() -> None:
         torch.tensor(((0.0, 0.0, 1.0),), dtype=torch.float64),
         torch.tensor(((0.1, -0.2, 0.3),), dtype=torch.float64),
         torch.tensor((-0.4,), dtype=torch.float64),
+        torch.tensor((0.8,), dtype=torch.float64),
     )
     assert task.shape == (1, 1, 8)
     assert torch.equal(task[0, 0, 3:6], torch.tensor((0.1, -0.2, 0.3), dtype=torch.float64))
+    assert float(task[0, 0, 6].item()) == 0.8  # $M_t$使frontier reward对critic保持Markov
     assert float(task[0, 0, 7].item()) == -0.4  # signed progress保留负值

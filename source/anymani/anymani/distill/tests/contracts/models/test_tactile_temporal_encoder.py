@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from anymani.distill.models.temporal_encoder import (
     PerJointHistoryStackEncoder,
+    PerJointRawHistoryStack,
     PerJointTactileTemporalEncoder,
     TactileTemporalConvEncoder,
 )
@@ -167,3 +168,18 @@ def test_per_joint_history_stack_preserves_order_and_joint_independence() -> Non
     assert not torch.equal(encoder(latest_changed, active)[:, 0], baseline[:, 0])
     torch.testing.assert_close(encoder(oldest_changed, active)[:, 1], baseline[:, 1])
     assert torch.count_nonzero(baseline[0, 7:]) == 0
+
+
+def test_per_joint_raw_history_stack_is_exact_oldest_to_latest_view() -> None:
+    r"""Raw route不得学习或汇聚时间轴；每个JOINT的150列必须逐值对应30×5输入。"""
+
+    encoder = PerJointRawHistoryStack(joint_count=16, frame_dim=5)
+    history = torch.arange(2 * 30 * 16 * 5, dtype=torch.float32).reshape(2, 30, 16, 5)
+    active = torch.ones(2, 16, dtype=torch.bool)
+    active[0, 7:] = False
+    stacked = encoder(history, active)
+
+    assert stacked.shape == (2, 16, 150)
+    torch.testing.assert_close(stacked[1, 3], history[1, :, 3].reshape(-1), rtol=0.0, atol=0.0)
+    assert torch.count_nonzero(stacked[0, 7:]) == 0
+    assert sum(parameter.numel() for parameter in encoder.parameters()) == 0

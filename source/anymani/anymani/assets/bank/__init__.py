@@ -8,6 +8,30 @@ from anymani.assets.bank import HandBankCfg
 ```
 """
 
+from .cohort import (
+    HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION,
+    HAND_ASSET_COHORT_SCHEMA_VERSION,
+    HandAssetCohortMember,
+    HandAssetCohortSource,
+    ResolvedHandAssetCohort,
+    finalize_hand_asset_cohort_lock,
+    load_hand_asset_cohort,
+    write_hand_asset_cohort_lock,
+)
+from .cohort_selection import (
+    LINEAGE_COHORT_SELECTION_SCHEMA_VERSION,
+    PURE_LEAP_RIGHT_A64_RECIPE,
+    PURE_LEAP_RIGHT_A128_RECIPE,
+    LineageDescriptor,
+    MutationVariantDescriptor,
+    PureLeapRightLineageRecipe,
+    ResolvedLineageCohortSelection,
+    SourceCellMotherQuota,
+    resolve_lineage_cohort_selection,
+    select_diverse_lineages,
+    select_diverse_variants,
+    write_lineage_cohort_lock,
+)
 from .dataset import (
     HAND_ASSET_DATASET_SCHEMA_VERSION,
     HandAssetDataset,
@@ -47,9 +71,16 @@ from .path_utils import (
 from .prepared_train import PREPARED_TRAIN_CACHE_SCHEMA_VERSION, resolve_prepared_train
 
 __all__ = [
+    "HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION",
+    "HAND_ASSET_COHORT_SCHEMA_VERSION",
     "HAND_ASSET_DATASET_SCHEMA_VERSION",
+    "LINEAGE_COHORT_SELECTION_SCHEMA_VERSION",
     "PREPARED_TRAIN_CACHE_SCHEMA_VERSION",
+    "PURE_LEAP_RIGHT_A64_RECIPE",
+    "PURE_LEAP_RIGHT_A128_RECIPE",
     "HandAssetDataset",
+    "HandAssetCohortMember",
+    "HandAssetCohortSource",
     "HandAssetDatasetCfg",
     "HandAssetEvaluationCfg",
     "HandAssetLineageCfg",
@@ -66,9 +97,15 @@ __all__ = [
     "HandSelectionMode",
     "HandSourceMode",
     "ResolvedHandAssetDataset",
+    "ResolvedHandAssetCohort",
     "ResolvedHandAssetPartition",
     "ResolvedHandAssetRecord",
     "HandAssetSourceKind",
+    "LineageDescriptor",
+    "MutationVariantDescriptor",
+    "PureLeapRightLineageRecipe",
+    "ResolvedLineageCohortSelection",
+    "SourceCellMotherQuota",
     "UrdfMeshRef",
     "UrdfRgba",
     "resolve_anymani_root",
@@ -76,5 +113,12 @@ __all__ = [
     "resolve_container_entry_path",
     "resolve_post_mutate_root",
     "resolve_prepared_train",
+    "resolve_lineage_cohort_selection",
+    "select_diverse_lineages",
+    "select_diverse_variants",
     "coerce_hand_container_cfg",
+    "finalize_hand_asset_cohort_lock",
+    "load_hand_asset_cohort",
+    "write_hand_asset_cohort_lock",
+    "write_lineage_cohort_lock",
 ]

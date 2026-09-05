@@ -84,7 +84,7 @@ class PalmRotationMvpActionsCfg:
 
 @configclass
 class PalmRotationMvpCommandsCfg:
-    r"""N000同义的hand$+z$、30°moving-subgoal command。"""
+    r"""Hand$+z$物理30°frontier与独立strict moving-goal辅助command。"""
 
     goal_pose = command_mdp.HeterogeneousRotationCommandCfg(
         object_name="object",
@@ -92,6 +92,7 @@ class PalmRotationMvpCommandsCfg:
         fixed_axis_h=(0.0, 0.0, 1.0),
         semantic_R_ha=tuple(ASSET_BINDING.hand_spawn_cfg.frame.semantic_R_ha),
         subgoal_angle_rad=math.pi / 6.0,
+        rotation_frontier_interval_rad=math.pi / 6.0,
         keypoint_radius_m=0.05,
         orientation_success_threshold_m=0.005,
         position_success_threshold_m=0.025,
@@ -174,7 +175,12 @@ class PalmRotationMvpObservationsCfg:
 
 @configclass
 class PalmRotationMvpRewardsCfg:
-    r"""N000 rotation＋cell-released contact/stable＋failure impulse reward。"""
+    r"""逐值继承N000成熟MDP的pose/progress/strict-goal与稳定性reward。
+
+    N000训练锚固定为full-pose keypoint 1、signed progress 5、姿态与2.5 cm位置双门goal bonus 10。
+    30°物理frontier只进入diagnostics与scale-ready evaluation，不另加训练bonus，避免物体离开anchor后仍靠
+    frontier获利。7 cm位置与45°轴偏差继续作为failure termination。
+    """
 
     pose_keypoint = RewTerm(func=reward_mdp.pose_keypoint_reward, weight=1.0, params={"command_name": "goal_pose"})
     rotation_progress = RewTerm(

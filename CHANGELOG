@@ -1,3 +1,13 @@
+0.8.3 - 2026-09-05
+==================
+
+- 修复掌旋PPO诊断性反归一化污染value normalizer，以及rl_games更新KL参考均值时与动作机制统计共享存储的问题；保留逐资产完整rollout advantage、双optimizer学习率比例、随机状态和不可变Parquet分片的恢复合同。
+- 封存Residual、带局部旁路Direct和纯contextual-token Direct三种动作路径，以及TCN/raw History30、显式TF32、窄compile和冻结checkpoint梯度审计；Actor-only迁移与同identity完整续训分开记录。
+- 将reward-release起止净圈纳入CLI与方法身份。A16同拓扑、seed42的`[0,2]`渐进释放在U1920固定120秒R16达到4.167净圈中位、12/16 viability、2/16 scale-ready；这是同拓扑异几何学习证据，不代表异拓扑或规模晋级已经成立。
+- 封存member-level cohort选择、source/canonical locks与按物理身份复用的strict预抓取路径；catalog批量发布串行化并原子提交，保留父manifest、物理几何和运行时路由证书。
+- 物理净转、30度前沿、方向一致性和存活率与strict goal tracking分别评价；补齐Critic健康、内存余量及PhysX fatal证据，启动或训练异常不再被Kit关闭流程伪装为成功。
+- 修正generated-hand任务源码被通用生成物规则忽略的问题，同步扩展包版本。该版本封存既有120秒、全owner binary训练路径；TIP-only、随机短回合与后续工程重构另行验证和发布。
+
 0.8.2 - 2026-09-03
 ==================
 

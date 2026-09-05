@@ -18,11 +18,15 @@ Catalog采用一项physical hand/object/scale key对应一个Top-8 payload。Ind
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
+import os
 import re
-from collections.abc import Mapping, Sequence
+import tempfile
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -401,6 +405,7 @@ class GoodPregraspCatalog:
         self.root = Path(root).expanduser()
         self.index_path = self.root / "index.json"
         self.records_dir = self.root / "records"
+        self.lock_path = self.root / ".publish.lock"  # 跨进程串行化index的read-modify-write临界区
 
     def _load_index(self) -> tuple[GoodPregraspIndexEntry, ...]:
         r"""读取并验证有序index；不存在表示空catalog。"""
@@ -437,35 +442,113 @@ class GoodPregraspCatalog:
 
     @staticmethod
     def _atomic_write(path: Path, data: bytes) -> None:
-        r"""在目标文件同目录写临时文件并原子replace。"""
+        r"""在目标文件同目录持久写入后原子replace，并同步文件与目录元数据。
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_bytes(data)
-        temporary.replace(path)
+        同目录临时文件保证``os.replace``不跨文件系统；随机临时名允许多个publisher先各自准备payload。
+        ``fsync(file)``保证内容先于rename落盘，``fsync(directory)``保证rename本身在掉电后仍可见。
+        """
+
+        path.parent.mkdir(parents=True, exist_ok=True)  # 临时文件与目标必须位于同一文件系统
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )  # 独立临时名避免publisher互相覆盖未提交bytes
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)  # canonical JSON bytes；payload/index均带结尾换行
+                handle.flush()
+                os.fsync(handle.fileno())  # 数据先持久，再让index或payload文件名可见
+            os.replace(temporary, path)  # 同文件系统原子切换，不暴露半写文件
+            directory_descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_descriptor)  # 持久化rename后的目录项
+            finally:
+                os.close(directory_descriptor)
+        finally:
+            temporary.unlink(missing_ok=True)  # replace成功后路径已不存在；异常时清理孤立临时文件
+
+    @contextmanager
+    def _publication_lock(self) -> Iterator[None]:
+        r"""以POSIX advisory lock串行化跨进程catalog发布临界区。
+
+        Resolver不取锁：payload总在index之前写入，index使用原子replace，因此读者只会看到完整旧版本或完整
+        新版本。锁只保护publisher之间的``load index → validate → replace index``事务。
+        """
+
+        self.root.mkdir(parents=True, exist_ok=True)  # lock file本身属于catalog根，不进入科学identity
+        with self.lock_path.open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)  # 等待其他进程完成整个index事务
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)  # 正常返回或异常均释放publisher锁
 
     def publish(self, entry: GoodPregraspEntry) -> GoodPregraspIndexEntry:
         r"""幂等发布一个Top-8 entry；同key不同payload严格冲突。"""
 
-        key_digest = entry.key.digest
-        document = entry.to_dict()
-        payload_bytes = _canonical_bytes(document)
-        entry_digest = hashlib.sha256(payload_bytes).hexdigest()
-        index_entry = GoodPregraspIndexEntry(
-            key_digest=key_digest,
-            entry_digest=entry_digest,
-            payload_relpath=f"records/{entry_digest}.json",
-        )
-        entries = list(self._load_index())
-        existing = next((item for item in entries if item.key_digest == key_digest), None)
-        if existing is not None:
-            if existing.entry_digest != entry_digest:
-                raise GoodPregraspConflictError("exact good-pregrasp key already maps to another Top-8 payload")
-            return existing
-        self._atomic_write(self.root / index_entry.payload_relpath, payload_bytes + b"\n")
-        entries.append(index_entry)
-        self._atomic_write(self.index_path, _canonical_bytes(self._index_document(entries)) + b"\n")
-        return index_entry
+        return self.publish_many((entry,))[0]
+
+    def publish_many(self, entries: Sequence[GoodPregraspEntry]) -> tuple[GoodPregraspIndexEntry, ...]:
+        r"""一次提交一组Top-8 entries，使index对resolver呈现整批旧状态或整批新状态。
+
+        所有exact keys和既有index先完成冲突校验，随后写入content-addressed payload，最后仅原子替换一次
+        index。若payload阶段中断，最多留下没有index引用的无害孤儿文件；不会暴露部分cohort membership。
+
+        Args:
+            entries (Sequence[GoodPregraspEntry]): 同一生成任务待发布的完整有序entry集合。
+
+        Returns:
+            tuple[GoodPregraspIndexEntry, ...]: 与输入顺序一致的index引用；既有相同payload保持幂等。
+
+        Raises:
+            GoodPregraspConflictError: 输入内或既有catalog中同exact key对应不同Top-8 payload。
+        """
+
+        requested = tuple(entries)  # 固化调用方序列，避免临界区内generator状态变化
+        if not requested:
+            return ()
+
+        # 输入内同key只能出现一次；先拒绝可避免同一batch形成含糊的返回顺序与覆盖语义。
+        requested_key_digests = tuple(entry.key.digest for entry in requested)
+        if len(set(requested_key_digests)) != len(requested_key_digests):
+            raise GoodPregraspConflictError("batch publication contains duplicate exact keys")
+
+        with self._publication_lock():
+            current = list(self._load_index())  # 锁内读取，防止两个publisher基于同一旧index提交
+            current_by_key = {item.key_digest: item for item in current}
+            output: list[GoodPregraspIndexEntry] = []  # 与requested严格同序
+            pending_payloads: list[tuple[GoodPregraspIndexEntry, bytes]] = []
+
+            # 先计算所有content digests并完成冲突检查；此阶段不产生任何可见写入。
+            for entry in requested:
+                key_digest = entry.key.digest  # exact hand/object/scale/protocol身份SHA-256
+                payload_bytes = _canonical_bytes(entry.to_dict())
+                entry_digest = hashlib.sha256(payload_bytes).hexdigest()  # 完整Top-8内容身份
+                index_entry = GoodPregraspIndexEntry(
+                    key_digest=key_digest,
+                    entry_digest=entry_digest,
+                    payload_relpath=f"records/{entry_digest}.json",
+                )
+                existing = current_by_key.get(key_digest)
+                if existing is not None:
+                    if existing.entry_digest != entry_digest:
+                        raise GoodPregraspConflictError(
+                            "exact good-pregrasp key already maps to another Top-8 payload"
+                        )
+                    output.append(existing)  # 同key同payload幂等，不重复写文件或index
+                    continue
+                output.append(index_entry)
+                pending_payloads.append((index_entry, payload_bytes))
+                current.append(index_entry)  # 最终index一次包含该batch全部新增keys
+                current_by_key[key_digest] = index_entry
+
+            # Payload必须先于index存在；resolver一旦看到新index就能立即验证全部引用。
+            for index_entry, payload_bytes in pending_payloads:
+                self._atomic_write(self.root / index_entry.payload_relpath, payload_bytes + b"\n")
+            if pending_payloads:
+                index_bytes = _canonical_bytes(self._index_document(current)) + b"\n"
+                self._atomic_write(self.index_path, index_bytes)  # 整批唯一可见性提交点
+            return tuple(output)
 
     def resolve(self, key: GoodPregraspKey) -> GoodPregraspEntry:
         r"""按exact key读取Top-8并重新核对payload digest与embedded key。"""

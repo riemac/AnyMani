@@ -160,12 +160,78 @@ class TactileRotationCommand(CommandTerm):
         if diagnostics is not None:
             diagnostics.capture_terminal(self._env, ids)  # 必须先冻结 terminal causes，再由 super 取 subset mean
         cell_extras = self._morphology_cell_extras(ids)  # 必须在super清零per-env metrics前分组
+        asset_extras = self._asset_episode_extras(ids)  # fixed evaluation opt-in；训练默认返回空字典
         extras = super().reset(env_ids)  # 先记录旧 episode metrics；内部会按当前 pose resample goal
         extras.update(cell_extras)
+        extras.update(asset_extras)
         self._capture_reset_state(ids)  # object reset event 已执行，此处读取本 episode 真实 reset pose
         self._refresh_goal_errors(_mask_from_ids(self.num_envs, ids, self.device))  # 新 anchor 下同步 success/termination 双门
         if diagnostics is not None:
             diagnostics.reset(self._env, ids)  # super 已清旧 metrics；此处写入新 episode actual ADR snapshot
+        return extras
+
+    def _asset_episode_extras(self, ids: torch.Tensor) -> dict[str, float]:
+        r"""按formal dataset row保存逐资产terminal充分统计量。
+
+        该路径由fixed evaluation显式开启。所有字段均保存sum与episode count，避免短episode或异步reset
+        改变分母；训练默认关闭，因而不会为2048资产生成动态TensorBoard keys。
+        """
+
+        if not bool(getattr(self.cfg, "diagnostics_log_asset_metrics", False)):
+            return {}
+        dataset_rows = tuple(int(row) for row in getattr(self.cfg, "diagnostics_asset_dataset_rows", ()))
+        local_rows = getattr(self._env, "_anymani_canonical_asset_row", None)
+        if not dataset_rows or not isinstance(local_rows, torch.Tensor) or local_rows.shape != (self.num_envs,):
+            raise RuntimeError("asset-level diagnostics require local asset rows and formal dataset-row labels")
+        metric_names = (
+            "goal_success_count",
+            "net_rotation_rad",
+            "net_rotation_turns",
+            "rotation/axis_speed_mean_rad_s",
+            "rotation/axis_speed_abs_mean_rad_s",
+            "rotation/off_axis_ang_vel_rms_rad_s",
+            "task/episode_duration_s",
+            "pose/anchor_distance_mean_m",
+            "pose/anchor_distance_max_m",
+            "pose/orientation_keypoint_error_mean_m",
+            "action/target_tracking_error_rms_rad",
+            "contact/tip_active_count_mean",
+            "contact/palm_occupancy_fraction",
+            "contact/finger_non_tip_occupancy_fraction",
+            "contact/tip_force_ema_mean_N",
+            "termination/object_out_of_anchor_fraction",
+            "termination/goal_axis_misaligned_fraction",
+            "termination/time_out_fraction",
+        )
+        extras: dict[str, float] = {}
+        reset_local_rows = local_rows[ids].to(dtype=torch.long)
+        for local_row, dataset_row in enumerate(dataset_rows):
+            member_ids = ids[reset_local_rows == local_row]
+            prefix = f"asset/{dataset_row}"
+            extras[f"{prefix}/episode_count"] = float(member_ids.numel())
+            for metric_name in metric_names:
+                metric = self.metrics.get(metric_name)
+                if isinstance(metric, torch.Tensor):
+                    extras[f"{prefix}/{metric_name}_sum"] = (
+                        float(metric[member_ids].sum().item()) if member_ids.numel() > 0 else 0.0
+                    )
+            if member_ids.numel() == 0:
+                for derived_name in (
+                    "episode_with_goal_success_count",
+                    "episode_positive_30deg_count",
+                    "episode_positive_one_turn_count",
+                    "episode_negative_30deg_count",
+                    "positive_net_rotation_rad",
+                ):
+                    extras[f"{prefix}/{derived_name}_sum"] = 0.0
+                continue
+            success = self.goal_success_count[member_ids]
+            net_rad = self.net_rotation_rad[member_ids]
+            extras[f"{prefix}/episode_with_goal_success_count_sum"] = float((success > 0.0).sum().item())
+            extras[f"{prefix}/episode_positive_30deg_count_sum"] = float((net_rad >= math.pi / 6.0).sum().item())
+            extras[f"{prefix}/episode_positive_one_turn_count_sum"] = float((net_rad >= 2.0 * math.pi).sum().item())
+            extras[f"{prefix}/episode_negative_30deg_count_sum"] = float((net_rad <= -math.pi / 6.0).sum().item())
+            extras[f"{prefix}/positive_net_rotation_rad_sum"] = float(torch.clamp(net_rad, min=0.0).sum().item())
         return extras
 
     def _morphology_cell_extras(self, ids: torch.Tensor) -> dict[str, float]:

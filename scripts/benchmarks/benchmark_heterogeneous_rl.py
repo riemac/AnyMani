@@ -29,7 +29,12 @@ import time
 from pathlib import Path
 
 from anymani.distill.diagnostics.analysis.rl import summarize_rl_runtime_artifacts
-from anymani.distill.diagnostics.recording.rl import RlRunRecorder, read_linux_process_resources
+from anymani.distill.diagnostics.recording.rl import (
+    FATAL_RUNTIME_PATTERNS,
+    RlRunRecorder,
+    read_linux_process_resources,
+    scan_appended_fatal_log,
+)
 
 
 def _descendant_pids(root_pid: int) -> set[int]:
@@ -97,6 +102,16 @@ def _gpu_process_memory_bytes(pids: set[int]) -> int | None:
     return total_mib * 1024 * 1024 if matched else None  # MiB -> bytes
 
 
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    r"""先SIGTERM再有界SIGKILL回收整个Isaac/Kit process group。"""
+
+    os.killpg(process.pid, signal.SIGTERM)  # 给Kit最多15秒释放scene与CUDA context
+    try:
+        process.wait(timeout=15.0)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)  # C++/driver损坏后不得无限等待析构
+
+
 def _parse_args() -> argparse.Namespace:
     r"""解析父进程采样参数和 ``--`` 后的原始子命令。"""
 
@@ -104,6 +119,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", type=Path, required=True, help="Unique benchmark evidence directory.")
     parser.add_argument("--sample_period_s", type=float, default=1.0, help="Parent resource sample period.")
     parser.add_argument("--timeout_s", type=float, default=0.0, help="Wall timeout; 0 disables timeout.")
+    parser.add_argument(
+        "--disable_fatal_watchdog",
+        action="store_true",
+        help="Disable built-in PhysX/CUDA log termination; intended only for watchdog contract probes.",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER, help="Command after --.")
     args = parser.parse_args()
     if args.sample_period_s <= 0.0:
@@ -135,6 +155,7 @@ def main() -> int:
             "cwd": os.getcwd(),
             "sample_period_s": float(args.sample_period_s),
             "timeout_s": float(args.timeout_s),
+            "fatal_runtime_patterns": [] if args.disable_fatal_watchdog else list(FATAL_RUNTIME_PATTERNS),
         },
     )
     stdout_path = output_dir / "stdout.log"  # 被测程序原始 stdout，不在 recorder 内重新解释
@@ -142,6 +163,8 @@ def main() -> int:
     recorder.record_phase("child_process", "start", command=args.command)
     started = time.monotonic()  # timeout 和总运行时间使用父进程单调时钟
     timed_out = False
+    fatal_runtime_line: str | None = None  # 首个不可恢复C++/CUDA日志；不在损坏后请求checkpoint
+    log_sizes = {"stdout": 0, "stderr": 0}  # 两个append-only文件的增量扫描cursor
 
     # 新 process group 允许 timeout 时同时终止 isaaclab.sh 派生的 Python/Kit 进程。
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
@@ -172,26 +195,37 @@ def main() -> int:
                 ),
                 process_tree_swap_bytes=sum(int(item.get("process_swap_bytes") or 0) for item in tree_resources),
             )
+            if not args.disable_fatal_watchdog:
+                for label, path in (("stdout", stdout_path), ("stderr", stderr_path)):
+                    log_sizes[label], matched_line = scan_appended_fatal_log(path, log_sizes[label])
+                    if matched_line is not None:
+                        fatal_runtime_line = f"{label}: {matched_line}"  # stream provenance + 原始故障行
+                        recorder.record_phase(
+                            "runtime_watchdog",
+                            "failed",
+                            fatal_runtime_line=fatal_runtime_line,
+                        )
+                        _terminate_process_group(process)  # 不让corrupted scene继续产生rollout或optimizer update
+                        break
+                if fatal_runtime_line is not None:
+                    break
             if args.timeout_s > 0.0 and time.monotonic() - started >= args.timeout_s:
                 timed_out = True
-                os.killpg(process.pid, signal.SIGTERM)  # 先给 Kit 正常关闭窗口
-                try:
-                    process.wait(timeout=15.0)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)  # 超过关闭窗口后回收整个 group
+                _terminate_process_group(process)
                 break
             time.sleep(args.sample_period_s)  # 父进程低频采样；不轮询 CUDA event
         return_code = process.wait()
 
     # 子进程退出后的最后 partial sample 保留 process_alive=False 与系统余量。
     recorder.record_resources(process.pid, phase="child_process", gpu_process_memory_bytes=None)
-    effective_code = 124 if timed_out else int(return_code)  # 常用 timeout 可识别退出码
+    effective_code = 125 if fatal_runtime_line is not None else (124 if timed_out else int(return_code))
     event = "complete" if effective_code == 0 else "failed"
     recorder.record_phase(
         "child_process",
         event,
         return_code=effective_code,
         timed_out=timed_out,
+        fatal_runtime_line=fatal_runtime_line,
         wall_seconds=time.monotonic() - started,
     )
     artifact_summary = summarize_rl_runtime_artifacts(output_dir)  # 只读已落盘 JSONL
@@ -200,6 +234,7 @@ def main() -> int:
             "status": "passed" if effective_code == 0 else "failed",
             "return_code": effective_code,
             "timed_out": timed_out,
+            "fatal_runtime_line": fatal_runtime_line,
             "stdout": str(stdout_path),
             "stderr": str(stderr_path),
             **artifact_summary,

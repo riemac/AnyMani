@@ -90,3 +90,34 @@ def test_run_analysis_prefers_newer_shards_over_stale_final(tmp_path: Path) -> N
     report = analyze_palm_rotation_run(tmp_path)
     assert report["audit"]["updates"] == [1, 2]
     assert report["last_global"]["update"] == 2
+
+
+def test_run_analysis_accepts_single_support_three_row_updates(tmp_path: Path) -> None:
+    r"""Single closure每update的global/cell/asset三行应通过动态support audit，而非89行门。"""
+
+    shared = {
+        "schema_version": "2.3.0",
+        "identity_digest": "f" * 64,
+        "update": 1,
+        "transitions": 38400,
+        "reward_mean": 1.0,
+        "net_turns_mean": 0.2,
+        "value_error_mean": 0.1,
+        "action_clamp_fraction": 0.0,
+        "residual_rms": 0.01,
+        "film_modulation_rms": 0.02,
+    }
+    rows = [
+        {**shared, "scope": "global", "scope_index": 0},
+        {**shared, "scope": "cell", "scope_index": 0, "cell_id": 0},
+        {**shared, "scope": "asset", "scope_index": 0, "dataset_row": 873, "cell_id": 0},
+    ]
+    normalized = [{name: row.get(name) for name in PALM_ROTATION_METRICS_SCHEMA} for row in rows]
+    pl.DataFrame(normalized, schema=PALM_ROTATION_METRICS_SCHEMA).write_parquet(tmp_path / "metrics.parquet")
+
+    report = analyze_palm_rotation_run(tmp_path)
+    assert report["audit"]["asset_count"] == 1
+    assert report["audit"]["active_cell_count"] == 1
+    assert report["audit"]["expected_rows_per_update"] == 3
+    assert report["audit"]["rows_per_update_expected"]
+    assert not report["audit"]["rows_per_update_89"]

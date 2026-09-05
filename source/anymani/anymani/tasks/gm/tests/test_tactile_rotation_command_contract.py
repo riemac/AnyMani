@@ -114,6 +114,8 @@ def _fake_command(batch: int = 2):
         orientation_keypoint_success_threshold=0.005,
         position_success_threshold=0.025,
         speed_ema_time_constant_s=0.25,
+        diagnostics_log_asset_metrics=False,
+        diagnostics_asset_dataset_rows=(),
         resampling_time_range=(1.0e6, 1.0e6),
     )
     command._env = SimpleNamespace(common_step_counter=0, step_dt=0.05)
@@ -199,6 +201,35 @@ def test_morphology_cell_extras_preserve_reset_subset_group_means() -> None:
     assert extras["cell/left_tips3_thumb4dof/goal_success_count_sum"] == 8.0
     assert extras["cell/left_tips4_thumb3dof/episode_count"] == 0.0
     assert extras["cell/left_tips4_thumb3dof/goal_success_count_sum"] == 0.0  # count=0表明该零值不可解释为观测
+
+
+def test_asset_episode_extras_preserve_counts_angles_and_threshold_events() -> None:
+    r"""Fixed evaluation必须按formal asset row保留episode充分统计量，而不是group mean。"""
+
+    command = _fake_command(batch=4)
+    command.cfg.diagnostics_log_asset_metrics = True
+    command.cfg.diagnostics_asset_dataset_rows = (416, 417)
+    command._env._anymani_canonical_asset_row = torch.tensor([0, 0, 1, 1])
+    command.goal_success_count = torch.tensor([0.0, 2.0, 1.0, 0.0])
+    command.net_rotation_rad = torch.tensor([0.0, math.pi / 3.0, 2.0 * math.pi, -math.pi / 2.0])
+    command.net_rotation_turns = torch.clamp(command.net_rotation_rad, min=0.0) / (2.0 * math.pi)
+    command.metrics = {
+        "goal_success_count": command.goal_success_count,
+        "net_rotation_rad": command.net_rotation_rad,
+        "net_rotation_turns": command.net_rotation_turns,
+        "task/episode_duration_s": torch.tensor([120.0, 10.0, 20.0, 5.0]),
+    }
+
+    extras = command._asset_episode_extras(torch.arange(4))
+
+    assert extras["asset/416/episode_count"] == 2.0
+    assert extras["asset/416/goal_success_count_sum"] == 2.0
+    assert extras["asset/416/episode_with_goal_success_count_sum"] == 1.0
+    assert extras["asset/416/episode_positive_30deg_count_sum"] == 1.0
+    assert extras["asset/416/episode_positive_one_turn_count_sum"] == 0.0
+    assert extras["asset/417/episode_positive_one_turn_count_sum"] == 1.0
+    assert extras["asset/417/episode_negative_30deg_count_sum"] == 1.0
+    assert math.isclose(extras["asset/417/positive_net_rotation_rad_sum"], 2.0 * math.pi, abs_tol=1.0e-6)
 
 
 def test_partial_reset_preserves_other_env_and_blocks_same_stamp_delta() -> None:

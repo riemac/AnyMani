@@ -55,6 +55,12 @@ parser.add_argument(
     "--use_last_checkpoint", action="store_true", default=True, help="Use the latest checkpoint in a run."
 )
 parser.add_argument(
+    "--asset-metrics",
+    action="store_true",
+    default=False,
+    help="Record per-asset terminal episode metrics into --metrics-output; fixed evaluation only.",
+)
+parser.add_argument(
     "--use_best_checkpoint", action="store_true", default=False, help="Use `<agent_name>.pth` instead of latest."
 )
 parser.add_argument(
@@ -67,7 +73,7 @@ parser.add_argument(
     "--metrics-output",
     type=str,
     default=None,
-    help="Optional JSON path for fixed-time morphology-cell episode sum/count metrics.",
+    help="Optional JSON path for fixed-time cell/asset episode sum/count metrics.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run at env step real time if possible.")
 AppLauncher.add_app_launcher_args(parser)
@@ -151,8 +157,8 @@ def _distill_log_root(agent_cfg: dict) -> Path:
     return ANYMANI_ROOT / "logs" / "distill" / "rl_games" / config_name
 
 
-def _accumulate_cell_episode_metrics(accumulator: dict[str, float], infos: object) -> None:
-    r"""累积CommandTerm写入的绝对cell episode count/sums；忽略非terminal step。"""
+def _accumulate_grouped_episode_metrics(accumulator: dict[str, float], infos: object) -> None:
+    r"""累积CommandTerm写入的绝对cell/asset episode count与sums。"""
 
     if not isinstance(infos, dict):
         return
@@ -163,14 +169,38 @@ def _accumulate_cell_episode_metrics(accumulator: dict[str, float], infos: objec
             mappings.append(container)
     for mapping in mappings:
         for key, value in mapping.items():
-            if not isinstance(key, str) or "cell/" not in key:
+            if not isinstance(key, str) or ("cell/" not in key and "asset/" not in key):
                 continue
             if not (key.endswith("/episode_count") or key.endswith("_sum")):
                 continue
             scalar = float(value.item()) if isinstance(value, torch.Tensor) else float(value)
-            if key.startswith("cell/"):
+            if key.startswith(("cell/", "asset/")):
                 key = f"Metrics/goal_pose/{key}"
             accumulator[key] = accumulator.get(key, 0.0) + scalar
+
+
+def _restore_group_metrics(accumulated: dict[str, float], prefix: str) -> dict[str, dict[str, float]]:
+    r"""由任意`prefix/<label>/metric_sum`与episode_count恢复episode-weighted group means。"""
+
+    groups: dict[str, dict[str, float]] = {}
+    for key, value in accumulated.items():
+        if not key.startswith(prefix) or not key.endswith("/episode_count"):
+            continue
+        label = key[len(prefix) : -len("/episode_count")]
+        count = value
+        group: dict[str, float] = {"episode_count": count}
+        metric_prefix = f"{prefix}{label}/"
+        for metric_key, metric_sum in accumulated.items():
+            if metric_key.startswith(metric_prefix) and metric_key.endswith("_sum"):
+                metric_name = metric_key[len(metric_prefix) : -len("_sum")]
+                group[metric_name] = metric_sum / count if count > 0.0 else 0.0
+        if "net_rotation_rad" in group:
+            group["derived/net_rotation_deg_per_episode"] = group["net_rotation_rad"] * 180.0 / math.pi
+        duration = group.get("task/episode_duration_s", 0.0)
+        if duration > 0.0 and "net_rotation_rad" in group:
+            group["derived/time_weighted_signed_speed_rad_s"] = group["net_rotation_rad"] / duration
+        groups[label] = group
+    return groups
 
 
 def _write_fixed_time_metrics(
@@ -184,28 +214,33 @@ def _write_fixed_time_metrics(
 ) -> None:
     r"""把固定时长renewal-process统计恢复为各cell及全局episode均值。"""
 
-    cells: dict[str, dict[str, float]] = {}
-    prefix = "Metrics/goal_pose/cell/"
-    for key, value in accumulated.items():
-        if not key.startswith(prefix) or not key.endswith("/episode_count"):
-            continue
-        label = key[len(prefix) : -len("/episode_count")]
-        count = value
-        cell: dict[str, float] = {"episode_count": count}
-        metric_prefix = f"{prefix}{label}/"
-        for metric_key, metric_sum in accumulated.items():
-            if metric_key.startswith(metric_prefix) and metric_key.endswith("_sum"):
-                metric_name = metric_key[len(metric_prefix) : -len("_sum")]
-                cell[metric_name] = metric_sum / count if count > 0.0 else 0.0
-        cells[label] = cell
-    total_count = sum(cell["episode_count"] for cell in cells.values())
+    cells = _restore_group_metrics(accumulated, "Metrics/goal_pose/cell/")
+    assets = _restore_group_metrics(accumulated, "Metrics/goal_pose/asset/")
+    aggregation_groups = assets or cells
+    total_count = sum(group["episode_count"] for group in aggregation_groups.values())
     global_metrics: dict[str, float] = {"episode_count": total_count}
-    metric_names = {name for cell in cells.values() for name in cell if name != "episode_count"}
+    metric_names = {
+        name
+        for group in aggregation_groups.values()
+        for name in group
+        if name != "episode_count" and not name.startswith("derived/")
+    }
     for metric_name in metric_names:
-        numerator = sum(cell.get(metric_name, 0.0) * cell["episode_count"] for cell in cells.values())
+        numerator = sum(
+            group.get(metric_name, 0.0) * group["episode_count"] for group in aggregation_groups.values()
+        )
         global_metrics[metric_name] = numerator / total_count if total_count > 0.0 else 0.0
+    if "net_rotation_rad" in global_metrics:
+        global_metrics["derived/net_rotation_deg_per_episode"] = (
+            global_metrics["net_rotation_rad"] * 180.0 / math.pi
+        )
+        duration = global_metrics.get("task/episode_duration_s", 0.0)
+        if duration > 0.0:
+            global_metrics["derived/time_weighted_signed_speed_rad_s"] = global_metrics["net_rotation_rad"] / duration
+    if aggregation_groups and abs(total_count - done_count) > 1.0e-6:
+        raise RuntimeError(f"terminal metric count {total_count} disagrees with done count {done_count}")
     output = {
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "artifact_type": "anymani.heterogeneous_ppo.fixed_time_evaluation",
         "checkpoint": str(Path(checkpoint).resolve()),
         "seed": seed,
@@ -214,6 +249,7 @@ def _write_fixed_time_metrics(
         "aggregation": "renewal_process_episode_sum_over_count",
         "global_metrics": global_metrics,
         "cell_metrics": cells,
+        "asset_metrics": assets,
     }
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -252,6 +288,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.scene.num_envs = int(args_cli.num_envs) if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     env_cfg.seed = _resolve_seed(agent_cfg)  # env reset 随机性必须在构造前固定
+    if args_cli.asset_metrics:
+        command_cfg = getattr(getattr(env_cfg, "commands", None), "goal_pose", None)
+        if command_cfg is None or not hasattr(command_cfg, "diagnostics_log_asset_metrics"):
+            raise RuntimeError("--asset-metrics requires TactileRotationCommandCfg asset diagnostics")
+        command_cfg.diagnostics_log_asset_metrics = True
 
     resume_path = _resolve_checkpoint(agent_cfg)
     log_dir = os.path.dirname(os.path.dirname(resume_path))  # `<run>/nn/<ckpt>.pth -> <run>`
@@ -323,7 +364,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # 有限步 headless play 验证恢复后的首次 action/step 生命周期；证据不解释策略任务表现。
     timestep = 0
-    accumulated_cell_metrics: dict[str, float] = {}
+    accumulated_group_metrics: dict[str, float] = {}
     done_count = 0
     record_optional_rl_phase("playback", "start", requested_steps=args_cli.steps)
     while simulation_app.is_running():
@@ -335,7 +376,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             step_done_count = int(torch.count_nonzero(dones).item())
             done_count += step_done_count
             if step_done_count > 0:
-                _accumulate_cell_episode_metrics(accumulated_cell_metrics, infos)
+                _accumulate_grouped_episode_metrics(accumulated_group_metrics, infos)
             if len(dones) > 0 and agent.is_rnn and agent.states is not None:
                 for state in agent.states:
                     state[:, dones, :] = 0.0
@@ -358,7 +399,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             seed=int(env_cfg.seed),
             completed_steps=timestep,
             done_count=done_count,
-            accumulated=accumulated_cell_metrics,
+            accumulated=accumulated_group_metrics,
         )
     env.close()
 

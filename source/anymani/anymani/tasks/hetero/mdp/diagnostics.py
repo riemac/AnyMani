@@ -15,6 +15,8 @@ def asset_episode_sufficient_statistics(
     goal_success_pulse: torch.Tensor,
     net_rotation_rad: torch.Tensor,
     positive_net_rotation_turns: torch.Tensor,
+    max_positive_net_rotation_rad: torch.Tensor,
+    rotation_frontier_count: torch.Tensor,
     episode_duration_s: torch.Tensor,
     termination_bits: Mapping[str, torch.Tensor],
     horizon_s: float,
@@ -31,6 +33,8 @@ def asset_episode_sufficient_statistics(
         goal_success_pulse,
         net_rotation_rad,
         positive_net_rotation_turns,
+        max_positive_net_rotation_rad,
+        rotation_frontier_count,
         episode_duration_s,
         *termination_bits.values(),
     )
@@ -42,7 +46,8 @@ def asset_episode_sufficient_statistics(
     signed_turns = net_rotation_rad / (2.0 * torch.pi)
     reached_full_turn = net_rotation_rad >= 2.0 * torch.pi
     reached_negative_full_turn = net_rotation_rad <= -2.0 * torch.pi
-    reached_positive_30deg = net_rotation_rad >= torch.pi / 6.0
+    max_positive_turns = max_positive_net_rotation_rad / (2.0 * torch.pi)
+    reached_positive_30deg = rotation_frontier_count >= 1.0  # 历史到达语义，不受terminal回退影响
     reached_negative_30deg = net_rotation_rad <= -torch.pi / 6.0
     extras: dict[str, float] = {}
     selected_rows = dataset_row_by_env[reset_env_ids]
@@ -62,6 +67,10 @@ def asset_episode_sufficient_statistics(
         extras[f"{prefix}/positive_net_rotation_turns_sum"] = float(
             positive_net_rotation_turns[member_ids].sum().item()
         )
+        extras[f"{prefix}/max_positive_net_rotation_turns_sum"] = float(
+            max_positive_turns[member_ids].sum().item()
+        )
+        extras[f"{prefix}/rotation_frontier_count_sum"] = float(rotation_frontier_count[member_ids].sum().item())
         extras[f"{prefix}/reached_positive_full_turn_sum"] = float(
             reached_full_turn[member_ids].to(dtype=torch.float32).sum().item()
         )

@@ -21,14 +21,16 @@ Residual最后一层权重与bias初始化为0，因此初始策略逐元素严�
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 from torch import nn
 
 from .backbones.geometry_transformer import GraphBiasedTransformer, GraphBiasedTransformerCfg
-from .temporal_encoder import PerJointTactileTemporalEncoder
+from .temporal_encoder import PerJointRawHistoryStack, PerJointTactileTemporalEncoder
 
 JOINT_COUNT = 16
 TIP_COUNT = 4
@@ -43,6 +45,48 @@ HAND_WIDTH = 64
 BASE_ACTION_LIMIT = 0.8
 RESIDUAL_LIMIT = 0.2
 FILM_LIMIT = 0.25
+
+
+class _PalmRotationGraphBiasedTransformer(GraphBiasedTransformer):
+    r"""以直接Embedding查表形成掌旋PPO的静态图偏置。
+
+    对关系桶$d_{ij}$和每头偏置表$W\in\mathbb R^{K\times H}$，生产公式为：
+
+    $$
+    b_{ijh}=W_{d_{ij},h}.
+    $$
+
+    直接查表与$\operatorname{onehot}(d_{ij})^TW$前向逐值相同，但不物化
+    ``[B,21,21,K]`` FP32 one-hot activation。MVP80每个activation slice同时运行一层actor graph与
+    两层共享同一bias的critic graph；该局部实现减少PPO update显存与SGEMM，而不改变参数、checkpoint key、
+    attention公式或N040 retained encoder的独立compile合同。
+    """
+
+    def _graph_bias(
+        self,
+        shortest_path: torch.Tensor,
+        parent_direction: torch.Tensor,
+        child_direction: torch.Tensor,
+    ) -> torch.Tensor:
+        r"""返回三类关系Embedding之和，形状为`[H,N,N]`或`[B,H,N,N]`。"""
+
+        matrices = (shortest_path, parent_direction, child_direction)  # 三种同轴离散图关系
+        if any(matrix.ndim not in {2, 3} or matrix.shape[-2] != matrix.shape[-1] for matrix in matrices):
+            raise ValueError("graph relation matrices must have square shape [N_E,N_E] or [B,N_E,N_E]")
+        if parent_direction.shape != shortest_path.shape or child_direction.shape != shortest_path.shape:
+            raise ValueError("all graph relation matrices must have identical shape")
+
+        shortest = shortest_path.clamp(min=0, max=self.max_graph_distance)  # 无向图距离桶$d_{ij}^{sp}$
+        parent = parent_direction.clamp(min=0, max=self.max_graph_distance)  # parent方向桶$d_{ij}^{pa}$
+        child = child_direction.clamp(min=0, max=self.max_graph_distance)  # child方向桶$d_{ij}^{ch}$
+        bias = (
+            self.shortest_path_bias(shortest)
+            + self.parent_direction_bias(parent)
+            + self.child_direction_bias(child)
+        )  # `[...,N,N,H]`，三类可学习head-wise scalar bias相加
+        if bias.ndim == 3:
+            return bias.permute(2, 0, 1).contiguous()  # 单结构共享图`[H,N,N]`
+        return bias.permute(0, 3, 1, 2).contiguous()  # 逐sample异构图`[B,H,N,N]`
 
 
 def _bool_mask(value: torch.Tensor, *, name: str, shape: tuple[int, ...]) -> torch.Tensor:
@@ -73,10 +117,13 @@ def masked_max(tokens: torch.Tensor, mask: torch.Tensor, *, dim: int) -> torch.T
 
     if tokens.shape[:-1] != mask.shape:
         raise ValueError("masked_max tokens/mask shapes disagree")
+    has_value = mask.any(dim=dim, keepdim=True)  # `[... ,1,...]`，保留归约轴供安全broadcast
+    empty_slice = ~has_value  # 没有有效JOINT/TIP的padding group
+    safe_tokens = torch.where(empty_slice.unsqueeze(-1), torch.zeros_like(tokens), tokens)
+    effective_mask = mask | empty_slice.expand_as(mask)  # 全空slice把全部零sentinels视为有效
     minimum = torch.finfo(tokens.dtype).min
-    result = tokens.masked_fill(~mask.unsqueeze(-1), minimum).amax(dim=dim)
-    has_value = mask.any(dim=dim, keepdim=False).unsqueeze(-1)
-    return torch.where(has_value, result, torch.zeros_like(result))
+    result = safe_tokens.masked_fill(~effective_mask.unsqueeze(-1), minimum).amax(dim=dim)
+    return result  # 非空slice是原masked max；全空slice由zero sentinels得到精确0且零梯度
 
 
 @dataclass(frozen=True)
@@ -239,13 +286,14 @@ class PalmRotationCriticObservation:
 
 @dataclass(frozen=True)
 class PalmRotationActorOutput:
-    r"""Factorized Gaussian mean分解与共享log-standard-deviation。"""
+    r"""Actor mean、共享log-standard-deviation与arm-specific机制分解。"""
 
-    mean: torch.Tensor  # `[B,16]`，base+residual
-    base_mean: torch.Tensor  # `[B,16]`
-    residual_mean: torch.Tensor  # `[B,16]`，绝对值不超过0.2
+    mean: torch.Tensor  # `[B,16]`，最终有界物理动作均值
     film_modulation_rms: torch.Tensor  # `[B,16]`，geometry对dynamic local hidden的RMS改变量
     log_std: torch.Tensor  # scalar
+    base_mean: torch.Tensor | None = None  # residual/base arm；两种direct为None
+    residual_mean: torch.Tensor | None = None  # residual/base arm；两种direct为None
+    direct_mean: torch.Tensor | None = None  # 两种direct arm；residual/base为None
 
 
 class PalmRotationResidualActor(nn.Module):
@@ -258,8 +306,13 @@ class PalmRotationResidualActor(nn.Module):
         initial_log_std: float = -0.5,
         max_log_std: float = -0.43,
         base_action_limit: float = BASE_ACTION_LIMIT,
+        history_encoder: Literal["tcn", "raw_stack"] = "tcn",
     ) -> None:
-        r"""构造TCN、hierarchical pooling、base head与zero-init residual head。"""
+        r"""构造History30路径、hierarchical pooling、base head与zero-init residual head。
+
+        ``tcn``先把每个JOINT的$30\times5$序列压成32D；``raw_stack``保留全部150个固定lag标量，
+        直接交给共享local FiLM-MLP。两者读取完全相同的actor observation，后者不添加object privilege。
+        """
 
         super().__init__()
         if initial_log_std > max_log_std:
@@ -269,13 +322,24 @@ class PalmRotationResidualActor(nn.Module):
         self.residual_enabled = bool(residual_enabled)
         self.max_log_std = float(max_log_std)  # $\sigma_{max}=e^{-0.43}\approx0.65$，匹配N000 early budget
         self.base_action_limit = float(base_action_limit)  # base保留80% authority，residual保留20%
-        self.history_encoder = PerJointTactileTemporalEncoder(
-            joint_count=JOINT_COUNT,
-            frame_dim=JOINT_FRAME_WIDTH,
-            latent_dim=HISTORY_WIDTH,
-            hidden_channels=(32, 32, 32),
-        )
-        local_input_width = JOINT_FRAME_WIDTH + 2 + 2 + HISTORY_WIDTH
+        self.history_encoder_name = history_encoder  # checkpoint外run identity明确区分两种时间归纳偏置
+        if history_encoder == "tcn":
+            self.history_encoder: nn.Module = PerJointTactileTemporalEncoder(
+                joint_count=JOINT_COUNT,
+                frame_dim=JOINT_FRAME_WIDTH,
+                latent_dim=HISTORY_WIDTH,
+                hidden_channels=(32, 32, 32),
+            )  # `[B,30,16,5] -> [B,16,32]` learned temporal compression
+            history_width = HISTORY_WIDTH  # TCN latent宽度32
+        elif history_encoder == "raw_stack":
+            self.history_encoder = PerJointRawHistoryStack(
+                joint_count=JOINT_COUNT,
+                frame_dim=JOINT_FRAME_WIDTH,
+            )  # `[B,30,16,5] -> [B,16,150]`，无learned bottleneck
+            history_width = HISTORY_LENGTH * JOINT_FRAME_WIDTH  # $30\times5=150$
+        else:
+            raise ValueError(f"unknown palm-rotation history encoder: {history_encoder!r}")
+        local_input_width = JOINT_FRAME_WIDTH + 2 + 2 + history_width  # current/limits/lag/q/history
         self.local_encoder = nn.Sequential(
             nn.LayerNorm(local_input_width),
             nn.Linear(local_input_width, LOCAL_WIDTH),
@@ -317,7 +381,7 @@ class PalmRotationResidualActor(nn.Module):
         self.palm_dynamic_projection = nn.Linear(HAND_WIDTH, GEOMETRY_WIDTH)
         self.joint_dynamic_projection = nn.Linear(LOCAL_WIDTH, GEOMETRY_WIDTH)
         self.tip_dynamic_projection = nn.Linear(FINGER_WIDTH, GEOMETRY_WIDTH)
-        self.global_backbone = GraphBiasedTransformer(
+        self.global_backbone = _PalmRotationGraphBiasedTransformer(
             GraphBiasedTransformerCfg(
                 hidden_width=GEOMETRY_WIDTH,
                 layers=1,
@@ -377,7 +441,9 @@ class PalmRotationResidualActor(nn.Module):
         gamma = FILM_LIMIT * torch.tanh(gamma_raw)  # 有界multiplicative geometry modulation
         beta = FILM_LIMIT * torch.tanh(beta_raw)  # 有界additive geometry modulation
         local = ((1.0 + gamma) * dynamic_local + beta) * joint_weight  # $h^{loc}$，ghost严格为0
-        film_modulation_rms = torch.sqrt((local - dynamic_local).square().mean(dim=-1))  # `[B,16]`
+        film_modulation_rms = torch.linalg.vector_norm(local - dynamic_local, dim=-1) / math.sqrt(
+            LOCAL_WIDTH
+        )  # `[B,16]`；与sqrt(mean(square))逐值相同，零向量处autograd采用有限零次梯度
 
         # Canonical JOINT axis是depth-major；转成`[B,finger,depth,D]`后先在每根finger内pool。
         batch = local.shape[0]
@@ -419,19 +485,7 @@ class PalmRotationResidualActor(nn.Module):
         base = torch.where(observation.jnt_valid, base, torch.zeros_like(base))
 
         if self.residual_enabled:
-            dynamic = torch.zeros_like(geometry.tokens)
-            dynamic[:, 0] = self.palm_dynamic_projection(hand)
-            dynamic[:, 1:17] = self.joint_dynamic_projection(local)
-            dynamic[:, 17:21] = self.tip_dynamic_projection(finger)
-            tokens = self.geometry_adapter(geometry.tokens) + dynamic
-            tokens = tokens + self.owner_contact_projection(observation.owner_contact)
-            contextual = self.global_backbone(
-                tokens,
-                geometry.shortest_path,
-                geometry.parent_direction,
-                geometry.child_direction,
-                geometry.owner_valid,
-            )
+            contextual = self._contextual_tokens(observation, geometry, local, finger, hand)
             raw_residual = self.residual_head(torch.cat((contextual[:, 1:17], local), dim=-1)).squeeze(-1)
             residual = RESIDUAL_LIMIT * torch.tanh(raw_residual)
             residual = torch.where(observation.jnt_valid, residual, torch.zeros_like(residual))
@@ -440,10 +494,113 @@ class PalmRotationResidualActor(nn.Module):
         mean = base + residual
         return PalmRotationActorOutput(
             mean=mean,
-            base_mean=base,
-            residual_mean=residual,
             film_modulation_rms=film_modulation_rms,
             log_std=self.global_log_std,
+            base_mean=base,
+            residual_mean=residual,
+        )
+
+    def _contextual_tokens(
+        self,
+        observation: PalmRotationActorObservation,
+        geometry: PalmRotationGeometry,
+        local: torch.Tensor,
+        finger: torch.Tensor,
+        hand: torch.Tensor,
+    ) -> torch.Tensor:
+        r"""把共享dynamic owner states与冻结geometry送入一层整手graph context。
+
+        PALM接收whole-hand summary，JOINT接收local FiLM state，TIP接收finger summary；owner contact再以同序
+        binary embedding叠加。Residual与direct arm逐值共享该$X^a\to H^a$变换。
+        """
+
+        dynamic = torch.zeros_like(geometry.tokens)  # `[B,21,128]` actor-specific动态owner tokens
+        dynamic[:, 0] = self.palm_dynamic_projection(hand)
+        dynamic[:, 1:17] = self.joint_dynamic_projection(local)
+        dynamic[:, 17:21] = self.tip_dynamic_projection(finger)
+        tokens = self.geometry_adapter(geometry.tokens) + dynamic
+        tokens = tokens + self.owner_contact_projection(observation.owner_contact)
+        return self.global_backbone(
+            tokens,
+            geometry.shortest_path,
+            geometry.parent_direction,
+            geometry.child_direction,
+            geometry.owner_valid,
+        )
+
+
+class PalmRotationDirectActor(PalmRotationResidualActor):
+    r"""用contextual JOINT tokens产生全authority动作的两种matched Direct actor。
+
+    该arm共享residual actor的History30、dynamic-first FiLM、finger/hand pooling、owner adapters与一层graph
+    backbone，但没有base/residual动作加法分解。Canonical ``direct_token``只读取contextual token：
+
+    $$
+    \mu_{t,j}=\tanh f_{direct}(H^a_{t,j})\in[-1,1].
+    $$
+
+    已有``direct``checkpoint保持``[H^a_{t,j},Z^{a,loc}_{t,j}]``的local-skip语义。Token-only用96维head
+    hidden，使首层权重数$128\times96$与local-skip的$192\times64$相同；两者及Residual总参数量差保持在
+    ±5%内。它们都不是``residual_enabled=False``，后者表示只有local base、没有global context。
+    """
+
+    def __init__(
+        self,
+        *,
+        initial_log_std: float = -0.5,
+        max_log_std: float = -0.43,
+        history_encoder: Literal["tcn", "raw_stack"] = "tcn",
+        local_skip: bool = True,
+    ) -> None:
+        r"""构造共享trunk，并按显式feature-route以direct head替换两条Residual动作heads。"""
+
+        super().__init__(
+            residual_enabled=True,
+            initial_log_std=initial_log_std,
+            max_log_std=max_log_std,
+            base_action_limit=BASE_ACTION_LIMIT,
+            history_encoder=history_encoder,
+        )
+        del self.base_head  # direct没有local base动作读出；local仍进入context与最终head
+        del self.residual_head  # direct没有0.2 correction语义
+        del self.residual_enabled  # 防止外部把direct误判成residual-off
+        self.local_skip = bool(local_skip)  # true保留历史concat bypass；false对应notation-contract token-only
+        head_input_width = GEOMETRY_WIDTH + LOCAL_WIDTH if self.local_skip else GEOMETRY_WIDTH
+        head_hidden_width = 64 if self.local_skip else 96  # 两种Direct首层均为12,288个weights
+        self.direct_head = nn.Sequential(
+            nn.LayerNorm(head_input_width),
+            nn.Linear(head_input_width, head_hidden_width),
+            nn.GELU(),
+            nn.Linear(head_hidden_width, 1),
+        )
+        nn.init.orthogonal_(self.direct_head[-1].weight, gain=0.01)  # type: ignore[arg-type]
+        nn.init.zeros_(self.direct_head[-1].bias)  # type: ignore[arg-type]
+
+    def forward(
+        self,
+        observation: PalmRotationActorObservation,
+        geometry: PalmRotationGeometry,
+    ) -> PalmRotationActorOutput:
+        r"""输出全authority direct mean、FiLM机制量与共享探索尺度。"""
+
+        if observation.jnt_current.shape[0] != geometry.tokens.shape[0]:
+            raise ValueError("actor observation and geometry batch sizes disagree")
+        torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]
+            torch.all(observation.owner_valid == geometry.owner_valid), "actor/geometry masks disagree"
+        )
+        local, finger, hand, film_modulation_rms = self._local_and_hand(observation, geometry)
+        contextual = self._contextual_tokens(observation, geometry, local, finger, hand)
+        direct_input = (
+            torch.cat((contextual[:, 1:17], local), dim=-1) if self.local_skip else contextual[:, 1:17]
+        )  # local-skip为`[B,16,192]`；token-only为$H^a_{t,j}\in\mathbb R^{128}$
+        raw_direct = self.direct_head(direct_input).squeeze(-1)
+        mean = torch.tanh(raw_direct)  # 完整物理动作authority$[-1,1]$
+        mean = torch.where(observation.jnt_valid, mean, torch.zeros_like(mean))  # ghost严格零
+        return PalmRotationActorOutput(
+            mean=mean,
+            film_modulation_rms=film_modulation_rms,
+            log_std=self.global_log_std,
+            direct_mean=mean,
         )
 
 
@@ -461,7 +618,7 @@ class PalmRotationStructuredCritic(nn.Module):
             nn.GELU(),
             nn.Linear(128, 128),
         )  # Linear→LN→activation是TOPPO critic-only LN-c对应边界
-        self.backbone = GraphBiasedTransformer(
+        self.backbone = _PalmRotationGraphBiasedTransformer(
             GraphBiasedTransformerCfg(
                 hidden_width=128,
                 layers=2,
@@ -527,20 +684,33 @@ class PalmRotationActorCritic(nn.Module):
     def __init__(
         self,
         *,
-        residual_enabled: bool = True,
+        arm: Literal["base", "residual", "direct", "direct_token"] = "residual",
         initial_log_std: float = -0.5,
         max_log_std: float = -0.43,
         base_action_limit: float = BASE_ACTION_LIMIT,
+        history_encoder: Literal["tcn", "raw_stack"] = "tcn",
     ) -> None:
-        r"""分别实例化actor与critic；冻结N040不属于本module。"""
+        r"""按显式arm实例化actor与共同critic；冻结N040不属于本module。"""
 
         super().__init__()
-        self.actor = PalmRotationResidualActor(
-            residual_enabled=residual_enabled,
-            initial_log_std=initial_log_std,
-            max_log_std=max_log_std,
-            base_action_limit=base_action_limit,
-        )
+        if arm in {"direct", "direct_token"}:
+            self.actor: PalmRotationResidualActor | PalmRotationDirectActor = PalmRotationDirectActor(
+                initial_log_std=initial_log_std,
+                max_log_std=max_log_std,
+                history_encoder=history_encoder,
+                local_skip=arm == "direct",
+            )
+        elif arm in {"base", "residual"}:
+            self.actor = PalmRotationResidualActor(
+                residual_enabled=arm == "residual",
+                initial_log_std=initial_log_std,
+                max_log_std=max_log_std,
+                base_action_limit=base_action_limit,
+                history_encoder=history_encoder,
+            )
+        else:
+            raise ValueError(f"unsupported palm-rotation actor arm: {arm!r}")
+        self.arm = arm  # checkpoint/model诊断显式区分Residual、local-skip Direct与token-only Direct
         self.critic = PalmRotationStructuredCritic()
 
     def trainable_parameter_sets(self) -> tuple[set[int], set[int]]:
@@ -564,6 +734,7 @@ __all__ = [
     "PalmRotationActorObservation",
     "PalmRotationActorOutput",
     "PalmRotationCriticObservation",
+    "PalmRotationDirectActor",
     "PalmRotationGeometry",
     "PalmRotationResidualActor",
     "PalmRotationStructuredCritic",

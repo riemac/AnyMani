@@ -18,10 +18,12 @@ params:
   network:
     name: anymani_palm_rotation
     palm_rotation:
-      residual_enabled: true         # base-only短matched arm由CLI显式覆盖为false
+      arm: residual                   # CLI显式选择residual/base/direct/direct_token；后两者分别含/不含local skip
       initial_log_std: -0.5          # 一个global scalar log sigma，exp(-0.5)约0.607
       max_log_std: -0.43             # N000同transition预算约sigma=0.65；抑制clamp-driven jitter
       base_action_limit: 0.8         # base 80% authority + global residual 20% = exact [-1,1] mean
+      history_encoder: tcn           # CLI可切raw_stack；两者消费同一逐JOINT History30
+      compile_mode: null             # CLI可显式选default；只编译actor/critic forward，不包装rl_games model
 
   load_checkpoint: false
   load_path: ''
@@ -37,8 +39,9 @@ params:
     normalize_input: false           # actor raw packet不做running input normalization
     normalize_value: true            # 全80资产共同维护global value normalization
     normalize_advantage: true        # 全76,800 rollout batch共同标准化GAE
-    value_bootstrap: true
-    torch_compile: false
+    advantage_normalization_scope: global  # CLI候选per_asset_rollout；完整rollout moments冻结复用5轮PPO
+    value_bootstrap: false           # 120 s是finite-horizon真终点，不把timeout作为可继续状态bootstrap
+    torch_compile: false             # 外部Runner整model编译会破坏custom lifecycle；始终由窄forward边界拥有
     rsl_style_console: true
     num_actors: 2560                 # 80 assets × 32 replicas；唯一fallback为1280
     asset_count: 80
@@ -49,6 +52,7 @@ params:
     learning_rate: 3.0e-4            # TCN/local/base/head/global log_std
     adaptive_lr_max: 3.0e-4           # KL scheduler只可降低/恢复，不得越过方法LR锚点
     residual_learning_rate: 1.0e-4   # one-block graph residual branch
+    contextual_learning_rate: 1.0e-4 # direct one-block graph action path；与residual做matched比较
     critic_learning_rate: 5.0e-4     # completely independent privileged critic Adam
     lr_schedule: adaptive
     schedule_type: standard
@@ -73,7 +77,10 @@ params:
     seq_length: 1                    # History30属于observation，actor不是rl_games RNN
     bounds_loss_coef: 1.0e-4
     diagnostics_flush_updates: 50   # checkpoint前另行强制flush，不允许checkpoint领先于Parquet
+    gradient_probe_frequency: 500   # 仅首个stratified minibatch计算head-level per-asset Gram
+    full_gradient_shadow_frequency: 0  # 显式短probe才计算global/per-asset完整Actor梯度与replica-half自一致性
     gpu_memory_fraction_limit: 0.85  # scene+rollout buffer+model+optimizers的CUDA allocated峰值门
+    gpu_driver_free_memory_bytes_min: 2147483648  # PhysX/context也占显存；update边界至少保留2 GiB全device余量
 
     player:
       deterministic: true

@@ -6,8 +6,6 @@ Object block描述当前物理状态，task block描述command/error/progress；
 
 from __future__ import annotations
 
-import math
-
 import torch
 
 from .task_math import quaternion_to_matrix_wxyz
@@ -66,25 +64,27 @@ def task_state(
     axis_h: torch.Tensor,
     goal_error_so3_h_rad: torch.Tensor,
     net_rotation_rad: torch.Tensor,
-    *,
-    subgoal_angle_rad: float = math.pi / 6.0,
+    max_positive_net_rotation_rad: torch.Tensor,
 ) -> torch.Tensor:
-    r"""构造$O^c_{t,\mathrm{task}}=[\hat k^h,\phi^h,\theta_{goal},\Psi]$，形状$[B,1,8]$。"""
+    r"""构造$O^c_{t,\mathrm{task}}=[\hat k^h,\phi^h,M_t,\Psi_t]$，形状$[B,1,8]$。
+
+    当前净转角$\Psi_t$单独不能决定frontier reward，因为物体可能退回曾到达的角度；历史正向最大值
+    $M_t=\max_{s\le t}\max(0,\Psi_s)$补齐这一episode状态。30°间隔是固定task identity，不作为冗余常量输入。
+    """
 
     if axis_h.ndim != 2 or axis_h.shape[1] != 3 or goal_error_so3_h_rad.shape != axis_h.shape:
         raise ValueError("axis_h and goal error must share [B,3]")
-    if net_rotation_rad.shape != axis_h.shape[:1]:
-        raise ValueError("net_rotation_rad must have shape [B]")
+    if net_rotation_rad.shape != axis_h.shape[:1] or max_positive_net_rotation_rad.shape != axis_h.shape[:1]:
+        raise ValueError("net rotation and frontier maximum must have shape [B]")
     axis_norm = torch.linalg.vector_norm(axis_h, dim=-1, keepdim=True)
     if bool((axis_norm < 1.0e-12).any().item()):
         raise ValueError("task axis must be non-zero")
     normalized_axis = axis_h / axis_norm
-    subgoal = torch.full_like(net_rotation_rad, subgoal_angle_rad)
     return torch.cat(
         (
             normalized_axis,
             goal_error_so3_h_rad,
-            subgoal.unsqueeze(-1),
+            max_positive_net_rotation_rad.unsqueeze(-1),
             net_rotation_rad.unsqueeze(-1),
         ),
         dim=-1,

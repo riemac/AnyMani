@@ -11,9 +11,14 @@ from anymani.pregrasp.mvp80_strict_search import (
     initial_joint_candidates,
     low_rank_cem_candidates,
     sobol_bank,
+    stable_asset_stream_key,
     strict_pass_mask,
 )
 from anymani.pregrasp.strict_gate import MVP80_STRICT_GOOD_PREGRASP_GATE
+from anymani.tasks.hetero.config.generated.cohort_good_pregrasp_identity import (
+    COHORT_GOOD_PREGRASP_GENERATION_DIGEST,
+    COHORT_GOOD_PREGRASP_GENERATION_IDENTITY,
+)
 from anymani.tasks.hetero.config.generated.good_pregrasp_identity import (
     GOOD_PREGRASP_CATALOG_ROOT,
     GOOD_PREGRASP_GENERATION_DIGEST,
@@ -52,6 +57,19 @@ def test_sobol_stream_is_row_local_deterministic_and_order_invariant() -> None:
     torch.testing.assert_close(first[0], repeated[1], rtol=0.0, atol=0.0)
     torch.testing.assert_close(first[1], repeated[0], rtol=0.0, atol=0.0)
     assert first.shape == (2, 8, 13)
+
+
+def test_cohort_stream_key_is_identity_local_and_uses_a_distinct_generation_protocol() -> None:
+    r"""相同physical identity跨manifest保持同stream，不同identity和旧row协议严格分离。"""
+
+    key = stable_asset_stream_key("asset", "a" * 64, "b" * 64)
+    assert key == stable_asset_stream_key("asset", "a" * 64, "b" * 64)
+    assert key != stable_asset_stream_key("asset", "a" * 64, "c" * 64)
+    first = sobol_bank((key,), candidate_count=8, seed=7, device="cpu")
+    repeated = sobol_bank((key,), candidate_count=8, seed=7, device="cpu")
+    torch.testing.assert_close(first, repeated, rtol=0.0, atol=0.0)
+    assert COHORT_GOOD_PREGRASP_GENERATION_IDENTITY["publication"]["require_all_selected_assets"] is True
+    assert COHORT_GOOD_PREGRASP_GENERATION_DIGEST != GOOD_PREGRASP_GENERATION_DIGEST
 
 
 def test_initial_joint_candidates_keep_active_margin_and_zero_ghosts() -> None:

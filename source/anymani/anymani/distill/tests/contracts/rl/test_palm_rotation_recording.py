@@ -50,6 +50,8 @@ def test_parquet_shards_resume_and_final_compaction(tmp_path: Path) -> None:
     assert frame["scope"].to_list() == ["global", "cell", "asset"]
     assert frame["identity_digest"].unique().to_list() == [identity]
     assert frame["goal_count_mean"].null_count() == 3
+    assert frame["ppo_update_seconds"].null_count() == 3  # 新infra字段在旧式scope row缺失时稳定落null
+    assert frame["gpu_driver_free_bytes"].null_count() == 3  # schema不依赖Polars逐flush类型推断
 
 
 def test_recorder_rejects_unknown_metric_and_tampered_shard(tmp_path: Path) -> None:

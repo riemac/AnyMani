@@ -1,0 +1,316 @@
+{
+  "cohort_id": "pure-leap-right-a16",
+  "members": [
+    {
+      "asset_id": "f5d8c069",
+      "cohort_index": 0,
+      "content_hash": "f56739f0fd808d7c3ff52f0b5bb53e7807066756ecf33509e4fcd271747cee59",
+      "provenance": {
+        "asset_role": "mother",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": ""
+      },
+      "source_alias": "ppo",
+      "source_row": 848
+    },
+    {
+      "asset_id": "06558dc5",
+      "cohort_index": 1,
+      "content_hash": "54580c37c2780f91e036102fe82cddfa666db01a5e743a008ded60f0bee6bd39",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 849
+    },
+    {
+      "asset_id": "1d0a2b3b",
+      "cohort_index": 2,
+      "content_hash": "2a9321d915bef436d5a191d3379e83b77fcaa5964b1182a44053cbded0e60655",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 850
+    },
+    {
+      "asset_id": "2267a3c3",
+      "cohort_index": 3,
+      "content_hash": "1a5df6ea8eb8b49e416f515dcf6d155b51a583075c31c3a455237bb29e084655",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 851
+    },
+    {
+      "asset_id": "3130f51f",
+      "cohort_index": 4,
+      "content_hash": "235ba82aca73fc2ab16d0e05a41a308ab792966e5db47cda8d9ddc07b49efc6b",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 852
+    },
+    {
+      "asset_id": "3ada7ef1",
+      "cohort_index": 5,
+      "content_hash": "b2603190776e395fb8baf1d73e8719778d4bac770eb0e4185752e58e83598fce",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 853
+    },
+    {
+      "asset_id": "4dd9bc2e",
+      "cohort_index": 6,
+      "content_hash": "159845687bc2071ef0baee5f652b7c03feb7e04522e1f75b5ee29d156909681d",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 854
+    },
+    {
+      "asset_id": "5150748b",
+      "cohort_index": 7,
+      "content_hash": "ef40b095c2b1a8853dc1acccbe733056f0657dbc0c21ad8487a461c0b77696ac",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 855
+    },
+    {
+      "asset_id": "53b1f1e7",
+      "cohort_index": 8,
+      "content_hash": "2124a1d62721c095955982d12d2dfe81165815bf930a5624f43ffe5c7f192ffe",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 856
+    },
+    {
+      "asset_id": "75c118d8",
+      "cohort_index": 9,
+      "content_hash": "faf0aaa86690c27c2512ed97e6be9c9f5010736e642b0b9321741934f5c3702e",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 857
+    },
+    {
+      "asset_id": "8aee1297",
+      "cohort_index": 10,
+      "content_hash": "02b51de3a0d26c6f0ad939c182cbdcec7657e0af6ef71f2dd911e8b9d25daa57",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 858
+    },
+    {
+      "asset_id": "951d5fa1",
+      "cohort_index": 11,
+      "content_hash": "a8d346c3bd946a33b4b201b84fbedf97c7bc69d2885c3d71ec1df651f2b741dd",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 859
+    },
+    {
+      "asset_id": "98914ecf",
+      "cohort_index": 12,
+      "content_hash": "a9be46340ac2a5eee9490398435f799a8785cb31a1455654c5226ef5fd5ea05b",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 860
+    },
+    {
+      "asset_id": "a2521189",
+      "cohort_index": 13,
+      "content_hash": "fff6a0b7695a424367c8e55c79ab17e5a51988b167de90bcc3e697701f537800",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 861
+    },
+    {
+      "asset_id": "aa0464fc",
+      "cohort_index": 14,
+      "content_hash": "60ef186f50c32eccbf37d8cfac3cf50ab1d0bd1ee9870172d13f3eee0ca81473",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 862
+    },
+    {
+      "asset_id": "ad8d72bc",
+      "cohort_index": 15,
+      "content_hash": "0139ae3b4588bcb7b9eedbb68aa0e958a6d7edd77573487bc0d7ee3825675236",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t4_i4_m4_r4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t4_i4_m4_r4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-33-41"
+      },
+      "source_alias": "ppo",
+      "source_row": 863
+    }
+  ],
+  "schema_version": "1.0.0",
+  "selection": {
+    "algorithm": "explicit-complete-lineage-v1",
+    "include_mother": true,
+    "members_per_lineage": 16,
+    "mother_asset_id": "f5d8c069",
+    "mother_name": "right_t4_i4_m4_r4",
+    "source_row_range": [
+      848,
+      863
+    ],
+    "source_scope": {
+      "collection_kind": "groups",
+      "group_name": "single_palm_leap",
+      "handedness": "right"
+    }
+  },
+  "sources": {
+    "ppo": {
+      "manifest_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ppo.yaml",
+      "manifest_sha256": "22320b8e00c8df73699d20cd0f56e68fbab720e8d63b36bba898ee964334a8dc"
+    }
+  }
+}

@@ -47,6 +47,8 @@ docker/artifacts/
 # Doc Outputs
 **/docs/_build/*
 **/generated/*
+# Generated-hand task configurations are source, not generated asset bundles.
+!/source/anymani/anymani/tasks/hetero/config/generated/*.py
 
 # Isaac-Sim packman
 _isaac_sim*

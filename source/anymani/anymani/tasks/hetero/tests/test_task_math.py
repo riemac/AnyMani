@@ -16,6 +16,7 @@ from anymani.tasks.hetero.mdp.task_math import (
     moving_goal_quaternion,
     projected_space_rotation_delta,
     quaternion_from_angle_axis_wxyz,
+    rotation_frontier_update,
     task_termination_flags,
 )
 
@@ -57,6 +58,28 @@ def test_nonidentity_hand_frame_and_root_transform_fixed_axis() -> None:
     root_quaternion = _axis_quaternion((0.0, 0.0, 1.0), math.pi / 2.0)
     axis_w = hand_axis_to_world(axis_h, root_quaternion, semantic_R_ha)
     assert torch.allclose(axis_w, torch.tensor(((-1.0, 0.0, 0.0),), dtype=torch.float64), atol=1.0e-10)
+
+
+def test_rotation_frontier_counts_only_new_positive_30_degree_intervals() -> None:
+    r"""往返重越旧阈值不重复计数；单步跨两档时$\Delta K=2$而非一个布尔近似。"""
+
+    interval = math.pi / 6.0  # 物理前沿宽度$\delta=30^\circ$
+    maximum = torch.zeros(1, dtype=torch.float64)  # $M_0=0$ rad
+    count = torch.zeros(1, dtype=torch.long)  # $K_0=0$
+    observed: list[tuple[int, int, bool]] = []
+
+    # 依次：首次越过一档、退回、重越旧档、再跨两档、反向；预期只在新历史前沿产生增量。
+    for angle in (interval, 0.1, interval + 0.01, 3.0 * interval + 0.01, -0.5):
+        maximum, count, delta, pulse = rotation_frontier_update(
+            torch.tensor((angle,), dtype=torch.float64),
+            maximum,
+            count,
+            frontier_interval_rad=interval,
+        )
+        observed.append((int(count.item()), int(delta.item()), bool(pulse.item())))
+
+    assert observed == [(1, 1, True), (1, 0, False), (1, 0, False), (3, 2, True), (3, 0, False)]
+    assert torch.allclose(maximum, torch.tensor((3.0 * interval + 0.01,), dtype=torch.float64))
 
 
 def test_moving_goal_is_left_multiplied_from_current_pose() -> None:

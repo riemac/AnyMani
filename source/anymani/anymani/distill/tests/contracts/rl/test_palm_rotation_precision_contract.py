@@ -17,3 +17,17 @@ def test_precision_contract_overrides_runner_tf32_side_effect() -> None:
     finally:
         torch.backends.cuda.matmul.allow_tf32 = original_matmul  # 不污染同进程其它precision contracts
         torch.backends.cudnn.allow_tf32 = original_cudnn
+
+
+def test_precision_contract_can_explicitly_enable_tf32_without_changing_tensor_dtype() -> None:
+    r"""TF32候选必须同时开启两项backend flags；普通FP32 tensors本身不改dtype。"""
+
+    original_matmul = bool(torch.backends.cuda.matmul.allow_tf32)
+    original_cudnn = bool(torch.backends.cudnn.allow_tf32)
+    try:
+        flags = enforce_palm_rotation_precision(allow_tf32=True)
+        assert flags == {"cuda_matmul_allow_tf32": True, "cudnn_allow_tf32": True}
+        assert torch.ones(1).dtype == torch.float32  # TF32只是内部乘法精度，不是storage dtype
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = original_matmul
+        torch.backends.cudnn.allow_tf32 = original_cudnn

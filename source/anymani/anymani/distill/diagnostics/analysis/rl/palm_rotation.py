@@ -75,7 +75,7 @@ def _scope_summary(frame: pl.DataFrame, *, group_key: str, metrics: tuple[str, .
 
 
 def analyze_palm_rotation_run(run_dir: Path | str, *, window_updates: int = 20) -> dict[str, Any]:
-    r"""验证一个MVP80 run并返回JSON-safe global/cell/asset诊断。
+    r"""验证一个palm-rotation full/subset run并返回JSON-safe global/cell/asset诊断。
 
     Args:
         run_dir (Path | str): `logs/distill/rl_games/.../<run-name>`目录。
@@ -89,14 +89,23 @@ def analyze_palm_rotation_run(run_dir: Path | str, *, window_updates: int = 20) 
     frame, sources = _load_metrics(root)
     required = {"identity_digest", "update", "scope", "scope_index", "dataset_row", "cell_id"}
     if not required.issubset(frame.columns):
-        raise RuntimeError(f"MVP80 metrics miss required columns: {sorted(required - set(frame.columns))}")
+        raise RuntimeError(f"palm-rotation metrics miss required columns: {sorted(required - set(frame.columns))}")
     identity_values = frame["identity_digest"].unique().to_list()
     if len(identity_values) != 1:
-        raise RuntimeError("MVP80 run mixes multiple method identities")
+        raise RuntimeError("palm-rotation run mixes multiple method identities")
     updates = [int(value) for value in frame["update"].unique().sort().to_list()]
     expected_updates = list(range(updates[0], updates[-1] + 1))
     counts = frame.group_by("update").len().sort("update")
-    row_geometry_valid = counts["len"].to_list() == [89] * len(updates)
+    first_update = frame.filter(pl.col("update") == updates[0])  # 支持轴在run内不可改变
+    first_scope_counts = _scope_counts(first_update["scope"].to_list())
+    asset_count = int(first_scope_counts.get("asset", 0))  # single closure为1，完整MVP为80
+    active_cell_count = int(first_scope_counts.get("cell", 0))  # 只计当前支持集实际出现的cells
+    expected_rows_per_update = 1 + active_cell_count + asset_count  # one global + cells + assets
+    row_geometry_valid = counts["len"].to_list() == [expected_rows_per_update] * len(updates)
+    per_update_scope_valid = all(
+        _scope_counts(frame.filter(pl.col("update") == update)["scope"].to_list()) == first_scope_counts
+        for update in updates
+    )  # 防止总行数相同但某scope缺失/重复
     update_axis_valid = updates == expected_updates
     scope_counts = _scope_counts(frame["scope"].to_list())
     numeric_columns = [name for name, dtype in frame.schema.items() if dtype.is_numeric()]
@@ -146,14 +155,18 @@ def analyze_palm_rotation_run(run_dir: Path | str, *, window_updates: int = 20) 
     for path in sorted((root / "nn").glob("*.pth")):
         checkpoints.append({"name": path.name, "sha256": _sha256(path), "bytes": path.stat().st_size})
     return {
-        "artifact_type": "anymani.palm_rotation_mvp80.run_analysis",
+        "artifact_type": "anymani.palm_rotation.run_analysis",
         "schema_version": "1.0.0",
         "run_dir": str(root),
         "identity_digest": identity_values[0],
         "audit": {
             "updates": updates,
             "update_axis_contiguous": update_axis_valid,
-            "rows_per_update_89": row_geometry_valid,
+            "asset_count": asset_count,
+            "active_cell_count": active_cell_count,
+            "expected_rows_per_update": expected_rows_per_update,
+            "rows_per_update_expected": row_geometry_valid and per_update_scope_valid,
+            "rows_per_update_89": bool(asset_count == 80 and expected_rows_per_update == 89 and row_geometry_valid),
             "scope_counts": scope_counts,
             "non_finite_columns": non_finite,
             "source_files": [{"path": str(path), "sha256": _sha256(path)} for path in sources],
