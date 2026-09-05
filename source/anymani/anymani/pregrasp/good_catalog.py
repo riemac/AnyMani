@@ -252,9 +252,7 @@ class GoodPregraspMetrics:
             raise ValueError("good-pregrasp metrics must be finite and non-negative")
         if not 0.0 <= self.joint_limit_margin_fraction <= 0.5:
             raise ValueError("joint_limit_margin_fraction must lie in [0,0.5]")
-        if not 0.0 <= self.palm_contact_fraction <= 1.0 or any(
-            not 0.0 <= value <= 1.0 for value in owner_contact
-        ):
+        if not 0.0 <= self.palm_contact_fraction <= 1.0 or any(not 0.0 <= value <= 1.0 for value in owner_contact):
             raise ValueError("contact fractions must lie in [0,1]")
         if any(value < 0.0 for value in distances):
             raise ValueError("envelope distances must be non-negative")
@@ -532,9 +530,7 @@ class GoodPregraspCatalog:
                 existing = current_by_key.get(key_digest)
                 if existing is not None:
                     if existing.entry_digest != entry_digest:
-                        raise GoodPregraspConflictError(
-                            "exact good-pregrasp key already maps to another Top-8 payload"
-                        )
+                        raise GoodPregraspConflictError("exact good-pregrasp key already maps to another Top-8 payload")
                     output.append(existing)  # 同key同payload幂等，不重复写文件或index
                     continue
                 output.append(index_entry)
@@ -546,6 +542,11 @@ class GoodPregraspCatalog:
             for index_entry, payload_bytes in pending_payloads:
                 self._atomic_write(self.root / index_entry.payload_relpath, payload_bytes + b"\n")
             if pending_payloads:
+                # 旧checkpoint引用的是发布时目录版本。新增无关key前保存该版本，支持逐已用entry的等价核验。
+                if self.index_path.is_file():
+                    previous_bytes = self.index_path.read_bytes()
+                    previous_digest = hashlib.sha256(previous_bytes).hexdigest()
+                    self._atomic_write(self.root / "index_history" / f"{previous_digest}.json", previous_bytes)
                 index_bytes = _canonical_bytes(self._index_document(current)) + b"\n"
                 self._atomic_write(self.index_path, index_bytes)  # 整批唯一可见性提交点
             return tuple(output)

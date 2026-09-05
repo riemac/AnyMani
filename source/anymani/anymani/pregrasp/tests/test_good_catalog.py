@@ -2,6 +2,7 @@ r"""Schema-3 good-pregrasp Top-8 catalog的纯文件系统合同。"""
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 
 import pytest
@@ -124,6 +125,20 @@ def test_catalog_resolve_many_reads_shared_index_once(tmp_path, monkeypatch) -> 
     resolved = catalog.resolve_many((second.key, first.key, second.key))
     assert resolved == (second, first, second)
     assert calls == 1
+
+
+def test_catalog_extension_preserves_previous_index_revision(tmp_path) -> None:
+    r"""新增资产保留旧目录版本，旧checkpoint可以核对其实际使用的Top-8而不受无关新增项影响。"""
+
+    catalog = GoodPregraspCatalog(tmp_path / "catalog")
+    original = _entry(scale=1.1)
+    catalog.publish(original)
+    previous_bytes = catalog.index_path.read_bytes()
+    previous_digest = hashlib.sha256(previous_bytes).hexdigest()
+    catalog.publish(_entry(scale=1.2))
+    archived = catalog.root / "index_history" / f"{previous_digest}.json"
+    assert archived.read_bytes() == previous_bytes
+    assert catalog.resolve(original.key) == original
 
 
 def test_catalog_publish_many_commits_one_index_after_all_payloads(tmp_path, monkeypatch) -> None:
