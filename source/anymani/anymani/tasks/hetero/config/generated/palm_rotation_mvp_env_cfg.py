@@ -284,6 +284,7 @@ class PalmRotationMvpEventsCfg:
         params={"config": GOOD_PREGRASP_RESET_CFG},
     )
     contact_reset = EventTerm(func=reset_contact_state, mode="reset", params=_contact_params())
+    episode_horizon: EventTerm | None = None  # launcher显式配置计划时长；固定评价不采样训练时长
 
 
 @configclass

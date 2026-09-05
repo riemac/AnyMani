@@ -30,7 +30,9 @@ class _Pregrasp:
     require_strict: bool = True
 
 
-def _identity(tmp_path: Path, *, learning_rate: float, reward_release_start_turns: float = 1.0) -> dict[str, Any]:
+def _identity(
+    tmp_path: Path, *, learning_rate: float, reward_release_start_turns: float = 1.0, **overrides: Any
+) -> dict[str, Any]:
     r"""构造只改变base LR的一组完整identity。"""
 
     manifest = tmp_path / "ppo_mvp80.yaml"
@@ -54,6 +56,7 @@ def _identity(tmp_path: Path, *, learning_rate: float, reward_release_start_turn
             "reward_release_start_turns": reward_release_start_turns,
             "reward_release_end_turns": 2.0,
             "reward_release_ema_alpha": 0.05,
+            **overrides,
         },
     )
 
@@ -73,6 +76,8 @@ def test_identity_binds_film_contact_reward_and_training_contract(tmp_path: Path
         "ema_alpha": 0.05,
         "end_turns": 2.0,
         "start_turns": 1.0,
+        "floor": 0.0,
+        "reference_seconds": 120.0,
     }
     assert first["policy"]["actor_contact"] == "all-owner-binary-no-force"
     assert "dynamic-film-base" in first["policy"]["residual_decomposition"]
@@ -88,6 +93,20 @@ def test_identity_binds_early_reward_release_schedule(tmp_path: Path) -> None:
 
     assert early["task_contract"]["reward_release"]["start_turns"] == 0.0
     assert baseline["identity_digest"] != early["identity_digest"]
+
+
+def test_tip_only_short_horizon_and_release_floor_are_explicit_method_changes(tmp_path: Path) -> None:
+    r"""删除不可部署触觉、缩短回合和固定塑形各自改变身份，不能伪装完整续训。"""
+
+    baseline = _identity(tmp_path, learning_rate=1.0e-4)
+    tip = _identity(tmp_path, learning_rate=1.0e-4, actor_contact="tip")
+    short = _identity(tmp_path, learning_rate=1.0e-4, episode_seconds_min=20.0, episode_seconds_max=60.0)
+    floor = _identity(tmp_path, learning_rate=1.0e-4, reward_release_floor=1.0)
+    assert tip["policy"]["actor_contact"] == "tip-only-binary"
+    assert short["task_contract"]["episode_seconds"] == 60.0
+    assert short["task_contract"]["episode_seconds_min"] == 20.0
+    assert floor["task_contract"]["reward_release"]["floor"] == 1.0
+    assert len({value["identity_digest"] for value in (baseline, tip, short, floor)}) == 4
 
 
 def test_identity_accepts_explicit_single_asset_closure_with_one_strict_binding(tmp_path: Path) -> None:

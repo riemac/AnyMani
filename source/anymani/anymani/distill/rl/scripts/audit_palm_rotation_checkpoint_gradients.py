@@ -194,6 +194,20 @@ def _training_argv(args: argparse.Namespace, checkpoint: Mapping[str, Any]) -> l
         str(float(training.get("reward_release_start_turns", 1.0))),
         "--reward_release_end_turns",
         str(float(training.get("reward_release_end_turns", 2.0))),
+        "--actor_contact",
+        str(training.get("actor_contact", "all")),
+        "--episode_seconds_min",
+        str(float(training.get("episode_seconds_min", 120.0))),
+        "--episode_seconds_max",
+        str(float(training.get("episode_seconds_max", 120.0))),
+        "--reward_release_floor",
+        str(float(training.get("reward_release_floor", 0.0))),
+        "--reward_release_reference_seconds",
+        str(float(training.get("reward_release_reference_seconds", 120.0))),
+        "--learning_rate",
+        str(float(training.get("actor_base_lr", 3.0e-4))),
+        "--seed",
+        str(int(training["seed"])),
         "--minibatches",
         str(minibatch_count),
         "--gradient_accumulation_steps",
@@ -341,7 +355,10 @@ def main() -> None:
 
                 # 任何Actor参数变化都说明optimizer隔离失败；即刻拒绝发布summary。
                 current_actor = tuple(agent.model.a2c_network.package.actor.parameters())
-                if not all(torch.equal(parameter.detach(), reference) for parameter, reference in zip(current_actor, frozen_actor, strict=True)):
+                if not all(
+                    torch.equal(parameter.detach(), reference)
+                    for parameter, reference in zip(current_actor, frozen_actor, strict=True)
+                ):
                     raise RuntimeError("checkpoint gradient audit changed Actor parameters")
                 npz_path = repeat_root / "full_gradient_shadows" / f"update_{checkpoint_epoch:06d}.npz"
                 if not npz_path.is_file():
@@ -376,7 +393,7 @@ def main() -> None:
             "cross_rollout": _cross_rollout_summary(npz_paths),
         }
         _atomic_json(output_root / "summary.json", summary)
-        print(json.dumps({"output": str(output_root / 'summary.json'), "optimizer_steps": 0}, sort_keys=True))
+        print(json.dumps({"output": str(output_root / "summary.json"), "optimizer_steps": 0}, sort_keys=True))
 
     class CheckpointGradientAuditAgent(PalmRotationPpoAgent):
         r"""显式覆盖Runner factory所实例化的Agent，使恢复epoch不会进入原训练终止门。"""

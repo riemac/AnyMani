@@ -55,6 +55,8 @@ _IMPLEMENTATION_PATHS = (
     "source/anymani/anymani/tasks/hetero/mdp/contact_state.py",
     "source/anymani/anymani/tasks/hetero/mdp/curriculum_state.py",
     "source/anymani/anymani/tasks/hetero/mdp/events.py",
+    "source/anymani/anymani/tasks/hetero/mdp/episode_horizon.py",
+    "source/anymani/anymani/tasks/hetero/mdp/curriculums.py",
     "source/anymani/anymani/tasks/hetero/mdp/object_state.py",
     "source/anymani/anymani/tasks/hetero/mdp/observation_state.py",
     "source/anymani/anymani/tasks/hetero/mdp/observations.py",
@@ -248,7 +250,9 @@ def build_palm_rotation_method_identity(
             "rotation_frontier_reward_weight": 0.0,
             "strict_tracking_reward_weight": 10.0,
             "critic_task_state": "axis-goal-error-max-positive-net-and-current-net",
-            "episode_seconds": 120.0,
+            "episode_seconds": float(run_contract.get("episode_seconds_max", 120.0)),
+            "episode_seconds_min": float(run_contract.get("episode_seconds_min", 120.0)),
+            "episode_horizon_sampling": "uniform-policy-step-interval",
             "adr_enabled": False,
             "pregrasp_rank": 0,
             "pregrasp_strict": True,
@@ -259,11 +263,15 @@ def build_palm_rotation_method_identity(
                 "start_turns": float(run_contract.get("reward_release_start_turns", 1.0)),
                 "end_turns": float(run_contract.get("reward_release_end_turns", 2.0)),
                 "ema_alpha": float(run_contract.get("reward_release_ema_alpha", 0.05)),
+                "floor": float(run_contract.get("reward_release_floor", 0.0)),
+                "reference_seconds": float(run_contract.get("reward_release_reference_seconds", 120.0)),
             },
         },
         "policy": {
             "arm": arm,
-            "actor_contact": "all-owner-binary-no-force",
+            "actor_contact": "tip-only-binary"
+            if run_contract.get("actor_contact", "all") == "tip"
+            else "all-owner-binary-no-force",
             "distribution": "mean-preserving-tanh-squashed-active-joint-diagonal-normal",
             "action_authority_rad_per_policy_step": 1.0 / 24.0,
             "residual_decomposition": (

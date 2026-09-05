@@ -1,6 +1,6 @@
 r"""MVP80 residual policy的fixed-scale、ADR-0正式能力评估入口。
 
-评估固定16 replicas/asset、deterministic actor mean、2400个20 Hz policy steps。每个replica只消费第一次
+主评估固定16 replicas/asset、deterministic actor mean、600个20 Hz policy steps（30 s），2400步用于耐久复查。每个replica只消费第一次
 trajectory；若底层ManagerBased环境在drop/axis/timeout后自动reset，后续state不再进入该replica统计。
 所有终局量来自RewardManager最后一项冻结的post-physics/pre-reset snapshot，避免读取rank-0新回合零值。
 """
@@ -66,7 +66,10 @@ parser.add_argument(
 )
 parser.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE, help="Accepted N000 fixed reference JSON.")
 parser.add_argument("--num_replicas", type=int, default=16, help="Fixed replicas per asset; formal protocol uses 16.")
-parser.add_argument("--steps", type=int, default=2400, help="20 Hz policy steps; formal protocol uses 2400=120 s.")
+parser.add_argument("--steps", type=int, default=2400, help="Fixed episode policy steps: 600=30 s, 2400=120 s.")
+parser.add_argument(
+    "--trace_stride", type=int, default=0, help="Per-step diagnostic sampling stride; 0 disables trace."
+)
 parser.add_argument("--output", type=Path, default=None, help="Cohort JSON; sibling .h5 stores trajectory arrays.")
 parser.add_argument(
     "--implementation_certificate",
@@ -85,12 +88,19 @@ parser.add_argument(
     help="GUI follows this selection-local asset index; each replica block preserves the same asset order.",
 )
 parser.add_argument("--rl_games_strict", action="store_true", help="Require pinned local rl_games commit.")
+parser.add_argument(
+    "--tip_only_intervention",
+    action="store_true",
+    help="Frozen-policy ablation: mask non-TIP contact at every actor input route.",
+)
 AppLauncher.add_app_launcher_args(parser)
 parser.add_argument("--checkpoint", type=Path, required=True, help="Full schema-3/4 palm-rotation checkpoint.")
 args_cli, launcher_unknown_args = parser.parse_known_args()
 
 if args_cli.num_replicas < 1 or args_cli.steps < 1:
     raise ValueError("evaluation replicas and steps must be positive")
+if args_cli.trace_stride < 0:
+    raise ValueError("trace stride must be non-negative")
 if args_cli.cohort_lock is not None:
     if args_cli.support_rows is not None:
         raise ValueError("--cohort_lock and --support_rows are mutually exclusive")
@@ -175,6 +185,7 @@ from anymani.tasks.hetero.config.generated.palm_rotation_mvp_env_cfg import (  #
     GeneratedPalmRotationMvpEnvCfg,
 )
 from anymani.tasks.hetero.config.generated.scene import ASSET_BINDING  # noqa: E402
+from anymani.tasks.hetero.mdp.contact_state import HETERO_CONTACT_STATE_ATTR  # noqa: E402
 
 SINGLE_CLOSURE_NET_TURNS_MIN = 1.0  # RL tiny-overfit最低持续有向旋转能力
 SINGLE_CLOSURE_DIRECTIONAL_CONSISTENCY_MIN = 0.7  # 排除absolute path由往返jitter构成
@@ -255,17 +266,28 @@ def main() -> None:
     reference_doc = json.loads(args_cli.reference.read_text(encoding="utf-8"))
     reference_values = reference_doc.get("reference", {})
     reference = PalmRotationReference(
-        goal_count_median=float(reference_values["G0_goal_count_median"]),
-        net_turns_median=float(reference_values["N0_signed_net_turns_median"]),
+        goal_count_median=float(
+            reference_values.get("G0_goal_count_median", reference_values.get("goal_count_median"))
+        ),
+        net_turns_median=float(
+            reference_values.get("N0_signed_net_turns_median", reference_values.get("signed_net_turns_median"))
+        ),
     )
 
     env_cfg = GeneratedPalmRotationMvpEnvCfg()
+    # 同时约束当前帧、History30和owner token三条入口；冻结遮蔽是独立干预，不改checkpoint的训练身份。
+    actor_tip_only = run_contract.get("actor_contact", "all") == "tip" or bool(args_cli.tip_only_intervention)
+    for name in ("jnt_current", "jnt_history", "owner_contact"):
+        getattr(env_cfg.observations.policy, name).params["tip_only"] = actor_tip_only
     env_cfg.scene.num_envs = num_envs
     env_cfg.seed = int(run_contract["seed"])
     env_cfg.viewer.env_index = int(args_cli.viewer_asset_index)  # round-robin首个replica中env index等于asset index
     device = str(run_contract.get("device", "cuda:0"))
     env_cfg.sim.device = device
     policy_dt_s = float(env_cfg.sim.dt) * int(env_cfg.decimation)  # $6/120=0.05$ s，GUI只按真实policy周期节流
+    evaluation_horizon_s = int(args_cli.steps) * policy_dt_s  # 固定评价窗口，不修改checkpoint训练协议
+    env_cfg.episode_length_s = evaluation_horizon_s
+    env_cfg.commands.goal_pose.horizon_s = evaluation_horizon_s
     env = gym.make("AnyMani-Hetero-Generated-PalmRotation-MVP-RLGames-v0", cfg=env_cfg)
     provider = build_palm_rotation_bf16_geometry_provider(ASSET_BINDING, device=device)
     prototype_index = torch.tensor(ASSET_BINDING.asset_index_by_env(num_envs), dtype=torch.long, device=device)
@@ -365,6 +387,13 @@ def main() -> None:
         net_turns_at_last_goal_success = torch.zeros_like(goal_count)  # 最后pulse时的signed累计净圈
         position_error_at_last_goal_success_m = torch.zeros_like(goal_count)  # 最后pulse时的anchor误差，单位m
         observation = transport.reset()["obs"]
+        trace_buffers: dict[str, torch.Tensor] = {}
+        trace_count = 0
+        trace_capacity = (
+            (int(args_cli.steps) + int(args_cli.trace_stride) - 1) // int(args_cli.trace_stride)
+            if args_cli.trace_stride
+            else 0
+        )
         two_pi = 2.0 * torch.pi
         with torch.no_grad():
             for _step in range(int(args_cli.steps)):
@@ -375,6 +404,46 @@ def main() -> None:
                 snapshot = command.post_physics_evaluation_snapshot
                 if not bool(snapshot["valid"].all().item()):
                     raise RuntimeError("fixed evaluator observed an invalid pre-reset snapshot")
+                if trace_capacity and _step % int(args_cli.trace_stride) == 0:
+                    # 聚合量来自真正pre-reset snapshot；逐sensor量只在未reset的step有效，单独保存mask。
+                    contact = getattr(transport.unwrapped, HETERO_CONTACT_STATE_ATTR)
+                    values = {
+                        name: snapshot[name]
+                        for name in (
+                            "episode_duration_s",
+                            "net_rotation_rad",
+                            "absolute_path_rotation_rad",
+                            "axis_speed_rad_s",
+                            "tip_active_count",
+                            "palm_contact",
+                            "finger_non_tip_contact",
+                            "goal_success_pulse",
+                            "position_error_m",
+                            "orientation_keypoint_error_m",
+                            "termination_object_out_of_anchor",
+                            "termination_goal_axis_misaligned",
+                            "termination_time_out",
+                        )
+                    }
+                    values.update(
+                        {
+                            "active": active,
+                            "post_state_valid": active & ~done.bool(),
+                            "sensor_contact_bits": contact.contact_bits,
+                            "sensor_force_ema_N": contact.force_ema_N,
+                            "action": actions,
+                            "pre_owner_contact": observation["actor_owner_contact"].squeeze(-1),
+                            "post_joint_position_rad": next_observation["obs"]["actor_jnt_current"][..., 0] * torch.pi,
+                        }
+                    )
+                    if not trace_buffers:
+                        trace_buffers = {
+                            name: torch.empty((trace_capacity, *value.shape), dtype=value.dtype, device=value.device)
+                            for name, value in values.items()
+                        }  # 一次分配，采样循环不做GPU→CPU搬运
+                    for name, value in values.items():
+                        trace_buffers[name][trace_count].copy_(value)
+                    trace_count += 1
                 goal_count[active] = snapshot["completed_subgoals"][active]
                 frontier_count[active] = snapshot["rotation_frontier_count"][active]
                 max_positive_rotation_rad[active] = snapshot["max_positive_net_rotation_rad"][active]
@@ -532,12 +601,19 @@ def main() -> None:
             termination_drop=arrays["termination_drop"].tolist(),
             termination_axis=arrays["termination_axis"].tolist(),
         )
+        scale_protocol_matched = (
+            int(args_cli.steps) == 600
+            and int(args_cli.num_replicas) == 16
+            and actor_tip_only
+            and not args_cli.residual_off
+            and not args_cli.tip_only_intervention
+        )  # 耐久/R1/冻结遮蔽仅诊断，不冒充30秒R16的正式扩张资格
         scale_ladder_result = (
             evaluate_scale_ladder_cohort(
                 physical_asset_results,
                 finite_and_identity_valid=physical_finite,
             )
-            if asset_count in (16, 64, 128)
+            if asset_count in (16, 64, 128) and scale_protocol_matched
             else None
         )  # 其它cardinality仍保存逐资产物理证据，但不伪造scale-ladder结论
         cohort = (
@@ -566,17 +642,23 @@ def main() -> None:
         output = args_cli.output
         if output is None:
             intervention = "-residual-off" if args_cli.residual_off else ""
+            intervention += "-tip-mask" if args_cli.tip_only_intervention else ""
             output = (
-                checkpoint_path.parent.parent / "evaluation" / f"{checkpoint_path.stem}-fixed-r16{intervention}.json"
+                checkpoint_path.parent.parent
+                / "evaluation"
+                / f"{checkpoint_path.stem}-fixed{evaluation_horizon_s:g}s-r{args_cli.num_replicas}{intervention}.json"
             )
         output = output.expanduser().resolve()
+        if any(path.exists() for path in (output, output.with_suffix(".h5"), output.with_suffix(".trace.h5"))):
+            raise FileExistsError(f"evaluation output already exists: {output}")
         output.parent.mkdir(parents=True, exist_ok=True)
         hdf5_path = output.with_suffix(".h5")
         checkpoint_sha = _sha256(checkpoint_path)
         evaluation_identity = {
-            "schema_version": "1.3.0",
+            "schema_version": "1.4.0",
             "method_identity_digest": checkpoint_identity["identity_digest"],
             "execution_identity_digest": current_identity["identity_digest"],
+            "evaluator_source_sha256": _sha256(Path(__file__).resolve()),
             "execution_implementation": current_identity["implementation"],
             "code_provenance": palm_rotation_code_provenance(),
             "implementation_certificate_sha256": (
@@ -592,6 +674,13 @@ def main() -> None:
                 "replicas_per_asset": int(args_cli.num_replicas),
                 "policy_steps": int(args_cli.steps),
                 "policy_dt_s": 0.05,
+                "horizon_s": evaluation_horizon_s,
+                "trace_stride": int(args_cli.trace_stride),
+                "actor_contact_intervention": "tip-only-mask" if args_cli.tip_only_intervention else "none",
+                "actor_contact": "tip-only-binary" if actor_tip_only else "all-owner-binary-no-force",
+                "scale_ready_protocol_matched": scale_protocol_matched,
+                "reference_horizon_s": reference_doc.get("protocol", {}).get("horizon_s"),
+                "reference_horizon_matched": reference_doc.get("protocol", {}).get("horizon_s") == evaluation_horizon_s,
                 "deterministic_actor_mean": True,
                 "first_trajectory_only": True,
                 "pregrasp_rank": 0,
@@ -622,6 +711,32 @@ def main() -> None:
                 "mother_ids": list(mother_ids),
             },
         )
+
+        trace_result = None
+        if trace_buffers:
+            trace_path = output.with_suffix(".trace.h5")
+            trace_arrays = {
+                name: value[:trace_count]
+                .reshape(trace_count, args_cli.num_replicas, asset_count, *value.shape[2:])
+                .transpose(1, 2)
+                .cpu()
+                .numpy()
+                for name, value in trace_buffers.items()
+            }  # 所有逐时数组为[T,A,R,...]，active含最后terminal step，后续自动reset样本无效
+            trace_arrays["policy_step"] = np.arange(trace_count, dtype=np.int64) * int(args_cli.trace_stride) + 1
+            write_selected_trajectories_hdf5(
+                trace_path,
+                arrays=trace_arrays,
+                metadata={
+                    **evaluation_identity,
+                    "trace_stride": int(args_cli.trace_stride),
+                    "axes": "time,asset,replica,feature",
+                    "sensor_names": list(ASSET_BINDING.contact_layout.state_sensor_names),
+                    "post_state_valid_semantics": "sensor forces/bits and post q exclude automatic-reset terminal rows",
+                    "pre_owner_contact_semantics": "actor input before the applied action; aggregates are post-physics/pre-reset",
+                },
+            )
+            trace_result = {"path": str(trace_path), "sha256": _sha256(trace_path), "samples": trace_count}
 
         # JSON保留逐资产可读的tracking分布摘要；逐replica原值仍以HDF5为唯一dense事实源。
         goal_tracking_assets: list[dict[str, Any]] = []
@@ -746,6 +861,7 @@ def main() -> None:
             },
             "trajectory_hdf5": str(hdf5_path),
             "trajectory_hdf5_sha256": _sha256(hdf5_path),
+            "step_trace": trace_result,
         }
         temporary = output.with_suffix(output.suffix + ".tmp")
         temporary.write_text(

@@ -57,16 +57,16 @@ source /home/hac/isaac/env_isaaclab/bin/activate
 小规模排查可以降低 `--num_envs`；入口会把 PPO minibatch 修正为可整除当前 rollout batch 的值。正式实验
 不要把 debug 时的自动修正误记成标准训练配置。
 
-Generated heterogeneous 80手短matched pulse直接运行：
+Generated heterogeneous 80手有界链路检查：
 
 ```bash
 python -m anymani.distill.rl.train_palm_rotation_mvp \
-  --headless --arm residual --num_envs 1280
+  --headless --arm residual --num_envs 1280 --smoke
 ```
 
 完整MVP80的YAML保留历史2560环境预算，1280是其内存回退点；它们不是任意cohort的统一推荐值。A16可以采用128或256环境，分别对应每资产8或16个副本。一次rollout含$B=N_{env}H$个新transitions；每update的optimizer步数为$E M/K$，其中$E$是mini-epochs、$M$是activation minibatches、$K$是梯度累积步数。例如$E=5,M=4,K=1$与$E=5,M=16,K=4$均为20个逻辑optimizer步骤。并行度、数据量、更新时间与墙钟应分别比较；PyTorch allocated不包含全部PhysX/context分配，实际driver余量仍需保留。
 
-Member-level cohort由assets层发布的canonical lock给出。以下命令展示A16已用过的预算与方法配置，参数不代表所有规模的最优点：
+Member-level cohort由assets层发布的canonical lock给出。以下命令展示A16的TIP-only、随机20–60秒训练协议；参数不代表所有规模的最优点：
 
 ```bash
 python -m anymani.distill.rl.train_palm_rotation_mvp \
@@ -74,17 +74,24 @@ python -m anymani.distill.rl.train_palm_rotation_mvp \
   --num_envs 256 --max_updates 1000 --minibatches 4 --gradient_accumulation_steps 1 \
   --arm direct_token --advantage_normalization_scope per_asset_rollout \
   --gradient_probe_frequency 0 --tf32 --torch_compile default \
+  --actor_contact tip --episode_seconds_min 20 --episode_seconds_max 60 \
   --reward_release_start_turns 0 --reward_release_end_turns 2
 ```
 
 逐资产advantage在完整rollout中估计moments，不随mini-epoch重算。梯度probe需要同一图多次求导，因而只能走eager；窄compile训练应关闭probe，在独立诊断进程审计冻结checkpoint。
+
+TIP-only保留每关节本体状态、动作历史和所属指尖接触，同时把当前帧、History30与独立owner token的非指尖触觉通道恒置零。已有五通道TCN权重可迁移，实体及几何有效mask不变。奖励、critic和诊断仍读完整接触，允许掌托和短暂连杆过渡。全触觉固定120秒对照显式设置`--actor_contact all --episode_seconds_min 120 --episode_seconds_max 120`。
+
+随机回合长度在reset时以控制步为单位均匀采样，和物理ADR分开。回合达到计划上限即作为有限时域终点，保持`value_bootstrap=false`；固定评估始终另设统一时长。课程可用$N_i^{ref}=N_i^+T_{ref}/T_i^{planned}$校准短回合的进度，参考时长由`--reward_release_reference_seconds`给出，默认120秒。失败仍使用计划时长作分母。EMA按asset-reset cohort更新，时长随机化也会改变其更新频率。
+
+已有策略的新方法分支使用`--actor_init_checkpoint <parent.pth>`；默认只加载actor，增加`--init_critic`可显式继承具有相同privileged输入语义的critic和value统计。两套optimizer、课程和训练计数重新初始化，初始化来源进入方法身份。已有技能的对照可共同使用`--reward_release_floor 1 --learning_rate 0.0001`固定满塑形并降低各组步长，以分离课程重启瞬态；这不是从随机策略训练的通用推荐。
 
 Raw History30、TF32与窄compile都是显式候选，不会静默改写旧run：
 
 ```bash
 python -m anymani.distill.rl.train_palm_rotation_mvp \
   --headless --num_envs 1280 \
-  --history_encoder raw_stack --tf32 --torch_compile default
+  --history_encoder raw_stack --tf32 --torch_compile default --gradient_probe_frequency 0
 ```
 
 `--torch_compile`只编译原始actor/critic bound forwards，rl_games外层model保持eager，因此optimizer与checkpoint keys不出现`_orig_mod`。TF32只改变FP32 Linear/attention/Conv的内部乘法模式，参数、GAE、loss和Adam仍为FP32；其科学采用需要数值门与matched学习证据。
@@ -94,7 +101,7 @@ Single/few-embodiment closure使用冻结MVP80 rows的显式子集，并继续�
 ```bash
 python -m anymani.distill.rl.train_palm_rotation_mvp \
   --headless --support_rows 873 --num_envs 1280 --max_updates 128 \
-  --history_encoder raw_stack --tf32 --torch_compile default
+  --history_encoder raw_stack --tf32 --torch_compile default --gradient_probe_frequency 0
 ```
 
 子集必须显式给出`--num_envs`和`--max_updates`；它只服务single/few-support closure，不改变最终80-row manifest。数据流smoke使用`--smoke`、4-step rollout和1 update，不构成学习证据。
@@ -139,11 +146,11 @@ python -m anymani.distill.rl.evaluate_palm_rotation_mvp \
 python -m anymani.distill.diagnostics.analysis.rl.palm_rotation /absolute/path/to/run
 ```
 
-当前已实现的任务仍使用120秒、全owner binary观察；新的TIP-only和短回合研究协议应按独立方法身份验证，不由目录重构隐式改变。Cohort评估显式传入训练使用的`--cohort_lock`；主要物理指标为净圈、方向性和drop/axis联合生存率，strict goal tracking单独报告。
+训练入口与评估入口分别拥有训练分布和能力测量窗口。评估读取checkpoint声明的actor触觉信息，显式传入相同`--cohort_lock`；30秒主评估使用`--steps 600 --num_replicas 16 --reference <fixed30-reference.json>`，`--trace_stride 1`额外保存20 Hz接触/角速时序。默认2400步保留耐久检查入口。正式扩张资格只在30秒R16、TIP-only且无额外遮蔽干预时应用；R1、耐久和冻结干预仍保存物理结果，但不授予该资格。主要物理指标为净圈、方向性和drop/axis联合生存率，strict goal tracking单独报告。
 
 ### 旧checkpoint与重构
 
-Schema-4 method identity绑定实际源码bytes、资产和训练语义；Git HEAD单独写入`params/agent.yaml`的`code_provenance`。因此相同代码提交后仍可完整续训，真正改动执行源码则继续拒绝同identity恢复。Schema-3旧checkpoint可作显式Actor-only初始化，其他训练状态重置。
+Schema-4 method identity绑定实际源码bytes、资产和训练语义；Git HEAD单独写入`params/agent.yaml`的`code_provenance`。因此相同代码提交后仍可完整续训，真正改动执行源码则继续拒绝同identity恢复。Schema-3旧checkpoint可作显式初始化，默认Actor-only，额外critic/value继承需通过上述语义检查。
 
 跨重构的只读评估使用精确绑定两端源码的等价证书。证书比较四种arm、两种历史编码、可选真实权重的前向/梯度/Adam更新和核心训练AST；它不是通用的“忽略identity”开关，不用于跨实现完整续训：
 
@@ -169,6 +176,8 @@ logs/distill/rl_games/<config-name>/<run-name>/
 `--experiment_name` 指定。回放优先使用 `--checkpoint`；省略时才通过 `--run_name` 与 latest/best 规则查找。
 
 掌旋PPO每50 updates原子写Zstd Parquet shard，checkpoint前强制flush，正常结束合并为`metrics.parquet`。每个update包含1条global、每个实际active cell一条cell与每个支持资产一条asset；完整MVP80仍是89行。Selected-checkpoint dense trajectories写gzip HDF5，TensorBoard只保存global/cell在线曲线。比较runs时应同时核对task ID、agent YAML、seed、支持rows、manifest/catalog、N040、History30路径、TF32/compile、rl_games commit与checkpoint，而不只比较目录名或最终reward。
+
+需要保留旧run的合并表和checkpoint时，可先运行`python -m anymani.distill.rl.scripts.prepare_palm_rotation_resume --checkpoint <source-run/nn/checkpoint.pth> --destination <same-arm-root/new-run>`。工具核验checkpoint声明的分片SHA后硬链接只读输入，排除领先于checkpoint的后续分片。随后以新目录中的checkpoint运行`--checkpoint`，逐项保留原训练参数，只增加`--max_updates`；不再指定`--actor_init_checkpoint`或`--init_critic`。完整续训恢复模型、优化器、课程、随机状态和统计游标；仿真场景本身仍冷重置，不能声称PhysX轨迹位级连续。
 
 ## Runtime ownership
 

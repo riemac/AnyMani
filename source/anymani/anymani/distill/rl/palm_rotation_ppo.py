@@ -51,7 +51,11 @@ from .runtime.palm_rotation_network import (
     PalmRotationRlGamesNetwork,
     denormalize_value_readonly,
 )
-from .runtime.palm_rotation_warm_start import load_actor_init_checkpoint, should_load_actor_init_checkpoint
+from .runtime.palm_rotation_warm_start import (
+    load_actor_init_checkpoint,
+    load_critic_init_checkpoint,
+    should_load_actor_init_checkpoint,
+)
 
 PALM_ROTATION_PPO_ALGO = "anymani_palm_rotation_ppo"
 PALM_ROTATION_NETWORK = "anymani_palm_rotation"
@@ -118,6 +122,10 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
             )
             if len(loaded_keys) != int(warm_start["loaded_tensor_count"]):  # type: ignore[index]
                 raise RuntimeError("actor-init loaded tensor count disagrees with inspected identity")
+            if isinstance(warm_start, Mapping) and bool(warm_start.get("initialize_critic", False)):
+                load_critic_init_checkpoint(
+                    self.model, actor_init_path, expected_checkpoint_sha256=str(warm_start["checkpoint_sha256"])
+                )
 
         base_parameters, contextual_parameters = network.actor_parameter_groups()  # disjoint actor groups
         critic_parameters = list(network.package.critic.parameters())  # completely separate$\theta^c$

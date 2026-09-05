@@ -39,8 +39,7 @@ from isaaclab.app import AppLauncher
 
 ROOT = resolve_anymani_root()
 DEFAULT_CHECKPOINT = ROOT / (
-    "logs/distill/rl_games/gm_tactile_rotation_tcn/gm_tactile_rotation_tcn_v050_s42/nn/"
-    "gm_tactile_rotation_tcn.pth"
+    "logs/distill/rl_games/gm_tactile_rotation_tcn/gm_tactile_rotation_tcn_v050_s42/nn/gm_tactile_rotation_tcn.pth"
 )
 DEFAULT_OUTPUT = Path("outputs/hetero/evaluation/n000-fixed-s1p1-adr0-reference.json")
 FORMAL_CANONICAL_MANIFEST = ROOT / (
@@ -196,12 +195,12 @@ def _formal_geometry_provenance(source_asset_id: str) -> dict[str, Any]:
 
 
 def _fixed_protocol_cfg() -> GmTactileRotationHistory30EnvCfg:
-    r"""从N000 typed cfg构造scale-1.1、无随机化、固定120 s evaluation变体。"""
+    r"""从N000 typed cfg构造scale-1.1、无随机化、请求时长的固定评价变体。"""
 
     cfg = GmTactileRotationHistory30EnvCfg()
     cfg.scene.num_envs = int(args.num_envs)
     cfg.seed = int(args.seed)
-    cfg.episode_length_s = 120.0
+    cfg.episode_length_s = int(args.steps) * float(cfg.sim.dt) * int(cfg.decimation)
     cfg.actions.hand_joint_pos.use_adr = False  # 保留$u_{t+1}=u_t+a_t/24$，关闭noise/latency
     object_spawn = cast(sim_utils.UsdFileCfg, cfg.scene.object.spawn)
     object_spawn.scale = (1.1, 1.1, 1.1)  # exact absolute DexCube scale
@@ -252,9 +251,7 @@ def main() -> dict[str, Any]:
     checkpoint_epoch = int(checkpoint_state.get("epoch", -1))
     checkpoint_frame = int(checkpoint_state.get("frame", -1))
     if checkpoint_epoch != 3831 or checkpoint_frame != 470753280:
-        raise RuntimeError(
-            "N000 fixed reference requires the accepted best checkpoint at epoch/frame 3831/470753280"
-        )
+        raise RuntimeError("N000 fixed reference requires the accepted best checkpoint at epoch/frame 3831/470753280")
     cfg = _fixed_protocol_cfg()
     agent_cfg = _agent_cfg()
     rl_device = str(agent_cfg["params"]["config"].get("device", args.device))
@@ -275,7 +272,9 @@ def main() -> dict[str, Any]:
         "N000FixedReferenceWrapper",
         lambda config_name, num_actors, **kwargs: RlGamesGpuEnv(config_name, num_actors, **kwargs),
     )
-    env_configurations.register("rlgpu", {"vecenv_type": "N000FixedReferenceWrapper", "env_creator": lambda **_: wrapped})
+    env_configurations.register(
+        "rlgpu", {"vecenv_type": "N000FixedReferenceWrapper", "env_creator": lambda **_: wrapped}
+    )
     register_anymani_rl_games_networks()
     runner = Runner()
     runner.load(agent_cfg)
@@ -399,9 +398,7 @@ def main() -> dict[str, Any]:
             "source_urdf_sha256": _sha256(source_asset.urdf_path),
             "source_sidecar": str(source_asset.sidecar_path),
             "source_sidecar_sha256": _sha256(source_asset.sidecar_path),
-            "source_mesh_sha256": {
-                str(mesh.virtual_path): _sha256(mesh.real_path) for mesh in source_asset.mesh_refs
-            },
+            "source_mesh_sha256": {str(mesh.virtual_path): _sha256(mesh.real_path) for mesh in source_asset.mesh_refs},
             "formal_geometry_provenance": _formal_geometry_provenance(source_asset.asset_id),
             "audited_distill_physical_geometry_hash": N000_DISTILL_PHYSICAL_GEOMETRY_HASH,
             "audited_configuration_domain_hash": N000_CONFIGURATION_DOMAIN_HASH,
@@ -495,8 +492,7 @@ def main() -> dict[str, Any]:
                     else None
                 )
                 capture_actor_sample = (
-                    args.actor_dataset_output is not None
-                    and completed_steps % int(args.actor_dataset_stride) == 0
+                    args.actor_dataset_output is not None and completed_steps % int(args.actor_dataset_stride) == 0
                 )
                 packet = None
                 teacher_history = None
@@ -612,9 +608,7 @@ def main() -> dict[str, Any]:
         if actor_metadata is None or not actor_sample_steps or not actor_buffers or not student_static_recorded:
             raise RuntimeError("N000 actor dataset was requested but no complete bridge samples were captured")
         actor_dataset_path = (
-            args.actor_dataset_output
-            if args.actor_dataset_output.is_absolute()
-            else ROOT / args.actor_dataset_output
+            args.actor_dataset_output if args.actor_dataset_output.is_absolute() else ROOT / args.actor_dataset_output
         ).resolve()
         actor_arrays = {
             name: torch.stack(values, dim=1).numpy()  # 每项由`[B,...]`堆成`[B,T_sample,...]`
@@ -693,6 +687,7 @@ def main() -> dict[str, Any]:
         "schema_version": "2.2.0",
         "checkpoint": str(evaluated_checkpoint_path),
         "checkpoint_sha256": evaluated_checkpoint_sha256,
+        "evaluator_source_sha256": _sha256(Path(__file__).resolve()),
         "checkpoint_epoch": checkpoint_epoch if student_actor is None else None,
         "checkpoint_frame": checkpoint_frame if student_actor is None else None,
         "checkpoint_update": int(student_state["update"]) if student_state is not None else None,
@@ -718,7 +713,7 @@ def main() -> dict[str, Any]:
             "initial_noise": 0.0,
             "yaw": 0.0,
             "wrench": False,
-            "horizon_s": 120.0,
+            "horizon_s": float(cfg.episode_length_s),
             "policy_dt_s": float(runtime.step_dt),
             "deterministic_actor_mean": True,
             "first_trajectory_only": True,

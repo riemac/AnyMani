@@ -1,8 +1,8 @@
-r"""掌托旋转PPO的显式Actor-only checkpoint迁移。
+r"""掌托旋转PPO的新方法分支初始化与来源边界。
 
 ``--checkpoint``仍由rl_games执行完整同identity续训；本模块为首次``--actor_init_checkpoint``加载Actor，并在随后
-full resume时从target checkpoint恢复同一份只读迁移血缘。首次迁移只读取``a2c_network.package.actor.*``，不接触
-Critic、两套optimizer、value normalizer、课程、ADR、诊断cursor或随机状态。Source与target可使用不同cohort/task
+full resume时从target checkpoint恢复同一份只读迁移血缘。默认仅迁移Actor；显式``--init_critic``额外继承具有相同
+privileged输入语义的Critic和value normalizer。两套optimizer、课程、ADR、诊断cursor与随机状态均重新初始化。Source与target可使用不同cohort/task
 reward，但必须共享actor arm、History30 encoder与retained N040 artifact，否则张量即使shape碰巧相同也拒绝迁移。
 """
 
@@ -19,7 +19,7 @@ from torch import nn
 from anymani.assets.bank.path_utils import resolve_anymani_root
 
 ACTOR_CHECKPOINT_PREFIX = "a2c_network.package.actor."
-"""rl_games完整model state中唯一允许warm-start加载的namespace。"""
+"""默认初始化模式加载的Actor参数空间；Critic迁移必须显式授权。"""
 
 ACTOR_WARM_START_SCHEMA_VERSION = "1.0.0"
 """写入target method identity的Actor-only迁移证据schema。"""
@@ -66,6 +66,7 @@ def inspect_actor_init_checkpoint(
     target_arm: str,
     target_history_encoder: str,
     target_provider_identity: Mapping[str, Any],
+    initialize_critic: bool = False,
 ) -> dict[str, Any]:
     r"""验证迁移兼容性并返回写入target identity的JSON-safe证据。
 
@@ -74,6 +75,7 @@ def inspect_actor_init_checkpoint(
         target_arm (str): 目标``base/residual/direct/direct_token``动作生成结构。
         target_history_encoder (str): 目标``tcn/raw_stack``时间编码器。
         target_provider_identity (Mapping[str, Any]): 目标N040 provider identity，必须含retained artifact SHA。
+        initialize_critic (bool): 额外继承兼容Critic和value统计，不继承optimizer或课程。
 
     Returns:
         dict[str, Any]: Parent SHA、source arm/cohort/task、加载namespace与显式重置组件。
@@ -109,6 +111,14 @@ def inspect_actor_init_checkpoint(
         raise ValueError("actor-init checkpoint contains no actor namespace tensors")
     task_contract = identity.get("task_contract")
     task_contract = dict(task_contract) if isinstance(task_contract, Mapping) else {}
+    if initialize_critic:
+        # 维度相同不代表task变量含义相同；当前critic的最大正向净圈/净圈定义必须与source一致。
+        if task_contract.get("critic_task_state") != "axis-goal-error-max-positive-net-and-current-net":
+            raise ValueError("critic-init source privileged task semantics do not match the target")
+        if not any(str(key).startswith("a2c_network.package.critic.") for key in model):
+            raise ValueError("critic-init checkpoint contains no critic tensors")
+        if "value_mean_std.count" not in model:
+            raise ValueError("critic-init requires source value normalization statistics")
     return {
         "schema_version": ACTOR_WARM_START_SCHEMA_VERSION,
         "checkpoint_path": _relative_or_absolute(resolved),
@@ -124,11 +134,12 @@ def inspect_actor_init_checkpoint(
         "source_namespace": ACTOR_CHECKPOINT_PREFIX,
         "target_namespace": "package.actor.",
         "loaded_tensor_count": len(actor_keys),
+        "initialize_critic": bool(initialize_critic),
+        "value_normalizer_initial_count": float(model["value_mean_std.count"].item()) if initialize_critic else None,
         "reset_components": [
-            "critic",
+            *([] if initialize_critic else ["critic", "value_normalizer"]),
             "actor_optimizer",
             "critic_optimizer",
-            "value_normalizer",
             "reward_curriculum",
             "adr_state",
             "diagnostics_recorder",
@@ -160,7 +171,9 @@ def inspect_resumed_actor_warm_start(path: str | Path) -> dict[str, Any] | None:
     reset_components = evidence.get("reset_components")
     if not isinstance(checkpoint_sha, str) or len(checkpoint_sha) != 64:
         raise ValueError("resume actor-warm-start provenance lacks a SHA-256 parent identity")
-    if not isinstance(reset_components, list) or "critic" not in reset_components:
+    if not isinstance(reset_components, list) or (
+        not bool(evidence.get("initialize_critic", False)) and "critic" not in reset_components
+    ):
         raise ValueError("resume actor-warm-start provenance lacks the reset boundary")
     return dict(evidence)
 
@@ -211,11 +224,37 @@ def load_actor_init_checkpoint(
     return tuple(sorted(actor_state))
 
 
+def load_critic_init_checkpoint(model: Any, path: str | Path, *, expected_checkpoint_sha256: str) -> None:
+    r"""新方法分支显式继承兼容critic和value统计，仍重置两套optimizer。
+
+    Actor观察改变时，privileged critic输入仍可完全相同。保留其可用估计避免用随机critic破坏已学策略；
+    是否适合新的reward/时长仍属实验假设，由warm-start identity明确记录，不称为同identity完整续训。
+    """
+
+    resolved = Path(path).expanduser().resolve(strict=True)
+    if _sha256(resolved) != expected_checkpoint_sha256:
+        raise ValueError("critic-init checkpoint changed after inspection")
+    _, _, state = _checkpoint_document(resolved)
+    prefix = "a2c_network.package.critic."
+    critic_state = {
+        key[len(prefix) :]: value for key, value in state.items() if key.startswith(prefix)
+    }  # 不加载actor/optimizer
+    normalizer_prefix = "value_mean_std."
+    normalizer_state = {
+        key[len(normalizer_prefix) :]: value for key, value in state.items() if key.startswith(normalizer_prefix)
+    }
+    if not normalizer_state or not bool(getattr(model, "normalize_value", False)):
+        raise ValueError("critic-init requires source and target value normalization")
+    model.a2c_network.package.critic.load_state_dict(critic_state, strict=True)  # 逐参数验证结构与shape
+    model.value_mean_std.load_state_dict(normalizer_state, strict=True)
+
+
 __all__ = [
     "ACTOR_CHECKPOINT_PREFIX",
     "ACTOR_WARM_START_SCHEMA_VERSION",
     "inspect_actor_init_checkpoint",
     "inspect_resumed_actor_warm_start",
     "load_actor_init_checkpoint",
+    "load_critic_init_checkpoint",
     "should_load_actor_init_checkpoint",
 ]

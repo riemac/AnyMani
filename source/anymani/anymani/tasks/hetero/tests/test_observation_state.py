@@ -143,3 +143,35 @@ def test_limits_tip_and_critic_keep_named_axes_and_units() -> None:
     assert critic.shape == (1, 16, 4)
     assert float(critic[0, 0, 1].item()) == 2.5  # rad/s保持物理单位
     assert torch.equal(critic[~mask], torch.zeros_like(critic[~mask]))
+
+
+def test_tip_only_frame_preserves_proprioception_and_tip_but_cannot_read_link_bits() -> None:
+    r"""TIP-only切断当前/历史共用producer的own-bit，保留旧权重所需五通道ABI。"""
+
+    mask = _prefix_mask()
+    q = torch.arange(16, dtype=torch.float32).reshape(1, 16) * 0.02
+    target, action = q + 0.1, torch.zeros_like(q)
+    tip = torch.tensor(((True, False, True, False),))
+    own = torch.ones_like(mask)
+    full = actor_joint_contact_frame(q, target, action, own, tip, mask)
+    partial = actor_joint_contact_frame(q, target, action, own, tip, mask, tip_only=True)
+    changed_links = actor_joint_contact_frame(q, target, action, ~own, tip, mask, tip_only=True)
+    assert partial.shape == full.shape == (1, 16, 5)
+    assert torch.equal(partial, changed_links)
+    assert torch.equal(partial[..., :3], full[..., :3])
+    assert torch.equal(partial[..., 4], full[..., 4])
+    assert not partial[..., 3].any()
+    assert own.all()  # actor masking不得原地改变reward/critic共享的接触真值
+
+
+def test_tip_only_owner_packet_zeros_palm_and_joint_without_masking_entities() -> None:
+    r"""只移除不可部署的触觉通道；实体有效mask和TIP接触信息仍存在。"""
+
+    mask = _prefix_mask()
+    bits = torch.ones(1, 21, dtype=torch.bool)
+    packet = actor_owner_contact(bits, mask, tip_only=True)
+    assert not packet[:, :17].any()
+    assert packet[:, 17:].all()
+    assert bits.all()
+    _, owner_valid = derive_tip_and_owner_masks(mask)
+    assert owner_valid[0, 0] and owner_valid[:, 1:17].any()

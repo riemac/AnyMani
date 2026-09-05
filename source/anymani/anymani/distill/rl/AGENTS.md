@@ -63,7 +63,7 @@ CUDA driver free；后者至少保留配置中的安全余量，因为PhysX与co
 
 环境数是计算与统计选择，不设所有cohort共用的128/1280硬默认。预算同时记录$N_{env}H$新样本、逐资产副本数和$E M/K$逻辑optimizer步数；例如5个mini-epochs、4个minibatches、accumulation1为20步。改变并行数、采样、累积或时长必须进入run identity，不用epoch count替代等样本或等墙钟比较。
 Actor base/global residual/critic初始LR分别为`3e-4/1e-4/5e-4`，adaptive schedule保持比例且只能向下调整或恢复到
-该锚点，不能使用rl_games默认`1e-2`上限。
+该锚点；显式`--learning_rate`同比缩放各组及上限，不能使用rl_games默认`1e-2`上限。
 训练标量使用Polars 1.32.3写Zstd Parquet分片，checkpoint前flush并保存shard identity；selected trajectories用
 gzip HDF5。每update写global、实际active cells与全部支持资产；只有完整MVP80固定89行。Actor base使用
 dynamic-first geometry FiLM：History30可经逐JOINT TCN或direct 150D raw stack进入local MLP，$Z_j^e$只产生
@@ -73,6 +73,10 @@ dynamic-first geometry FiLM：History30可经逐JOINT TCN或direct 150D raw stac
 诊断反归一化只读value moments；不可变rollout均值与rl_games逐minibatch更新的KL参考分开存储。Gradient probe只在eager运行，是否介入优化依赖独立rollout/replica-half可靠性证据。
 
 Schema4把Git HEAD放在独立code provenance，method identity只绑定实际源码及科学合同；完整resume仍严格比较全部method字段。旧schema3 Actor-only初始化可用，跨重构只读评估须提供精确源码映射的等价证书，不能用忽略identity开关代替。修改任务/观察/算法是新研究分支，不冒充语义保持重构。
+
+训练入口默认`--actor_contact tip`和随机20–60秒回合；全触觉/固定120秒只作显式对照。TIP-only同时清除当前关节帧、History30和owner token中的非TIP触觉，保留五通道权重接口、实体mask、本体状态及TIP信号，reward/critic仍读取完整接触。时长独立于ADR，每回合计划长度决定有限时域timeout；能力主评估显式使用`--steps 600 --num_replicas 16`，重要候选以2400步复查耐久。
+
+课程可将净圈按计划时长换算到参考时长，提前失败不借实际短存活时间放大进度；`--reward_release_floor`是显式塑形下限，不是能力门。`--actor_init_checkpoint --init_critic`额外继承兼容critic和value统计，optimizer/课程重置；保存的normalizer初始计数加后续更新量才是其合法计数。`scripts.prepare_palm_rotation_resume`只链接checkpoint声明并哈希验证的不可变分片到独立run，完整恢复不重读初始化parent。
 
 ### Logs
 

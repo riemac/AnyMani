@@ -131,6 +131,7 @@ def actor_joint_contact_frame_term(
     robot_name: str = "robot",
     ema_alpha: float = 0.5,
     force_threshold_N: float = 0.25,
+    tip_only: bool = False,
 ) -> torch.Tensor:
     r"""返回MVP actor当前/History30共用的`[N,16,5]` own-JOINT＋TIP-contact帧。"""
 
@@ -152,6 +153,7 @@ def actor_joint_contact_frame_term(
         owner_bits[:, 1:17],
         contact.tip_bits,
         mask,
+        tip_only=tip_only,
     )
 
 
@@ -162,6 +164,7 @@ def actor_owner_contact_term(
     layout: HeterogeneousContactLayout,
     ema_alpha: float = 0.5,
     force_threshold_N: float = 0.25,
+    tip_only: bool = False,
 ) -> torch.Tensor:
     r"""返回MVP global residual消费的`[N,21,1]` owner binary contact。"""
 
@@ -174,7 +177,7 @@ def actor_owner_contact_term(
         force_threshold_N=force_threshold_N,
     )
     _, owner_bits = contact.owner_force_and_bits()
-    return actor_owner_contact(owner_bits, mask)
+    return actor_owner_contact(owner_bits, mask, tip_only=tip_only)
 
 
 def actor_joint_limits_term(

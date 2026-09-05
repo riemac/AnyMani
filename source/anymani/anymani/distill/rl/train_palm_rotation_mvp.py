@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -179,10 +180,43 @@ parser.add_argument(
     "--smoke", action="store_true", help="Use 80 env, horizon 4, one mini-epoch/update integration mode."
 )
 parser.add_argument("--rl_games_strict", action="store_true", help="Require pinned local rl_games v1.6.5 commit.")
+parser.add_argument(
+    "--actor_contact",
+    choices=("all", "tip"),
+    default="tip",
+    help="Actor contact information; critic/reward keep full contact.",
+)
+parser.add_argument("--episode_seconds_min", type=float, default=20.0)
+parser.add_argument("--episode_seconds_max", type=float, default=60.0)
+parser.add_argument(
+    "--reward_release_floor",
+    type=float,
+    default=0.0,
+    help="Explicit minimum shaping gain; continuation controls may use 1.",
+)
+parser.add_argument("--reward_release_reference_seconds", type=float, default=120.0)
+parser.add_argument(
+    "--learning_rate", type=float, default=None, help="Override actor base LR and scale other groups by the same ratio."
+)
+parser.add_argument(
+    "--init_critic",
+    action="store_true",
+    help="Also initialize compatible critic/value RMS from actor_init_checkpoint, not optimizer state.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, launcher_unknown_args = parser.parse_known_args()
 if args_cli.checkpoint is not None and args_cli.actor_init_checkpoint is not None:
     raise ValueError("--checkpoint and --actor_init_checkpoint are mutually exclusive")
+if args_cli.init_critic and args_cli.actor_init_checkpoint is None:
+    raise ValueError("--init_critic requires --actor_init_checkpoint")
+if not 0 < args_cli.episode_seconds_min <= args_cli.episode_seconds_max or not math.isfinite(
+    args_cli.episode_seconds_max
+):
+    raise ValueError("episode duration bounds must satisfy 0 < minimum <= maximum")
+if not 0 <= args_cli.reward_release_floor <= 1 or not 0 < args_cli.reward_release_reference_seconds < math.inf:
+    raise ValueError("release floor/reference duration are invalid")
+if args_cli.learning_rate is not None and not 0 < args_cli.learning_rate < math.inf:
+    raise ValueError("learning rate must be finite and positive")
 if args_cli.reward_release_start_turns < 0.0:
     raise ValueError("--reward_release_start_turns must be non-negative")
 if args_cli.reward_release_end_turns <= args_cli.reward_release_start_turns:
@@ -255,6 +289,7 @@ backend_info = prefer_local_rl_games(strict=bool(args_cli.rl_games_strict))
 torch.backends.cuda.matmul.allow_tf32 = bool(args_cli.tf32)  # Runner之前先声明；构造后还会重新强制
 torch.backends.cudnn.allow_tf32 = bool(args_cli.tf32)  # temporal convolution与matmul共享显式候选身份
 
+from isaaclab.managers import EventTermCfg, TerminationTermCfg  # noqa: E402
 from rl_games.common import env_configurations, vecenv  # noqa: E402
 
 from anymani.distill.rl.observers import OneShotIsaacAlgoObserver  # noqa: E402
@@ -284,6 +319,11 @@ from anymani.tasks.hetero.config.generated.palm_rotation_mvp_env_cfg import (  #
     GeneratedPalmRotationMvpEnvCfg,
 )
 from anymani.tasks.hetero.config.generated.scene import ASSET_BINDING  # noqa: E402
+from anymani.tasks.hetero.mdp.episode_horizon import (  # noqa: E402
+    EPISODE_HORIZON_STEPS_ATTR,
+    planned_time_out,
+    reset_episode_horizon,
+)
 
 
 def _resolve_seed(agent_cfg: dict[str, Any]) -> int:
@@ -382,9 +422,21 @@ def main() -> None:
     r"""构造exact 80-hand environment、cached-N040 transport和custom PPO Runner。"""
 
     env_cfg: ManagerBasedRLEnvCfg = GeneratedPalmRotationMvpEnvCfg()  # typed task cfg，不经过dict round-trip
+    for name in ("jnt_current", "jnt_history", "owner_contact"):
+        getattr(env_cfg.observations.policy, name).params["tip_only"] = args_cli.actor_contact == "tip"
+    env_cfg.episode_length_s = float(args_cli.episode_seconds_max)
+    env_cfg.commands.goal_pose.horizon_s = float(args_cli.episode_seconds_max)
+    env_cfg.events.episode_horizon = EventTermCfg(
+        func=reset_episode_horizon,
+        mode="reset",
+        params={"minimum_seconds": args_cli.episode_seconds_min, "maximum_seconds": args_cli.episode_seconds_max},
+    )
+    env_cfg.terminations.time_out = TerminationTermCfg(func=planned_time_out, time_out=True)
     reward_release_params = env_cfg.curriculum.reward_release.params  # type: ignore[union-attr]  # 训练MDP课程配置
     reward_release_params["release_start_turns"] = float(args_cli.reward_release_start_turns)
     reward_release_params["release_end_turns"] = float(args_cli.reward_release_end_turns)
+    reward_release_params["release_floor"] = float(args_cli.reward_release_floor)
+    reward_release_params["reference_seconds"] = float(args_cli.reward_release_reference_seconds)
     reward_release_ema_alpha = float(
         cast(Any, reward_release_params["ema_alpha"])
     )  # episode-cohort EMA更新率，baseline 0.05
@@ -394,6 +446,17 @@ def main() -> None:
         raise TypeError("palm-rotation rl_games YAML must contain a mapping")
     seed = _resolve_seed(agent_cfg)  # task随机状态与PPO RNG统一
     horizon, minibatch_size, max_updates = _configure_budget(agent_cfg)
+    if args_cli.learning_rate is not None:
+        config = agent_cfg["params"]["config"]
+        factor = float(args_cli.learning_rate) / float(config["learning_rate"])
+        for name in (
+            "learning_rate",
+            "adaptive_lr_max",
+            "residual_learning_rate",
+            "contextual_learning_rate",
+            "critic_learning_rate",
+        ):
+            config[name] = float(config[name]) * factor
     validate_gradient_probe_compile_compatibility(
         args_cli.torch_compile,
         int(agent_cfg["params"]["config"]["gradient_probe_frequency"]),
@@ -425,6 +488,7 @@ def main() -> None:
             target_arm=str(args_cli.arm),
             target_history_encoder=str(args_cli.history_encoder),
             target_provider_identity=provider.identity,
+            initialize_critic=bool(args_cli.init_critic),
         )
         if actor_init_checkpoint is not None
         else (inspect_resumed_actor_warm_start(checkpoint) if checkpoint is not None else None)
@@ -461,6 +525,11 @@ def main() -> None:
             "cohort_lock_sha256": ASSET_BINDING.cohort_lock_sha256,
             "source_member_keys": list(ASSET_BINDING.source_member_keys),
             "actor_warm_start": actor_warm_start,
+            "actor_contact": str(args_cli.actor_contact),
+            "episode_seconds_min": float(args_cli.episode_seconds_min),
+            "episode_seconds_max": float(args_cli.episode_seconds_max),
+            "reward_release_floor": float(args_cli.reward_release_floor),
+            "reward_release_reference_seconds": float(args_cli.reward_release_reference_seconds),
             "horizon_length": horizon,
             "minibatch_size": minibatch_size,
             "minibatch_count": (num_envs * horizon) // minibatch_size,
@@ -569,6 +638,45 @@ def main() -> None:
         metrics_path = run_dir / "metrics.parquet"  # 正常预算结束必须由custom agent finalize
         if not metrics_path.is_file() or metrics_path.stat().st_size == 0:
             raise RuntimeError("palm-rotation Runner returned without any finalized PPO update metrics")
+        # 对真实仿真返回的packet做末次合同核验，而不靠CLI声明推断TIP-only已经生效。
+        task_env = cast(Any, env.unwrapped)  # Gym base类型不暴露typed task运行时buffer
+        policy = task_env.obs_buf["policy"]  # 最后一个真实step的raw observation，禁止再次推进历史或RNG
+        own_max = max(
+            float(policy["jnt_current"][..., 3].abs().max().item()),
+            float(policy["jnt_history"][..., 3].abs().max().item()),
+            float(policy["owner_contact"][:, :17].abs().max().item()),
+        )  # 当前/历史/独立token三个不可部署触觉入口
+        if args_cli.actor_contact == "tip" and own_max != 0.0:
+            raise RuntimeError("TIP-only actor observation leaks non-tip contact")
+        plans = getattr(task_env, EPISODE_HORIZON_STEPS_ATTR)
+        planned_seconds = plans * float(task_env.step_dt)  # 每env正在执行的回合计划，而非统一max_episode_length
+        if not bool(
+            (
+                (planned_seconds >= args_cli.episode_seconds_min - 1e-5)
+                & (planned_seconds <= args_cli.episode_seconds_max + 1e-5)
+            ).all()
+        ):
+            raise RuntimeError("runtime episode horizons lie outside the declared interval")
+        if bool((task_env.episode_length_buf >= plans).any()):
+            raise RuntimeError("an expired episode survived automatic reset")
+        (run_dir / "params" / "protocol_runtime_check.json").write_text(
+            json.dumps(
+                {
+                    "identity_digest": identity["identity_digest"],
+                    "actor_contact": args_cli.actor_contact,
+                    "actor_non_tip_input_max_abs": own_max,
+                    "planned_duration_min_s": float(planned_seconds.min().item()),
+                    "planned_duration_max_s": float(planned_seconds.max().item()),
+                    "planned_duration_unique_count": int(plans.unique().numel()),
+                    "expired_unreset_env_count": 0,
+                    "scope": "final live observation and plans; episode timing is audited separately from recorded terminations",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     finally:
         transport.close()  # failure也释放PhysX/CUDA scene resources
 
