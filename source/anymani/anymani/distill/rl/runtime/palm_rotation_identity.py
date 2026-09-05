@@ -251,7 +251,7 @@ def build_palm_rotation_method_identity(
             "rotation_progress_clip_rad_per_step": float(
                 run_contract.get("rotation_progress_clip_rad_per_step", 0.025)
             ),
-            "strict_tracking_reward_weight": 10.0,
+            "strict_tracking_reward_weight": float(run_contract.get("strict_goal_reward_weight", 10.0)),
             "critic_task_state": "axis-goal-error-max-positive-net-and-current-net",
             "episode_seconds": float(run_contract.get("episode_seconds_max", 120.0)),
             "episode_seconds_min": float(run_contract.get("episode_seconds_min", 120.0)),

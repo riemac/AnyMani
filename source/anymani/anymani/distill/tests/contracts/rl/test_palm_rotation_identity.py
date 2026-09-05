@@ -119,6 +119,17 @@ def test_progress_clip_is_a_task_contract_parameter_not_just_training_metadata(t
     assert baseline["identity_digest"] != faster["identity_digest"]
 
 
+def test_strict_goal_weight_is_explicit_without_adding_frontier_reward(tmp_path: Path) -> None:
+    r"""Strict-only降权必须单独进入任务身份，物理frontier仍只有诊断用途。"""
+
+    baseline = _identity(tmp_path, learning_rate=1.0e-4)
+    lower = _identity(tmp_path, learning_rate=1.0e-4, strict_goal_reward_weight=1.0)
+    assert baseline["task_contract"]["strict_tracking_reward_weight"] == 10.0
+    assert lower["task_contract"]["strict_tracking_reward_weight"] == 1.0
+    assert lower["task_contract"]["rotation_frontier_reward_weight"] == 0.0
+    assert baseline["identity_digest"] != lower["identity_digest"]
+
+
 def test_identity_accepts_explicit_single_asset_closure_with_one_strict_binding(tmp_path: Path) -> None:
     r"""Single-embodiment closure应复用同一identity schema，并显式记录支持集基数1。"""
 

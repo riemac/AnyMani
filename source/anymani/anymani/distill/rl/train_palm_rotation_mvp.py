@@ -205,6 +205,12 @@ parser.add_argument(
     "--learning_rate", type=float, default=None, help="Override actor base LR and scale other groups by the same ratio."
 )
 parser.add_argument(
+    "--strict_goal_reward_weight",
+    type=float,
+    default=10.0,
+    help="Strict pose-and-position goal pulse weight; frontier reward remains zero.",
+)
+parser.add_argument(
     "--init_critic",
     action="store_true",
     help="Also initialize compatible critic/value RMS from actor_init_checkpoint, not optimizer state.",
@@ -225,6 +231,8 @@ if args_cli.learning_rate is not None and not 0 < args_cli.learning_rate < math.
     raise ValueError("learning rate must be finite and positive")
 if not 0 < args_cli.rotation_progress_clip_rad < math.inf:
     raise ValueError("rotation progress clip must be finite and positive")
+if not 0 <= args_cli.strict_goal_reward_weight < math.inf:
+    raise ValueError("strict goal reward weight must be finite and non-negative")
 if args_cli.reward_release_start_turns < 0.0:
     raise ValueError("--reward_release_start_turns must be non-negative")
 if args_cli.reward_release_end_turns <= args_cli.reward_release_start_turns:
@@ -442,6 +450,7 @@ def main() -> None:
     env_cfg.terminations.time_out = TerminationTermCfg(func=planned_time_out, time_out=True)
     # 只扩展进展奖励的对称截断区间；低速斜率、反向符号、动作authority与物理速度均不改写。
     env_cfg.rewards.rotation_progress.params["clip_rad_per_step"] = float(args_cli.rotation_progress_clip_rad)
+    env_cfg.rewards.goal_success.weight = float(args_cli.strict_goal_reward_weight)  # 保留双门事件本身，只改变脉冲权重
     reward_release_params = env_cfg.curriculum.reward_release.params  # type: ignore[union-attr]  # 训练MDP课程配置
     reward_release_params["release_start_turns"] = float(args_cli.reward_release_start_turns)
     reward_release_params["release_end_turns"] = float(args_cli.reward_release_end_turns)
@@ -541,6 +550,7 @@ def main() -> None:
             "reward_release_floor": float(args_cli.reward_release_floor),
             "reward_release_reference_seconds": float(args_cli.reward_release_reference_seconds),
             "rotation_progress_clip_rad_per_step": float(args_cli.rotation_progress_clip_rad),
+            "strict_goal_reward_weight": float(args_cli.strict_goal_reward_weight),
             "horizon_length": horizon,
             "minibatch_size": minibatch_size,
             "minibatch_count": (num_envs * horizon) // minibatch_size,

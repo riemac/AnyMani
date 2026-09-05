@@ -208,6 +208,8 @@ def _training_argv(args: argparse.Namespace, checkpoint: Mapping[str, Any]) -> l
         str(float(training.get("actor_base_lr", 3.0e-4))),
         "--rotation_progress_clip_rad",
         str(float(training.get("rotation_progress_clip_rad_per_step", 0.025))),
+        "--strict_goal_reward_weight",
+        str(float(training.get("strict_goal_reward_weight", 10.0))),
         "--seed",
         str(int(training["seed"])),
         "--minibatches",

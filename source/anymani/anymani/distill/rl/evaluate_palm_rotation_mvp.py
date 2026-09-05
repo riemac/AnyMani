@@ -291,6 +291,7 @@ def main() -> None:
     env_cfg.rewards.rotation_progress.params["clip_rad_per_step"] = float(
         run_contract.get("rotation_progress_clip_rad_per_step", 0.025)
     )  # 物理评价仍用未截断净转角；保留checkpoint训练奖励配置供协议审计
+    env_cfg.rewards.goal_success.weight = float(run_contract.get("strict_goal_reward_weight", 10.0))
     env = gym.make("AnyMani-Hetero-Generated-PalmRotation-MVP-RLGames-v0", cfg=env_cfg)
     provider = build_palm_rotation_bf16_geometry_provider(ASSET_BINDING, device=device)
     prototype_index = torch.tensor(ASSET_BINDING.asset_index_by_env(num_envs), dtype=torch.long, device=device)
