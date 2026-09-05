@@ -56,6 +56,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--rollouts", type=int, default=4, help="冻结参数下独立H30 rollout数量；正式诊断默认4。")
     parser.add_argument("--seed_offset", type=int, default=10000, help="相对训练seed的诊断随机流偏移。")
     parser.add_argument("--warmup_steps", type=int, default=0, help="无更新预运行步数；0测冷启动，570测28.5–30秒占据。")
+    parser.add_argument("--full_rollout", action="store_true", help="按half样本数合并全部分层minibatch的只读梯度。")
     args = parser.parse_args()
     if args.rollouts < 2:  # 单一rollout只有half consistency，不能形成跨rollout可靠性证据
         parser.error("--rollouts must be at least 2")
@@ -263,10 +264,15 @@ def main() -> None:
     torch.compile = lambda function, **_kwargs: function  # type: ignore[assignment]  # 多次autograd必须使用eager图
 
     import anymani.distill.rl.train_palm_rotation_mvp as training_entry  # noqa: PLC0415  # AppLauncher顺序真源
+    from anymani.distill.rl.algorithms.gradient_audit import (  # noqa: PLC0415
+        compute_actor_gradient_scope_audit,
+        per_asset_replica_half_gradients,
+    )
     from anymani.distill.rl.palm_rotation_ppo import (  # noqa: PLC0415
         PALM_ROTATION_PPO_ALGO,
         PalmRotationPpoAgent,
     )
+    from anymani.distill.rl.runtime import palm_rotation_probes as probe_runtime  # noqa: PLC0415
 
     checkpoint_epoch = int(checkpoint["epoch"])  # 所有repeat均锚定同一冻结update
     training_seed = int(checkpoint["anymani_identity"]["training"]["seed"])  # 正式训练随机种子
@@ -330,9 +336,80 @@ def main() -> None:
         original_shadow_frequency = int(agent.config.get("full_gradient_shadow_frequency", 0))
         npz_paths: list[Path] = []  # $R$个full-gradient dense artifacts
         populations: list[dict[str, Any]] = []  # 记录实际episode age，区分elapsed-time与持续存活总体
+        original_shadow = probe_runtime.run_full_actor_gradient_shadow
+        half_sums: dict[str, torch.Tensor] = {}
+        count_sums: dict[str, torch.Tensor] = {}
+        shadow_calls = 0
+
+        def accumulate_shadow(
+            current_agent: Any,
+            *,
+            global_objective: torch.Tensor,
+            per_asset_objective: torch.Tensor,
+            labels: torch.Tensor,
+            replica_halves: torch.Tensor,
+        ) -> None:
+            r"""按$n_{imh}$加权合并microbatch均值梯度，得到完整rollout的$g_{ih}$。
+
+            各slice的half数量不必相等；仅平均已有cosine或不加权平均half梯度都会改变估计量。
+            """
+
+            nonlocal shadow_calls
+            parameters = tuple(current_agent.model.a2c_network.package.actor.parameters())
+            for scope, objective in (("global", global_objective), ("per_asset_rollout", per_asset_objective)):
+                gradients, counts = per_asset_replica_half_gradients(
+                    objective,
+                    labels,
+                    replica_halves,
+                    parameters,
+                    asset_count=current_agent.asset_count,
+                )
+                weighted = gradients * counts[..., None]  # sum-objective梯度，`[A,2,P]`
+                if scope not in half_sums:
+                    half_sums[scope], count_sums[scope] = weighted, counts.clone()
+                else:
+                    half_sums[scope].add_(weighted)
+                    count_sums[scope].add_(counts)
+            shadow_calls += 1
+            if shadow_calls != len(current_agent.dataset):
+                return
+            dense = {}
+            scope_summary = {}
+            expected_half_count = int(current_agent.batch_size) // (2 * current_agent.asset_count)
+            for scope in half_sums:
+                counts = count_sums[scope]
+                if not bool((counts == expected_half_count).all()):
+                    raise RuntimeError("full-rollout gradient counts do not match complete replica halves")
+                gradients = half_sums[scope] / counts[..., None]
+                audit = compute_actor_gradient_scope_audit(gradients, counts)
+                dense[f"{scope}_half_gradients"] = gradients.cpu().numpy()
+                dense.update({f"{scope}_{key}": value.cpu().numpy() for key, value in audit.items()})
+                scope_summary[scope] = {
+                    "half_self_cosine_median": float(audit["half_self_cosine"].median().item()),
+                    "positive_half_fraction": float(audit["reliable_asset_fraction"].item()),
+                    "aggregate_to_individual_norm_ratio": float(audit["aggregate_to_individual_norm_ratio"].item()),
+                }
+            path = Path(current_agent.experiment_dir) / "full_gradient_shadows"
+            path.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(path / f"update_{checkpoint_epoch:06d}.npz", **dense)
+            _atomic_json(
+                path / f"update_{checkpoint_epoch:06d}.json",
+                {
+                    "sample_population": "complete-H30-rollout-count-weighted-microbatches",
+                    "activation_minibatches": shadow_calls,
+                    "half_sample_count": expected_half_count,
+                    "scopes": scope_summary,
+                },
+            )
+
+        if args.full_rollout:
+            probe_runtime.run_full_actor_gradient_shadow = accumulate_shadow
 
         try:
             for repeat_index in range(int(args.rollouts)):
+                half_sums.clear()
+                count_sums.clear()
+                shadow_calls = 0
                 # 每次从完全相同的模型/value-normalizer状态与环境reset边界开始，只改变诊断随机流。
                 agent.model.load_state_dict(frozen_model, strict=True)
                 vec_env.set_env_state(deepcopy(frozen_environment))
@@ -384,18 +461,22 @@ def main() -> None:
                 batch = agent.play_steps()  # env-major flatten前的正式rollout batch
                 agent._reset_optimization_metrics()
                 agent.prepare_dataset(batch)  # global/per-asset GAE与stratified permutation
-                first_minibatch = agent.dataset[0]  # 每资产等量，和训练期full shadow总体完全一致
                 print(f"[gradient-audit] rollout {repeat_index}: differentiating full Actor", flush=True)
 
                 # Shadow在``calc_gradients``主backward之前运行；accumulation=2使第一个microbatch绝不触发step。
                 repeat_root = output_root / f"rollout_{repeat_index:02d}"
                 agent.experiment_dir = str(repeat_root)  # dense NPZ/JSON只写独立repeat目录
                 agent.epoch_num = checkpoint_epoch  # artifact update含义始终是source checkpoint坐标
-                agent.config["gradient_probe_frequency"] = 1  # 同时保存Actor/Critic末层Gram作低成本参照
+                agent.config["gradient_probe_frequency"] = 0 if args.full_rollout else 1
                 agent.config["full_gradient_shadow_frequency"] = 1  # 完整Actor global/per-asset两种scope
                 agent._gradient_accumulation_steps = 2  # 当前只调用一个microbatch，故optimizer boundary不可达
-                agent._gradient_microbatch_index = 0
-                agent.calc_gradients(first_minibatch)
+                for minibatch_index in range(len(agent.dataset) if args.full_rollout else 1):
+                    agent._gradient_microbatch_index = 0  # 每个slice均单独只读，永不进入第二个累积microstep
+                    agent.calc_gradients(agent.dataset[minibatch_index])
+                    if agent._gradient_microbatch_index != 1:
+                        raise RuntimeError("gradient audit crossed an optimizer boundary")
+                if args.full_rollout and shadow_calls != len(agent.dataset):
+                    raise RuntimeError("full-rollout shadow did not observe every minibatch")
                 print(f"[gradient-audit] rollout {repeat_index}: gradient artifact complete", flush=True)
                 if agent._gradient_microbatch_index != 1:
                     raise RuntimeError("gradient audit unexpectedly executed more than one activation microbatch")
@@ -419,6 +500,7 @@ def main() -> None:
                     raise RuntimeError("full Actor gradient shadow did not publish its dense artifact")
                 npz_paths.append(npz_path)
         finally:
+            probe_runtime.run_full_actor_gradient_shadow = original_shadow
             # 内存状态也恢复到checkpoint，确保后续清理/observer不会看见probe更新后的value RMS或gradients。
             agent.model.load_state_dict(frozen_model, strict=True)
             vec_env.set_env_state(deepcopy(frozen_environment))
@@ -443,11 +525,16 @@ def main() -> None:
             "actor_parameters_frozen_exact": True,
             "critic_parameters_frozen_exact": True,
             "warmup_steps": int(args.warmup_steps),
+            "full_rollout": bool(args.full_rollout),
             "rollout_populations": populations,
             "source_metric_shards_hardlinked": len(checkpoint["anymani_metrics_recorder"]["shards"]),
             "rollout_horizon": int(agent.horizon_length),
             "rollout_seeds": [training_seed + int(args.seed_offset) + index for index in range(int(args.rollouts))],
-            "sample_population": "independent-H30-after-declared-untrained-warmup-first-stratified-minibatch-even-odd-halves",
+            "sample_population": (
+                "independent-H30-after-untrained-warmup-full-rollout-count-weighted-even-odd-halves"
+                if args.full_rollout
+                else "independent-H30-after-declared-untrained-warmup-first-stratified-minibatch-even-odd-halves"
+            ),
             "cross_rollout": _cross_rollout_summary(npz_paths),
         }
         _atomic_json(output_root / "summary.json", summary)
