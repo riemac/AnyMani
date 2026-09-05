@@ -438,6 +438,7 @@ def main() -> None:
                             "action": actions,
                             "pre_owner_contact": observation["actor_owner_contact"].squeeze(-1),
                             "post_joint_position_rad": next_observation["obs"]["actor_jnt_current"][..., 0] * torch.pi,
+                            "post_goal_axis_alignment": command.goal_normal_alignment,  # cos(物体z轴,目标z轴)，仅post_state_valid内有效
                         }
                     )
                     if not trace_buffers:
@@ -736,7 +737,7 @@ def main() -> None:
                     "trace_stride": int(args_cli.trace_stride),
                     "axes": "time,asset,replica,feature",
                     "sensor_names": list(ASSET_BINDING.contact_layout.state_sensor_names),
-                    "post_state_valid_semantics": "sensor forces/bits and post q exclude automatic-reset terminal rows",
+                    "post_state_valid_semantics": "sensor forces/bits, post q and post axis alignment exclude automatic-reset terminal rows",
                     "pre_owner_contact_semantics": "actor input before the applied action; aggregates are post-physics/pre-reset",
                 },
             )

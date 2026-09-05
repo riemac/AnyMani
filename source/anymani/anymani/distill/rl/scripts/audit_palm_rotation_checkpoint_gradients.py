@@ -31,6 +31,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -54,9 +55,12 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True, help="全新、独立的gradient-audit输出目录。")
     parser.add_argument("--rollouts", type=int, default=4, help="冻结参数下独立H30 rollout数量；正式诊断默认4。")
     parser.add_argument("--seed_offset", type=int, default=10000, help="相对训练seed的诊断随机流偏移。")
+    parser.add_argument("--warmup_steps", type=int, default=0, help="无更新预运行步数；0测冷启动，570测28.5–30秒占据。")
     args = parser.parse_args()
     if args.rollouts < 2:  # 单一rollout只有half consistency，不能形成跨rollout可靠性证据
         parser.error("--rollouts must be at least 2")
+    if args.warmup_steps < 0:
+        parser.error("--warmup_steps must be non-negative")
     if args.output.expanduser().exists():  # 不复用目录，防止新旧NPZ看似属于同一冻结参数总体
         parser.error("--output must not already exist")
     return args
@@ -304,6 +308,9 @@ def main() -> None:
         # rl_games把experience buffer、current episode accumulators与``dones``延迟到``train()``入口创建；
         # 本诊断覆盖了该入口，故必须显式执行同一初始化，不能只恢复checkpoint中的model/optimizer state。
         agent.init_tensors()
+        vec_env = agent.vec_env
+        if vec_env is None:
+            raise RuntimeError("gradient audit requires the constructed vector environment")
 
         # 参数快照覆盖Actor与Critic；value RMS等buffers由完整model snapshot在每个repeat前恢复。
         frozen_model = {
@@ -312,17 +319,23 @@ def main() -> None:
         frozen_actor = [
             parameter.detach().clone() for parameter in agent.model.a2c_network.package.actor.parameters()
         ]  # 逐参数bitwise不变门
+        frozen_critic = [
+            parameter.detach().clone() for parameter in agent.model.a2c_network.package.critic.parameters()
+        ]
+        frozen_environment = deepcopy(vec_env.get_env_state())  # 恢复课程/diagnostic counter，不声称恢复PhysX状态
         print("[gradient-audit] checkpoint parameter snapshot complete", flush=True)
         original_epoch = int(agent.epoch_num)  # restore后的真实checkpoint update
         original_accumulation = int(agent._gradient_accumulation_steps)  # 正式值通常1；probe临时设2阻止step边界
         original_probe_frequency = int(agent.config.get("gradient_probe_frequency", 0))
         original_shadow_frequency = int(agent.config.get("full_gradient_shadow_frequency", 0))
         npz_paths: list[Path] = []  # $R$个full-gradient dense artifacts
+        populations: list[dict[str, Any]] = []  # 记录实际episode age，区分elapsed-time与持续存活总体
 
         try:
             for repeat_index in range(int(args.rollouts)):
                 # 每次从完全相同的模型/value-normalizer状态与环境reset边界开始，只改变诊断随机流。
                 agent.model.load_state_dict(frozen_model, strict=True)
+                vec_env.set_env_state(deepcopy(frozen_environment))
                 agent.optimizer.zero_grad(set_to_none=True)
                 agent.critic_optimizer.zero_grad(set_to_none=True)
                 repeat_seed = training_seed + int(args.seed_offset) + repeat_index  # 独立Normal action/minibatch流
@@ -335,6 +348,36 @@ def main() -> None:
                 agent.current_rewards.zero_()
                 agent.current_shaped_rewards.zero_()
                 agent.current_lengths.zero_()
+
+                # 不调用额外play_steps或prepare_dataset：只推进原始动作/物理路径，不更新value RMS。
+                resets = torch.zeros_like(agent.dones, dtype=torch.long)
+                for _ in range(int(args.warmup_steps)):
+                    values = agent.get_action_values(agent.obs)  # eval/no_grad，仍从同一随机策略采样
+                    agent.obs, rewards, agent.dones, _infos = agent.env_step(values["actions"])
+                    agent.current_rewards.add_(rewards)
+                    agent.current_shaped_rewards.add_(agent.rewards_shaper(rewards))
+                    agent.current_lengths.add_(1)
+                    resets += agent.dones.long()
+                    not_done = 1.0 - agent.dones.float()
+                    agent.current_rewards.mul_(not_done.unsqueeze(1))
+                    agent.current_shaped_rewards.mul_(not_done.unsqueeze(1))
+                    agent.current_lengths.mul_(not_done)
+                if not all(torch.equal(value, agent.model.state_dict()[name]) for name, value in frozen_model.items()):
+                    raise RuntimeError("gradient-audit warmup changed model/value statistics")
+                environment_now = vec_env.get_env_state()
+                if not torch.equal(
+                    environment_now["reward_release"]["env_lambda"], frozen_environment["reward_release"]["env_lambda"]
+                ):
+                    raise RuntimeError("gradient-audit warmup changed actual reward release")
+                episode_ages = vec_env.env.unwrapped.episode_length_buf.detach().cpu()
+                populations.append(
+                    {
+                        "warmup_steps": int(args.warmup_steps),
+                        "episode_age_steps_at_h30_start": episode_ages.tolist(),
+                        "warmup_resets_by_env": resets.cpu().tolist(),
+                        "model_and_value_state_unchanged_after_warmup": True,
+                    }
+                )
 
                 # ``play_steps``逐值复用生产H30 stochastic policy、reward、done、critic与GAE路径。
                 print(f"[gradient-audit] rollout {repeat_index}: collecting H30", flush=True)
@@ -364,6 +407,13 @@ def main() -> None:
                     for parameter, reference in zip(current_actor, frozen_actor, strict=True)
                 ):
                     raise RuntimeError("checkpoint gradient audit changed Actor parameters")
+                if not all(
+                    torch.equal(parameter.detach(), reference)
+                    for parameter, reference in zip(
+                        agent.model.a2c_network.package.critic.parameters(), frozen_critic, strict=True
+                    )
+                ):
+                    raise RuntimeError("checkpoint gradient audit changed Critic parameters")
                 npz_path = repeat_root / "full_gradient_shadows" / f"update_{checkpoint_epoch:06d}.npz"
                 if not npz_path.is_file():
                     raise RuntimeError("full Actor gradient shadow did not publish its dense artifact")
@@ -371,6 +421,7 @@ def main() -> None:
         finally:
             # 内存状态也恢复到checkpoint，确保后续清理/observer不会看见probe更新后的value RMS或gradients。
             agent.model.load_state_dict(frozen_model, strict=True)
+            vec_env.set_env_state(deepcopy(frozen_environment))
             agent.optimizer.zero_grad(set_to_none=True)
             agent.critic_optimizer.zero_grad(set_to_none=True)
             agent.epoch_num = original_epoch
@@ -390,10 +441,13 @@ def main() -> None:
             "audit_script_sha256": _sha256(Path(__file__).resolve()),
             "optimizer_steps": 0,
             "actor_parameters_frozen_exact": True,
+            "critic_parameters_frozen_exact": True,
+            "warmup_steps": int(args.warmup_steps),
+            "rollout_populations": populations,
             "source_metric_shards_hardlinked": len(checkpoint["anymani_metrics_recorder"]["shards"]),
             "rollout_horizon": int(agent.horizon_length),
             "rollout_seeds": [training_seed + int(args.seed_offset) + index for index in range(int(args.rollouts))],
-            "sample_population": "independent-H30-rollouts-first-stratified-minibatch-even-odd-replica-halves",
+            "sample_population": "independent-H30-after-declared-untrained-warmup-first-stratified-minibatch-even-odd-halves",
             "cross_rollout": _cross_rollout_summary(npz_paths),
         }
         _atomic_json(output_root / "summary.json", summary)
