@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 import time
@@ -17,7 +18,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from isaaclab.app import AppLauncher
@@ -64,6 +65,11 @@ parser.add_argument(
     default=None,
     help="训练checkpoint使用的member-level cohort lock；与legacy support rows互斥。",
 )
+parser.add_argument(
+    "--cohort_transfer",
+    action="store_true",
+    help="Explicit frozen-policy evaluation on a different canonical cohort; shared assets keep exact pregrasps.",
+)
 parser.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE, help="Accepted N000 fixed reference JSON.")
 parser.add_argument("--num_replicas", type=int, default=16, help="Fixed replicas per asset; formal protocol uses 16.")
 parser.add_argument("--steps", type=int, default=2400, help="Fixed episode policy steps: 600=30 s, 2400=120 s.")
@@ -93,6 +99,12 @@ parser.add_argument(
     action="store_true",
     help="Frozen-policy ablation: mask non-TIP contact at every actor input route.",
 )
+parser.add_argument(
+    "--direct_logit_gain",
+    type=float,
+    default=1.0,
+    help="Frozen Direct-policy diagnostic: mu=tanh(gain*logit); physical action bounds remain unchanged.",
+)
 AppLauncher.add_app_launcher_args(parser)
 parser.add_argument("--checkpoint", type=Path, required=True, help="Full schema-3/4 palm-rotation checkpoint.")
 args_cli, launcher_unknown_args = parser.parse_known_args()
@@ -101,6 +113,10 @@ if args_cli.num_replicas < 1 or args_cli.steps < 1:
     raise ValueError("evaluation replicas and steps must be positive")
 if args_cli.trace_stride < 0:
     raise ValueError("trace stride must be non-negative")
+if not math.isfinite(args_cli.direct_logit_gain) or args_cli.direct_logit_gain <= 0.0:
+    raise ValueError("direct logit gain must be finite and positive")
+if args_cli.cohort_transfer and args_cli.cohort_lock is None:
+    raise ValueError("--cohort_transfer requires an explicit --cohort_lock")
 if args_cli.cohort_lock is not None:
     if args_cli.support_rows is not None:
         raise ValueError("--cohort_lock and --support_rows are mutually exclusive")
@@ -149,6 +165,7 @@ backend_info = prefer_local_rl_games(strict=bool(args_cli.rl_games_strict))  # p
 
 import anymani.distill.rl  # noqa: F401, E402
 import anymani.tasks.hetero  # noqa: F401, E402
+from anymani.distill.diagnostics.evaluation.rl import palm_rotation_transfer  # noqa: E402
 from anymani.distill.diagnostics.evaluation.rl.palm_rotation import (  # noqa: E402
     PalmRotationReference,
     evaluate_cohort,
@@ -318,11 +335,23 @@ def main() -> None:
             if args_cli.implementation_certificate is not None
             else None
         )
-        validate_palm_rotation_evaluation_identity(
-            runtime_identity=current_identity,
-            checkpoint_identity=checkpoint_identity,
-            implementation_certificate=implementation_certificate,
-        )
+        transfer_validation = None
+        catalog_revision_changed = current_identity["pregrasp"] != checkpoint_identity["pregrasp"]
+        if args_cli.cohort_transfer or catalog_revision_changed:
+            if not args_cli.cohort_transfer and current_identity["manifest"] != checkpoint_identity["manifest"]:
+                raise RuntimeError("new evaluation support requires explicit --cohort_transfer")
+            transfer_validation = palm_rotation_transfer.validate_transfer_evaluation(
+                current_identity,
+                checkpoint_identity,
+                root=ANYMANI_ROOT,
+                implementation_certificate=implementation_certificate,
+            )
+        else:
+            validate_palm_rotation_evaluation_identity(
+                runtime_identity=current_identity,
+                checkpoint_identity=checkpoint_identity,
+                implementation_certificate=implementation_certificate,
+            )
         if run_contract.get("rl_games_backend_commit") != backend_info.git_commit:
             raise RuntimeError("evaluation rl_games backend disagrees with checkpoint training contract")
 
@@ -353,6 +382,22 @@ def main() -> None:
         if args_cli.residual_off:
             network.package.actor.residual_enabled = False  # 同checkpoint反事实，不改base/FiLM参数
         network.eval()
+        frozen_actor_state = None
+        direct_gain_hook = None
+        if args_cli.direct_logit_gain != 1.0:
+            if checkpoint_identity["policy"]["arm"] not in {"direct", "direct_token"}:
+                raise ValueError("--direct_logit_gain is defined only for a Direct-arm checkpoint")
+            # $\mu_j=\tanh(g f(H_j))$只改变冻结策略的读出增益；保留原tanh、ghost mask和1/24 rad物理上限。
+            # 在logit处干预无需atanh反演饱和动作，也不改写checkpoint参数；末端逐值核验参数仍冻结。
+            frozen_actor_state = {
+                name: value.detach().clone() for name, value in network.package.actor.state_dict().items()
+            }
+            direct_head = network.package.actor.direct_head
+            if not isinstance(direct_head, torch.nn.Module):
+                raise TypeError("Direct logit-gain diagnostic requires an action readout module")
+            direct_gain_hook = direct_head.register_forward_hook(
+                lambda _module, _inputs, logits: cast(torch.Tensor, logits) * float(args_cli.direct_logit_gain)
+            )
 
         # 每env持续保存其first trajectory最新充分统计；done后即冻结并忽略自动reset的新episode。
         active = torch.ones(num_envs, dtype=torch.bool, device=device)
@@ -503,6 +548,14 @@ def main() -> None:
             raise RuntimeError(
                 f"fixed evaluation ended before {int(active.sum().item())}/{num_envs} first trajectories terminated"
             )
+        if frozen_actor_state is not None:
+            if any(
+                not torch.equal(value, network.package.actor.state_dict()[name])
+                for name, value in frozen_actor_state.items()
+            ):
+                raise RuntimeError("Direct logit-gain diagnostic changed frozen Actor parameters")
+            if direct_gain_hook is not None:
+                direct_gain_hook.remove()
 
         safe_diagnostic_steps = diagnostic_steps.clamp_min(1.0)  # 每条first trajectory理论上至少含terminal/window一步
         frontier_from_maximum = torch.floor(
@@ -612,7 +665,9 @@ def main() -> None:
             and actor_tip_only
             and not args_cli.residual_off
             and not args_cli.tip_only_intervention
-        )  # 耐久/R1/冻结遮蔽仅诊断，不冒充30秒R16的正式扩张资格
+            and args_cli.direct_logit_gain == 1.0
+            and not args_cli.cohort_transfer
+        )  # 耐久/R1/冻结遮蔽或动作读出干预仅诊断，不冒充原checkpoint的正式扩张资格
         scale_ladder_result = (
             evaluate_scale_ladder_cohort(
                 physical_asset_results,
@@ -648,6 +703,9 @@ def main() -> None:
         if output is None:
             intervention = "-residual-off" if args_cli.residual_off else ""
             intervention += "-tip-mask" if args_cli.tip_only_intervention else ""
+            intervention += "-cohort-transfer" if args_cli.cohort_transfer else ""
+            if args_cli.direct_logit_gain != 1.0:
+                intervention += f"-logit-gain-{args_cli.direct_logit_gain:g}"
             output = (
                 checkpoint_path.parent.parent
                 / "evaluation"
@@ -664,6 +722,8 @@ def main() -> None:
             "method_identity_digest": checkpoint_identity["identity_digest"],
             "execution_identity_digest": current_identity["identity_digest"],
             "evaluator_source_sha256": _sha256(Path(__file__).resolve()),
+            "transfer_validator_source_sha256": _sha256(Path(palm_rotation_transfer.__file__)),
+            "transfer_validation": transfer_validation,
             "execution_implementation": current_identity["implementation"],
             "code_provenance": palm_rotation_code_provenance(),
             "implementation_certificate_sha256": (
@@ -682,6 +742,11 @@ def main() -> None:
                 "horizon_s": evaluation_horizon_s,
                 "trace_stride": int(args_cli.trace_stride),
                 "actor_contact_intervention": "tip-only-mask" if args_cli.tip_only_intervention else "none",
+                "cohort_transfer": bool(args_cli.cohort_transfer),
+                "direct_logit_gain_intervention": float(args_cli.direct_logit_gain),
+                "direct_logit_gain_parameter_check": (
+                    "bitwise-equal" if frozen_actor_state is not None else "not-applicable"
+                ),
                 "actor_contact": "tip-only-binary" if actor_tip_only else "all-owner-binary-no-force",
                 "scale_ready_protocol_matched": scale_protocol_matched,
                 "reference_horizon_s": reference_doc.get("protocol", {}).get("horizon_s"),
