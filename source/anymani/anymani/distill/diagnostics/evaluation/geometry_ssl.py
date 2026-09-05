@@ -53,6 +53,7 @@ def geometry_ssl_ablation_forward(
     ablation: GeometrySSLAblation,  # `query_only` 或 `latent_shuffle`
     batch_permutation: torch.Tensor | None = None,  # shuffle 时 `[B]` 双射
     evidence_row_index: torch.Tensor | None = None,  # `[B]` q row -> unique static-evidence row
+    joint_coordinate_sign: torch.Tensor | None = None,  # `[B,N_J]`，逐 q joint-sign gauge
 ) -> GeometrySSLForward:
     r"""保持同一 decoder/query path，仅移除或错配 morphology latent。
 
@@ -74,7 +75,7 @@ def geometry_ssl_ablation_forward(
         ValueError: permutation 不是 ``[0,B)`` 双射或 ablation 名未知时抛出。
     """
 
-    latents = model.encoder(q, evidence, evidence_row_index)  # 原始 unified $Z:[B,G,D]$
+    latents = model.encoder(q, evidence, evidence_row_index, joint_coordinate_sign)  # 原始 unified $Z:[B,G,D]$
     query_features = model.encoder.encode_points(  # 与完整模型完全相同的 point-anchor 前端
         query_points_h.detach(), evidence, evidence_row_index
     )  # `[B,G,N_Q,D_q]`；固定 query 不接收 sampler 梯度

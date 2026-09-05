@@ -307,7 +307,7 @@ class PhysicalAuditHandle:
 
 
 class MultiAnchorGaussianSession:
-    r"""封装一个 train/validation/evaluation split 的 source、Sobol cursor 与 resident window。"""
+    r"""封装一个 train/evaluation split 的 source、Sobol cursor 与 resident window。"""
 
     def __init__(
         self,
@@ -328,12 +328,12 @@ class MultiAnchorGaussianSession:
         if not sources:
             raise ValueError(f"method session role={role!r} suite={suite!r} requires at least one asset")
         self.method = method  # concrete scientific aggregation root
-        self.role = role  # train/training_evaluation/validation/evaluation
+        self.role = role  # train/evaluation
         self.suite = suite  # held-out suite 名；train 为空
         self.sources = sources  # 当前 split 的固定 lazy asset axis
         self.seed = int(seed)  # 当前 split 独立 q/query root seed
         self.samplers = method.make_independent_samplers(sources, seed=self.seed)
-        loader = method.load_device_state if role == "train" else method.load_validation_device_state
+        loader = method.load_device_state if role == "train" else method.load_fixed_device_state
         self.window = window_factory(
             sources,
             device=str(device),
@@ -356,6 +356,20 @@ class MultiAnchorGaussianSession:
 
         del step  # 采样 identity 由 schedule cursor 与 session seed 唯一确定
         return self.method.realize_minibatch(
+            schedule_item,
+            sources=self.sources,
+            samplers=self.samplers,
+            window=self.window,
+            seed=self.seed,
+            schedule=schedule,
+            mode="train" if self.role == "train" else "eval",
+        )
+
+    def realize_units(self, schedule_item: Any, *, schedule: Any, step: int):
+        r"""逐个返回当前 logical minibatch 的 64-pair units，供 Trainer 流式闭合一次 update。"""
+
+        del step
+        return self.method.realize_minibatch_units(
             schedule_item,
             sources=self.sources,
             samplers=self.samplers,
@@ -400,6 +414,7 @@ def configure_source_artifacts(
     mode: str,
     dataset_manifest_sha256: str,
     producer_device: str,
+    role: str = "train",
 ) -> None:
     r"""配置跨 run source store；``off`` 显式关闭磁盘 artifact。"""
 
@@ -411,6 +426,7 @@ def configure_source_artifacts(
             mode=mode,
             dataset_manifest_sha256=dataset_manifest_sha256,
             producer_device=producer_device,
+            role=role,
         )
     )
 
@@ -419,7 +435,7 @@ def source_artifact_identity(method: Any) -> dict[str, object]:
     r"""返回 checkpoint/stage 可比较的 source producer 身份。"""
 
     store = method.source_artifact_store
-    return {"schema_version": "1.0.0", "mode": "off"} if store is None else store.identity()
+    return {"schema_version": "2.0.0", "mode": "off"} if store is None else store.identity()
 
 
 def materialize_or_load_core(
@@ -461,14 +477,13 @@ def lazy_sources(
 
 
 def source_partitions(method: Any) -> dict[str, tuple[LazyGeometrySources, int]]:
-    r"""返回 prepare/preflight 所需 provider 与 anchor shard 数。"""
+    r"""返回当前运行角色实际可访问的 provider 与 anchor shard 数。"""
 
-    partitions: dict[str, tuple[LazyGeometrySources, int]] = {
-        "train": (require_train_sources(method), method.config.representation.source.anchors.bank_size),
-    }
-    partitions.update({f"validation.{name}": (source, 1) for name, source in method.validation_sources.items()})
-    partitions.update({f"evaluation.{name}": (source, 1) for name, source in method.evaluation_sources.items()})
-    return partitions
+    if method.active_role == "train":
+        return {"train": (require_train_sources(method), method.config.representation.source.anchors.bank_size)}
+    if method.active_role == "evaluation":
+        return {f"evaluation.{name}": (source, 1) for name, source in method.evaluation_sources.items()}
+    raise RuntimeError("source partitions requested before method role preparation")
 
 
 def prepare_source_artifacts(
@@ -508,8 +523,8 @@ def prepare_source_artifacts(
                 shard_count += 1
     disk = shutil.disk_usage(store.root.parent if store.root.parent.exists() else Path.cwd())
     return {
-        "schema_version": "1.0.0",
-        "source_artifact_schema": "1.0.0",
+        "schema_version": "2.0.0",
+        "source_artifact_schema": "2.0.0",
         "root": str(store.root),
         "partitions": sorted(providers),
         "base_count": base_count,
@@ -538,12 +553,10 @@ def preflight_source_artifacts(method: Any) -> dict[str, int]:
 
 
 def split_names(method: Any, role: str) -> tuple[str, ...]:
-    r"""返回 train 或 validation/evaluation 具名 suite 轴。"""
+    r"""返回 train 或 evaluation 具名 suite 轴。"""
 
-    if role in {"train", "training_evaluation"}:
+    if role == "train":
         return ("",)
-    if role == "validation":
-        return tuple(method.validation_sources)
     if role == "evaluation":
         return tuple(method.evaluation_sources)
     raise ValueError(f"unknown method split role={role!r}")
@@ -560,10 +573,8 @@ def require_train_sources(method: Any) -> LazyGeometrySources:
 def split_asset_count(method: Any, role: str, *, suite: str = "") -> int:
     r"""返回 train 或具名 held-out suite 的资产数。"""
 
-    if role in {"train", "training_evaluation"}:
+    if role == "train":
         return len(require_train_sources(method))
-    if role == "validation":
-        return len(method.validation_sources.get(suite, ()))
     if role == "evaluation":
         return len(method.evaluation_sources.get(suite, ()))
     raise ValueError(f"unknown method split role={role!r}")
@@ -629,16 +640,9 @@ def asset_manifest(method: Any, catalog: Any, *, cancel_event: Event | None = No
             record_item(item, partition="train", representation=method.representation)
             for item in catalog.dataset.train.records
         ],
-        "validation": {
-            suite: [
-                record_item(item, partition=f"validation.{suite}", representation=method.validation_representation)
-                for item in partition.records
-            ]
-            for suite, partition in catalog.dataset.validation.items()
-        },
         "evaluation": {
             suite: [
-                record_item(item, partition=f"evaluation.{suite}", representation=method.validation_representation)
+                record_item(item, partition=f"evaluation.{suite}", representation=method.fixed_representation)
                 for item in partition.records
             ]
             for suite, partition in catalog.dataset.evaluation.items()

@@ -151,7 +151,8 @@ class OwnerSurfaceSamplingCache:
     point 和当前 $T_{hg}(q)$，无需移动 mesh 或重建 BVH。
     """
 
-    triangles_owner_local_m: tuple[torch.Tensor, ...]  # 每项 `[F_g,3,3]`，m
+    vertices_owner_local_m: tuple[torch.Tensor, ...]  # 每项 `[V_g,3]`，m
+    faces: tuple[torch.Tensor, ...]  # 每项 `[F_g,3]` int64，供 selected-face gather
     face_normals_owner_local: tuple[torch.Tensor, ...]  # 每项 `[F_g,3]`，单位向量
     face_area_cdf: tuple[torch.Tensor, ...]  # 每项 `[F_g]`，严格递增并以 1 结尾
 
@@ -175,22 +176,25 @@ def materialize_owner_surface_sampling_cache(
     """
 
     source_arrays = arrays if arrays is not None else prepare_owner_surface_sampling_arrays(cache)
-    if len(source_arrays.triangles_owner_local_m) != len(cache.records):
+    if len(source_arrays.vertices_owner_local_m) != len(cache.records):
         raise ValueError("owner surface sampling array count must match geometry cache")
-    triangles: list[torch.Tensor] = []  # owner 之间 face 数可变，不能伪 padding 后再采样
+    vertices: list[torch.Tensor] = []  # owner 之间 vertex/face 数可变，不能伪 padding后再采样
+    faces: list[torch.Tensor] = []
     normals: list[torch.Tensor] = []  # face normal 与 triangle 轴逐项同序
     cdfs: list[torch.Tensor] = []  # 面积 categorical 的逆 CDF 路径
     for owner_index, record in enumerate(cache.records):
-        triangle = torch.tensor(source_arrays.triangles_owner_local_m[owner_index], device=device, dtype=dtype)
+        vertex = torch.tensor(source_arrays.vertices_owner_local_m[owner_index], device=device, dtype=dtype)
+        face = torch.tensor(source_arrays.faces[owner_index], device=device, dtype=torch.long)
         normal = torch.tensor(source_arrays.face_normals_owner_local[owner_index], device=device, dtype=dtype)
         cdf = torch.tensor(source_arrays.face_area_cdf[owner_index], device=device, dtype=dtype)
-        if triangle.ndim != 3 or triangle.shape[1:] != (3, 3) or cdf.ndim != 1:
+        if vertex.ndim != 2 or vertex.shape[1:] != (3,) or face.ndim != 2 or face.shape[1:] != (3,) or cdf.ndim != 1:
             raise ValueError(f"owner {record.owner_id!r} surface sampling cache requires positive triangles")
         cdf[-1] = 1.0  # 消除浮点累计误差，保证 $u<1$ 总能映射到最后一个 face
-        triangles.append(triangle.contiguous())  # `[F_g,3,3]` owner-local，m
+        vertices.append(vertex.contiguous())  # `[V_g,3]` owner-local，m
+        faces.append(face.contiguous())  # `[F_g,3]`，只在抽到 face 后构造 triangle
         normals.append(normal.contiguous())  # `[F_g,3]` owner-local 单位向量
         cdfs.append(cdf.contiguous())  # `[F_g]` 归一化面积 CDF
-    return OwnerSurfaceSamplingCache(tuple(triangles), tuple(normals), tuple(cdfs))
+    return OwnerSurfaceSamplingCache(tuple(vertices), tuple(faces), tuple(normals), tuple(cdfs))
 
 
 def sample_spatial_queries(
@@ -225,7 +229,7 @@ def sample_spatial_queries(
         raise ValueError("q must have shape [B,N_J]")
     if anchors_hand_m.ndim != 2 or anchors_hand_m.shape[-1] != 3 or anchors_hand_m.shape[0] < 1:
         raise ValueError("anchors_hand_m must have non-empty shape [K,3]")
-    if len(surface_sampling.triangles_owner_local_m) != spec.owner_home_transforms.shape[0]:
+    if len(surface_sampling.vertices_owner_local_m) != spec.owner_home_transforms.shape[0]:
         raise ValueError("surface sampling cache/spec owner axes must match")
 
     batch_size = q.shape[0]
@@ -439,7 +443,8 @@ def _sample_current_owner_surface(
             (batch_size, sample_count), generator=generator, device=owner_transforms.device
         )
         face_index = torch.searchsorted(cdf, face_uniform.contiguous())  # 面积加权 face selector
-        triangles = surface_sampling.triangles_owner_local_m[owner_index][face_index]  # `[B,N,3,3]`
+        face_vertices = surface_sampling.faces[owner_index][face_index]  # `[B,N,3]` selected vertex indices
+        triangles = surface_sampling.vertices_owner_local_m[owner_index][face_vertices]  # `[B,N,3,3]`
         root = torch.sqrt(torch.rand(  # $a=\sqrt u$ 消除 naive barycentric 的中心偏置
             (batch_size, sample_count, 1), generator=generator, device=owner_transforms.device
         ))

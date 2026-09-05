@@ -60,6 +60,15 @@ def test_graph_bias_is_exact_sum_of_shortest_parent_and_child_head_lookups() -> 
 
     torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
     assert actual.shape == (2, 3, 3)
+    parameters = (
+        model.shortest_path_bias.weight,
+        model.parent_direction_bias.weight,
+        model.child_direction_bias.weight,
+    )  # 三张离散关系表，one-hot 与 Embedding 必须产生相同桶梯度
+    actual_gradients = torch.autograd.grad(actual.square().sum(), parameters, retain_graph=True)
+    expected_gradients = torch.autograd.grad(expected.square().sum(), parameters)
+    for actual_gradient, expected_gradient in zip(actual_gradients, expected_gradients, strict=True):
+        torch.testing.assert_close(actual_gradient, expected_gradient, atol=0.0, rtol=0.0)
 
 
 def test_max_distance_entity_still_contributes_through_full_attention() -> None:

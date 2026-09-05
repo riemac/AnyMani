@@ -48,7 +48,7 @@ from .kinematics import EmbodimentGeometrySpec, lower_hand_geometry_semantics
 class AnchorBankCfg:
     r"""每资产独立的有限 physical anchor constellation bank。
 
-    训练按 q-block 均衡轮换 $A^{(k)}$；validation、独立 q-bank 与 PPO 固定 $A^{(0)}$。
+    训练按 q-block 均衡轮换 $A^{(k)}$；evaluation、独立 q-bank 与 PPO 固定 $A^{(0)}$。
     数值锚点：每指 10 个 anchors、$R_a=0.05\,\mathrm m$、$\tau_a=0.025\,\mathrm m$，
     surface/interior 各半，bank size $K=8$。
     """
@@ -288,7 +288,7 @@ class GeometrySource:
     spec_cpu: EmbodimentGeometrySpec  # CPU float64 POE/graph/component transforms
     geometry_cache: OwnerGeometryCache  # owner-local strict surface/solid union
     home_surface: HomeSurfaceSamples  # `[G,M,3]` owner-local boundary-only realization
-    anchors: AnchorSamples  # `[K,3]` canonical $A^{(0)}$，validation/PPO 固定使用
+    anchors: AnchorSamples  # `[K,3]` canonical $A^{(0)}$，evaluation/PPO 固定使用
     anchor_bank: tuple[AnchorSamples, ...]  # 有限 Monte-Carlo realization $\{A^{(0)},\ldots,A^{(K-1)}\}$
     identity: GeometryIdentity  # physical mapping 与 configuration-domain 双重身份
     anchor_realization: AnchorRealization | None = None  # selected hot path 的原 bank 身份

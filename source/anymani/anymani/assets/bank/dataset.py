@@ -365,6 +365,69 @@ class HandAssetDataset:
         _validate_unique_asset_records((train,))  # train 内路径、asset ID 与 content hash 仍必须唯一
         return train
 
+    def resolve_evaluation(
+        self,
+        *,
+        require_geometry_semantics: bool = False,
+        allow_legacy_left_handedness: bool = False,
+    ) -> Mapping[str, ResolvedHandAssetPartition]:
+        r"""只展开 evaluation suites，不读取 train/validation bundle。
+
+        ``unseen_variant_set`` 与 ``unseen_mother`` 的关系验证只需要 manifest 中声明的 mother
+        路径，不需要解析更早角色的 URDF、sidecar 或 mesh。这样显式 evaluation 可以验证
+        partition 语义，同时保持 held-out 进程对 8192 个训练 source 的严格 IO 隔离。
+
+        Args:
+            require_geometry_semantics (bool): 是否要求 evaluation 资产交付 typed geometry semantics。
+            allow_legacy_left_handedness (bool): 是否放行 legacy generated left；正式 Geometry SSL 为 false。
+
+        Returns:
+            Mapping[str, ResolvedHandAssetPartition]: 三条具名 evaluation 资产轴。
+        """
+
+        unseen_variant_set = self._resolve_generated_partition(
+            self.config.evaluation.unseen_variant_set,
+            partition_name="evaluation.unseen_variant_set",
+            require_geometry_semantics=require_geometry_semantics,
+            allow_legacy_left_handedness=allow_legacy_left_handedness,
+        )
+        unseen_mother = self._resolve_generated_partition(
+            self.config.evaluation.unseen_mother,
+            partition_name="evaluation.unseen_mother",
+            require_geometry_semantics=require_geometry_semantics,
+            allow_legacy_left_handedness=allow_legacy_left_handedness,
+        )
+        official = self._resolve_official_partition(
+            self.config.evaluation.official_zero_shot,
+            require_geometry_semantics=require_geometry_semantics,
+        )
+        evaluation = {
+            "unseen_variant_set": unseen_variant_set,
+            "unseen_mother": unseen_mother,
+            "official_zero_shot": official,
+        }
+
+        # 这里只比较 manifest 的 lineage 坐标；train/validation leaf bundle 从未被打开。
+        train_mothers = _declared_generated_mothers(self.config.train, default_run_dir=self.config.default_run_dir)
+        validation_seen = _declared_generated_mothers(
+            self.config.validation.unseen_variant_set,
+            default_run_dir=self.config.default_run_dir,
+        )
+        validation_unseen = _declared_generated_mothers(
+            self.config.validation.unseen_mother,
+            default_run_dir=self.config.default_run_dir,
+        )
+        evaluation_seen = _validate_unseen_variant_set(unseen_variant_set, train_mothers=train_mothers)
+        overlap = evaluation_seen & validation_seen
+        if overlap:
+            raise ValueError(f"validation/evaluation unseen_variant_set mothers overlap: {tuple(sorted(overlap))}")
+        _validate_unseen_mother(
+            unseen_mother,
+            forbidden_mothers=train_mothers | validation_unseen,
+        )
+        _validate_unique_asset_records(tuple(evaluation.values()))
+        return evaluation
+
     def _resolve_generated_partition(
         self,
         config: HandAssetPartitionCfg,
@@ -732,6 +795,30 @@ def _validate_named_suite_relations(
     )
 
 
+def _declared_generated_mothers(
+    partition: HandAssetPartitionCfg,
+    *,
+    default_run_dir: str,
+) -> set[str]:
+    r"""从 manifest 目录坐标恢复 mother 集，不访问 generation run 或 bundle 文件。
+
+    Relation gate 只需要回答两个 suite 是否指向同一 mother lineage。该 identity 由
+    ``run_dir / collection / group / mother`` 完整决定，因此无需为了核对关系而解析任何资产内容。
+    """
+
+    mothers: set[str] = set()
+    for run_config in partition.runs.values():
+        run_dir = run_config.run_dir or default_run_dir
+        if not run_dir:
+            raise ValueError("dataset run requires run_dir or default_run_dir")
+        run_root = resolve_bank_path(run_dir)
+        for collection_kind, group_map in (("groups", run_config.groups), ("mixed", run_config.mixed)):
+            for group_name, lineages in group_map.items():
+                group_root = run_root / group_name if collection_kind == "groups" else run_root / "mixed" / group_name
+                mothers.update(str((group_root / mother_name).resolve(strict=False)) for mother_name in lineages)
+    return mothers
+
+
 def _validate_unseen_variant_set(
     partition: ResolvedHandAssetPartition,
     *,
@@ -781,18 +868,18 @@ def _dataset_cfg_from_mapping(document: Mapping[str, Any]) -> HandAssetDatasetCf
     _require_keys(
         document,
         allowed={"schema_version", "default_run_dir", "train", "validation", "evaluation"},
-        required={"schema_version", "default_run_dir", "train", "validation", "evaluation"},
+        required={"schema_version", "default_run_dir", "train", "evaluation"},
         context="dataset",
     )
     schema_version = str(document["schema_version"])
     if schema_version != HAND_ASSET_DATASET_SCHEMA_VERSION:
         raise ValueError(f"hand asset dataset schema must be exactly {HAND_ASSET_DATASET_SCHEMA_VERSION!r}")
 
-    validation_raw = _as_mapping(document["validation"], context="validation")
+    validation_raw = _as_mapping(document.get("validation", {}), context="validation")
     _require_keys(
         validation_raw,
         allowed={"unseen_variant_set", "unseen_mother"},
-        required={"unseen_variant_set", "unseen_mother"},
+        required=set(),
         context="validation",
     )
     evaluation_raw = _as_mapping(document.get("evaluation", {}), context="evaluation")
@@ -811,10 +898,10 @@ def _dataset_cfg_from_mapping(document: Mapping[str, Any]) -> HandAssetDatasetCf
         train=_partition_cfg_from_mapping(document["train"], context="train"),
         validation=HandAssetValidationCfg(
             unseen_variant_set=_partition_cfg_from_mapping(
-                validation_raw["unseen_variant_set"], context="validation.unseen_variant_set"
+                validation_raw.get("unseen_variant_set", {}), context="validation.unseen_variant_set"
             ),
             unseen_mother=_partition_cfg_from_mapping(
-                validation_raw["unseen_mother"], context="validation.unseen_mother"
+                validation_raw.get("unseen_mother", {}), context="validation.unseen_mother"
             ),
         ),
         evaluation=HandAssetEvaluationCfg(

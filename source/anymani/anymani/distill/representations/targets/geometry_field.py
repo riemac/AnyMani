@@ -129,7 +129,7 @@ class GaussianProximityFieldCfg:
 
     bandwidth_centers_m: tuple[float, ...] = (0.004, 0.016, 0.064)  # 4/16/64 mm 训练中心
     bandwidth_jitter_relative: float = 0.10  # log-space 有界采样的相对半宽，默认 ±10%
-    validation_bandwidths_m: tuple[float, ...] = (0.004, 0.016, 0.064)  # 固定 4/16/64 mm，与训练中心一致
+    fixed_bandwidths_m: tuple[float, ...] = (0.004, 0.016, 0.064)  # evaluation 固定 4/16/64 mm
     def __post_init__(self) -> None:
         """拒绝无带宽、非递增带宽与越界的 log-space jitter。"""
 
@@ -137,12 +137,10 @@ class GaussianProximityFieldCfg:
             raise ValueError("bandwidth_centers_m must contain strictly positive values")
         if any(left >= right for left, right in zip(self.bandwidth_centers_m[:-1], self.bandwidth_centers_m[1:])):
             raise ValueError("bandwidth_centers_m must be strictly increasing")
-        if not self.validation_bandwidths_m or any(value <= 0.0 for value in self.validation_bandwidths_m):
-            raise ValueError("validation_bandwidths_m must contain strictly positive values")
-        if any(
-            left >= right for left, right in zip(self.validation_bandwidths_m[:-1], self.validation_bandwidths_m[1:])
-        ):
-            raise ValueError("validation_bandwidths_m must be strictly increasing")
+        if not self.fixed_bandwidths_m or any(value <= 0.0 for value in self.fixed_bandwidths_m):
+            raise ValueError("fixed_bandwidths_m must contain strictly positive values")
+        if any(left >= right for left, right in zip(self.fixed_bandwidths_m[:-1], self.fixed_bandwidths_m[1:])):
+            raise ValueError("fixed_bandwidths_m must be strictly increasing")
         if not 0.0 <= self.bandwidth_jitter_relative < 1.0:
             raise ValueError("bandwidth_jitter_relative must lie in [0,1)")
 
@@ -153,8 +151,8 @@ class GeometryFieldTargetCfg:
 
     train_active_per_joint: int = 1  # 每个有效 JOINT、每个 q 的 descendant/active shell 边数
     train_zero_per_joint: int = 1  # 每个有效 JOINT、每个 q 的 structure-zero shell 边数
-    validation_active_per_joint: int = 4  # 固定 validation bank 的 descendant 边数
-    validation_zero_per_joint: int = 4  # 固定 validation bank 的 structure-zero 边数
+    fixed_active_per_joint: int = 4  # 固定 evaluation bank 的 descendant 边数
+    fixed_zero_per_joint: int = 4  # 固定 evaluation bank 的 structure-zero 边数
     distance_epsilon_m: float = 1.0e-6  # $d\approx0$ 时 UDF 方向未定义
     feature_margin_min_m: float = 1.0e-5  # 最近投影点远离当前三角面边界的阈值
 
@@ -164,8 +162,8 @@ class GeometryFieldTargetCfg:
         counts = (
             self.train_active_per_joint,
             self.train_zero_per_joint,
-            self.validation_active_per_joint,
-            self.validation_zero_per_joint,
+            self.fixed_active_per_joint,
+            self.fixed_zero_per_joint,
         )
         if min(counts) < 1:
             raise ValueError("joint-first active/zero edge budgets must be positive")
@@ -206,12 +204,12 @@ def sample_geometry_bandwidths(
     return realization.unsqueeze(0).expand(batch_size, -1)  # `[B,N_σ]` shared q-subbatch view
 
 
-def fixed_validation_gaussian_field_config(config: GaussianProximityFieldCfg) -> GaussianProximityFieldCfg:
-    r"""返回使用固定 sigma 网格、完全关闭 jitter 的 validation teacher 配置。"""
+def fixed_gaussian_field_config(config: GaussianProximityFieldCfg) -> GaussianProximityFieldCfg:
+    r"""返回使用固定 sigma 网格、完全关闭 jitter 的 evaluation teacher 配置。"""
 
     return replace(
         config,
-        bandwidth_centers_m=config.validation_bandwidths_m,
+        bandwidth_centers_m=config.fixed_bandwidths_m,
         bandwidth_jitter_relative=0.0,
     )
 
@@ -303,8 +301,8 @@ def generate_geometry_field_targets(
     )
 
     if supervision_split == "eval":
-        active_per_joint = target_config.validation_active_per_joint
-        zero_per_joint = target_config.validation_zero_per_joint
+        active_per_joint = target_config.fixed_active_per_joint
+        zero_per_joint = target_config.fixed_zero_per_joint
     elif supervision_split == "train":
         active_per_joint = target_config.train_active_per_joint
         zero_per_joint = target_config.train_zero_per_joint
@@ -803,7 +801,7 @@ def _choose_query(
 __all__ = [
     "GaussianProximityFieldCfg",
     "GeometryFieldTargetCfg",
-    "fixed_validation_gaussian_field_config",
+    "fixed_gaussian_field_config",
     "generate_geometry_field_targets",
     "sample_geometry_bandwidths",
 ]

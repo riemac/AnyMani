@@ -81,7 +81,8 @@ def test_surface_sampler_is_area_weighted_barycentric_and_rigid_equivariant() ->
         dtype=torch.float64,
     )
     cache = OwnerSurfaceSamplingCache(
-        triangles_owner_local_m=(triangles,),
+        vertices_owner_local_m=(triangles.reshape(-1, 3),),
+        faces=(torch.arange(6).reshape(2, 3),),
         face_normals_owner_local=(torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]], dtype=torch.float64),),
         face_area_cdf=(torch.tensor([0.2, 1.0], dtype=torch.float64),),
     )
@@ -117,9 +118,10 @@ def test_owner_shell_uses_declared_inside_outside_normal_offsets() -> None:
     """平面 oracle 上 shell 的前后两半必须精确对应负/正 face-normal 偏移。"""
 
     cache = OwnerSurfaceSamplingCache(
-        triangles_owner_local_m=(
-            torch.tensor([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]], dtype=torch.float64),
+        vertices_owner_local_m=(
+            torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=torch.float64),
         ),
+        faces=(torch.tensor([[0, 1, 2]]),),
         face_normals_owner_local=(torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float64),),
         face_area_cdf=(torch.ones(1, dtype=torch.float64),),
     )
@@ -147,7 +149,8 @@ def test_adjacent_queries_reject_non_neighbors_and_stay_in_middle_pair_segment()
         torch.tensor([[[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 1.0]]], dtype=torch.float64),
     )
     cache = OwnerSurfaceSamplingCache(
-        triangles_owner_local_m=triangles,
+        vertices_owner_local_m=tuple(triangle.reshape(-1, 3) for triangle in triangles),
+        faces=(torch.tensor([[0, 1, 2]]), torch.tensor([[0, 1, 2]])),
         face_normals_owner_local=(
             torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float64),
             torch.tensor([[-1.0, 0.0, 0.0]], dtype=torch.float64),

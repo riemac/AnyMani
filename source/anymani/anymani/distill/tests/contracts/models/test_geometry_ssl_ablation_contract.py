@@ -247,6 +247,13 @@ def test_model_unique_evidence_rows_match_fully_expanded_reference() -> None:
     torch.testing.assert_close(routed.query_features, reference.query_features, atol=1.0e-12, rtol=1.0e-12)
     torch.testing.assert_close(routed.density, reference.density, atol=1.0e-12, rtol=1.0e-12)
     torch.testing.assert_close(routed.kappa, reference.kappa, atol=1.0e-12, rtol=1.0e-12)
+    parameters = tuple(model.parameters())  # density 与 sampled κ 联合覆盖 shared encoder 和两个 private readers
+    routed_loss = routed.density.square().sum() + routed.kappa.square().sum()
+    reference_loss = reference.density.square().sum() + reference.kappa.square().sum()
+    routed_gradients = torch.autograd.grad(routed_loss, parameters, retain_graph=True)
+    reference_gradients = torch.autograd.grad(reference_loss, parameters)
+    for routed_gradient, reference_gradient in zip(routed_gradients, reference_gradients, strict=True):
+        torch.testing.assert_close(routed_gradient, reference_gradient, atol=1.0e-9, rtol=1.0e-9)
 
 
 def test_ablation_unique_evidence_rows_match_expanded_reference() -> None:

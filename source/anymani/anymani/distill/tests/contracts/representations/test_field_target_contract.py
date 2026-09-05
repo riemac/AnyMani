@@ -21,7 +21,7 @@ from anymani.distill.representations.targets.field_samples import (
 from anymani.distill.representations.targets.geometry_field import (
     GaussianProximityFieldCfg,
     _sample_sensitivity_edges,
-    fixed_validation_gaussian_field_config,
+    fixed_gaussian_field_config,
     sample_geometry_bandwidths,
 )
 
@@ -93,7 +93,7 @@ def test_log_uniform_sigma_sampling_is_bounded_shared_and_reproducible() -> None
     assert torch.all(sampled[0] >= 0.9 * centers)
     assert torch.all(sampled[0] <= 1.1 * centers)
 
-    validation_config = fixed_validation_gaussian_field_config(config)
+    validation_config = fixed_gaussian_field_config(config)
     validation_sigma = sample_geometry_bandwidths(
         validation_config,
         batch_size=3,

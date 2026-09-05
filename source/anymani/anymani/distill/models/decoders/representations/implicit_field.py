@@ -219,8 +219,13 @@ class ConditionalDensityDecoder(nn.Module):
         bandwidths = bandwidths.detach()  # sigma 是外生物理条件，不建立优化或 q->sigma 梯度路径
         if bandwidths.ndim == 1:
             bandwidths = bandwidths.unsqueeze(0).expand(query_features.shape[0], -1)  # `[B,N_σ]`
-        if bandwidths.ndim != 2 or bandwidths.shape[0] != query_features.shape[0] or torch.any(bandwidths <= 0.0):
-            raise ValueError("bandwidths must have positive shape [N_sigma] or [B,N_sigma]")
+        if bandwidths.ndim != 2 or bandwidths.shape[0] != query_features.shape[0]:
+            raise ValueError("bandwidths must have shape [N_sigma] or [B,N_sigma]")
+        torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]
+            torch.all(bandwidths > 0.0),
+            "bandwidths must be strictly positive",
+        )  # pyright: ignore[reportPrivateImportUsage]  # sigma remains a device-side invariant
+        # sigma 物理域由 device-side assertion 守住，compile hot path 不提取 host scalar
 
         sigma_count = bandwidths.shape[1]  # $N_\sigma$ 是当前数据轴，可在不同调用中变化
         query = query_features.unsqueeze(3).expand(-1, -1, -1, sigma_count, -1)  # `[B,G,N_Q,N_σ,D_q]`

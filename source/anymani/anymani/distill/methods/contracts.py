@@ -108,6 +108,10 @@ class MethodSplitSession(Protocol):
         r"""按 Trainer 给出的离散 schedule item 产生 opaque method batch。"""
         ...
 
+    def realize_units(self, schedule_item: Any, *, schedule: Any, step: int) -> Iterable[Any]:
+        r"""按 device window 逐个产生有界 unit，不保留同一 logical minibatch 的历史 CUDA batch。"""
+        ...
+
     def state_dict(self) -> dict[str, object]:
         r"""返回每资产状态采样 cursor。"""
         ...
@@ -129,20 +133,20 @@ class MethodSplitSession(Protocol):
 class EmbodimentMethod(Protocol):
     r"""SSL trainer 需要的最小运行时行为；内部组件由 concrete method 自己管理。"""
 
-    def prepare(self, catalog: Any, *, device: torch.device, dtype: torch.dtype) -> None:
-        r"""物化 CPU sources、推导 padding，并建立每资产 q sampler。"""
+    def prepare(self, catalog: Any, *, role: str, device: torch.device, dtype: torch.dtype) -> None:
+        r"""为明确的 train/evaluation role 建立 CPU sources、padding 与每资产 q sampler。"""
         ...
 
     def split_names(self, role: str) -> tuple[str, ...]:
-        r"""返回 validation/evaluation 的具名 suites；train 使用空 suite 名。"""
+        r"""返回 evaluation 的具名 suites；train 使用空 suite 名。"""
         ...
 
     def split_asset_count(self, role: str, *, suite: str = "") -> int:
-        r"""返回某个具名 split 的真实资产数；空 suite 必须显式返回 0。"""
+        r"""返回 train 或某个 evaluation suite 的真实资产数；空 suite 必须显式返回 0。"""
         ...
 
     def asset_manifest(self, catalog: Any) -> dict[str, Any]:
-        r"""返回 Method 实际 materialization 后的 train/validation/evaluation provenance。"""
+        r"""返回 Method 实际 materialization 后的 train/evaluation provenance。"""
         ...
 
     def open_session(
@@ -189,6 +193,14 @@ class EmbodimentMethod(Protocol):
 
     def reduce_update(self, steps: tuple[MethodStep, ...]) -> MethodUpdate:
         r"""按 $(asset,q)$ 等权合并一个 optimizer update 的 method steps。"""
+        ...
+
+    def stage_replay_unit(self, unit: Any) -> Any:
+        r"""把 opaque detached teacher unit 暂存到 Method-owned bounded host replay 介质。"""
+        ...
+
+    def restore_replay_unit(self, unit: Any, *, device: torch.device) -> Any:
+        r"""只把当前即将消费的 opaque replay unit 恢复到训练 device。"""
         ...
 
     def evaluate_session(

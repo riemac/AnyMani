@@ -1,3 +1,8 @@
+0.5.1 - 2026-08-28
+==================
+
+- dataset schema `2.0.0` 的 `validation` 字段保持可选，允许 Geometry SSL manifest 只声明 train/evaluation；PPO manifest 与通用 partition resolver 继续保留 validation 能力。
+
 0.5.0 - 2026-08-19
 ==================
 

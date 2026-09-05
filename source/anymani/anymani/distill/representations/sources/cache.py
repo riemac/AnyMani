@@ -98,7 +98,8 @@ def geometry_source_array_nbytes(source: GeometrySource | GeometrySourceCore) ->
     sampling_arrays = source.surface_sampling_arrays
     if sampling_arrays is not None:
         for name in (
-            "triangles_owner_local_m",
+            "vertices_owner_local_m",
+            "faces",
             "face_normals_owner_local",
             "face_area_cdf",
         ):

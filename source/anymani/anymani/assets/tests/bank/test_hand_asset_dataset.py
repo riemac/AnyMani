@@ -515,3 +515,39 @@ def test_resolve_train_does_not_touch_broken_holdout_paths(tmp_path: Path) -> No
     assert tuple(container.asset_id for container in prefix.assets) == ("mother", "variant_a")
     with pytest.raises(FileNotFoundError):
         dataset.resolve()  # 证明 train-only 通过不是 fixture 中 holdout 偶然有效
+
+
+def test_dataset_schema_two_allows_manifest_without_validation(tmp_path: Path) -> None:
+    r"""Schema 2.0 的 validation 是可选扩展；train/evaluation-only SSL manifest 不需空占位段。"""
+
+    run = _write_generation_run(tmp_path / "generated")
+    mother = _write_bundle(run / "single_palm_leap" / "right_t4_i4_m4_r4", "mother")
+    _write_variant_set(mother, "train_set", ("train",))
+    manifest = _write_dataset(
+        tmp_path / "without_validation.yaml",
+        {
+            "schema_version": "2.0.0",
+            "default_run_dir": str(run),
+            "train": {
+                "runs": {
+                    "default": {
+                        "groups": {
+                            "single_palm_leap": {
+                                "right_t4_i4_m4_r4": {
+                                    "include_mother": True,
+                                    "variant_sets": ["train_set"],
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "evaluation": {},
+        },
+    )
+
+    dataset = HandAssetDataset.from_yaml(manifest)
+
+    assert dataset.config.validation.unseen_variant_set.runs == {}
+    assert dataset.config.validation.unseen_mother.runs == {}
+    assert tuple(record.container.asset_id for record in dataset.resolve_train().records) == ("mother", "train")

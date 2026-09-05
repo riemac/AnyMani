@@ -235,10 +235,20 @@ class GraphBiasedTransformer(nn.Module):
         shortest = shortest_path.clamp(min=0, max=self.max_graph_distance)  # 截断无向距离桶
         parent = parent_direction.clamp(min=0, max=self.max_graph_distance)  # 截断 parent 方向距离桶
         child = child_direction.clamp(min=0, max=self.max_graph_distance)  # 截断 child 方向距离桶
+        bucket_count = self.max_graph_distance + 1  # $0,\ldots,d_{max}$ 共用同一有限离散图距离域
+
+        # one-hot 矩阵乘法与 nn.Embedding 查表严格同义：$b_{ijh}=e(d_{ij})^TW_h$；该形式使
+        # 确定性 backward 直接归约每个桶的梯度，不触发 CUDA Graph 不支持的 index-put。
+        def lookup(index: torch.Tensor, embedding: nn.Embedding) -> torch.Tensor:
+            one_hot = torch.nn.functional.one_hot(index, num_classes=bucket_count).to(
+                dtype=embedding.weight.dtype
+            )  # `[...,N_E,N_E,K]`，每条关系恰有一个 active distance bucket
+            return one_hot @ embedding.weight  # `[...,N_E,N_E,H]`，每个 attention head 独立偏置
+
         bias = (
-            self.shortest_path_bias(shortest)
-            + self.parent_direction_bias(parent)
-            + self.child_direction_bias(child)
+            lookup(shortest, self.shortest_path_bias)
+            + lookup(parent, self.parent_direction_bias)
+            + lookup(child, self.child_direction_bias)
         )  # `[N_E,N_E,H]` 或 `[B,N_E,N_E,H]`
         if bias.ndim == 3:
             return bias.permute(2, 0, 1).contiguous()  # `[H,N_E,N_E]`

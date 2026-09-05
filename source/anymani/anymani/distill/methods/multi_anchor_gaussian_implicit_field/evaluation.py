@@ -40,6 +40,7 @@ def update_evaluation_digest(digest: _HashWriter, batch: PaddedOnlineGeometryBat
         batch.q_index,
         batch.anchor_index,
         batch.q,
+        batch.joint_coordinate_sign,
         batch.evidence_row_index,
         batch.evidence.anchors,
         batch.evidence.home_surface_points,
@@ -135,6 +136,7 @@ def fixed_evaluation_ablation_evidence(
     )
     for block_index, batch in enumerate(batches):
         q = batch.q.detach()
+        joint_coordinate_sign = getattr(batch, "joint_coordinate_sign", None)
         common = {
             "owner_index": batch.sensitivity_targets.owner_index,
             "query_index": batch.sensitivity_targets.query_index,
@@ -146,6 +148,7 @@ def fixed_evaluation_ablation_evidence(
             batch.queries.query_points_h,
             batch.field_targets.bandwidths,
             evidence_row_index=batch.evidence_row_index,
+            joint_coordinate_sign=joint_coordinate_sign,
             **common,
         )
         # CUDA Graph 复用 compiled output storage；每次 forward 后立即归约，避免后续调用覆盖旧预测。
@@ -160,6 +163,7 @@ def fixed_evaluation_ablation_evidence(
             batch.field_targets.bandwidths,
             ablation="query_only",
             evidence_row_index=batch.evidence_row_index,
+            joint_coordinate_sign=joint_coordinate_sign,
             **common,
         )
         per_ablation["query_only"] = geometry_ssl_reconstruction_metrics_per_sample(query_only, batch)
@@ -177,6 +181,7 @@ def fixed_evaluation_ablation_evidence(
                 ablation="latent_shuffle",
                 batch_permutation=same_asset_permutation,
                 evidence_row_index=batch.evidence_row_index,
+                joint_coordinate_sign=joint_coordinate_sign,
                 **common,
             )
             per_ablation["same_asset_q_shuffle"] = geometry_ssl_reconstruction_metrics_per_sample(
@@ -196,6 +201,7 @@ def fixed_evaluation_ablation_evidence(
                 ablation="latent_shuffle",
                 batch_permutation=cross_permutation,
                 evidence_row_index=batch.evidence_row_index,
+                joint_coordinate_sign=joint_coordinate_sign,
                 **common,
             )
             per_ablation["cross_asset_shuffle"] = geometry_ssl_reconstruction_metrics_per_sample(
@@ -209,6 +215,7 @@ def fixed_evaluation_ablation_evidence(
             batch.field_targets.bandwidths,
             ablation="joint_token_shuffle",
             evidence_row_index=batch.evidence_row_index,
+            joint_coordinate_sign=joint_coordinate_sign,
             **common,
         )
         per_ablation["joint_token_shuffle"] = geometry_ssl_reconstruction_metrics_per_sample(
@@ -382,7 +389,12 @@ def evaluate_method_session(
 
 
 def fit_z_compression_basis(method: Any, session: Any, schedule: Any) -> Any:
-    r"""在独立 training-q bank 上流式拟合一个统一 PALM/JOINT/TIP PCA basis。"""
+    r"""在独立 train q-bank 上流式拟合统一 PALM/JOINT/TIP PCA basis。
+
+    这里的 encoder execution policy 与训练/评估 forward 保持一致：参数仍为 FP32，CUDA learned
+    region 若声明 BF16 则在同一 autocast 边界内产生 token，随后只把有效 token 移到 CPU FP64
+    累计 $\mathbf z$ 的均值和二阶矩。这样 basis 与 evaluation replay 消费的是同一表示数值语义。
+    """
 
     from anymani.distill.diagnostics.evaluation.z_compression import UnifiedPCAAccumulator
 
@@ -392,8 +404,14 @@ def fit_z_compression_basis(method: Any, session: Any, schedule: Any) -> Any:
     with torch.no_grad():
         while not schedule.complete:
             batch = session.realize(schedule.next(), schedule=schedule, step=block_index)
-            q, evidence, row_index = method_batch_views(batch).model_input
-            latents = method.require_model().encoder(q, evidence, row_index)
+            q, evidence, row_index, joint_coordinate_sign = method_batch_views(batch).model_input
+            encoder = method.require_model().encoder
+            autocast_name = str(getattr(method.execution_policy, "model_autocast_dtype", "float32"))
+            if q.device.type == "cuda" and autocast_name == "bfloat16":
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    latents = encoder(q, evidence, row_index, joint_coordinate_sign)
+            else:
+                latents = encoder(q, evidence, row_index, joint_coordinate_sign)
             valid = evidence.entity_valid_mask
             if valid is None:
                 valid = torch.ones(latents.entities.shape[:2], device=q.device, dtype=torch.bool)
@@ -463,7 +481,7 @@ def evaluate_z_compression_session(
                 )
             block_index += 1
     if baseline_statistics is None:
-        raise ValueError("Z compression evaluation requires at least one validation block")
+        raise ValueError("Z compression evaluation requires at least one evaluation block")
     baseline = method.finalize_teacher_baselines(baseline_statistics)
     density_record = cast(Mapping[str, object], baseline["density"])
     kappa_record = cast(Mapping[str, object], baseline["kappa"])

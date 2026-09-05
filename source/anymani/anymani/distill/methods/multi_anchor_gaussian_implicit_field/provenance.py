@@ -14,15 +14,11 @@ from anymani.distill.representations.sources.collision_geometry import HomeSurfa
 def validate_asset_manifest_isolation(manifest: Mapping[str, Any]) -> None:
     r"""按 content 与 physical mapping 两层拒绝任意 train/held-out role 泄漏。
 
-    Expanded physical manifest schema 4 把 validation 与 evaluation 都保留为具名
-    suite mapping。role identity 使用 ``validation.<suite>`` / ``evaluation.<suite>``，
-    因而相同 suite 名不会把 checkpoint-selection 与冻结评估误当成同一数据角色。
+    Expanded physical manifest schema 4 把 evaluation 保留为具名 suite mapping。role identity
+    使用 ``evaluation.<suite>``，并与 train role 共同形成冻结后的 physical provenance 边界。
     """
 
-    raw_validation = manifest.get("validation", {})
     raw_evaluation = manifest.get("evaluation", {})
-    if not isinstance(raw_validation, Mapping):
-        raise ValueError("asset manifest validation field must be a mapping")
     if not isinstance(raw_evaluation, Mapping):
         raise ValueError("asset manifest evaluation field must be a mapping")
 
@@ -32,16 +28,11 @@ def validate_asset_manifest_isolation(manifest: Mapping[str, Any]) -> None:
         raise ValueError("asset manifest train field must be a sequence of mappings")
     roles["train"] = list(raw_train)
 
-    # 两类 held-out phase 共用同一结构校验，但 role 前缀保持训练生命周期边界。
-    for phase_name, suites in (("validation", raw_validation), ("evaluation", raw_evaluation)):
-        for suite_name, raw_records in suites.items():
-            if not isinstance(raw_records, (tuple, list)) or not all(
-                isinstance(record, Mapping) for record in raw_records
-            ):
-                raise ValueError(
-                    f"asset manifest {phase_name} suite {suite_name!r} must be a sequence of mappings"
-                )
-            roles[f"{phase_name}.{suite_name}"] = list(raw_records)
+    # evaluation suite 只在显式 stage 中 materialize，role 前缀保持训练/评估生命周期边界。
+    for suite_name, raw_records in raw_evaluation.items():
+        if not isinstance(raw_records, (tuple, list)) or not all(isinstance(record, Mapping) for record in raw_records):
+            raise ValueError(f"asset manifest evaluation suite {suite_name!r} must be a sequence of mappings")
+        roles[f"evaluation.{suite_name}"] = list(raw_records)
     for identity_name in ("content_hash", "physical_geometry_hash"):
         owners: dict[str, str] = {}
         conflicts: set[str] = set()

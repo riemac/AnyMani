@@ -14,7 +14,6 @@ from typing import Any
 import torch
 
 from anymani.distill.models.input_adapters.geometry import StaticGeometryEvidence
-from anymani.distill.objectives.representations.gauge_consistency import rewrite_joint_sign_coordinates
 from anymani.distill.representations.queries.spatial_sampling import SpatialQueryBatch
 from anymani.distill.representations.targets.field_samples import FieldTargetBatch, SensitivityTargetBatch
 
@@ -236,6 +235,8 @@ def maybe_rewrite_batch(
     config: JointSignRewriteCfg,
     step: int,
     seed: int,
+    row_offset: int = 0,
+    logical_batch_size: int | None = None,
 ) -> PaddedOnlineGeometryBatch:
     r"""按 20% 概率、每个选中样本恰好一个有效 JOINT 改写输入与一阶 target。"""
 
@@ -249,7 +250,13 @@ def maybe_rewrite_batch(
         joint_valid = joint_valid.unsqueeze(0).expand(batch.q.shape[0], -1)
     generator = torch.Generator(device="cpu")
     generator.manual_seed(int(seed) + int(config.seed_offset) + int(step))
-    selected = torch.rand(batch.q.shape[0], generator=generator) < config.probability
+    logical_size = int(logical_batch_size or batch.q.shape[0])
+    if row_offset < 0 or logical_size < batch.q.shape[0] or row_offset + batch.q.shape[0] > logical_size:
+        raise ValueError("joint-sign rewrite row range must lie inside the logical optimizer batch")
+    selected = (
+        torch.rand(logical_size, generator=generator)[row_offset : row_offset + batch.q.shape[0]]
+        < config.probability
+    )
     if not bool(selected.any()):
         return batch  # 默认未改写行保持 unique evidence table，不复制静态张量
     joint_sign = torch.ones_like(batch.q)
@@ -262,7 +269,8 @@ def maybe_rewrite_batch(
         cursor = 0
         if batch.q_index is not None:
             cursor = int(batch.q_index[batch_index].item())
-        chosen = valid_indices[(int(step) + cursor + batch_index) % len(valid_indices)]
+        global_row = row_offset + batch_index
+        chosen = valid_indices[(int(step) + cursor + global_row) % len(valid_indices)]
         joint_sign[batch_index, chosen] = -1.0
     return rewrite_batch_joint_sign_coordinates(batch, joint_sign)
 
@@ -275,63 +283,23 @@ def rewrite_batch_joint_sign_coordinates(
 
     if joint_sign.shape != batch.q.shape:
         raise ValueError("joint_sign must have shape [B,N_J] matching batch.q")
-    evidence = batch.evidence
-    if batch.evidence_row_index is not None:
-        evidence = _expand_evidence_rows(evidence, batch.evidence_row_index)
-    rewritten_q, rewritten_evidence, joint_sign = rewrite_joint_sign_coordinates(
-        batch.q,
-        evidence,
-        joint_sign=joint_sign,
-    )
+    if not torch.all((joint_sign == 1.0) | (joint_sign == -1.0)):
+        raise ValueError("joint_sign entries must be exactly -1 or +1")
+    prior_sign = batch.joint_coordinate_sign
+    coordinate_sign = joint_sign if prior_sign is None else prior_sign * joint_sign
+    rewritten_q = batch.q * joint_sign  # $q'_i=s_iq_i$；$q_{home}$ 与 screw 在 encoder 动态边界同步改写
     sensitivity = _rewrite_sensitivity_targets(batch.sensitivity_targets, joint_sign)
     return PaddedOnlineGeometryBatch(
         asset_ids=batch.asset_ids,
         q=rewritten_q,
-        evidence=rewritten_evidence,
-        evidence_row_index=torch.arange(batch.q.shape[0], device=batch.q.device, dtype=torch.long),
+        evidence=batch.evidence,
+        evidence_row_index=batch.evidence_row_index,
         queries=batch.queries,
         field_targets=batch.field_targets,
         sensitivity_targets=sensitivity,
         anchor_index=batch.anchor_index,
         q_index=batch.q_index,
-    )
-
-
-def _expand_evidence_rows(
-    evidence: StaticGeometryEvidence,
-    row_index: torch.Tensor,
-) -> StaticGeometryEvidence:
-    r"""把 unique evidence table 展开到 q-row，供逐行 joint-sign 坐标改写。
-
-    同一 q-block 通常只有少数行被改写；第一版为保持公式清晰展开完整 microbatch。未发生任何改写时
-    ``maybe_rewrite_batch`` 已直接返回原 table，不承担该复制成本。
-    """
-
-    if evidence.anchors.ndim != 3 or row_index.ndim != 1:
-        raise ValueError("evidence row expansion requires batched evidence and [B] row_index")
-
-    def route(value: torch.Tensor) -> torch.Tensor:
-        return value[row_index] if value.ndim > 0 and value.shape[0] == evidence.anchors.shape[0] else value
-
-    def route_optional(value: torch.Tensor | None) -> torch.Tensor | None:
-        return None if value is None else route(value)
-
-    return StaticGeometryEvidence(
-        anchors=route(evidence.anchors),
-        home_surface_points=route(evidence.home_surface_points),
-        home_surface_mask=route(evidence.home_surface_mask),
-        palm_normal=route(evidence.palm_normal),
-        space_screws=route(evidence.space_screws),
-        q_home=route(evidence.q_home),
-        entity_role=route(evidence.entity_role),
-        entity_joint_index=route(evidence.entity_joint_index),
-        joint_entity_index=route(evidence.joint_entity_index),
-        shortest_path=route(evidence.shortest_path),
-        parent_direction=route(evidence.parent_direction),
-        child_direction=route(evidence.child_direction),
-        entity_valid_mask=route_optional(evidence.entity_valid_mask),
-        joint_valid_mask=route_optional(evidence.joint_valid_mask),
-        anchor_valid_mask=route_optional(evidence.anchor_valid_mask),
+        joint_coordinate_sign=coordinate_sign,
     )
 
 

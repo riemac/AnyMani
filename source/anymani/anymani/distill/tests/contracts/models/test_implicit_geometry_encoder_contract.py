@@ -385,3 +385,8 @@ def test_unique_evidence_row_routing_matches_expanded_static_batch() -> None:
     repeated = encoder(q, expanded)
 
     torch.testing.assert_close(routed.entities, repeated.entities, atol=1.0e-10, rtol=1.0e-10)
+    parameters = tuple(encoder.parameters())  # 检查 8→64 one-hot row routing 的反向累加，不只比较前向 latent
+    routed_gradients = torch.autograd.grad(routed.entities.square().sum(), parameters, retain_graph=True)
+    repeated_gradients = torch.autograd.grad(repeated.entities.square().sum(), parameters)
+    for routed_gradient, repeated_gradient in zip(routed_gradients, repeated_gradients, strict=True):
+        torch.testing.assert_close(routed_gradient, repeated_gradient, atol=1.0e-9, rtol=1.0e-9)

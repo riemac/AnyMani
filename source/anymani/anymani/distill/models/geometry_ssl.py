@@ -105,6 +105,7 @@ class GeometrySSLModel(nn.Module):
         query_index: torch.Tensor,  # `[E]`/`[B,E]`
         joint_index: torch.Tensor,  # `[E]`/`[B,E]`
         evidence_row_index: torch.Tensor | None = None,  # `[B]` q 行到 unique evidence table
+        joint_coordinate_sign: torch.Tensor | None = None,  # `[B,N_J]`，joint-sign coordinate gauge
     ) -> GeometrySSLForward:
         r"""完成 retained 编码和两个 training-only 预测头。
 
@@ -124,7 +125,12 @@ class GeometrySSLModel(nn.Module):
         owner_count = evidence.entity_role.shape[-1]  # $G$；batched/unbatched role 都读尾轴
         if query_points_h.ndim != 4 or query_points_h.shape[:2] != (q.shape[0], owner_count):  # `[B,G]`
             raise ValueError("query_points_h must have shape [B,G,N_Q,3] matching q/evidence")  # 不广播
-        latents = self.encoder(q, evidence, evidence_row_index)  # retained path；静态 evidence 可按资产去重
+        latents = self.encoder(
+            q,
+            evidence,
+            evidence_row_index,
+            joint_coordinate_sign,
+        )  # retained path；静态 evidence 保持按资产去重，gauge 只走动态 screw 分支
         query_features = self.encoder.encode_points(
             query_points_h.detach(), evidence, evidence_row_index
         )  # query 点已有 q-row 轴，anchors/normal 通过同一 row index 路由
@@ -175,26 +181,44 @@ class GeometrySSLModel(nn.Module):
             density = density * entity_valid_mask.unsqueeze(-1).unsqueeze(-1)  # padding owner 不产生虚假场值
         if owner_index.ndim not in {1, 2} or query_index.shape != owner_index.shape or joint_index.shape != owner_index.shape:
             raise ValueError("owner/query/joint selectors must share [E] or [B,E] shape")
+
+        # sampled edge 的离散 selector 用 one-hot 收缩可学习 activation：$z_e=\sum_gS_{eg}z_g$。
+        # 每行 selector 恰有一个 1，因此与 gather 完全等价，但确定性 backward 不依赖 index-put。
+        def select_entities(index: torch.Tensor) -> torch.Tensor:
+            selector = torch.nn.functional.one_hot(index, num_classes=entities.shape[1]).to(dtype=entities.dtype)
+            if selector.ndim == 2:
+                selector = selector.unsqueeze(0).expand(entities.shape[0], -1, -1)  # `[B,E,G]`
+            return torch.bmm(selector, entities)  # `[B,E,D]`
+
+        def select_queries(owner: torch.Tensor, query: torch.Tensor) -> torch.Tensor:
+            query_count = query_features.shape[2]  # $N_Q$，每个 owner 的固定 query 数
+            flat_index = owner * query_count + query  # `[E]`/`[B,E]`，联合 `(owner,query)` selector
+            flat_queries = query_features.flatten(start_dim=1, end_dim=2)  # `[B,G N_Q,D_q]`
+            selector = torch.nn.functional.one_hot(flat_index, num_classes=flat_queries.shape[1]).to(
+                dtype=query_features.dtype
+            )  # `[E,G N_Q]` 或 `[B,E,G N_Q]`
+            if selector.ndim == 2:
+                selector = selector.unsqueeze(0).expand(entities.shape[0], -1, -1)  # `[B,E,G N_Q]`
+            return torch.bmm(selector, flat_queries)  # `[B,E,D_q]`
+
         if owner_index.ndim == 1:
-            owner_latent = entities.index_select(1, owner_index)  # `[B,E,D]` 的 $z_o$
+            owner_latent = select_entities(owner_index)  # `[B,E,D]` 的 $z_o$
             if joint_entity_index.ndim == 1:
                 joint_entities = joint_entity_index.index_select(0, joint_index)  # edge JOINT -> entity slot
-                joint_latent = entities.index_select(1, joint_entities)  # `[B,E,D]` 的 $z_i$
+                joint_latent = select_entities(joint_entities)  # `[B,E,D]` 的 $z_i$
             elif joint_entity_index.ndim == 2 and joint_entity_index.shape[0] == entities.shape[0]:
-                batch_index = torch.arange(entities.shape[0], device=entities.device).unsqueeze(1)
                 joint_entities = joint_entity_index[:, joint_index]
-                joint_latent = entities[batch_index, joint_entities]
+                joint_latent = select_entities(joint_entities)
             else:
                 raise ValueError("joint_entity_index must have shape [N_J] or [B,N_J]")
-            selected_query = query_features[:, owner_index, query_index]  # `[B,E,D_q]`
+            selected_query = select_queries(owner_index, query_index)  # `[B,E,D_q]`
         else:
             if owner_index.shape[0] != entities.shape[0] or joint_entity_index.ndim != 2:
                 raise ValueError("batched selectors/routing must share B with entity latents")
-            batch_index = torch.arange(entities.shape[0], device=entities.device).unsqueeze(1)  # `[B,1]`
-            owner_latent = entities[batch_index, owner_index]  # 每个样本自己的 edge owner token
+            owner_latent = select_entities(owner_index)  # 每个样本自己的 edge owner token
             joint_entities = torch.gather(joint_entity_index, 1, joint_index)  # `[B,E]` entity selectors
-            joint_latent = entities[batch_index, joint_entities]  # 每个样本自己的 edge JOINT token
-            selected_query = query_features[batch_index, owner_index, query_index]  # `[B,E,D_q]`
+            joint_latent = select_entities(joint_entities)  # 每个样本自己的 edge JOINT token
+            selected_query = select_queries(owner_index, query_index)  # `[B,E,D_q]`
         kappa = self.sensitivity_decoder(owner_latent, joint_latent, selected_query)  # `[B,E]` signed scalar
         return GeometrySSLForward(latents, query_features, density, kappa)  # 类型化 objective 输入
 

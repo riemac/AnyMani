@@ -17,7 +17,13 @@ from anymani.distill.representations.sources.anchor_sampling import (
     AnchorSamples,
     _anchor_realization_hash,
 )
-from anymani.distill.representations.sources.artifacts import GeometrySourceArtifactStore, source_artifact_key
+from anymani.distill.representations.sources.artifacts import (
+    GeometrySourceArtifactStore,
+    audit_source_cache,
+    prune_source_cache,
+    source_artifact_key,
+    source_cache_status,
+)
 from anymani.distill.representations.sources.cache import geometry_source_array_nbytes
 from anymani.distill.representations.sources.collision_geometry import (
     GeometryIdentity,
@@ -54,6 +60,18 @@ def test_artifact_key_changes_with_urdf_and_mesh_bytes(tmp_path: Path) -> None:
     assert first != second
     urdf.write_bytes(b"<robot name='b'/>")
     assert second != source_artifact_key(container, config)
+
+
+def test_artifact_key_is_not_namespaced_by_asset_id(tmp_path: Path) -> None:
+    """相同 typed geometry 与文件 bytes 改变目录标签时仍复用同一 canonical base。"""
+
+    urdf = tmp_path / "hand.urdf"
+    urdf.write_bytes(b"<robot name='same-geometry'/>")
+    semantics = SimpleNamespace(content_hash="same-content-hash")
+    first = SimpleNamespace(asset_id="asset-a", geometry_semantics=semantics, urdf_path=urdf, mesh_refs=())
+    second = SimpleNamespace(asset_id="asset-b", geometry_semantics=semantics, urdf_path=urdf, mesh_refs=())
+    config = GeometrySourceCfg()
+    assert source_artifact_key(first, config) == source_artifact_key(second, config)
 
 
 def _core() -> tuple[SimpleNamespace, GeometrySourceCore, GeometrySourceCfg]:
@@ -152,8 +170,10 @@ def test_source_base_and_anchor_shard_round_trip_without_pickle(tmp_path: Path) 
     assert np.array_equal(loaded.geometry_cache.records[0].surface_mesh.vertices, core.geometry_cache.records[0].surface_mesh.vertices)
     assert loaded.surface_sampling_arrays is not None
     assert loaded.warp_surface_views is not None
-    expected_triangles = np.asarray(core.geometry_cache.records[0].surface_mesh.triangles)
-    assert np.array_equal(loaded.surface_sampling_arrays.triangles_owner_local_m[0], expected_triangles)
+    expected_vertices = np.asarray(core.geometry_cache.records[0].surface_mesh.vertices)
+    expected_faces = np.asarray(core.geometry_cache.records[0].surface_mesh.faces, dtype=np.int32)
+    assert np.array_equal(loaded.surface_sampling_arrays.vertices_owner_local_m[0], expected_vertices)
+    assert np.array_equal(loaded.surface_sampling_arrays.faces[0], expected_faces)
     assert loaded.surface_sampling_arrays.face_area_cdf[0][-1] == 1.0
     assert loaded.warp_surface_views[0].vertices.dtype == np.float32
     assert loaded.warp_surface_views[0].faces.dtype == np.int32
@@ -180,8 +200,9 @@ def test_source_artifact_readonly_corruption_fails_closed(tmp_path: Path) -> Non
     array_path.write_bytes(payload)
 
     reader = GeometrySourceArtifactStore(tmp_path, mode="readonly")
+    reader.load_base(container, config)  # warm read 只检查 COMPLETE/schema/size，不扫描全 payload
     with pytest.raises(ValueError, match="digest mismatch"):
-        reader.load_base(container, config)
+        reader.audit_directory(tmp_path / reference.relative_path)
 
 
 def test_source_artifact_rejects_nondeterministic_rewrite(tmp_path: Path) -> None:
@@ -219,6 +240,70 @@ def test_source_artifact_concurrent_writers_publish_one_complete_identity(tmp_pa
     assert not tuple(final.parent.glob(".base.tmp-*"))
 
 
+def test_source_cache_maintenance_reports_references_and_audits_payload(tmp_path: Path) -> None:
+    """维护入口只读取共享账本，audit 才读取 payload，默认 prune 不删除已引用对象。"""
+
+    container, core, config = _core()
+    store = GeometrySourceArtifactStore(tmp_path, mode="read-write", role="train")
+    reference = store.write_base(core, config)
+
+    status = source_cache_status(tmp_path)
+    assert status["object_count"] == 1
+    assert status["roles"] == {"train": {"reference_count": 1, "references_by_kind": {"base": 1}}}
+    audit = audit_source_cache(tmp_path)
+    assert audit["status"] == "ok"
+    assert audit["object_count"] == 1
+    assert prune_source_cache(tmp_path)["candidates"] == []
+    assert (tmp_path / reference.relative_path).is_dir()
+    del container
+
+
+def test_source_object_is_reused_after_role_index_miss(tmp_path: Path) -> None:
+    """role index miss 仍可从共享 object catalog 找到 immutable object，并建立当前 role 引用。"""
+
+    container, core, config = _core()
+    writer = GeometrySourceArtifactStore(tmp_path, mode="read-write", role="train")
+    reference = writer.write_base(core, config)
+    evaluation = GeometrySourceArtifactStore(tmp_path, mode="read-write", role="evaluation")
+    loaded, reused = evaluation.load_base(container, config)
+    assert reused == reference
+    assert loaded.identity == core.identity
+    status = source_cache_status(tmp_path)
+    assert status["roles"]["evaluation"] == {"reference_count": 1, "references_by_kind": {"base": 1}}
+
+
+def test_source_store_normalizes_relative_root_before_recording_references(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """相对 cache root 不能使 load 返回的绝对 object path 脱离 lineage relative path 计算。"""
+
+    monkeypatch.chdir(tmp_path)
+    container, core, config = _core()
+    store = GeometrySourceArtifactStore("cache/v2", mode="read-write")
+    reference = store.write_base(core, config)
+    loaded, reused = store.load_base(container, config)
+    assert store.root == (tmp_path / "cache/v2").resolve()
+    assert reused == reference
+    assert loaded.identity == core.identity
+
+
+def test_source_cache_hard_limit_fails_before_publishing_object(tmp_path: Path) -> None:
+    """预计对象越过 hard limit 时 fail closed，不能留下半成品或 object catalog 记录。"""
+
+    _container, core, config = _core()
+    store = GeometrySourceArtifactStore(
+        tmp_path,
+        mode="read-write",
+        soft_limit_bytes=1,
+        hard_limit_bytes=1,
+        minimum_filesystem_reserve_bytes=0,
+    )
+    with pytest.raises(OSError, match="hard limit"):
+        store.write_base(core, config)
+    assert source_cache_status(tmp_path)["object_count"] == 0
+
+
 def test_source_artifact_incomplete_directory_and_io_do_not_change_torch_rng(tmp_path: Path) -> None:
     """Readonly 不得接纳半成品；key/write/load 不得消费全局 Torch RNG。"""
 
@@ -244,7 +329,8 @@ def test_source_arena_size_includes_query_and_warp_static_arrays() -> None:
 
     _container, core, _config = _core()
     query_arrays = OwnerSurfaceSamplingArrays(
-        (np.zeros((2, 3, 3), dtype=np.float64),),
+        (np.zeros((4, 3), dtype=np.float64),),
+        (np.zeros((2, 3), dtype=np.int32),),
         (np.zeros((2, 3), dtype=np.float64),),
         (np.ones(2, dtype=np.float64),),
     )
@@ -267,7 +353,8 @@ def test_source_arena_size_includes_query_and_warp_static_arrays() -> None:
     expected_increment = sum(
         array.nbytes
         for array in (
-            *query_arrays.triangles_owner_local_m,
+            *query_arrays.vertices_owner_local_m,
+            *query_arrays.faces,
             *query_arrays.face_normals_owner_local,
             *query_arrays.face_area_cdf,
             warp_view.vertices,

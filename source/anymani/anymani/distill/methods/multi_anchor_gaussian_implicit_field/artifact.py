@@ -32,9 +32,33 @@ def build_retained_geometry_artifact(
 
     if not source_checkpoint.is_file():
         raise FileNotFoundError(f"retained artifact source checkpoint does not exist: {source_checkpoint}")
-    retained = method.retained_state_dict()
-    if not retained or any(not key.startswith("encoder.") for key in retained):
+    raw_retained = method.retained_state_dict()
+    if not raw_retained or any(not key.startswith("encoder.") for key in raw_retained):
         raise ValueError("retained artifact requires a non-empty encoder-only state")
+    if any(value.dtype != torch.float32 for value in raw_retained.values()):
+        raise ValueError("retained artifact requires FP32 encoder master parameters")
+    retained = {
+        str(key): value.detach().to(device="cpu", dtype=torch.float32).clone()
+        for key, value in raw_retained.items()
+    }
+    resolved_config = metadata.get("resolved_config", {})
+    trainer_config = resolved_config.get("trainer", {}) if isinstance(resolved_config, Mapping) else {}
+    precision = trainer_config.get("execution", {}) if isinstance(trainer_config, Mapping) else {}
+    source_artifact = metadata.get("source_artifact", {})
+    if not isinstance(precision, Mapping) or not isinstance(source_artifact, Mapping):
+        raise ValueError("retained artifact lineage lacks execution precision or source identity")
+    required_precision = {
+        "teacher_dtype",
+        "parameter_dtype",
+        "model_autocast_dtype",
+        "loss_dtype",
+        "fairgrad_accumulation_dtype",
+        "allow_tf32",
+        "compile_enabled",
+        "compile_mode",
+    }
+    if required_precision - precision.keys():
+        raise ValueError("retained artifact lineage lacks the complete execution precision profile")
     return {
         "schema_version": RETAINED_ARTIFACT_SCHEMA_VERSION,
         "artifact_type": "retained_geometry_encoder",
@@ -48,11 +72,17 @@ def build_retained_geometry_artifact(
         },
         "lineage": {
             "source_checkpoint": str(source_checkpoint),
+            "checkpoint_schema_version": "9.0.0",
             "code_revision": metadata.get("code_revision", "unknown"),
             "package_version": metadata.get("package_version", "unknown"),
             "geometry_semantics_schema": metadata.get("geometry_semantics_schema", "unknown"),
             "asset_manifest": dict(metadata.get("asset_manifest", {})),
             "dataset_identity": dict(metadata.get("dataset_identity", {})),
+            "execution_precision": dict(precision),
+            "source_artifact": dict(source_artifact),
+            "parameter_partition": dict(metadata.get("parameter_partition", {})),
+            "worktree_dirty": bool(metadata.get("worktree_dirty", False)),
+            "worktree_fingerprint": str(metadata.get("worktree_fingerprint", "")),
         },
     }
 

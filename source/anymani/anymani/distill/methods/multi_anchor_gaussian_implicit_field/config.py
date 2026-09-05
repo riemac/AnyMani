@@ -42,7 +42,7 @@ class JointSignRewriteCfg:
     $$
     q_i'=-q_i,\qquad q_i^{home\prime}=-q_i^{home},\qquad \mathcal S_i'=-\mathcal S_i.
     $$
-    density/distance 不变；对应 JOINT 的 $\kappa/g$ 翻号。validation 不做这项增强，另做双前向 parity audit。
+    density/distance 不变；对应 JOINT 的 $\kappa/g$ 翻号。evaluation 不做这项增强，另做双前向 parity audit。
     """
 
     probability: float = 0.20  # 每个 $(asset,q)$ 被选中改写的概率
@@ -168,10 +168,10 @@ class MultiAnchorGaussianMethodCfg:
             raise TypeError("multi-anchor method requires GeometryRepresentationCfg")
         if not isinstance(self.model, GeometrySSLModelCfg):
             raise TypeError("multi-anchor method requires GeometrySSLModelCfg")
-        if tuple(self.representation.field.validation_bandwidths_m) != tuple(
+        if tuple(self.representation.field.fixed_bandwidths_m) != tuple(
             self.representation.field.bandwidth_centers_m
         ):
-            raise ValueError("validation sigma grid must match the three training centers")
+            raise ValueError("fixed evaluation sigma grid must match the three training centers")
 
 
 __all__ = [

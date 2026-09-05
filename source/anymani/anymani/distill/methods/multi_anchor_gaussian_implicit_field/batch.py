@@ -11,6 +11,7 @@ realization 编成 encoder 输入，并把异构 $N_J/G/E$ 填进稠密容器。
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
 from typing import Any, TypeVar, cast
 
@@ -62,15 +63,83 @@ class PaddedOnlineGeometryBatch:
     evidence_row_index: torch.Tensor | None = None  # `[B]`，q 行 -> unique static evidence 行
     anchor_index: torch.Tensor | None = None  # `[B]`，每行 q 使用的 anchor realization
     q_index: torch.Tensor | None = None  # `[B]`
+    joint_coordinate_sign: torch.Tensor | None = None  # `[B,N_J]`，逐 q 坐标 gauge，元素严格为 $\pm1$
 
 
 @dataclass(frozen=True)
 class MethodBatchViews:
     r"""把一份 padded batch 拆成模型输入、读出条件与物理真值。"""
 
-    model_input: tuple[torch.Tensor, StaticGeometryEvidence, torch.Tensor | None]
+    model_input: tuple[torch.Tensor, StaticGeometryEvidence, torch.Tensor | None, torch.Tensor | None]
     readout_condition: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
     truth: tuple[FieldTargetBatch, SensitivityTargetBatch]
+
+
+def _map_dataclass_tensors(value: _DataclassT, transform: Callable[[torch.Tensor], torch.Tensor]) -> _DataclassT:
+    r"""保持具体 dataclass 类型，只变换其直接 tensor fields。"""
+
+    updates: dict[str, Any] = {}
+    for field_info in fields(cast(Any, value)):
+        field_value = getattr(value, field_info.name)
+        updates[field_info.name] = transform(field_value) if isinstance(field_value, torch.Tensor) else field_value
+    return cast(_DataclassT, replace(cast(Any, value), **updates))
+
+
+def _map_padded_batch_tensors(
+    batch: PaddedOnlineGeometryBatch,
+    transform: Callable[[torch.Tensor], torch.Tensor],
+) -> PaddedOnlineGeometryBatch:
+    r"""对 opaque padded batch 的模型输入、读出条件和 teacher truth 使用同一 tensor 迁移。"""
+
+    def optional(value: torch.Tensor | None) -> torch.Tensor | None:
+        return None if value is None else transform(value)
+
+    return PaddedOnlineGeometryBatch(
+        asset_ids=batch.asset_ids,
+        q=transform(batch.q),
+        evidence=_map_dataclass_tensors(batch.evidence, transform),
+        queries=_map_dataclass_tensors(batch.queries, transform),
+        field_targets=_map_dataclass_tensors(batch.field_targets, transform),
+        sensitivity_targets=_map_dataclass_tensors(batch.sensitivity_targets, transform),
+        evidence_row_index=optional(batch.evidence_row_index),
+        anchor_index=optional(batch.anchor_index),
+        q_index=optional(batch.q_index),
+        joint_coordinate_sign=optional(batch.joint_coordinate_sign),
+    )
+
+
+def stage_padded_batch_for_replay(batch: PaddedOnlineGeometryBatch) -> PaddedOnlineGeometryBatch:
+    r"""把一个 detached 64-pair teacher unit 复制到 pinned CPU，供有限 mini-epoch 复用。
+
+    pinned host tensor 不建立 autograd graph；模型参数从未进入 batch，因此 replay 只复用固定物理 teacher，
+    每次 mini-epoch 仍重新计算 learned activation 与参数梯度。
+    """
+
+    def stage(tensor: torch.Tensor) -> torch.Tensor:
+        source = tensor.detach()
+        if torch.cuda.is_available():
+            target = torch.empty_like(source, device="cpu", pin_memory=True)
+            target.copy_(source, non_blocking=False)  # 释放 CUDA unit 前必须完成 host staging
+            return target
+        return source.cpu().clone()
+
+    return _map_padded_batch_tensors(batch, stage)
+
+
+def restore_padded_batch_from_replay(
+    batch: PaddedOnlineGeometryBatch,
+    *,
+    device: torch.device | str,
+) -> PaddedOnlineGeometryBatch:
+    r"""把一个 pinned CPU unit 非阻塞恢复到训练 device；同 stream model forward 自动等待 copy。"""
+
+    target = torch.device(device)
+    if batch.q.device.type != "cpu":
+        raise ValueError("replay unit must be staged on CPU before device restore")
+    return _map_padded_batch_tensors(
+        batch,
+        lambda tensor: tensor.to(device=target, non_blocking=tensor.is_pinned()),
+    )
 
 
 def attach_static_evidence(
@@ -503,6 +572,7 @@ def pad_online_geometry_samples(
         sensitivity_targets=sensitivity_targets,
         anchor_index=anchor_index,
         q_index=q_index,
+        joint_coordinate_sign=None,
     )
 
 
@@ -531,7 +601,7 @@ def method_batch_views(batch: PaddedOnlineGeometryBatch) -> MethodBatchViews:
 
     targets = batch.sensitivity_targets
     return MethodBatchViews(
-        model_input=(batch.q, batch.evidence, batch.evidence_row_index),
+        model_input=(batch.q, batch.evidence, batch.evidence_row_index, batch.joint_coordinate_sign),
         readout_condition=(
             batch.queries.query_points_h,
             batch.field_targets.bandwidths,
@@ -589,18 +659,65 @@ def _slice_padded_batch(
             updates[field_info.name] = field_value
         return cast(_DataclassT, replace(cast(Any, value), **updates))
 
+    # 正式 asset-major unit 的 row index 为 ``0...7`` 的连续 8-q blocks；只保留本切片实际引用的
+    # static rows，并把 q-row routing 重映射到紧凑表。该操作阻断历史 512-row evidence 被每个
+    # 64-pair forward 重复编码的 OOM 放大路径。
+    evidence = batch.evidence
+    compact_row_index = batch.evidence_row_index[start:stop] if batch.evidence_row_index is not None else None
+    if compact_row_index is not None:
+        selected_rows, inverse = torch.unique_consecutive(compact_row_index, return_inverse=True)
+        if torch.unique(selected_rows).numel() != selected_rows.numel():
+            raise ValueError("microbatch evidence rows must remain asset-major contiguous blocks")
+        evidence = _select_static_evidence_rows(evidence, selected_rows)
+        compact_row_index = inverse.to(dtype=torch.long)
     return PaddedOnlineGeometryBatch(
         asset_ids=batch.asset_ids[start:stop],
         q=batch.q[start:stop],
-        evidence=batch.evidence,
-        evidence_row_index=(
-            batch.evidence_row_index[start:stop] if batch.evidence_row_index is not None else None
-        ),
+        evidence=evidence,
+        evidence_row_index=compact_row_index,
         queries=slice_dataclass(batch.queries),
         field_targets=slice_dataclass(batch.field_targets),
         sensitivity_targets=slice_dataclass(batch.sensitivity_targets),
         anchor_index=batch.anchor_index[start:stop] if batch.anchor_index is not None else None,
         q_index=batch.q_index[start:stop] if batch.q_index is not None else None,
+        joint_coordinate_sign=(
+            batch.joint_coordinate_sign[start:stop] if batch.joint_coordinate_sign is not None else None
+        ),
+    )
+
+
+def _select_static_evidence_rows(
+    evidence: StaticGeometryEvidence,
+    row_index: torch.Tensor,
+) -> StaticGeometryEvidence:
+    r"""从 padded static table 选择有序资产行，不复制无 batch 轴的共享字段。"""
+
+    if evidence.anchors.ndim != 3 or row_index.ndim != 1 or row_index.dtype != torch.long:
+        raise ValueError("static evidence compaction requires batched evidence and long row_index")
+    source_rows = evidence.anchors.shape[0]
+
+    def select(value: torch.Tensor) -> torch.Tensor:
+        return value.index_select(0, row_index) if value.ndim > 0 and value.shape[0] == source_rows else value
+
+    def select_optional(value: torch.Tensor | None) -> torch.Tensor | None:
+        return None if value is None else select(value)
+
+    return StaticGeometryEvidence(
+        anchors=select(evidence.anchors),
+        home_surface_points=select(evidence.home_surface_points),
+        home_surface_mask=select(evidence.home_surface_mask),
+        palm_normal=select(evidence.palm_normal),
+        space_screws=select(evidence.space_screws),
+        q_home=select(evidence.q_home),
+        entity_role=select(evidence.entity_role),
+        entity_joint_index=select(evidence.entity_joint_index),
+        joint_entity_index=select(evidence.joint_entity_index),
+        shortest_path=select(evidence.shortest_path),
+        parent_direction=select(evidence.parent_direction),
+        child_direction=select(evidence.child_direction),
+        entity_valid_mask=select_optional(evidence.entity_valid_mask),
+        joint_valid_mask=select_optional(evidence.joint_valid_mask),
+        anchor_valid_mask=select_optional(evidence.anchor_valid_mask),
     )
 
 
@@ -615,7 +732,9 @@ __all__ = [
     "method_batch_views",
     "pad_online_geometry_samples",
     "pad_online_geometry_blocks",
+    "restore_padded_batch_from_replay",
     "split_padded_online_geometry_batch",
     "split_online_geometry_sample",
     "split_physical_online_geometry_sample",
+    "stage_padded_batch_for_replay",
 ]

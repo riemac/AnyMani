@@ -172,9 +172,10 @@ class WarpSurfaceView:
 
 @dataclass(frozen=True)
 class OwnerSurfaceSamplingArrays:
-    r"""query sampler 的 owner-local CPU 真源；owner 间 face 数不同，保持 tuple。"""
+    r"""query sampler 的 owner-local CPU 真源；triangle 在选中 face 后按索引 gather。"""
 
-    triangles_owner_local_m: tuple[np.ndarray, ...]  # 每项 `[F_g,3,3]` float64，m
+    vertices_owner_local_m: tuple[np.ndarray, ...]  # 每项 `[V_g,3]` float64，m
+    faces: tuple[np.ndarray, ...]  # 每项 `[F_g,3]` int32，索引到 owner vertices
     face_normals_owner_local: tuple[np.ndarray, ...]  # 每项 `[F_g,3]` float64
     face_area_cdf: tuple[np.ndarray, ...]  # 每项 `[F_g]` float64，严格以 1 结尾
 
@@ -545,24 +546,27 @@ def prepare_warp_surface_view(
 
 
 def prepare_owner_surface_sampling_arrays(cache: OwnerGeometryCache) -> OwnerSurfaceSamplingArrays:
-    r"""从 owner union 一次形成 query triangle/normal/area-CDF 的 float64 静态数组。"""
+    r"""从 owner union 形成 vertices/faces、normal 与 area-CDF，不展开 ``[F,3,3]``。"""
 
-    triangles: list[np.ndarray] = []
+    vertices: list[np.ndarray] = []
+    faces: list[np.ndarray] = []
     normals: list[np.ndarray] = []
     cdfs: list[np.ndarray] = []
     for record in cache.records:
         surface = record.surface_mesh
-        triangle = np.ascontiguousarray(np.asarray(surface.triangles, dtype=np.float64))
+        vertex = np.ascontiguousarray(np.asarray(surface.vertices, dtype=np.float64))
+        face = np.ascontiguousarray(np.asarray(surface.faces, dtype=np.int32))
         normal = np.ascontiguousarray(np.asarray(surface.face_normals, dtype=np.float64))
         area = np.asarray(surface.area_faces, dtype=np.float64)
-        if triangle.ndim != 3 or triangle.shape[1:] != (3, 3) or np.any(area <= 0.0):
+        if vertex.ndim != 2 or vertex.shape[1:] != (3,) or face.ndim != 2 or face.shape[1:] != (3,) or np.any(area <= 0.0):
             raise ValueError(f"owner {record.owner_id!r} surface sampling arrays require positive triangles")
         cdf = np.cumsum(area / area.sum(), dtype=np.float64)
         cdf[-1] = 1.0
-        triangles.append(triangle)
+        vertices.append(vertex)
+        faces.append(face)
         normals.append(normal)
         cdfs.append(np.ascontiguousarray(cdf))
-    return OwnerSurfaceSamplingArrays(tuple(triangles), tuple(normals), tuple(cdfs))
+    return OwnerSurfaceSamplingArrays(tuple(vertices), tuple(faces), tuple(normals), tuple(cdfs))
 
 
 def strict_owner_union(meshes: list[trimesh.Trimesh], *, owner_id: str) -> trimesh.Trimesh:
