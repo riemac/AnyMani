@@ -1,0 +1,223 @@
+{
+  "canonical_binding": {
+    "canonical_schema_version": "v1",
+    "physical_identity_algorithm": "canonical-runtime-lowering",
+    "source_lock_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/cohorts/right-transfer-unseen-a6.lock.yaml",
+    "source_lock_sha256": "9bb4bb7af8829fa9ce769525faedb01d222e076e7b892b7c7ae13435175673f7"
+  },
+  "cohort_id": "right-transfer-unseen-a6",
+  "members": [
+    {
+      "asset_id": "759a2cb2",
+      "canonical_schema_digest": "ffcee38e6878f1bb2a691c8084ef06ba89e265496694c2cb0b10cc8efc075842",
+      "cohort_index": 0,
+      "configuration_domain_hash": "f6326a2c03ce95b7106d108153f60d8e7d51608f01199858a18cff33f9bf3692",
+      "content_hash": "12efa7a936c52e680b413d74477bedff697a0ae7e3295bf25e17a0102fb7bd77",
+      "mutation_descriptor": {
+        "kind": "mother"
+      },
+      "physical_geometry_hash": "e586acdcc2ebb17305c2587f84665a5cf37a5e11df68ad9a88506cfa9e54c710",
+      "provenance": {
+        "asset_role": "mother",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t3_i3_m4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t3_i3_m4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": ""
+      },
+      "source_alias": "ssl",
+      "source_row": 3984
+    },
+    {
+      "asset_id": "3201fa24",
+      "canonical_schema_digest": "ffcee38e6878f1bb2a691c8084ef06ba89e265496694c2cb0b10cc8efc075842",
+      "cohort_index": 1,
+      "configuration_domain_hash": "b87a564ac0ac46cfd1d616ccfc2c5c10bd7ae868e43ed125d2894e04d641cfa0",
+      "content_hash": "433f9140edce9c690db92d373db9054d68355e216bac2ab6f3bd21ff2d8ff407",
+      "mutation_descriptor": {
+        "kind": "variant",
+        "mutator_modes": {
+          "limit_tweak": "disturb",
+          "link_proximal_overlap": "homologous_non_thumb",
+          "link_scale": "general",
+          "mount_perturb": "index_ring_yaw_rot",
+          "tip_replace": "general"
+        },
+        "post_mutate_samples_sha256": "07c0cd588a1b6680bebc2e855715d300cc7bd6996e9630505f16402519ca641f",
+        "source_origin_sample_id": "759a2cb2",
+        "source_origin_topology_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t3_i3_m4"
+      },
+      "physical_geometry_hash": "fa03170cdf7f82ceae32d55a6c5a2ccf5b8f4eb31e8d59771d9a2dbd097043ab",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t3_i3_m4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t3_i3_m4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-38-37"
+      },
+      "source_alias": "ssl",
+      "source_row": 3986
+    },
+    {
+      "asset_id": "fc865d79",
+      "canonical_schema_digest": "ffcee38e6878f1bb2a691c8084ef06ba89e265496694c2cb0b10cc8efc075842",
+      "cohort_index": 2,
+      "configuration_domain_hash": "8724beb813fc12841a5933791682fcc4b0ee13b3850b2c389a2c0c1c51696317",
+      "content_hash": "550937fbc238d030c835bea0bea370955726cd755e382bc8e24c51b5ec82c125",
+      "mutation_descriptor": {
+        "kind": "variant",
+        "mutator_modes": {
+          "limit_tweak": "identity",
+          "link_proximal_overlap": "homologous_non_thumb",
+          "link_scale": "only_length",
+          "mount_perturb": "identity",
+          "tip_replace": "general"
+        },
+        "post_mutate_samples_sha256": "9b0f60f78767f1eb1d2dbe185c38dd0a1d192c750f48cdb438b6f19307818ff1",
+        "source_origin_sample_id": "759a2cb2",
+        "source_origin_topology_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t3_i3_m4"
+      },
+      "physical_geometry_hash": "348a273be3cb25348b9548d8db119e92224799ca21f0065ff67732de8ac90834",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_leap",
+        "mother_name": "right_t3_i3_m4",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_leap/right_t3_i3_m4",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-38-37"
+      },
+      "source_alias": "ssl",
+      "source_row": 3999
+    },
+    {
+      "asset_id": "d431de35",
+      "canonical_schema_digest": "ffcee38e6878f1bb2a691c8084ef06ba89e265496694c2cb0b10cc8efc075842",
+      "cohort_index": 3,
+      "configuration_domain_hash": "ae19f484da940e2b8ae62ee75825b00d2051503352acedd5b2bbbf69d4cdb763",
+      "content_hash": "4c1cec615389d3036e1770ddba22f4c6b36c5ab0cc3c6c38f4b98d4a4852e77e",
+      "mutation_descriptor": {
+        "kind": "mother"
+      },
+      "physical_geometry_hash": "232ab1c3da54d27abce6c420b22d85a942ea8f084235b5a7ab4bd8f1db02c29c",
+      "provenance": {
+        "asset_role": "mother",
+        "collection_kind": "groups",
+        "group_name": "single_palm_allegro",
+        "mother_name": "right_t4_m4_r3",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_allegro/right_t4_m4_r3",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": ""
+      },
+      "source_alias": "ppo",
+      "source_row": 368
+    },
+    {
+      "asset_id": "11d58477",
+      "canonical_schema_digest": "ffcee38e6878f1bb2a691c8084ef06ba89e265496694c2cb0b10cc8efc075842",
+      "cohort_index": 4,
+      "configuration_domain_hash": "a4523f264cdad113017621e73933b8bf7e359d0db1274a4383e0c39f70b87b8a",
+      "content_hash": "86ebc98134495c3a3a07b99493bc40d1b1bb1a69d8c6a74d9d339bbed9ac3639",
+      "mutation_descriptor": {
+        "kind": "variant",
+        "mutator_modes": {
+          "limit_tweak": "homologous_non_thumb",
+          "link_proximal_overlap": "homologous_non_thumb",
+          "link_scale": "only_length",
+          "mount_perturb": "identity",
+          "tip_replace": "general"
+        },
+        "post_mutate_samples_sha256": "17c3bfc5bd77bbd069f9b93b2cec75d97138dbf088cc985fcb5c550ce3159083",
+        "source_origin_sample_id": "d431de35",
+        "source_origin_topology_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_allegro/right_t4_m4_r3"
+      },
+      "physical_geometry_hash": "58b871e45c9f8b23ae98c8d6a839ce61538bb7571ecf03211bb1238cf24914c9",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_allegro",
+        "mother_name": "right_t4_m4_r3",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_allegro/right_t4_m4_r3",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-09-59"
+      },
+      "source_alias": "ppo",
+      "source_row": 370
+    },
+    {
+      "asset_id": "39cb8175",
+      "canonical_schema_digest": "ffcee38e6878f1bb2a691c8084ef06ba89e265496694c2cb0b10cc8efc075842",
+      "cohort_index": 5,
+      "configuration_domain_hash": "872d272e50eed52be09cc05dfdcb1735d06a63fd508d78ec7890b872a38dba04",
+      "content_hash": "e07f4bedf3c8bce8e50e8c6a0ea3fb9712dcc501928039a8128cdfad0707d534",
+      "mutation_descriptor": {
+        "kind": "variant",
+        "mutator_modes": {
+          "limit_tweak": "disturb",
+          "link_proximal_overlap": "disturb",
+          "link_scale": "identity",
+          "mount_perturb": "index_ring_yaw_rot",
+          "tip_replace": "general"
+        },
+        "post_mutate_samples_sha256": "79eae8180bf170b76ca779ca8b3ba3707cecdaf9d43e98c7331af27bc09d61dd",
+        "source_origin_sample_id": "d431de35",
+        "source_origin_topology_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_allegro/right_t4_m4_r3"
+      },
+      "physical_geometry_hash": "0c715984cf6f4d8ec5a3005e7e3226a9861b2df365e1b994e0ab3e790bd01e40",
+      "provenance": {
+        "asset_role": "variant",
+        "collection_kind": "groups",
+        "group_name": "single_palm_allegro",
+        "mother_name": "right_t4_m4_r3",
+        "mother_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48/single_palm_allegro/right_t4_m4_r3",
+        "partition": "train",
+        "run_alias": "default",
+        "run_dir": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/generated/2026-08-19_15-10-48",
+        "variant_set": "2026-08-20_03-09-59"
+      },
+      "source_alias": "ppo",
+      "source_row": 372
+    }
+  ],
+  "schema_version": "1.2.0",
+  "selection": {
+    "algorithm": "explicit-policy-unseen-three-tip-topologies-v1",
+    "base_cohort": null,
+    "member_order": "all prior training members first; then fixed mother-wise representative blocks",
+    "new_active_dof": [
+      10,
+      11
+    ],
+    "new_mothers": [
+      "right_t3_i3_m4",
+      "right_t4_m4_r3"
+    ],
+    "new_tip_count": 3,
+    "policy_exposure": "policy-unseen relative to the inherited training chain; geometry SSL train exposure retained",
+    "purpose": "policy-unseen-evaluation",
+    "representatives_per_new_mother": 3
+  },
+  "sources": {
+    "ppo": {
+      "manifest_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ppo.yaml",
+      "manifest_sha256": "22320b8e00c8df73699d20cd0f56e68fbab720e8d63b36bba898ee964334a8dc"
+    },
+    "ssl": {
+      "manifest_path": "/home/hac/isaac/AnyMani/source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ssl.yaml",
+      "manifest_sha256": "671e204e8542e69fab7adc05bb3516a28993a7aa744a333b31811eb2e9c0eeb8"
+    }
+  }
+}
