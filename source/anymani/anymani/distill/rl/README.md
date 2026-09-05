@@ -86,6 +86,8 @@ TIP-only保留每关节本体状态、动作历史和所属指尖接触，同时
 
 已有策略的新方法分支使用`--actor_init_checkpoint <parent.pth>`；默认只加载actor，增加`--init_critic`可显式继承具有相同privileged输入语义的critic和value统计。两套optimizer、课程和训练计数重新初始化，初始化来源进入方法身份。已有技能的对照可共同使用`--reward_release_floor 1 --learning_rate 0.0001`固定满塑形并降低各组步长，以分离课程重启瞬态；这不是从随机策略训练的通用推荐。
 
+`--rotation_progress_clip_rad`显式控制进展奖励$5\,\mathrm{clip}(\Delta\psi,-c,c)$的对称半宽，默认$c=0.025$ rad/step；20 Hz下对应增量速率0.5 rad/s，候选0.04对应0.8 rad/s。改变它保留未饱和区的斜率和反向惩罚，进入任务与训练身份；它不是动作幅度或物理速度上限。固定评价始终使用未截断的物理净圈，奖励重算不能代替实际重训后的能力比较。
+
 Raw History30、TF32与窄compile都是显式候选，不会静默改写旧run：
 
 ```bash

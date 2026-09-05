@@ -288,6 +288,9 @@ def main() -> None:
     evaluation_horizon_s = int(args_cli.steps) * policy_dt_s  # 固定评价窗口，不修改checkpoint训练协议
     env_cfg.episode_length_s = evaluation_horizon_s
     env_cfg.commands.goal_pose.horizon_s = evaluation_horizon_s
+    env_cfg.rewards.rotation_progress.params["clip_rad_per_step"] = float(
+        run_contract.get("rotation_progress_clip_rad_per_step", 0.025)
+    )  # 物理评价仍用未截断净转角；保留checkpoint训练奖励配置供协议审计
     env = gym.make("AnyMani-Hetero-Generated-PalmRotation-MVP-RLGames-v0", cfg=env_cfg)
     provider = build_palm_rotation_bf16_geometry_provider(ASSET_BINDING, device=device)
     prototype_index = torch.tensor(ASSET_BINDING.asset_index_by_env(num_envs), dtype=torch.long, device=device)

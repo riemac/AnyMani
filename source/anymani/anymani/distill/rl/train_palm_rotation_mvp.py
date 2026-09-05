@@ -196,6 +196,12 @@ parser.add_argument(
 )
 parser.add_argument("--reward_release_reference_seconds", type=float, default=120.0)
 parser.add_argument(
+    "--rotation_progress_clip_rad",
+    type=float,
+    default=0.025,
+    help="Symmetric per-policy-step progress clip: 0.025/0.04 rad correspond to 0.5/0.8 rad/s at 20 Hz.",
+)
+parser.add_argument(
     "--learning_rate", type=float, default=None, help="Override actor base LR and scale other groups by the same ratio."
 )
 parser.add_argument(
@@ -217,6 +223,8 @@ if not 0 <= args_cli.reward_release_floor <= 1 or not 0 < args_cli.reward_releas
     raise ValueError("release floor/reference duration are invalid")
 if args_cli.learning_rate is not None and not 0 < args_cli.learning_rate < math.inf:
     raise ValueError("learning rate must be finite and positive")
+if not 0 < args_cli.rotation_progress_clip_rad < math.inf:
+    raise ValueError("rotation progress clip must be finite and positive")
 if args_cli.reward_release_start_turns < 0.0:
     raise ValueError("--reward_release_start_turns must be non-negative")
 if args_cli.reward_release_end_turns <= args_cli.reward_release_start_turns:
@@ -432,6 +440,8 @@ def main() -> None:
         params={"minimum_seconds": args_cli.episode_seconds_min, "maximum_seconds": args_cli.episode_seconds_max},
     )
     env_cfg.terminations.time_out = TerminationTermCfg(func=planned_time_out, time_out=True)
+    # 只扩展进展奖励的对称截断区间；低速斜率、反向符号、动作authority与物理速度均不改写。
+    env_cfg.rewards.rotation_progress.params["clip_rad_per_step"] = float(args_cli.rotation_progress_clip_rad)
     reward_release_params = env_cfg.curriculum.reward_release.params  # type: ignore[union-attr]  # 训练MDP课程配置
     reward_release_params["release_start_turns"] = float(args_cli.reward_release_start_turns)
     reward_release_params["release_end_turns"] = float(args_cli.reward_release_end_turns)
@@ -530,6 +540,7 @@ def main() -> None:
             "episode_seconds_max": float(args_cli.episode_seconds_max),
             "reward_release_floor": float(args_cli.reward_release_floor),
             "reward_release_reference_seconds": float(args_cli.reward_release_reference_seconds),
+            "rotation_progress_clip_rad_per_step": float(args_cli.rotation_progress_clip_rad),
             "horizon_length": horizon,
             "minibatch_size": minibatch_size,
             "minibatch_count": (num_envs * horizon) // minibatch_size,

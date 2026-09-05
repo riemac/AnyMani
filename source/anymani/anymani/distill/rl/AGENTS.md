@@ -78,6 +78,8 @@ Schema4把Git HEAD放在独立code provenance，method identity只绑定实际�
 
 课程可将净圈按计划时长换算到参考时长，提前失败不借实际短存活时间放大进度；`--reward_release_floor`是显式塑形下限，不是能力门。`--actor_init_checkpoint --init_critic`额外继承兼容critic和value统计，optimizer/课程重置；保存的normalizer初始计数加后续更新量才是其合法计数。`scripts.prepare_palm_rotation_resume`只链接checkpoint声明并哈希验证的不可变分片到独立run，完整恢复不重读初始化parent。
 
+`--rotation_progress_clip_rad`改变有符号进展奖励的对称截断半宽，必须进入task/training identity。20 Hz下0.025/0.04 rad每步对应0.5/0.8 rad/s奖励饱和点，不改动作authority；评价仍使用未截断转角，不能把同轨迹奖励重算当作学习增益。
+
 ### Logs
 
 输出根为 `logs/distill/rl_games/<config-name>/<run-name>/`。play 优先显式 `--checkpoint`。对比必须记录 commit、asset version、task ID、YAML、seed、backend 与 obs/action schema。

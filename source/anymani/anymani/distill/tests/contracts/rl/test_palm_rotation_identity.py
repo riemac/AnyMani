@@ -109,6 +109,16 @@ def test_tip_only_short_horizon_and_release_floor_are_explicit_method_changes(tm
     assert len({value["identity_digest"] for value in (baseline, tip, short, floor)}) == 4
 
 
+def test_progress_clip_is_a_task_contract_parameter_not_just_training_metadata(tmp_path: Path) -> None:
+    r"""每步0.025与0.04 rad对应不同进展奖励，评价和恢复必须显式绑定该差异。"""
+
+    baseline = _identity(tmp_path, learning_rate=1.0e-4)
+    faster = _identity(tmp_path, learning_rate=1.0e-4, rotation_progress_clip_rad_per_step=0.04)
+    assert baseline["task_contract"]["rotation_progress_clip_rad_per_step"] == 0.025
+    assert faster["task_contract"]["rotation_progress_clip_rad_per_step"] == 0.04
+    assert baseline["identity_digest"] != faster["identity_digest"]
+
+
 def test_identity_accepts_explicit_single_asset_closure_with_one_strict_binding(tmp_path: Path) -> None:
     r"""Single-embodiment closure应复用同一identity schema，并显式记录支持集基数1。"""
 

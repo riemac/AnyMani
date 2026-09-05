@@ -248,6 +248,9 @@ def build_palm_rotation_method_identity(
             "evaluation_primary": "physical-frontier-net-turns-directionality-and-survival",
             "rotation_frontier_degrees": 30.0,
             "rotation_frontier_reward_weight": 0.0,
+            "rotation_progress_clip_rad_per_step": float(
+                run_contract.get("rotation_progress_clip_rad_per_step", 0.025)
+            ),
             "strict_tracking_reward_weight": 10.0,
             "critic_task_state": "axis-goal-error-max-positive-net-and-current-net",
             "episode_seconds": float(run_contract.get("episode_seconds_max", 120.0)),
