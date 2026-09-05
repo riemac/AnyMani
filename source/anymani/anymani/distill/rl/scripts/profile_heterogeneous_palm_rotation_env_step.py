@@ -29,8 +29,9 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--num-envs", type=int, default=128)
     parser.add_argument("--warmup-steps", type=int, default=10)
     parser.add_argument("--profile-steps", type=int, default=30)
-    parser.add_argument("--output", type=Path, required=True)
     AppLauncher.add_app_launcher_args(parser)
+    # AppLauncher添加参数时会临时预解析；必填任务参数在其后声明，保留--help的无仿真退出路径。
+    parser.add_argument("--output", type=Path, required=True)
     args, unknown = parser.parse_known_args()
     if (args.cohort_lock is None) == (args.rows is None):
         parser.error("exactly one of --cohort-lock or --rows is required")

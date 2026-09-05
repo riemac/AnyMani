@@ -1,4 +1,8 @@
-# Material-point Jacobian Autoresearch
+# 跨阶段研究入口
+
+本目录保留资产选择、预抓取和几何表征的跨阶段工具。RL专属的评估、梯度审计、性能与structured-policy对照位于`source/anymani/anymani/distill/rl/scripts`，统一使用`python -m anymani.distill.rl.scripts.<name>`；训练主入口仍为`anymani.distill.rl.train_palm_rotation_mvp`，具体数据流与命令见[RL说明](../../source/anymani/anymani/distill/rl/README.md)。历史实验中的旧脚本路径按当时Git版本解释，不改写既有artifact。
+
+## Material-point Jacobian
 
 本目录保存可复现的研究 probe，不是正式 SSL 训练入口。当前主题是 fixed-material anchor-relational Jacobian：owner-local home-surface material point 随 POE/FK 运动后，相对固定 PALM anchor constellation 的四通道关系导数。正式物理公式位于 `source/anymani/anymani/distill/representations/targets/material_point_jacobian.py`。
 

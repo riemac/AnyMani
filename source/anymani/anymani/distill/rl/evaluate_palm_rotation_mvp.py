@@ -23,10 +23,7 @@ import yaml
 from isaaclab.app import AppLauncher
 
 ANYMANI_ROOT = Path(__file__).resolve().parents[5]  # `<repo>/source/anymani/anymani/distill/rl/file.py`
-DEFAULT_MANIFEST = (
-    ANYMANI_ROOT
-    / "source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ppo_mvp80.yaml"
-)
+DEFAULT_MANIFEST = ANYMANI_ROOT / "source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ppo_mvp80.yaml"
 DEFAULT_REFERENCE = ANYMANI_ROOT / "outputs/hetero/evaluation/n000-fixed-s1p1-adr0-reference.json"
 
 
@@ -57,9 +54,10 @@ def _select_support_rows(mvp80_rows: tuple[int, ...], raw_support_rows: str | No
 
 
 parser = argparse.ArgumentParser(description="Evaluate one MVP80 residual PPO checkpoint on fixed first trajectories.")
-parser.add_argument("--checkpoint", type=Path, required=True, help="Full schema-3 MVP80 checkpoint.")
 parser.add_argument("--asset_manifest", type=Path, default=DEFAULT_MANIFEST, help="Exact 80-row manifest.")
-parser.add_argument("--support_rows", type=str, default=None, help="Ordered MVP80 subset used by the checkpoint closure run.")
+parser.add_argument(
+    "--support_rows", type=str, default=None, help="Ordered MVP80 subset used by the checkpoint closure run."
+)
 parser.add_argument(
     "--cohort_lock",
     type=Path,
@@ -70,7 +68,15 @@ parser.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE, help="A
 parser.add_argument("--num_replicas", type=int, default=16, help="Fixed replicas per asset; formal protocol uses 16.")
 parser.add_argument("--steps", type=int, default=2400, help="20 Hz policy steps; formal protocol uses 2400=120 s.")
 parser.add_argument("--output", type=Path, default=None, help="Cohort JSON; sibling .h5 stores trajectory arrays.")
-parser.add_argument("--residual_off", action="store_true", help="Evaluate the same checkpoint with global residual set to zero.")
+parser.add_argument(
+    "--implementation_certificate",
+    type=Path,
+    default=None,
+    help="跨源码实现只读回放所需的精确重构等价证书；不用于完整训练续接。",
+)
+parser.add_argument(
+    "--residual_off", action="store_true", help="Evaluate the same checkpoint with global residual set to zero."
+)
 parser.add_argument("--real-time", action="store_true", help="Pace GUI replay at the 20 Hz policy period.")
 parser.add_argument(
     "--viewer_asset_index",
@@ -80,6 +86,7 @@ parser.add_argument(
 )
 parser.add_argument("--rl_games_strict", action="store_true", help="Require pinned local rl_games commit.")
 AppLauncher.add_app_launcher_args(parser)
+parser.add_argument("--checkpoint", type=Path, required=True, help="Full schema-3/4 palm-rotation checkpoint.")
 args_cli, launcher_unknown_args = parser.parse_known_args()
 
 if args_cli.num_replicas < 1 or args_cli.steps < 1:
@@ -147,13 +154,14 @@ from anymani.distill.models.palm_rotation_policy import (  # noqa: E402
     PalmRotationActorObservation,
     PalmRotationGeometry,
 )
-from anymani.distill.rl.masked_ppo import validate_anymani_checkpoint_identity  # noqa: E402
 from anymani.distill.rl.palm_rotation_ppo import PalmRotationRlGamesBuilder  # noqa: E402
 from anymani.distill.rl.runtime.palm_rotation_geometry import (  # noqa: E402
     build_palm_rotation_bf16_geometry_provider,
 )
 from anymani.distill.rl.runtime.palm_rotation_identity import (  # noqa: E402
     build_palm_rotation_method_identity,
+    palm_rotation_code_provenance,
+    validate_palm_rotation_evaluation_identity,
 )
 from anymani.distill.rl.runtime.palm_rotation_precision import enforce_palm_rotation_precision  # noqa: E402
 from anymani.distill.rl.runtime.palm_rotation_vecenv import (  # noqa: E402
@@ -234,8 +242,11 @@ def main() -> None:
     checkpoint_path = args_cli.checkpoint.expanduser().resolve()
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     checkpoint_identity = checkpoint.get("anymani_identity")
-    if not isinstance(checkpoint_identity, dict) or checkpoint_identity.get("identity_schema_version") != "3.0.0":
-        raise RuntimeError("evaluation requires a schema-3 MVP80 checkpoint identity")
+    if not isinstance(checkpoint_identity, dict) or checkpoint_identity.get("identity_schema_version") not in {
+        "3.0.0",
+        "4.0.0",
+    }:
+        raise RuntimeError("evaluation requires a schema-3/4 palm-rotation checkpoint identity")
     run_contract = checkpoint_identity.get("training")
     if not isinstance(run_contract, dict):
         raise RuntimeError("checkpoint identity is missing the exact training contract")
@@ -276,9 +287,15 @@ def main() -> None:
             arm=str(checkpoint_identity["policy"]["arm"]),
             run_contract=run_contract,
         )
-        validate_anymani_checkpoint_identity(
+        implementation_certificate = (
+            json.loads(args_cli.implementation_certificate.read_text(encoding="utf-8"))
+            if args_cli.implementation_certificate is not None
+            else None
+        )
+        validate_palm_rotation_evaluation_identity(
             runtime_identity=current_identity,
             checkpoint_identity=checkpoint_identity,
+            implementation_certificate=implementation_certificate,
         )
         if run_contract.get("rl_games_backend_commit") != backend_info.git_commit:
             raise RuntimeError("evaluation rl_games backend disagrees with checkpoint training contract")
@@ -394,9 +411,7 @@ def main() -> None:
                 last_position_gate_step[active & position_gate] = _step + 1
                 active_success = active & success_pulse
                 last_goal_success_step[active_success] = _step + 1
-                net_turns_at_last_goal_success[active_success] = (
-                    snapshot["net_rotation_rad"][active_success] / two_pi
-                )
+                net_turns_at_last_goal_success[active_success] = snapshot["net_rotation_rad"][active_success] / two_pi
                 position_error_at_last_goal_success_m[active_success] = position_error[active_success]
                 newly_done = active & done.bool()
                 termination_drop[newly_done] = snapshot["termination_object_out_of_anchor"][newly_done]
@@ -428,27 +443,27 @@ def main() -> None:
         arrays = {
             "goal_count": _group_by_asset(goal_count, args_cli.num_replicas).astype(np.float32),
             "rotation_frontier_count": _group_by_asset(frontier_count, args_cli.num_replicas).astype(np.float32),
-            "rotation_frontier_delta_recount": _group_by_asset(
-                frontier_delta_recount, args_cli.num_replicas
-            ).astype(np.float32),
+            "rotation_frontier_delta_recount": _group_by_asset(frontier_delta_recount, args_cli.num_replicas).astype(
+                np.float32
+            ),
             "rotation_frontier_recount_error": _group_by_asset(
                 frontier_delta_recount - frontier_count, args_cli.num_replicas
             ).astype(np.float32),
             "rotation_frontier_formula_error": _group_by_asset(
                 frontier_from_maximum - frontier_count, args_cli.num_replicas
             ).astype(np.float32),
-            "max_positive_net_turns": _group_by_asset(
-                max_positive_rotation_rad / two_pi, args_cli.num_replicas
-            ).astype(np.float32),
+            "max_positive_net_turns": _group_by_asset(max_positive_rotation_rad / two_pi, args_cli.num_replicas).astype(
+                np.float32
+            ),
             "signed_net_turns": _group_by_asset(net_turns, args_cli.num_replicas).astype(np.float32),
             "absolute_path_turns": _group_by_asset(path_turns, args_cli.num_replicas).astype(np.float32),
             "duration_s": _group_by_asset(duration_s, args_cli.num_replicas).astype(np.float32),
             "termination_drop": _group_by_asset(termination_drop, args_cli.num_replicas).astype(np.bool_),
             "termination_axis": _group_by_asset(termination_axis, args_cli.num_replicas).astype(np.bool_),
             "termination_timeout": _group_by_asset(termination_timeout, args_cli.num_replicas).astype(np.bool_),
-            "goal_success_pulse_recount": _group_by_asset(
-                goal_success_pulse_recount, args_cli.num_replicas
-            ).astype(np.float32),
+            "goal_success_pulse_recount": _group_by_asset(goal_success_pulse_recount, args_cli.num_replicas).astype(
+                np.float32
+            ),
             "goal_count_recount_error": _group_by_asset(
                 goal_success_pulse_recount - goal_count, args_cli.num_replicas
             ).astype(np.float32),
@@ -462,9 +477,9 @@ def main() -> None:
             "orientation_keypoint_error_mean_m": _group_by_asset(
                 orientation_error_sum_m / safe_diagnostic_steps, args_cli.num_replicas
             ).astype(np.float32),
-            "orientation_keypoint_error_max_m": _group_by_asset(
-                orientation_error_max_m, args_cli.num_replicas
-            ).astype(np.float32),
+            "orientation_keypoint_error_max_m": _group_by_asset(orientation_error_max_m, args_cli.num_replicas).astype(
+                np.float32
+            ),
             "orientation_keypoint_error_final_m": _group_by_asset(
                 orientation_error_final_m, args_cli.num_replicas
             ).astype(np.float32),
@@ -536,7 +551,11 @@ def main() -> None:
         )  # 54/80 cohort gate只对完整冻结支持集有定义
         closure_passed_assets = sum(result.viability_passed for result in physical_asset_results)
         closure_passed = bool(physical_finite and closure_passed_assets == asset_count)
-        pair_results = evaluate_pairs(asset_results, _manifest_pairs(args_cli.asset_manifest)) if args_cli.cohort_lock is None else ()
+        pair_results = (
+            evaluate_pairs(asset_results, _manifest_pairs(args_cli.asset_manifest))
+            if args_cli.cohort_lock is None
+            else ()
+        )
         pair_counts = Counter(result.outcome for result in pair_results)
         closure_thresholds = {
             "net_turns_median_min": SINGLE_CLOSURE_NET_TURNS_MIN,
@@ -547,7 +566,9 @@ def main() -> None:
         output = args_cli.output
         if output is None:
             intervention = "-residual-off" if args_cli.residual_off else ""
-            output = checkpoint_path.parent.parent / "evaluation" / f"{checkpoint_path.stem}-fixed-r16{intervention}.json"
+            output = (
+                checkpoint_path.parent.parent / "evaluation" / f"{checkpoint_path.stem}-fixed-r16{intervention}.json"
+            )
         output = output.expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         hdf5_path = output.with_suffix(".h5")
@@ -555,6 +576,14 @@ def main() -> None:
         evaluation_identity = {
             "schema_version": "1.3.0",
             "method_identity_digest": checkpoint_identity["identity_digest"],
+            "execution_identity_digest": current_identity["identity_digest"],
+            "execution_implementation": current_identity["implementation"],
+            "code_provenance": palm_rotation_code_provenance(),
+            "implementation_certificate_sha256": (
+                _sha256(args_cli.implementation_certificate)
+                if args_cli.implementation_certificate is not None
+                else None
+            ),
             "checkpoint_sha256": checkpoint_sha,
             "reference_sha256": _sha256(args_cli.reference),
             "manifest_sha256": _sha256(support_manifest_path),
@@ -655,9 +684,7 @@ def main() -> None:
                     "pulse_recount_max_abs_error": float(
                         np.max(np.abs(arrays["goal_count_recount_error"][asset_index]))
                     ),
-                    "position_gate_fraction_median": float(
-                        np.median(arrays["position_gate_fraction"][asset_index])
-                    ),
+                    "position_gate_fraction_median": float(np.median(arrays["position_gate_fraction"][asset_index])),
                     "position_pass_given_orientation_gate_q10_median_q90": [
                         float(np.quantile(arrays["position_pass_given_orientation_gate"][asset_index], 0.10)),
                         float(np.median(arrays["position_pass_given_orientation_gate"][asset_index])),
@@ -721,7 +748,9 @@ def main() -> None:
             "trajectory_hdf5_sha256": _sha256(hdf5_path),
         }
         temporary = output.with_suffix(output.suffix + ".tmp")
-        temporary.write_text(json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
+        temporary.write_text(
+            json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
         temporary.replace(output)
         print(
             json.dumps(

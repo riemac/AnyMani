@@ -173,8 +173,8 @@ def _training_argv(args: argparse.Namespace, checkpoint: Mapping[str, Any]) -> l
     """
 
     identity = checkpoint.get("anymani_identity")
-    if not isinstance(identity, Mapping) or identity.get("identity_schema_version") != "3.0.0":
-        raise RuntimeError("gradient audit requires a schema-3 palm-rotation checkpoint")
+    if not isinstance(identity, Mapping) or identity.get("identity_schema_version") not in {"3.0.0", "4.0.0"}:
+        raise RuntimeError("gradient audit requires a schema-3/4 palm-rotation checkpoint")
     training = identity.get("training")
     policy = identity.get("policy")
     if not isinstance(training, Mapping) or not isinstance(policy, Mapping):

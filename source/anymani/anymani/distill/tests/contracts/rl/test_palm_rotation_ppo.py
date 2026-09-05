@@ -2,6 +2,8 @@ r"""MVP80 rl_games structured network、privilege边界与分层minibatch合同�
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -261,7 +263,9 @@ def test_diagnostic_denormalization_is_read_only_while_model_trains() -> None:
         normalizer.running_mean.copy_(torch.tensor((1.25,), dtype=torch.float64))
         normalizer.running_var.copy_(torch.tensor((2.25,), dtype=torch.float64))
         normalizer.count.copy_(torch.tensor(37.0, dtype=torch.float64))
-    before = tuple(value.detach().clone() for value in (normalizer.running_mean, normalizer.running_var, normalizer.count))
+    before = tuple(
+        value.detach().clone() for value in (normalizer.running_mean, normalizer.running_var, normalizer.count)
+    )
     normalized_value = torch.tensor(((-1.0,), (0.5,), (2.0,)))
 
     physical_value = denormalize_value_readonly(model, normalized_value)
@@ -317,6 +321,46 @@ def test_optimizer_scalar_drain_transfers_only_update_level_means() -> None:
     assert result["entropy"] == 4.0 and result["policy_sigma"] == 0.5
     assert result["actor_grad_norm"] == 0.5 and result["critic_grad_norm"] == 1.5
     assert result["optimizer_microbatches"] == 80.0 and result["optimizer_steps"] == 20.0
+
+
+def test_extracted_gradient_probes_publish_without_updating_parameters(tmp_path: Path) -> None:
+    r"""迁移后的探针既要能写完整证据，也不能写主grad或改变Actor参数。"""
+
+    from anymani.distill.rl.runtime import palm_rotation_probes
+
+    actor = torch.nn.Linear(2, 1)
+    critic = torch.nn.Linear(2, 1)
+    features = torch.tensor(((1.0, 0.0), (3.0, 0.0), (0.0, 2.0), (0.0, 4.0)))
+    labels = torch.tensor((0, 0, 1, 1))  # 每资产恰有两个独立half样本
+    actor_objective = actor(features).squeeze(-1).square()
+    critic_objective = critic(features).squeeze(-1).square()
+    before = tuple(parameter.detach().clone() for parameter in actor.parameters())
+    fake = SimpleNamespace(
+        asset_count=2,
+        epoch_num=123,
+        experiment_dir=str(tmp_path),
+        model=SimpleNamespace(a2c_network=SimpleNamespace(package=SimpleNamespace(actor=actor))),
+        _gradient_probe_parameters=lambda: (tuple(actor.parameters()), tuple(critic.parameters())),
+        _per_asset_gradient_matrix=PalmRotationPpoAgent._per_asset_gradient_matrix,
+    )  # 不提供optimizer；探针若尝试更新参数应直接失败
+
+    palm_rotation_probes.run_gradient_probe(
+        fake, actor_objective=actor_objective, critic_objective=critic_objective, labels=labels
+    )  # type: ignore[arg-type]
+    palm_rotation_probes.run_full_actor_gradient_shadow(
+        fake,
+        global_objective=actor_objective,
+        per_asset_objective=actor_objective * torch.tensor((1.0, 1.0, 2.0, 2.0)),
+        labels=labels,
+        replica_halves=torch.tensor((0, 1, 0, 1)),
+    )  # type: ignore[arg-type]
+
+    assert (tmp_path / "gradient_probes/update_000123.npz").is_file()
+    summary = json.loads((tmp_path / "full_gradient_shadows/update_000123.json").read_text())
+    assert summary["update"] == 123 and summary["asset_count"] == 2
+    assert set(summary["scopes"]) == {"global", "per_asset_rollout"}
+    for parameter, reference in zip(actor.parameters(), before, strict=True):
+        assert torch.equal(parameter, reference) and parameter.grad is None
 
 
 def test_network_blocks_critic_privilege_and_prototype_from_actor() -> None:

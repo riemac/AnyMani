@@ -7,7 +7,7 @@
 ```text
 rl/
 ├── train.py / play.py               GM AppLauncher、Hydra、runner；不定义 MDP
-├── train_palm_rotation_mvp.py       MVP80 typed cfg、identity、structured rl_games launcher
+├── train_palm_rotation_mvp.py       MVP80及显式支持子集的typed cfg、identity、launcher
 ├── __init__.py                      distill-owned training aliases
 ├── rl_games_backend.py              任何 `rl_games.*` import 前固定本地 backend
 ├── rl_games_networks.py             compatibility adapter；实现来自 `distill.models`
@@ -20,16 +20,19 @@ rl/
 │   ├── retained_geometry.py         冻结q-dependent Z与static frontend cache
 │   ├── palm_rotation_geometry.py    encoder-only BF16、FP32 Z边界
 │   └── palm_rotation_vecenv.py      named experience transport与rollout诊断
-├── palm_rotation_ppo.py             分层采样、masked Normal、双optimizer custom agent
+├── palm_rotation_ppo.py             双optimizer、训练/恢复hook与注册；公开导入保持稳定
+├── scripts/                         RL专属探针、回放、性能与历史structured对照
 ├── structured_runtime.py            named actor/critic与N040 package
 ├── structured_masked_distribution.py active-joint Gaussian probability
 ├── structured_ppo.py                direct GAE/clipped PPO
 ├── agents/                          single-asset与MVP80 rl_games YAML
-└── algorithms/                      未来 advantage/PPO update；scalar loss 仍归 objectives.rl
+└── algorithms/                      ppo_batch逐资产估计/分层采样；gradient_audit只读梯度计算
 ```
 
 Generated heterogeneous task位于`tasks/hetero`，network仍属于`distill.models`。掌托旋转MVP使用项目内custom
 rl_games agent；`structured_ppo.py`只保留既有bounded probe用途。不要修改外部`/home/hac/isaac/rl_games`。
+
+`runtime/palm_rotation_network.py`拥有rl_games网络/分布适配，不重定义神经架构；`palm_rotation_diagnostics.py`归约agent与task已形成的事实，`palm_rotation_probes.py`执行显式只读梯度探针。主agent保留更新与恢复顺序，不以大型mixin隐藏训练状态。RL专属脚本放在本目录`scripts/`，资产生产、预抓取和SSL工具不机械迁入。
 
 ## Development Style And Conventions
 
@@ -37,14 +40,14 @@ rl_games agent；`structured_ppo.py`只保留既有bounded probe用途。不要�
 
 GM入口固定 `python -m anymani.distill.rl.train` / `play`；MVP80入口为
 `python -m anymani.distill.rl.train_palm_rotation_mvp`。`tasks/inhand`继续用根目录`scripts/rl_games/`。
-Isaac Sim与rl_games import必须在`AppLauncher`之后；MVP80在此前只解析80-row manifest并设置静态scene routing，
-直接实例化typed cfg，不做会改写frozen contact/pregrasp dataclass的Hydra round-trip。
+Isaac Sim与rl_games import必须在`AppLauncher`之后；掌旋入口在此前只解析冻结80-row manifest及其显式
+`--support_rows`子集，并设置静态scene routing。环境直接实例化typed cfg，不做会改写frozen
+contact/pregrasp dataclass的Hydra round-trip。
 
 ### Alias 与 YAML
 
 `AnyMani-GM-SingleAsset-MLP-v0`、LEAP与single-asset tactile aliases继续走rl_games。MVP80训练alias为
-`AnyMani-Hetero-Generated-PalmRotation-MVP-RLGames-v0`；入口必须绑定80-row manifest、rank-0 catalog、
-N040/precision、structured ABI、arm与replica routing identity。
+`AnyMani-Hetero-Generated-PalmRotation-MVP-RLGames-v0`；入口绑定冻结manifest或member-level canonical cohort lock、rank-0 catalog、N040/precision/History30/compile、structured ABI、arm和replica routing。Legacy `--support_rows`只选冻结MVP80子集；`--cohort_lock`独立提供明确成员轴，两者互斥，不改写父manifest。
 
 ## Important Semantics
 
@@ -53,18 +56,23 @@ N040/precision、structured ABI、arm与replica routing identity。
 PALM/JOINT/TIP同索引。MVP80使用固定`[B,21]` owner / `[B,16]` joint ABI；ghost永远invalid。四层N040
 保留FP32 master weights，仅encoder forward进入BF16 autocast，输出FP32$Z^e$。Vec-env每个rollout state只计算
 一次$Z^e$并写入单份Dict experience；actor与privileged critic共享缓存，mini-epochs不得重算。Actor、critic、
-loss和两套optimizers保持FP32且完全分参。RTX 5070 Ti、$B=2560$的provider→actor门为20 warmups、50 events、
-p95<50 ms；完整训练还需满足CUDA allocated峰值<总显存85%。
+loss和两套optimizers保持FP32且完全分参；显式TF32只改变Linear/attention/Conv内部乘法。大batch计时回答训练吞吐，$B=1$端到端才回答真机20 Hz时限，二者不可混用。完整训练同时检查PyTorch peak allocated与
+CUDA driver free；后者至少保留配置中的安全余量，因为PhysX与context不受PyTorch allocator统计。
 
 ### PPO 与诊断
 
-正式batch为`2560×30=76800`，16个逐资产等量activation slices每4个累积为一个19,200-sample逻辑minibatch，
-每mini-epoch仍执行4次optimizer step，共5 mini-epochs；唯一容量fallback为1280 env并按transitions补updates。
+环境数是计算与统计选择，不设所有cohort共用的128/1280硬默认。预算同时记录$N_{env}H$新样本、逐资产副本数和$E M/K$逻辑optimizer步数；例如5个mini-epochs、4个minibatches、accumulation1为20步。改变并行数、采样、累积或时长必须进入run identity，不用epoch count替代等样本或等墙钟比较。
 Actor base/global residual/critic初始LR分别为`3e-4/1e-4/5e-4`，adaptive schedule保持比例且只能向下调整或恢复到
 该锚点，不能使用rl_games默认`1e-2`上限。
 训练标量使用Polars 1.32.3写Zstd Parquet分片，checkpoint前flush并保存shard identity；selected trajectories用
-gzip HDF5。TensorBoard只保留global/8-cell在线曲线。Actor base使用dynamic-first geometry FiLM：低维控制状态
-先经TCN/MLP编码，$Z_j^e$只产生零初始化、有界的scale/shift；整手graph仍只输出有界action residual。
+gzip HDF5。每update写global、实际active cells与全部支持资产；只有完整MVP80固定89行。Actor base使用
+dynamic-first geometry FiLM：History30可经逐JOINT TCN或direct 150D raw stack进入local MLP，$Z_j^e$只产生
+零初始化、有界的scale/shift；Residual输出局部base与整手修正，`direct`额外拼接local skip，`direct_token`只从contextual JOINT token读出全authority动作。局部信息已进入token-only的输入，不等于被丢弃。Compile只包装actor/critic bound forwards，
+不得让外部rl_games把整个model改成`_orig_mod` checkpoint namespace。
+
+诊断反归一化只读value moments；不可变rollout均值与rl_games逐minibatch更新的KL参考分开存储。Gradient probe只在eager运行，是否介入优化依赖独立rollout/replica-half可靠性证据。
+
+Schema4把Git HEAD放在独立code provenance，method identity只绑定实际源码及科学合同；完整resume仍严格比较全部method字段。旧schema3 Actor-only初始化可用，跨重构只读评估须提供精确源码映射的等价证书，不能用忽略identity开关代替。修改任务/观察/算法是新研究分支，不冒充语义保持重构。
 
 ### Logs
 
@@ -76,9 +84,12 @@ gzip HDF5。TensorBoard只保留global/8-cell在线曲线。Actor base使用dyna
 source /home/hac/isaac/env_isaaclab/bin/activate
 pytest source/anymani/anymani/distill/tests/contracts/rl -q
 python -m anymani.distill.rl.train_palm_rotation_mvp --headless --smoke --arm residual
+python -m anymani.distill.rl.train_palm_rotation_mvp --headless --support_rows 873 --num_envs 1280 --max_updates 128 --history_encoder raw_stack --tf32 --torch_compile default
 python -m anymani.distill.rl.evaluate_palm_rotation_mvp --headless --checkpoint <checkpoint.pth>
 python -m anymani.distill.diagnostics.analysis.rl.palm_rotation <run-dir>
-python scripts/research/palm_rotation_precision_performance.py --headless
+python -m anymani.distill.rl.scripts.palm_rotation_precision_performance --headless
+python -m anymani.distill.rl.scripts.profile_palm_rotation_update --history_encoder raw_stack --tf32 --batch_size 2400
+python -m anymani.distill.rl.scripts.check_palm_rotation_refactor --checkpoint <checkpoint.pth> --output <new-certificate.json>
 ```
 
 人类运行说明见本目录 `README.md`。未经用户要求，不以完整长训练作为普通代码验证。

@@ -54,7 +54,7 @@ simulation_app = app_launcher.app
 
 
 RUN_SOURCE_FILES = (
-    "scripts/research/train_hetero_structured_ppo.py",
+    "anymani.distill.rl.scripts.train_hetero_structured_ppo",
     "source/anymani/anymani/tasks/hetero/config/generated/pregrasp_identity.py",
     "source/anymani/anymani/tasks/hetero/config/generated/tactile_rotation_env_cfg.py",
     "source/anymani/anymani/tasks/hetero/mdp/actions.py",

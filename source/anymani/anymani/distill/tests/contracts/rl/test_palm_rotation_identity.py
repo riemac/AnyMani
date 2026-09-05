@@ -2,10 +2,14 @@ r"""MVP80 method/run identity对task、policy与PPO配置的fail-closed合同。
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pytest
+from anymani.distill.rl.masked_ppo import validate_anymani_checkpoint_identity
+from anymani.distill.rl.runtime import palm_rotation_identity as identity_module
 from anymani.distill.rl.runtime.palm_rotation_identity import build_palm_rotation_method_identity
 
 
@@ -59,7 +63,7 @@ def test_identity_binds_film_contact_reward_and_training_contract(tmp_path: Path
 
     first = _identity(tmp_path, learning_rate=3.0e-4)
     changed = _identity(tmp_path, learning_rate=1.0e-4)
-    assert first["identity_schema_version"] == "3.0.0"
+    assert first["identity_schema_version"] == "4.0.0"
     assert first["task_contract"]["stable_joint_reduction"] == "reference-dof-16"
     assert first["task_contract"]["training_mdp_anchor"] == "N000-gm-tactile-rotation-v0.5.0"
     assert first["task_contract"]["rotation_frontier_reward_weight"] == 0.0
@@ -103,7 +107,7 @@ def test_identity_accepts_explicit_single_asset_closure_with_one_strict_binding(
         run_contract={"seed": 42, "num_envs": 1280},
     )
 
-    assert identity["identity_schema_version"] == "3.0.0"
+    assert identity["identity_schema_version"] == "4.0.0"
     assert identity["manifest"]["support_asset_count"] == 1
     assert identity["manifest"]["selected_rows"] == [1966]
 
@@ -130,3 +134,54 @@ def test_identity_distinguishes_local_skip_and_token_only_direct_heads(tmp_path:
     assert local_skip["policy"]["direct_decomposition"] == "full-authority-contextual-plus-local-skip"
     assert token_only["policy"]["direct_decomposition"] == "full-authority-contextual-token-only"
     assert local_skip["identity_digest"] != token_only["identity_digest"]
+
+
+def test_commit_provenance_does_not_change_identical_implementation_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r"""仅提交Git、未改执行源码时，method和Parquet续接身份必须保持不变。"""
+
+    monkeypatch.setattr(identity_module, "_git_head", lambda _root: "a" * 40)
+    first = _identity(tmp_path, learning_rate=3.0e-4)
+    assert identity_module.palm_rotation_code_provenance() == {"git_head": "a" * 40}
+    monkeypatch.setattr(identity_module, "_git_head", lambda _root: "b" * 40)
+    second = _identity(tmp_path, learning_rate=3.0e-4)
+    assert identity_module.palm_rotation_code_provenance() == {"git_head": "b" * 40}
+    assert first == second and "git_head" not in first["implementation"]
+    validate_anymani_checkpoint_identity(runtime_identity=second, checkpoint_identity=first)
+
+
+def test_readonly_replay_requires_exact_certificate_and_never_weakens_resume(tmp_path: Path) -> None:
+    r"""旧schema跨实现只允许带证书的评估；任务漂移和完整续训均不能借此通过。"""
+
+    runtime = _identity(tmp_path, learning_rate=3.0e-4)
+    legacy = deepcopy(runtime)
+    legacy["identity_schema_version"] = "3.0.0"
+    legacy["implementation"] = {"git_head": "a" * 40, "files": {"legacy.py": "b" * 64}}
+    legacy["identity_digest"] = identity_module._stable_digest(
+        {key: value for key, value in legacy.items() if key != "identity_digest"}
+    )
+    certificate = {
+        "artifact_type": "anymani.palm_rotation.refactor_equivalence",
+        "schema_version": "1.0.0",
+        "passed": True,
+        "reference_implementation_files": legacy["implementation"]["files"],
+        "current_implementation_files": runtime["implementation"]["files"],
+    }
+    with pytest.raises(RuntimeError, match="certificate is required"):
+        identity_module.validate_palm_rotation_evaluation_identity(runtime_identity=runtime, checkpoint_identity=legacy)
+    identity_module.validate_palm_rotation_evaluation_identity(
+        runtime_identity=runtime, checkpoint_identity=legacy, implementation_certificate=certificate
+    )
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        validate_anymani_checkpoint_identity(runtime_identity=runtime, checkpoint_identity=legacy)
+    wrong_certificate = {**certificate, "current_implementation_files": {"wrong.py": "c" * 64}}
+    with pytest.raises(RuntimeError, match="does not cover"):
+        identity_module.validate_palm_rotation_evaluation_identity(
+            runtime_identity=runtime, checkpoint_identity=legacy, implementation_certificate=wrong_certificate
+        )
+    changed = _identity(tmp_path, learning_rate=1.0e-4)
+    with pytest.raises(RuntimeError, match="semantic identity mismatch"):
+        identity_module.validate_palm_rotation_evaluation_identity(
+            runtime_identity=changed, checkpoint_identity=legacy, implementation_certificate=certificate
+        )

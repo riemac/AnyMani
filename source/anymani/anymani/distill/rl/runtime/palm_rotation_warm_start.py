@@ -53,8 +53,8 @@ def _checkpoint_document(path: Path) -> tuple[dict[str, Any], Mapping[str, Any],
         raise TypeError("actor-init checkpoint root must be a mapping")
     identity = document.get("anymani_identity")
     model = document.get("model")
-    if not isinstance(identity, Mapping) or identity.get("identity_schema_version") != "3.0.0":
-        raise ValueError("actor-init checkpoint requires a schema-3 AnyMani identity")
+    if not isinstance(identity, Mapping) or identity.get("identity_schema_version") not in {"3.0.0", "4.0.0"}:
+        raise ValueError("actor-init checkpoint requires a schema-3/4 AnyMani identity")
     if not isinstance(model, Mapping):
         raise ValueError("actor-init checkpoint is missing model state")
     return document, identity, model

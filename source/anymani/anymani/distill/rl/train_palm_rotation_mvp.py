@@ -86,7 +86,9 @@ def _select_support_rows(mvp80_rows: tuple[int, ...], raw_support_rows: str | No
 
 
 parser = argparse.ArgumentParser(description="Train the 80-hand palm-rotation MVP with structured rl_games PPO.")
-parser.add_argument("--asset_manifest", type=Path, default=DEFAULT_MANIFEST, help="Versioned 80-row selection manifest.")
+parser.add_argument(
+    "--asset_manifest", type=Path, default=DEFAULT_MANIFEST, help="Versioned 80-row selection manifest."
+)
 parser.add_argument(
     "--support_rows",
     type=str,
@@ -113,7 +115,9 @@ parser.add_argument(
     help="Per-joint History30 route; raw_stack feeds all 150 lagged scalars to the local FiLM MLP.",
 )
 parser.add_argument("--seed", type=int, default=42, help="Formal protocol uses 42, then 43/44 after seed42 passes.")
-parser.add_argument("--max_updates", type=int, default=None, help="Override PPO updates; default preserves 30M pulse budget.")
+parser.add_argument(
+    "--max_updates", type=int, default=None, help="Override PPO updates; default preserves 30M pulse budget."
+)
 parser.add_argument(
     "--reward_release_start_turns",
     type=float,
@@ -126,7 +130,9 @@ parser.add_argument(
     default=2.0,
     help="Cell-median positive-turn EMA where stability/contact shaping reaches full weight.",
 )
-parser.add_argument("--minibatches", type=int, default=None, help="Formal default 16; every minibatch remains asset-balanced.")
+parser.add_argument(
+    "--minibatches", type=int, default=None, help="Formal default 16; every minibatch remains asset-balanced."
+)
 parser.add_argument(
     "--gradient_probe_frequency",
     type=int,
@@ -160,14 +166,18 @@ parser.add_argument(
 )
 parser.add_argument("--experiment_name", type=str, default=None, help="Run name under logs/distill/rl_games.")
 parser.add_argument("--sigma", type=float, default=None, help="Optional rl_games play-time sigma override.")
-parser.add_argument("--tf32", action="store_true", help="Explicit TF32 numeric-speed candidate; tensors and Adam remain FP32.")
+parser.add_argument(
+    "--tf32", action="store_true", help="Explicit TF32 numeric-speed candidate; tensors and Adam remain FP32."
+)
 parser.add_argument(
     "--torch_compile",
     choices=("default", "reduce-overhead"),
     default=None,
     help="Compile the PPO model after checkpoint restore; default YAML remains eager.",
 )
-parser.add_argument("--smoke", action="store_true", help="Use 80 env, horizon 4, one mini-epoch/update integration mode.")
+parser.add_argument(
+    "--smoke", action="store_true", help="Use 80 env, horizon 4, one mini-epoch/update integration mode."
+)
 parser.add_argument("--rl_games_strict", action="store_true", help="Require pinned local rl_games v1.6.5 commit.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli, launcher_unknown_args = parser.parse_known_args()
@@ -258,6 +268,7 @@ from anymani.distill.rl.runtime.palm_rotation_geometry import (  # noqa: E402
 )
 from anymani.distill.rl.runtime.palm_rotation_identity import (  # noqa: E402
     build_palm_rotation_method_identity,
+    palm_rotation_code_provenance,
 )
 from anymani.distill.rl.runtime.palm_rotation_precision import enforce_palm_rotation_precision  # noqa: E402
 from anymani.distill.rl.runtime.palm_rotation_vecenv import (  # noqa: E402
@@ -377,10 +388,7 @@ def main() -> None:
     reward_release_ema_alpha = float(
         cast(Any, reward_release_params["ema_alpha"])
     )  # episode-cohort EMA更新率，baseline 0.05
-    agent_path = (
-        ANYMANI_ROOT
-        / "source/anymani/anymani/distill/rl/agents/heterogeneous_palm_rotation_mvp_ppo.yaml"
-    )
+    agent_path = ANYMANI_ROOT / "source/anymani/anymani/distill/rl/agents/heterogeneous_palm_rotation_mvp_ppo.yaml"
     agent_cfg = yaml.safe_load(agent_path.read_text(encoding="utf-8"))  # versioned rl_games config
     if not isinstance(agent_cfg, dict):
         raise TypeError("palm-rotation rl_games YAML must contain a mapping")
@@ -489,6 +497,7 @@ def main() -> None:
     )
     agent_cfg["params"]["network"]["anymani_identity"] = identity
     agent_cfg["params"]["config"]["num_actors"] = transport.num_envs
+    agent_cfg["params"]["config"]["code_provenance"] = palm_rotation_code_provenance()
     dump_yaml(str(run_dir / "params" / "env.yaml"), env_cfg)
     dump_yaml(str(run_dir / "params" / "agent.yaml"), agent_cfg)
     (run_dir / "params" / "runtime_identity.json").write_text(

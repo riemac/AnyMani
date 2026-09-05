@@ -17,9 +17,10 @@ import os
 from pathlib import Path
 
 import yaml
+from anymani.assets.bank.path_utils import resolve_anymani_root
 from isaaclab.app import AppLauncher
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = resolve_anymani_root()
 MANIFEST = ROOT / "source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ppo_mvp80.yaml"
 
 parser = argparse.ArgumentParser(description="Validate MVP80 N040 BF16 precision and provider-to-actor latency.")

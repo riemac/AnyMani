@@ -14,7 +14,7 @@ r"""以独立父进程运行 heterogeneous RL 命令并保存失败包络。
 python scripts/benchmarks/benchmark_heterogeneous_rl.py \
   --output_dir logs/benchmarks/heterogeneous_rl/smoke \
   --timeout_s 1800 -- \
-  /home/hac/isaac/IsaacLab/isaaclab.sh -p scripts/research/train_hetero_structured_ppo.py \
+  /home/hac/isaac/IsaacLab/isaaclab.sh -p -m anymani.distill.rl.scripts.train_hetero_structured_ppo \
   --tier support_basin --num-envs 8 --updates 1 --horizon 16 --eval-steps 20
 ```
 """

@@ -24,10 +24,21 @@ from .palm_rotation_vecenv import (
 )
 
 TASK_ID = "AnyMani-Hetero-Generated-PalmRotation-MVP-RLGames-v0"
+PALM_ROTATION_IDENTITY_SCHEMA_VERSION = "4.0.0"
+"""源码bytes定义实现身份；Git提交号另存来源，不改变同代码的完整续训资格。"""
 
 _IMPLEMENTATION_PATHS = (
     "source/anymani/anymani/distill/models/palm_rotation_policy.py",
     "source/anymani/anymani/distill/rl/palm_rotation_ppo.py",
+    "source/anymani/anymani/distill/rl/algorithms/ppo_batch.py",
+    "source/anymani/anymani/distill/rl/runtime/palm_rotation_network.py",
+    "source/anymani/anymani/distill/rl/runtime/palm_rotation_diagnostics.py",
+    "source/anymani/anymani/distill/rl/runtime/palm_rotation_probes.py",
+    "source/anymani/anymani/distill/rl/runtime/palm_rotation_warm_start.py",
+    "source/anymani/anymani/distill/models/temporal_encoder.py",
+    "source/anymani/anymani/distill/models/backbones/geometry_transformer.py",
+    "source/anymani/anymani/distill/models/input_adapters/encoder.py",
+    "source/anymani/anymani/distill/models/input_adapters/se3_invariant_encoder.py",
     "source/anymani/anymani/distill/rl/algorithms/gradient_audit.py",
     "source/anymani/anymani/distill/rl/train_palm_rotation_mvp.py",
     "source/anymani/anymani/distill/rl/masked_ppo.py",
@@ -121,6 +132,79 @@ def _git_head(root: Path) -> str:
     return revision
 
 
+def palm_rotation_code_provenance() -> dict[str, str]:
+    r"""返回独立保存的代码来源；提交号不是策略/MDP数值语义的一部分。"""
+
+    return {"git_head": _git_head(resolve_anymani_root())}
+
+
+def palm_rotation_implementation_files() -> dict[str, str]:
+    r"""对实际执行的算法、模型与任务源码计算逐文件SHA-256。"""
+
+    root = resolve_anymani_root()
+    return {path: _sha256(root / path) for path in _IMPLEMENTATION_PATHS}
+
+
+def validate_palm_rotation_evaluation_identity(
+    *,
+    runtime_identity: Mapping[str, Any],
+    checkpoint_identity: Mapping[str, Any],
+    implementation_certificate: Mapping[str, Any] | None = None,
+) -> None:
+    r"""验证只读评估身份；跨实现只能消费精确绑定两端源码的重构证书。
+
+    完整续训仍使用masked_ppo中的全字段严格验证。此函数只用于不更新参数的评估：资产、预抓取、N040、
+    actor信息、任务与训练合同逐值一致；Git来源和日志schema不决定动作语义。实现文件若不同，必须提供
+    check_palm_rotation_refactor产生的同源码SHA映射证书，不能用布尔开关跳过代码检查。
+    """
+
+    for label, identity in (("runtime", runtime_identity), ("checkpoint", checkpoint_identity)):
+        if identity.get("identity_schema_version") not in {"3.0.0", "4.0.0"}:
+            raise RuntimeError(f"{label} evaluation identity has unsupported schema")
+        payload = {key: value for key, value in identity.items() if key != "identity_digest"}
+        if identity.get("identity_digest") != _stable_digest(payload):
+            raise RuntimeError(f"{label} evaluation identity digest is inconsistent with its payload")
+    fields = (
+        "task_id",
+        "task_contract",
+        "policy",
+        "manifest",
+        "pregrasp",
+        "geometry_provider",
+        "transport_abi",
+        "training",
+    )
+    mismatched = [
+        name
+        for name in fields
+        if name not in runtime_identity or runtime_identity[name] != checkpoint_identity.get(name)
+    ]
+    if mismatched:
+        raise RuntimeError(f"evaluation semantic identity mismatch: {mismatched}")
+    runtime_files = runtime_identity.get("implementation", {}).get("files")
+    checkpoint_files = checkpoint_identity.get("implementation", {}).get("files")
+    if (
+        not isinstance(runtime_files, dict)
+        or not runtime_files
+        or not isinstance(checkpoint_files, dict)
+        or not checkpoint_files
+    ):
+        raise RuntimeError("evaluation requires non-empty implementation file identities")
+    if runtime_files == checkpoint_files:
+        return
+    certificate = implementation_certificate
+    if not isinstance(certificate, Mapping):
+        raise RuntimeError("evaluation implementation changed; an exact refactor certificate is required")
+    if (
+        certificate.get("artifact_type") != "anymani.palm_rotation.refactor_equivalence"
+        or certificate.get("schema_version") != "1.0.0"
+        or certificate.get("passed") is not True
+        or certificate.get("reference_implementation_files") != checkpoint_files
+        or certificate.get("current_implementation_files") != runtime_files
+    ):
+        raise RuntimeError("evaluation refactor certificate does not cover these exact implementations")
+
+
 def build_palm_rotation_method_identity(
     *,
     provider_identity: dict[str, Any],
@@ -147,10 +231,10 @@ def build_palm_rotation_method_identity(
     catalog_index = catalog_root / "index.json"
     if not resolved_manifest.is_file() or not catalog_index.is_file():
         raise FileNotFoundError("palm-rotation manifest or strict catalog index is missing")
-    implementation_files = {path: _sha256(root / path) for path in _IMPLEMENTATION_PATHS}
+    implementation_files = palm_rotation_implementation_files()
     key_digests = [hashlib.sha256(binding.key_json.encode("utf-8")).hexdigest() for binding in pregrasp.bindings]
     payload = {
-        "identity_schema_version": "3.0.0",
+        "identity_schema_version": PALM_ROTATION_IDENTITY_SCHEMA_VERSION,
         "task_id": TASK_ID,
         "task_contract": {
             "object": "DexCube",
@@ -205,7 +289,6 @@ def build_palm_rotation_method_identity(
         },
         "geometry_provider": provider_identity,
         "implementation": {
-            "git_head": _git_head(root),
             "files": implementation_files,
         },
         "transport_abi": {
@@ -223,4 +306,12 @@ def build_palm_rotation_method_identity(
     return {**payload, "identity_digest": _stable_digest(payload)}
 
 
-__all__ = ["TASK_ID", "PalmRotationPregraspIdentityCfg", "build_palm_rotation_method_identity"]
+__all__ = [
+    "TASK_ID",
+    "PALM_ROTATION_IDENTITY_SCHEMA_VERSION",
+    "PalmRotationPregraspIdentityCfg",
+    "build_palm_rotation_method_identity",
+    "palm_rotation_code_provenance",
+    "palm_rotation_implementation_files",
+    "validate_palm_rotation_evaluation_identity",
+]

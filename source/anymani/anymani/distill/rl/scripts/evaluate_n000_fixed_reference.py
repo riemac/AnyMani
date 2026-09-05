@@ -34,9 +34,10 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 import yaml
+from anymani.assets.bank.path_utils import resolve_anymani_root
 from isaaclab.app import AppLauncher
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = resolve_anymani_root()
 DEFAULT_CHECKPOINT = ROOT / (
     "logs/distill/rl_games/gm_tactile_rotation_tcn/gm_tactile_rotation_tcn_v050_s42/nn/"
     "gm_tactile_rotation_tcn.pth"
