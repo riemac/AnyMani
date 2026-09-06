@@ -130,6 +130,19 @@ def test_strict_goal_weight_is_explicit_without_adding_frontier_reward(tmp_path:
     assert baseline["identity_digest"] != lower["identity_digest"]
 
 
+def test_joint_anchor_override_is_explicit_and_preserves_other_task_semantics(tmp_path: Path) -> None:
+    r"""取消软关节初姿惩罚是单独奖励干预，不能顺便改变物体、动作或其他任务规则。"""
+
+    baseline = _identity(tmp_path, learning_rate=1.0e-4)
+    relaxed = _identity(tmp_path, learning_rate=1.0e-4, joint_pose_anchor_weight=0.0)
+    assert "joint_pose_anchor_weight" not in baseline["task_contract"]
+    assert relaxed["task_contract"]["joint_pose_anchor_weight"] == 0.0
+    other = dict(relaxed["task_contract"])
+    other.pop("joint_pose_anchor_weight")
+    assert other == baseline["task_contract"]
+    assert relaxed["policy"] == baseline["policy"]
+
+
 def test_identity_accepts_explicit_single_asset_closure_with_one_strict_binding(tmp_path: Path) -> None:
     r"""Single-embodiment closure应复用同一identity schema，并显式记录支持集基数1。"""
 

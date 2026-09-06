@@ -86,9 +86,13 @@ TIP-only保留每关节本体状态、动作历史和所属指尖接触，同时
 
 已有策略的新方法分支使用`--actor_init_checkpoint <parent.pth>`；默认只加载actor，增加`--init_critic`可显式继承具有相同privileged输入语义的critic和value统计。两套optimizer、课程和训练计数重新初始化，初始化来源进入方法身份。已有技能的对照可共同使用`--reward_release_floor 1 --learning_rate 0.0001`固定满塑形并降低各组步长，以分离课程重启瞬态；这不是从随机策略训练的通用推荐。
 
+需要保留动作均值而重新设置探索范围时，`python -m anymani.distill.rl.scripts.prepare_palm_rotation_actor_initialization --checkpoint <parent.pth> --latent_std 0.35 --output <new-init.pth>`生成仅初始化用artifact。它只改变global latent标准差，保留其余Actor、Critic和value张量，不导出optimizer或训练计数；输出只供`--actor_init_checkpoint`，不用于完整`--checkpoint`恢复。`scripts.check_palm_rotation_depth_growth`则验证额外零输出残差层的CPU函数/梯度保持性质，尚不构成大模型学习收益。
+
 `--rotation_progress_clip_rad`显式控制进展奖励$5\,\mathrm{clip}(\Delta\psi,-c,c)$的对称半宽，默认$c=0.025$ rad/step；20 Hz下对应增量速率0.5 rad/s，候选0.04对应0.8 rad/s。改变它保留未饱和区的斜率和反向惩罚，进入任务与训练身份；它不是动作幅度或物理速度上限。固定评价始终使用未截断的物理净圈，奖励重算不能代替实际重训后的能力比较。
 
 `--strict_goal_reward_weight`控制姿态与位置双门命中的脉冲权重，默认10。该单因素对照保持goal事件定义、pose奖励、位置/轴失败条件和frontier reward=0；降低它不等于放宽物理安全门。判定时同时检查固定净圈/方向、位置保持及120秒耐久，不能只根据同轨迹重算后的奖励相关性选择配置。
+
+`--joint_pose_anchor_weight`控制关节相对初始抓姿偏移的软惩罚，默认−0.5，允许有限的非正值，0只取消这一项。它不修改物体位置锚点、掉落阈值、轴失败或动作上限。非默认值进入任务与训练合同；比较时保留相同亲本、采样预算和其他配置，同时检查新技能与旧域遗忘。
 
 Raw History30、TF32与窄compile都是显式候选，不会静默改写旧run：
 
@@ -151,6 +155,12 @@ python -m anymani.distill.diagnostics.analysis.rl.palm_rotation /absolute/path/t
 ```
 
 训练入口与评估入口分别拥有训练分布和能力测量窗口。评估读取checkpoint声明的actor触觉信息，显式传入相同`--cohort_lock`；30秒主评估使用`--steps 600 --num_replicas 16 --reference <fixed30-reference.json>`，`--trace_stride 1`额外保存20 Hz接触/角速时序。默认2400步保留耐久检查入口。正式扩张资格只在30秒R16、TIP-only且无额外遮蔽干预时应用；R1、耐久和冻结干预仍保存物理结果，但不授予该资格。主要物理指标为净圈、方向性和drop/axis联合生存率，strict goal tracking单独报告。
+
+冻结策略在另一集合上评价时，显式使用`--cohort_lock <target.canonical.lock.yaml> --cohort_transfer`。验证仍固定策略、任务、观察ABI、N040和精度/代码语义；重合物理资产必须保留相同预抓取。共享catalog新增条目前保存`index_history`，只读复测可核对真正使用的旧记录，避免无关新增条目改变旧结果。此兼容不等于不同目录版本下的完整PPO状态恢复已自动放宽。
+
+`--direct_logit_gain 1.5`是冻结Direct策略的显式读出诊断，形成$\mu=\tanh(1.5\,\mathrm{logit})$；原动作上限和参数保持，干预不授予原checkpoint的正式过门资格。`--trace_rewards --trace_stride 1`保存实际加权每步奖励分项、释放系数和分项重构误差。评价按source释放参数初始化，动态课程的评价状态不自动等于训练结束状态；解释时以记录的实际系数为准。
+
+回放导出使用`--video <new.mp4> --viewer_asset_index <selection-local-index>`，通常配合`--num_replicas 1 --steps 600`。入口自动启用离屏相机，以选中副本的实际reset物体位置设置固定世界取景，按20 Hz保存动作前图像；第一轨迹结束后不接入自动重置的新回合。视频是人工机制检查材料，R1回放不替代R16能力评价。
 
 ### 旧checkpoint与重构
 

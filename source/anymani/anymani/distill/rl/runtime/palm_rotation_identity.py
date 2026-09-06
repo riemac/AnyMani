@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -224,6 +225,9 @@ def build_palm_rotation_method_identity(
         raise ValueError("palm-rotation identity requires non-empty unique selected rows")
     if not run_contract:
         raise ValueError("palm-rotation identity requires a non-empty PPO run contract")
+    joint_anchor_weight = float(run_contract.get("joint_pose_anchor_weight", -0.5))
+    if not math.isfinite(joint_anchor_weight) or joint_anchor_weight > 0.0:
+        raise ValueError("joint pose anchor weight must be finite and non-positive")
     if not pregrasp.require_strict or int(pregrasp.rank) != 0 or len(pregrasp.bindings) != len(selected_rows):
         raise ValueError("palm-rotation method requires one strict rank-0 binding per selected asset")
     root = resolve_anymani_root()
@@ -252,6 +256,7 @@ def build_palm_rotation_method_identity(
                 run_contract.get("rotation_progress_clip_rad_per_step", 0.025)
             ),
             "strict_tracking_reward_weight": float(run_contract.get("strict_goal_reward_weight", 10.0)),
+            **({"joint_pose_anchor_weight": joint_anchor_weight} if joint_anchor_weight != -0.5 else {}),
             "critic_task_state": "axis-goal-error-max-positive-net-and-current-net",
             "episode_seconds": float(run_contract.get("episode_seconds_max", 120.0)),
             "episode_seconds_min": float(run_contract.get("episode_seconds_min", 120.0)),

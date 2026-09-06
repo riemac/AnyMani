@@ -211,6 +211,12 @@ parser.add_argument(
     help="Strict pose-and-position goal pulse weight; frontier reward remains zero.",
 )
 parser.add_argument(
+    "--joint_pose_anchor_weight",
+    type=float,
+    default=-0.5,
+    help="Soft joint displacement penalty relative to pregrasp; 0 disables only this reward term.",
+)
+parser.add_argument(
     "--init_critic",
     action="store_true",
     help="Also initialize compatible critic/value RMS from actor_init_checkpoint, not optimizer state.",
@@ -233,6 +239,8 @@ if not 0 < args_cli.rotation_progress_clip_rad < math.inf:
     raise ValueError("rotation progress clip must be finite and positive")
 if not 0 <= args_cli.strict_goal_reward_weight < math.inf:
     raise ValueError("strict goal reward weight must be finite and non-negative")
+if not math.isfinite(args_cli.joint_pose_anchor_weight) or args_cli.joint_pose_anchor_weight > 0.0:
+    raise ValueError("joint pose anchor weight must be finite and non-positive")
 if args_cli.reward_release_start_turns < 0.0:
     raise ValueError("--reward_release_start_turns must be non-negative")
 if args_cli.reward_release_end_turns <= args_cli.reward_release_start_turns:
@@ -451,6 +459,9 @@ def main() -> None:
     # 只扩展进展奖励的对称截断区间；低速斜率、反向符号、动作authority与物理速度均不改写。
     env_cfg.rewards.rotation_progress.params["clip_rad_per_step"] = float(args_cli.rotation_progress_clip_rad)
     env_cfg.rewards.goal_success.weight = float(args_cli.strict_goal_reward_weight)  # 保留双门事件本身，只改变脉冲权重
+    env_cfg.rewards.joint_pose_anchor.weight = float(
+        args_cli.joint_pose_anchor_weight
+    )  # 软关节初姿约束；物体/轴失败不变
     reward_release_params = env_cfg.curriculum.reward_release.params  # type: ignore[union-attr]  # 训练MDP课程配置
     reward_release_params["release_start_turns"] = float(args_cli.reward_release_start_turns)
     reward_release_params["release_end_turns"] = float(args_cli.reward_release_end_turns)
@@ -551,6 +562,11 @@ def main() -> None:
             "reward_release_reference_seconds": float(args_cli.reward_release_reference_seconds),
             "rotation_progress_clip_rad_per_step": float(args_cli.rotation_progress_clip_rad),
             "strict_goal_reward_weight": float(args_cli.strict_goal_reward_weight),
+            **(
+                {"joint_pose_anchor_weight": float(args_cli.joint_pose_anchor_weight)}
+                if args_cli.joint_pose_anchor_weight != -0.5
+                else {}
+            ),
             "horizon_length": horizon,
             "minibatch_size": minibatch_size,
             "minibatch_count": (num_envs * horizon) // minibatch_size,

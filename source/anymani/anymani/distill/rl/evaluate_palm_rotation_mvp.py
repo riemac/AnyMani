@@ -63,7 +63,7 @@ parser.add_argument(
     "--cohort_lock",
     type=Path,
     default=None,
-    help="训练checkpoint使用的member-level cohort lock；与legacy support rows互斥。",
+    help="待评价的member-level cohort lock；改变训练支持集时显式使用--cohort_transfer。",
 )
 parser.add_argument(
     "--cohort_transfer",
@@ -76,7 +76,13 @@ parser.add_argument("--steps", type=int, default=2400, help="Fixed episode polic
 parser.add_argument(
     "--trace_stride", type=int, default=0, help="Per-step diagnostic sampling stride; 0 disables trace."
 )
+parser.add_argument(
+    "--trace_rewards", action="store_true", help="Include actual weighted per-step reward terms in trace."
+)
 parser.add_argument("--output", type=Path, default=None, help="Cohort JSON; sibling .h5 stores trajectory arrays.")
+parser.add_argument(
+    "--video", type=Path, default=None, help="Optional MP4 of the selected viewer asset's first trajectory."
+)
 parser.add_argument(
     "--implementation_certificate",
     type=Path,
@@ -113,10 +119,16 @@ if args_cli.num_replicas < 1 or args_cli.steps < 1:
     raise ValueError("evaluation replicas and steps must be positive")
 if args_cli.trace_stride < 0:
     raise ValueError("trace stride must be non-negative")
+if args_cli.trace_rewards and args_cli.trace_stride != 1:
+    raise ValueError("--trace_rewards requires --trace_stride 1 for complete reward attribution")
 if not math.isfinite(args_cli.direct_logit_gain) or args_cli.direct_logit_gain <= 0.0:
     raise ValueError("direct logit gain must be finite and positive")
 if args_cli.cohort_transfer and args_cli.cohort_lock is None:
     raise ValueError("--cohort_transfer requires an explicit --cohort_lock")
+if args_cli.video is not None:
+    if args_cli.video.suffix.lower() != ".mp4" or args_cli.video.exists():
+        raise ValueError("--video requires a new .mp4 output path")
+    args_cli.enable_cameras = True
 if args_cli.cohort_lock is not None:
     if args_cli.support_rows is not None:
         raise ValueError("--cohort_lock and --support_rows are mutually exclusive")
@@ -309,7 +321,25 @@ def main() -> None:
         run_contract.get("rotation_progress_clip_rad_per_step", 0.025)
     )  # 物理评价仍用未截断净转角；保留checkpoint训练奖励配置供协议审计
     env_cfg.rewards.goal_success.weight = float(run_contract.get("strict_goal_reward_weight", 10.0))
-    env = gym.make("AnyMani-Hetero-Generated-PalmRotation-MVP-RLGames-v0", cfg=env_cfg)
+    env_cfg.rewards.joint_pose_anchor.weight = float(run_contract.get("joint_pose_anchor_weight", -0.5))
+    # 奖励诊断采用source的实际释放配置；lambda只进入reward/critic，不进入deterministic Actor。
+    env_cfg.curriculum.reward_release.params.update(
+        release_start_turns=float(run_contract.get("reward_release_start_turns", 1.0)),
+        release_end_turns=float(run_contract.get("reward_release_end_turns", 2.0)),
+        ema_alpha=float(run_contract.get("reward_release_ema_alpha", 0.05)),
+        release_floor=float(run_contract.get("reward_release_floor", 0.0)),
+        reference_seconds=float(run_contract.get("reward_release_reference_seconds", 120.0)),
+    )
+    if args_cli.video is not None:
+        env_cfg.viewer.resolution = (960, 720)
+        env_cfg.viewer.origin_type = "world"
+        env_cfg.viewer.eye = (0.23, -0.22, 0.28)
+        env_cfg.viewer.lookat = (0.0, 0.075, 0.05)
+    env = gym.make(
+        "AnyMani-Hetero-Generated-PalmRotation-MVP-RLGames-v0",
+        cfg=env_cfg,
+        render_mode="rgb_array" if args_cli.video is not None else None,
+    )
     provider = build_palm_rotation_bf16_geometry_provider(ASSET_BINDING, device=device)
     prototype_index = torch.tensor(ASSET_BINDING.asset_index_by_env(num_envs), dtype=torch.long, device=device)
     transport = PalmRotationRlGamesVecEnv(
@@ -321,6 +351,8 @@ def main() -> None:
         clip_actions=1.0,
     )
 
+    video_writer: Any = None
+    video_frames = 0
     try:
         current_identity = build_palm_rotation_method_identity(
             provider_identity=provider.identity,
@@ -436,6 +468,18 @@ def main() -> None:
         net_turns_at_last_goal_success = torch.zeros_like(goal_count)  # 最后pulse时的signed累计净圈
         position_error_at_last_goal_success_m = torch.zeros_like(goal_count)  # 最后pulse时的anchor误差，单位m
         observation = transport.reset()["obs"]
+        if args_cli.video is not None:
+            import imageio.v2 as imageio
+
+            # 离屏模式不依赖GUI的相机跟随器。用实际reset物体位置设置固定世界相机，后续漂移仍可见。
+            x, y, z = transport.unwrapped.scene["object"].data.root_pos_w[int(args_cli.viewer_asset_index)].cpu().tolist()
+            camera_target = (float(x), float(y), float(z) - 0.015)
+            camera_eye = (float(x) + 0.23, float(y) - 0.25, float(z) + 0.23)
+            transport.unwrapped.sim.set_camera_view(camera_eye, camera_target, env_cfg.viewer.cam_prim_path)
+            args_cli.video.parent.mkdir(parents=True, exist_ok=True)
+            video_writer = imageio.get_writer(str(args_cli.video), fps=round(1.0 / policy_dt_s), codec="libx264")
+            for _ in range(3):
+                transport.unwrapped.render()  # 仅预热渲染器，不推进physics或policy时间
         trace_buffers: dict[str, torch.Tensor] = {}
         trace_count = 0
         trace_capacity = (
@@ -447,6 +491,10 @@ def main() -> None:
         with torch.no_grad():
             for _step in range(int(args_cli.steps)):
                 step_started_at = time.perf_counter()  # GUI replay墙钟节流起点；不进入任何物理状态或指标
+                if video_writer is not None and bool(active[int(args_cli.viewer_asset_index)].item()):
+                    # 保存动作前状态；所选首轨迹结束后不录自动reset状态，时间轴固定为真实policy dt。
+                    video_writer.append_data(transport.unwrapped.render())
+                    video_frames += 1
                 actions = _actor_mean(network, observation)
                 next_observation, _reward, done, _extras = transport.step(actions)
                 command = transport.unwrapped.command_manager.get_term("goal_pose")
@@ -486,6 +534,11 @@ def main() -> None:
                             "post_goal_axis_alignment": command.goal_normal_alignment,  # cos(物体z轴,目标z轴)，仅post_state_valid内有效
                         }
                     )
+                    if args_cli.trace_rewards:
+                        # RewardManager保存weight*rate，reset只清episode sums；乘dt恢复真实每步贡献。
+                        values["reward_terms_step"] = transport.unwrapped.reward_manager._step_reward * policy_dt_s
+                        values["reward_step"] = _reward
+                        values["reward_release_gain"] = observation["critic_reward_release"].squeeze(-1)
                     if not trace_buffers:
                         trace_buffers = {
                             name: torch.empty((trace_capacity, *value.shape), dtype=value.dtype, device=value.device)
@@ -548,6 +601,9 @@ def main() -> None:
             raise RuntimeError(
                 f"fixed evaluation ended before {int(active.sum().item())}/{num_envs} first trajectories terminated"
             )
+        if video_writer is not None:
+            video_writer.close()
+            video_writer = None
         if frozen_actor_state is not None:
             if any(
                 not torch.equal(value, network.package.actor.state_dict()[name])
@@ -724,6 +780,18 @@ def main() -> None:
             "evaluator_source_sha256": _sha256(Path(__file__).resolve()),
             "transfer_validator_source_sha256": _sha256(Path(palm_rotation_transfer.__file__)),
             "transfer_validation": transfer_validation,
+            "video": (
+                {
+                    "path": str(args_cli.video.resolve()),
+                    "asset_index": int(args_cli.viewer_asset_index),
+                    "replica_index": 0,
+                    "frames": video_frames,
+                    "fps": round(1.0 / policy_dt_s),
+                    "frame_semantics": "pre-action first-trajectory states; automatic-reset frames excluded",
+                }
+                if args_cli.video is not None
+                else None
+            ),
             "execution_implementation": current_identity["implementation"],
             "code_provenance": palm_rotation_code_provenance(),
             "implementation_certificate_sha256": (
@@ -741,6 +809,7 @@ def main() -> None:
                 "policy_dt_s": 0.05,
                 "horizon_s": evaluation_horizon_s,
                 "trace_stride": int(args_cli.trace_stride),
+                "trace_rewards": bool(args_cli.trace_rewards),
                 "actor_contact_intervention": "tip-only-mask" if args_cli.tip_only_intervention else "none",
                 "cohort_transfer": bool(args_cli.cohort_transfer),
                 "direct_logit_gain_intervention": float(args_cli.direct_logit_gain),
@@ -794,6 +863,12 @@ def main() -> None:
                 for name, value in trace_buffers.items()
             }  # 所有逐时数组为[T,A,R,...]，active含最后terminal step，后续自动reset样本无效
             trace_arrays["policy_step"] = np.arange(trace_count, dtype=np.int64) * int(args_cli.trace_stride) + 1
+            reward_recount_error = None
+            if args_cli.trace_rewards:
+                error = np.abs(trace_arrays["reward_terms_step"].sum(axis=-1) - trace_arrays["reward_step"])
+                reward_recount_error = float(error[trace_arrays["active"]].max())
+                if not np.isfinite(reward_recount_error) or reward_recount_error > 1.0e-4:
+                    raise RuntimeError("reward term trace does not reconstruct the actual step reward")
             write_selected_trajectories_hdf5(
                 trace_path,
                 arrays=trace_arrays,
@@ -804,6 +879,10 @@ def main() -> None:
                     "sensor_names": list(ASSET_BINDING.contact_layout.state_sensor_names),
                     "post_state_valid_semantics": "sensor forces/bits, post q and post axis alignment exclude automatic-reset terminal rows",
                     "pre_owner_contact_semantics": "actor input before the applied action; aggregates are post-physics/pre-reset",
+                    "reward_term_names": list(transport.unwrapped.reward_manager.active_terms)
+                    if args_cli.trace_rewards
+                    else None,
+                    "reward_recount_max_abs_error": reward_recount_error,
                 },
             )
             trace_result = {"path": str(trace_path), "sha256": _sha256(trace_path), "samples": trace_count}
@@ -959,6 +1038,8 @@ def main() -> None:
             )
         )
     finally:
+        if video_writer is not None:
+            video_writer.close()
         transport.close()
 
 
