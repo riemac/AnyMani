@@ -8,6 +8,7 @@ source/physical identity随机流。一次生成必须覆盖resolved lock中的�
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from anymani.pregrasp.schema import stable_digest
@@ -26,9 +27,15 @@ from .strict_good_pregrasp_identity import (
     STRICT_GOOD_PREGRASP_SOBOL_CANDIDATES,
 )
 
-COHORT_GOOD_PREGRASP_CATALOG_ROOT = (
-    "outputs/pregrasp/catalogs/heterogeneous_rotation/strict-v1/dexcube/scale-1p1"
-)  # 跨cohort共享exact-key catalog；相同physical identity可直接复用
+# 目录是数据位置，进入实际run/evaluation identity；它不改变exact key的物理或搜索定义。
+# 开发/验收可使用独立目录，避免为未见资产补建条目时改变既有训练目录的index摘要。
+# 未显式设置时逐值保留训练默认位置，完整resume仍按原身份严格检查，不放宽恢复闸门。
+COHORT_GOOD_PREGRASP_CATALOG_ROOT = os.environ.get(
+    "ANYMANI_HETERO_GOOD_PREGRASP_CATALOG_ROOT",
+    "outputs/pregrasp/catalogs/heterogeneous_rotation/strict-v1/dexcube/scale-1p1",
+)  # 相同physical/object/scale/physics/generation identity仍可复用同一Top-8内容
+if not COHORT_GOOD_PREGRASP_CATALOG_ROOT.strip():
+    raise ValueError("cohort good-pregrasp catalog root must not be blank")
 COHORT_GOOD_PREGRASP_EVIDENCE_ROOT = "outputs/pregrasp/search/heterogeneous_rotation/strict-v1/dexcube/scale-1p1"
 """每次cohort invocation在其ID/lock-SHA子目录保存candidate级证据，不覆盖其他cohort。"""
 COHORT_GOOD_PREGRASP_OBJECT_SCALE = STRICT_GOOD_PREGRASP_OBJECT_SCALE  # 无量纲DexCube scale，固定1.1

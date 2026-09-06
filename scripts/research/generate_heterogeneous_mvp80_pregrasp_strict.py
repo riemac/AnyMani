@@ -35,7 +35,12 @@ DEFAULT_SELECTION = Path(
 )
 DEFAULT_CATALOG = Path("outputs/pregrasp/catalogs/heterogeneous_rotation_mvp80_dexcube_s1p1_v5")
 DEFAULT_EVIDENCE = Path("outputs/pregrasp/search/heterogeneous_rotation_mvp80_dexcube_s1p1_v5")
-DEFAULT_COHORT_CATALOG = Path("outputs/pregrasp/catalogs/heterogeneous_rotation/strict-v1/dexcube/scale-1p1")
+DEFAULT_COHORT_CATALOG = Path(
+    os.environ.get(
+        "ANYMANI_HETERO_GOOD_PREGRASP_CATALOG_ROOT",
+        "outputs/pregrasp/catalogs/heterogeneous_rotation/strict-v1/dexcube/scale-1p1",
+    )
+)  # 与runtime使用同一显式env；未设置时保留训练默认目录。
 DEFAULT_COHORT_EVIDENCE = Path("outputs/pregrasp/search/heterogeneous_rotation/strict-v1/dexcube/scale-1p1")
 
 
@@ -45,7 +50,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--selection", type=Path, default=DEFAULT_SELECTION)
     parser.add_argument("--cohort-lock", type=Path, default=None, help="待完整覆盖并发布的resolved member-level cohort lock。")
-    parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    parser.add_argument("--catalog", type=Path, default=None, help="显式覆盖目录；否则使用分片声明或对应任务默认目录。")
     parser.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
     parser.add_argument("--asset-limit", type=int, default=None, help="Development-only ordered prefix; never publish.")
     parser.add_argument("--rows", type=str, default=None, help="Development-only comma-separated selected rows.")
@@ -89,13 +94,30 @@ if COHORT_RUN:
     cohort_id = str(COHORT_DOCUMENT.get("cohort_id", "")).strip()
     if not cohort_id or any(character in cohort_id for character in ("/", "\\", "\0")):
         raise ValueError("cohort_id must be a non-empty path-safe identifier")
-    if ARGS.catalog == DEFAULT_CATALOG:
-        ARGS.catalog = DEFAULT_COHORT_CATALOG
+    # 数据位置随生成分片传播；显式CLI优先，两个隐式声明冲突则在Kit启动前拒绝。
+    selection = COHORT_DOCUMENT.get("selection", {})
+    if not isinstance(selection, dict):
+        raise ValueError("cohort selection must be a mapping")
+    declared_catalog = selection.get("catalog_root")
+    environment_catalog = os.environ.get("ANYMANI_HETERO_GOOD_PREGRASP_CATALOG_ROOT")
+    for location in (declared_catalog, environment_catalog):
+        if location is not None and (not isinstance(location, str) or not location.strip()):
+            raise ValueError("cohort catalog location must be a non-empty path string")
+    if ARGS.catalog is None:
+        if (
+            declared_catalog is not None
+            and environment_catalog is not None
+            and Path(declared_catalog).expanduser().resolve() != Path(environment_catalog).expanduser().resolve()
+        ):
+            raise ValueError("catalog location conflict between cohort declaration and environment; use --catalog")
+        ARGS.catalog = Path(declared_catalog or environment_catalog or DEFAULT_COHORT_CATALOG)
     if ARGS.evidence == DEFAULT_EVIDENCE:
         ARGS.evidence = DEFAULT_COHORT_EVIDENCE / f"{cohort_id}--{COHORT_LOCK_SHA256[:12]}"
     os.environ.pop("ANYMANI_HETERO_ASSET_ROWS", None)
     os.environ["ANYMANI_HETERO_COHORT_LOCK"] = str(cohort_path)
 else:
+    if ARGS.catalog is None:
+        ARGS.catalog = DEFAULT_CATALOG  # Legacy MVP80的缺省位置不随cohort路径改动。
     SELECTION_DOCUMENT = yaml.safe_load(ARGS.selection.read_text(encoding="utf-8"))
     FORMAL_SELECTED_ROWS = tuple(int(row) for row in SELECTION_DOCUMENT["initial_selected_rows"])
     if len(FORMAL_SELECTED_ROWS) != ASSETS_PER_RUN or len(set(FORMAL_SELECTED_ROWS)) != ASSETS_PER_RUN:

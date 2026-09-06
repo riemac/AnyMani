@@ -66,6 +66,7 @@ class PureLeapRightLineageRecipe:
     handedness: str = "right"  # 首轮scale ladder只覆盖右手
     family: str = "leap"  # surviving finger slots必须全部属于LEAP
     require_unique_topology: bool = True  # A128的32条mother主轴不得重复topology
+    excluded_mother_names: tuple[str, ...] = ()  # 研究留出母体；从所有source的候选池排除整个lineage
 
     def __post_init__(self) -> None:
         r"""静态验证recipe基数、source唯一性与固定四成员语义。"""
@@ -77,6 +78,10 @@ class PureLeapRightLineageRecipe:
             raise ValueError("scale lineage recipe requires exactly mother plus three variants")
         if self.handedness not in {"left", "right"} or not self.family.strip() or not self.production_group.strip():
             raise ValueError("lineage recipe has invalid handedness/family/production group")
+        if len(set(self.excluded_mother_names)) != len(self.excluded_mother_names) or any(
+            not name or name != name.strip() for name in self.excluded_mother_names
+        ):
+            raise ValueError("excluded mother names must be non-empty, whitespace-free and unique")
 
     @property
     def mother_count(self) -> int:
@@ -192,8 +197,7 @@ def _standardized_vectors(lineages: Sequence[LineageDescriptor]) -> dict[str, tu
     )  # $\sigma_d$；常数维使用$10^{-12}$防除零
     return {
         lineage.key: tuple(
-            (value - mean) / scale
-            for value, mean, scale in zip(lineage.descriptor, means, scales, strict=True)
+            (value - mean) / scale for value, mean, scale in zip(lineage.descriptor, means, scales, strict=True)
         )
         for lineage in lineages
     }
@@ -230,14 +234,16 @@ def select_diverse_lineages(
             for right in combo[left_index + 1 :]
         ]
         baseline_distances = [
-            _distance(vectors[lineage.key], vectors[reference.key])
-            for lineage in combo
-            for reference in baseline
+            _distance(vectors[lineage.key], vectors[reference.key]) for lineage in combo for reference in baseline
         ]
-        nearest_baseline_sum = sum(
-            min(_distance(vectors[lineage.key], vectors[reference.key]) for reference in baseline)
-            for lineage in combo
-        ) if baseline else 0.0
+        nearest_baseline_sum = (
+            sum(
+                min(_distance(vectors[lineage.key], vectors[reference.key]) for reference in baseline)
+                for lineage in combo
+            )
+            if baseline
+            else 0.0
+        )
         score = (
             float(len({lineage.missing_slots for lineage in combo})),  # 首先覆盖不同缺指类别
             float(len({lineage.finger_dofs for lineage in combo})),  # 再覆盖不同逐指DoF向量
@@ -408,8 +414,7 @@ def _resolved_lineages(
             raise ValueError(f"lineage {mother_path!r} lacks three representative variants")
         representative = representative_by_row[mother_row]
         variant_descriptors = tuple(
-            _variant_descriptor(source_alias, row, record, representative_by_row[row])
-            for row, record in variants
+            _variant_descriptor(source_alias, row, record, representative_by_row[row]) for row, record in variants
         )
         chosen_variants = select_diverse_variants(
             representative.descriptor,
@@ -469,6 +474,14 @@ def resolve_lineage_cohort_selection(
         source_sha256s[alias] = dataset.source_sha256
         lineages_by_source[alias] = _resolved_lineages(alias, partition, recipe)
 
+    # 留出针对运动学母体，而不是某几个variant。先核对名称存在，再在选择前移除，仍满足原cell配额。
+    excluded = set(recipe.excluded_mother_names)  # 本轮研究的policy-unseen lineage集合
+    available_mothers = {
+        lineage.descriptor.mother_name for lineages in lineages_by_source.values() for lineage in lineages
+    }
+    if unknown := excluded - available_mothers:
+        raise ValueError(f"excluded mother names were not found in source train candidates: {sorted(unknown)}")
+
     selected: list[_ResolvedLineage] = []
     selected_topologies: set[str] = set()
     for source_quota in recipe.source_quotas:
@@ -480,6 +493,7 @@ def resolve_lineage_cohort_selection(
                 lineage
                 for lineage in lineages_by_source[source_quota.source_alias]
                 if lineage.descriptor.cell == cell
+                and lineage.descriptor.mother_name not in excluded
                 and (not recipe.require_unique_topology or lineage.descriptor.topology not in selected_topologies)
             ]
             prior = tuple(lineage.descriptor for lineage in selected if lineage.descriptor.cell == cell)
@@ -493,17 +507,11 @@ def resolve_lineage_cohort_selection(
 
     if len(selected) != recipe.mother_count:
         raise RuntimeError(f"selector produced {len(selected)} mothers, expected {recipe.mother_count}")
-    coordinates = tuple(
-        (lineage.descriptor.source_alias, row)
-        for lineage in selected
-        for row in lineage.member_rows
-    )
+    coordinates = tuple((lineage.descriptor.source_alias, row) for lineage in selected for row in lineage.member_rows)
     records = tuple(record for lineage in selected for record in lineage.member_records)
     asset_ids = tuple(record.container.asset_id for record in records)
     content_hashes = tuple(record.content_hash for record in records)
-    static_fingerprints = tuple(
-        geometry_fingerprint_from_sidecar(record.container.sidecar_path) for record in records
-    )
+    static_fingerprints = tuple(geometry_fingerprint_from_sidecar(record.container.sidecar_path) for record in records)
     if len(set(coordinates)) != recipe.asset_count or len(set(asset_ids)) != recipe.asset_count:
         raise ValueError("selected lineage cohort duplicates source coordinates or asset IDs")
     if len(set(content_hashes)) != recipe.asset_count or len(set(static_fingerprints)) != recipe.asset_count:
@@ -541,11 +549,14 @@ def resolve_lineage_cohort_selection(
                 "members": member_documents,
             }
         )
+    recipe_document = asdict(recipe)  # 新排除名单随resolved lock冻结，避免重新选择时忘记研究留出。
+    if not excluded:
+        recipe_document.pop("excluded_mother_names")  # 已发布的无排除recipe保留原有序列化身份。
     selection_document = {
         "schema_version": LINEAGE_COHORT_SELECTION_SCHEMA_VERSION,
         "algorithm": "pure-lineage-cell-combinatorial-plus-variant-greedy-diversity-v2",
         "selection_seed": recipe.selection_seed,
-        "recipe": asdict(recipe),
+        "recipe": recipe_document,
         "source_manifest_sha256s": source_sha256s,
         "tie_break": "ascending-(mother-content-hash,mother-asset-id); manifest-row-excluded",
         "distance": "cell-local-population-standardized-representative-physical-descriptor-l2",

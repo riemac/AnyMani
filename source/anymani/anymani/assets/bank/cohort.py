@@ -415,8 +415,7 @@ def finalize_hand_asset_cohort_lock(
     if output.resolve() == source_path:
         raise ValueError("canonical cohort finalization must preserve the source lock at a distinct path")
     identities = tuple(
-        (str(configuration), str(physical), str(schema))
-        for configuration, physical, schema in canonical_identities
+        (str(configuration), str(physical), str(schema)) for configuration, physical, schema in canonical_identities
     )
     if len(identities) != len(source.members) or not canonical_schema_version.strip():
         raise ValueError("canonical identities must align with every cohort member and declare a schema version")
@@ -467,6 +466,92 @@ def finalize_hand_asset_cohort_lock(
     return output
 
 
+def write_hand_asset_cohort_subset(
+    parent: ResolvedHandAssetCohort,
+    source_lock_path: str | Path,
+    output_path: str | Path,
+    *,
+    cohort_id: str,
+    member_indices: Sequence[int],
+    selection: Mapping[str, Any],
+) -> Path:
+    r"""从已验证canonical父集合发布source/canonical子集，保留完整父轴映射。
+
+    生成分片只重新编号选中的成员，不改变任何资产、变体或物理字段。父集合由
+    ``load_hand_asset_cohort``验证后传入；这里复核父lock和manifest快照，不反复解析整份训练库。
+    下游consumer仍用标准loader独立验证子集。输出保持schema-1.1/1.2，已有文件不覆盖。
+
+    Args:
+        parent: 已解析并验证的canonical-final父集合。
+        source_lock_path: 新schema-1.1子集路径。
+        output_path: 新schema-1.2子集路径，必须与source路径不同。
+        cohort_id: 本次子集的明确名称。
+        member_indices: 父集合中的唯一有序索引，输出重新编号到连续局部轴。
+        selection: 子集用途；父路径、身份与索引映射由本函数正向补齐。
+    """
+
+    indices = tuple(member_indices)  # 父集合到子集合的有序映射，不能静默接受重复或负索引。
+    if (
+        not indices
+        or any(not isinstance(index, int) or index < 0 or index >= len(parent.members) for index in indices)
+        or len(set(indices)) != len(indices)
+    ):
+        raise ValueError("subset indices must be unique, non-empty and within the parent member axis")
+    source_path = resolve_bank_path(source_lock_path)
+    output = resolve_bank_path(output_path)
+    if source_path == output or not cohort_id.strip():
+        raise ValueError("subset publication requires a cohort ID and distinct source/canonical paths")
+    if source_path.exists() or output.exists():
+        raise FileExistsError("subset publication must preserve existing source and canonical locks")
+
+    # 已验证快照必须仍对应磁盘上的父证据；这只读几个小文件，不重建8192项源partition。
+    parent_bytes = parent.lock_path.read_bytes()
+    if hashlib.sha256(parent_bytes).hexdigest() != parent.lock_sha256:
+        raise ValueError("parent cohort lock changed after validation")
+    raw = safe_load(parent_bytes)
+    if not isinstance(raw, Mapping) or raw.get("schema_version") != HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION:
+        raise ValueError("subset publication requires a canonical parent cohort")
+    for source in parent.sources.values():
+        if hashlib.sha256(source.manifest_path.read_bytes()).hexdigest() != source.manifest_sha256:
+            raise ValueError("parent source manifest changed after validation")
+    canonical_fields = {"configuration_domain_hash", "physical_geometry_hash", "canonical_schema_digest"}
+    canonical_members = [dict(raw["members"][index], cohort_index=local) for local, index in enumerate(indices)]
+    source_members = [
+        {key: value for key, value in member.items() if key not in canonical_fields} for member in canonical_members
+    ]  # source层不冒称已lower；canonical层逐字段继承真实父证书。
+    source_document = {
+        "schema_version": HAND_ASSET_COHORT_SCHEMA_VERSION,
+        "cohort_id": cohort_id.strip(),
+        "selection": {
+            **dict(selection),
+            "parent_cohort_lock": str(parent.lock_path),
+            "parent_cohort_lock_sha256": parent.lock_sha256,
+            "parent_asset_indices": list(indices),
+        },
+        "sources": raw["sources"],
+        "members": source_members,
+    }
+    source_bytes = (json.dumps(source_document, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
+    canonical_document = {
+        **source_document,
+        "schema_version": HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION,
+        "members": canonical_members,
+        "canonical_binding": {
+            "source_lock_path": str(source_path),
+            "source_lock_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "canonical_schema_version": raw["canonical_binding"]["canonical_schema_version"],
+            "physical_identity_algorithm": "canonical-runtime-lowering",
+        },
+    }
+    canonical_bytes = (json.dumps(canonical_document, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
+    for path, payload in ((source_path, source_bytes), (output, canonical_bytes)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_bytes(payload)
+        temporary.replace(path)  # source先发布；consumer不会读取半写的canonical文件。
+    return output
+
+
 __all__ = [
     "HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION",
     "HAND_ASSET_COHORT_SCHEMA_VERSION",
@@ -476,4 +561,5 @@ __all__ = [
     "finalize_hand_asset_cohort_lock",
     "load_hand_asset_cohort",
     "write_hand_asset_cohort_lock",
+    "write_hand_asset_cohort_subset",
 ]
