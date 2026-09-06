@@ -22,6 +22,7 @@ import statistics
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -438,7 +439,9 @@ def evaluate_physical_support_trajectory_medians(
 
         drop = tuple(bool(value) for value in termination_drop[asset_index])
         axis = tuple(bool(value) for value in termination_axis[asset_index])
-        safe_fraction = sum(not (drop_bit or axis_bit) for drop_bit, axis_bit in zip(drop, axis, strict=True)) / replica_count
+        safe_fraction = (
+            sum(not (drop_bit or axis_bit) for drop_bit, axis_bit in zip(drop, axis, strict=True)) / replica_count
+        )
         frontier_median = statistics.median(frontier)
         maximum_median = statistics.median(maximum)
         net_median = statistics.median(net)
@@ -477,6 +480,84 @@ def evaluate_physical_support_trajectory_medians(
             )
         )
     return tuple(results), bool(finite_and_identity_valid)
+
+
+def evaluate_reliable_topology_coverage(
+    asset_results: Sequence[PalmRotationPhysicalAssetResult],
+    *,
+    topology_ids: Sequence[str],
+    horizon_s: float,
+) -> dict[str, Any]:
+    r"""按30秒R16的一圈可靠性与拓扑内半数代表，统计共享策略的入门覆盖。
+
+    资产$i$的净圈$N_i$、方向$C_i$和安全比例$S_i$来自既有逐副本归约，判据为：
+    $I_i=[N_i\ge1\land C_i\ge0.7\land S_i\ge0.75]$。拓扑$m$的代表集合为$\mathcal A_m$，
+    至少$\lceil|\mathcal A_m|/2\rceil$项通过才覆盖该拓扑，4代表时为2项、8代表时为4项。
+    ``topology_ids``应包含family/group及mother标签，防止同名跨family母体被合并。
+
+    本函数只做确定性数值归约；调用方另核对TIP-only、首轨迹及无动作/观察干预的评价协议。
+    它不读取旧viability/scale-ready布尔值，也不设全部拓扑必须通过的整体门。
+    """
+
+    results = tuple(asset_results)
+    groups = tuple(topology_ids)  # 每资产一个完整拓扑标签，重复标签表示同拓扑的不同代表。
+    if not results or len({result.dataset_row for result in results}) != len(results):
+        raise ValueError("reliable topology coverage requires non-empty unique assets")
+    if len(groups) != len(results) or any(not isinstance(group, str) or not group.strip() for group in groups):
+        raise ValueError("reliable topology coverage requires one topology id per asset")
+    if not math.isclose(horizon_s, 30.0, rel_tol=0.0, abs_tol=1e-8) or any(
+        result.replica_count != 16 for result in results
+    ):
+        raise ValueError("reliable topology coverage requires the fixed 30-second R16 protocol")
+
+    # 非有限或非法比例使本次统计无效，完整分母仍保留，不能通过删除坏行提高覆盖。
+    finite = all(
+        result.finite
+        and all(
+            math.isfinite(value)
+            for value in (result.net_turns_median, result.directional_consistency, result.safe_replica_fraction)
+        )
+        and 0.0 <= result.directional_consistency <= 1.0
+        and 0.0 <= result.safe_replica_fraction <= 1.0
+        for result in results
+    )
+    passed = tuple(
+        finite
+        and result.net_turns_median >= 1.0
+        and result.directional_consistency >= 0.7
+        and result.safe_replica_fraction >= 0.75
+        for result in results
+    )
+    total_by_topology = Counter(groups)  # 母体代表数，而非simulation replicas数量。
+    passed_by_topology = Counter(group for group, accepted in zip(groups, passed, strict=True) if accepted)
+    topology_results = [
+        {
+            "topology_id": group,
+            "asset_count": count,
+            "passed_asset_count": passed_by_topology[group],
+            "required_asset_count": (count + 1) // 2,
+            "passed": passed_by_topology[group] >= (count + 1) // 2,
+        }
+        for group, count in sorted(total_by_topology.items())
+    ]
+    return {
+        "schema_version": "1.0.0",
+        "thresholds": {
+            "horizon_s": 30.0,
+            "replicas_per_asset": 16,
+            "net_turns_min": 1.0,
+            "directional_consistency_min": 0.7,
+            "safe_replica_fraction_min": 0.75,
+            "topology_representative_fraction_min": 0.5,
+        },
+        "finite": finite,
+        "asset_count": len(results),
+        "passed_asset_count": sum(passed),
+        "passed_asset_rows": [result.dataset_row for result, accepted in zip(results, passed, strict=True) if accepted],
+        "topology_count": len(topology_results),
+        "passed_topology_count": sum(row["passed"] for row in topology_results),
+        "topology_results": topology_results,
+    }
 
 
 def evaluate_scale_ladder_cohort(
@@ -614,6 +695,7 @@ __all__ = [
     "evaluate_cohort",
     "evaluate_pairs",
     "evaluate_physical_support_trajectory_medians",
+    "evaluate_reliable_topology_coverage",
     "evaluate_scale_ladder_cohort",
     "evaluate_seed_confirmation",
     "evaluate_support_trajectory_medians",

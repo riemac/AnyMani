@@ -145,6 +145,9 @@ if args_cli.cohort_lock is not None:
         raise ValueError("--cohort_lock must contain a non-empty members list")
     selected_rows = tuple(range(len(cohort_members)))  # selection-local runtime/evaluation axis
     mother_ids = tuple(str(member["provenance"]["mother_name"]) for member in cohort_members)
+    topology_ids = tuple(
+        f"{member['provenance']['group_name']}/{member['provenance']['mother_name']}" for member in cohort_members
+    )  # group限定完整运动学母体，避免LEAP/Allegro的同名拓扑混为一项。
     source_member_keys = tuple(f"{member['source_alias']}#{int(member['source_row'])}" for member in cohort_members)
     support_manifest_path = cohort_lock_path  # exact lock bytes必须与训练method identity一致
     os.environ.pop("ANYMANI_HETERO_ASSET_ROWS", None)
@@ -153,6 +156,7 @@ else:
     mvp80_rows = _load_rows(args_cli.asset_manifest)
     selected_rows = _select_support_rows(mvp80_rows, args_cli.support_rows)
     mother_ids = tuple(f"legacy-row-{row}" for row in selected_rows)  # A80历史评估不应用mother晋级门
+    topology_ids = ()  # Legacy row标签本身不足以确定真实拓扑，保留逐资产评价。
     source_member_keys = tuple(f"ppo#{row}" for row in selected_rows)
     support_manifest_path = args_cli.asset_manifest
     os.environ.pop("ANYMANI_HETERO_COHORT_LOCK", None)
@@ -177,12 +181,14 @@ backend_info = prefer_local_rl_games(strict=bool(args_cli.rl_games_strict))  # p
 
 import anymani.distill.rl  # noqa: F401, E402
 import anymani.tasks.hetero  # noqa: F401, E402
+from anymani.distill.diagnostics.evaluation.rl import palm_rotation as palm_rotation_metrics  # noqa: E402
 from anymani.distill.diagnostics.evaluation.rl import palm_rotation_transfer  # noqa: E402
 from anymani.distill.diagnostics.evaluation.rl.palm_rotation import (  # noqa: E402
     PalmRotationReference,
     evaluate_cohort,
     evaluate_pairs,
     evaluate_physical_support_trajectory_medians,
+    evaluate_reliable_topology_coverage,
     evaluate_scale_ladder_cohort,
     evaluate_support_trajectory_medians,
 )
@@ -472,7 +478,9 @@ def main() -> None:
             import imageio.v2 as imageio
 
             # 离屏模式不依赖GUI的相机跟随器。用实际reset物体位置设置固定世界相机，后续漂移仍可见。
-            x, y, z = transport.unwrapped.scene["object"].data.root_pos_w[int(args_cli.viewer_asset_index)].cpu().tolist()
+            x, y, z = (
+                transport.unwrapped.scene["object"].data.root_pos_w[int(args_cli.viewer_asset_index)].cpu().tolist()
+            )
             camera_target = (float(x), float(y), float(z) - 0.015)
             camera_eye = (float(x) + 0.23, float(y) - 0.25, float(z) + 0.23)
             transport.unwrapped.sim.set_camera_view(camera_eye, camera_target, env_cfg.viewer.cam_prim_path)
@@ -715,15 +723,22 @@ def main() -> None:
             termination_drop=arrays["termination_drop"].tolist(),
             termination_axis=arrays["termination_axis"].tolist(),
         )
-        scale_protocol_matched = (
+        reliable_protocol_matched = (
             int(args_cli.steps) == 600
             and int(args_cli.num_replicas) == 16
             and actor_tip_only
             and not args_cli.residual_off
             and not args_cli.tip_only_intervention
             and args_cli.direct_logit_gain == 1.0
-            and not args_cli.cohort_transfer
-        )  # 耐久/R1/冻结遮蔽或动作读出干预仅诊断，不冒充原checkpoint的正式扩张资格
+        )  # 固定策略的跨cohort测量仍可报告目标域可靠覆盖；观察或动作干预单独作诊断。
+        reliable_coverage = (
+            evaluate_reliable_topology_coverage(
+                physical_asset_results, topology_ids=topology_ids, horizon_s=evaluation_horizon_s
+            )
+            if topology_ids and reliable_protocol_matched
+            else None
+        )
+        scale_protocol_matched = reliable_protocol_matched and not args_cli.cohort_transfer
         scale_ladder_result = (
             evaluate_scale_ladder_cohort(
                 physical_asset_results,
@@ -778,6 +793,7 @@ def main() -> None:
             "method_identity_digest": checkpoint_identity["identity_digest"],
             "execution_identity_digest": current_identity["identity_digest"],
             "evaluator_source_sha256": _sha256(Path(__file__).resolve()),
+            "physical_metrics_source_sha256": _sha256(Path(palm_rotation_metrics.__file__)),
             "transfer_validator_source_sha256": _sha256(Path(palm_rotation_transfer.__file__)),
             "transfer_validation": transfer_validation,
             "video": (
@@ -818,6 +834,8 @@ def main() -> None:
                 ),
                 "actor_contact": "tip-only-binary" if actor_tip_only else "all-owner-binary-no-force",
                 "scale_ready_protocol_matched": scale_protocol_matched,
+                "reliable_topology_coverage_protocol_matched": reliable_coverage is not None,
+                "reliable_topology_coverage_thresholds": reliable_coverage["thresholds"] if reliable_coverage else None,
                 "reference_horizon_s": reference_doc.get("protocol", {}).get("horizon_s"),
                 "reference_horizon_matched": reference_doc.get("protocol", {}).get("horizon_s") == evaluation_horizon_s,
                 "deterministic_actor_mean": True,
@@ -996,6 +1014,7 @@ def main() -> None:
                 "frontier_recount": frontier_assets,
             },
             "scale_ladder": asdict(scale_ladder_result) if scale_ladder_result is not None else None,
+            "reliable_topology_coverage": reliable_coverage,
             "cohort": asdict(cohort) if cohort is not None else None,
             "pair_diagnostics": {
                 "counts": dict(sorted(pair_counts.items())),
@@ -1031,6 +1050,11 @@ def main() -> None:
                     ),
                     "sustained_rotation_closure_passed": closure_passed,
                     "sustained_rotation_closure_passed_assets": closure_passed_assets,
+                    "reliable_passed_assets": reliable_coverage["passed_asset_count"] if reliable_coverage else None,
+                    "reliable_passed_topologies": reliable_coverage["passed_topology_count"]
+                    if reliable_coverage
+                    else None,
+                    "reliable_topology_count": reliable_coverage["topology_count"] if reliable_coverage else None,
                     "passed_by_cell": cohort.passed_by_cell if cohort is not None else None,
                     "pair_counts": dict(pair_counts),
                 },

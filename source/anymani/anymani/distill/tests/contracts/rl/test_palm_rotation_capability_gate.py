@@ -12,6 +12,7 @@ from anymani.distill.diagnostics.evaluation.rl.palm_rotation import (
     evaluate_cohort,
     evaluate_pairs,
     evaluate_physical_support_trajectory_medians,
+    evaluate_reliable_topology_coverage,
     evaluate_scale_ladder_cohort,
     evaluate_seed_confirmation,
     evaluate_support_trajectory_medians,
@@ -249,11 +250,58 @@ def test_scale_ladder_requires_asset_and_mother_coverage_independently() -> None
     assert not failed.passed
 
     # 12条mother各4项通过，恰好同时满足48/64与12/16 mother门。
-    balanced = [
-        _physical_result(row, f"mother-{row // 4}", passed=row // 4 < 12)
-        for row in range(64)
-    ]
+    balanced = [_physical_result(row, f"mother-{row // 4}", passed=row // 4 < 12) for row in range(64)]
     passed = evaluate_scale_ladder_cohort(balanced, finite_and_identity_valid=True)
     assert passed.scale_ready_assets == 48
     assert passed.mothers_with_three_of_four == 12
     assert passed.passed
+
+
+def test_reliable_coverage_uses_raw_thresholds_and_half_of_each_qualified_topology() -> None:
+    r"""新门要求安全75%，且每拓扑至少半数代表通过；同名跨family母体分开计算。"""
+
+    assets = [
+        replace(
+            _physical_result(row, "same-topology-name", passed=True),
+            net_turns_median=1.0,
+            directional_consistency=0.7,
+            safe_replica_fraction=0.75,
+            viability_passed=False,
+            scale_ready_passed=False,
+        )
+        for row in range(8)
+    ]  # 恰好命中新闭边界，即使旧布尔标签为false也应按原始指标通过。
+    assets[2] = replace(assets[2], safe_replica_fraction=0.625, viability_passed=True)
+    assets[3] = replace(assets[3], net_turns_median=0.999)
+    assets[5] = replace(assets[5], directional_consistency=0.699)
+    assets[6] = replace(assets[6], safe_replica_fraction=0.625)
+    assets[7] = replace(assets[7], net_turns_median=0.0)
+    topology_ids = ("family-a/same-topology-name",) * 4 + ("family-b/same-topology-name",) * 4
+    result = evaluate_reliable_topology_coverage(assets, topology_ids=topology_ids, horizon_s=30.0)
+    assert result["asset_count"] == 8
+    assert result["passed_asset_count"] == 3
+    assert result["passed_asset_rows"] == [0, 1, 4]
+    assert result["topology_count"] == 2 and result["passed_topology_count"] == 1
+    assert [row["required_asset_count"] for row in result["topology_results"]] == [2, 2]
+    assert [row["passed"] for row in result["topology_results"]] == [True, False]
+
+
+@pytest.mark.parametrize("replicas,horizon", [(1, 30.0), (16, 120.0)])
+def test_reliable_coverage_requires_fixed30_r16(replicas: int, horizon: float) -> None:
+    r"""单副本或120秒描述性结果不能直接获得30秒R16的入门覆盖。"""
+
+    asset = replace(_physical_result(0, "mother", passed=True), replica_count=replicas)
+    with pytest.raises(ValueError, match="30-second R16"):
+        evaluate_reliable_topology_coverage((asset,), topology_ids=("leap/mother",), horizon_s=horizon)
+
+
+def test_reliable_coverage_preserves_invalid_population_and_rejects_duplicate_assets() -> None:
+    r"""非有限数据保留完整分母并标无效；重复资产不能增加拓扑代表票数。"""
+
+    asset = _physical_result(0, "mother", passed=True)
+    invalid = replace(asset, dataset_row=1, net_turns_median=float("nan"))
+    result = evaluate_reliable_topology_coverage((asset, invalid), topology_ids=("leap/mother",) * 2, horizon_s=30.0)
+    assert not result["finite"] and result["asset_count"] == 2
+    assert result["passed_asset_count"] == result["passed_topology_count"] == 0
+    with pytest.raises(ValueError, match="unique assets"):
+        evaluate_reliable_topology_coverage((asset, asset), topology_ids=("leap/mother",) * 2, horizon_s=30.0)
