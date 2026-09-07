@@ -34,6 +34,8 @@ rl_games agent；`structured_ppo.py`只保留既有bounded probe用途。不要�
 
 `runtime/palm_rotation_network.py`拥有rl_games网络/分布适配，不重定义神经架构；`palm_rotation_diagnostics.py`归约agent与task已形成的事实，`palm_rotation_probes.py`执行显式只读梯度探针。主agent保留更新与恢复顺序，不以大型mixin隐藏训练状态。RL专属脚本放在本目录`scripts/`，资产生产、预抓取和SSL工具不机械迁入。
 
+新评估/探针产物采用根AGENTS规定的`logs/benchmarks/<topic>/<case>/`，同case内组织子条件、轨迹、分析和视频；旧命令与路径保留。初始化后核对真实探索参数，不能用构造配置`initial_log_std`推断继承权重已经重置sigma。
+
 ## Development Style And Conventions
 
 ### 入口顺序

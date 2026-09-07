@@ -16,6 +16,8 @@ pregrasp/
 
 `scripts/research/generate_heterogeneous_mvp80_pregrasp_strict.py`拥有Isaac scene生命周期与批量物理筛选；稳定数学应留在本目录并有纯测试。`tasks/hetero/config/generated/*pregrasp_identity.py`冻结具体run协议，`tasks/hetero/mdp/events.py`执行fail-closed reset。
 
+新预抓取专属工具与物理编排优先进入`pregrasp/scripts/`，仍显式拥有AppLauncher生命周期，核心数学保持无仿真导入。现有根research入口按历史路径保留；迁移另作语义验证，不在文档整理中搬动。新benchmark继承根AGENTS的`<topic>/<case>`落盘规则。
+
 Pair fallback的多run证据只由`scripts/research/assemble_heterogeneous_mvp80_strict_catalog.py`组合；source generation/physics/gate digest必须一致，最终80项全部在发布前重验。
 
 ## Development Conventions

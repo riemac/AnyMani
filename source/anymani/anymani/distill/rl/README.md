@@ -5,6 +5,14 @@
 
 阅读当前掌旋训练时，可以沿一条完整的数据链进入：任务生成具名观察，`runtime/palm_rotation_vecenv.py`附加每个状态的冻结几何表示，`runtime/palm_rotation_network.py`分流actor/critic并定义动作概率，`algorithms/ppo_batch.py`处理逐资产统计和采样，`palm_rotation_ppo.py`执行双optimizer更新与恢复。运行诊断和额外梯度求导分别由`runtime/palm_rotation_diagnostics.py`、`runtime/palm_rotation_probes.py`承接，最终交给`distill/diagnostics`保存证据。
 
+## 当前LEAP阶段配置
+
+2026-09-07冻结的LEAP-right策略使用32拓扑×4代表、TIP-only、`direct_token`、TCN History30与冻结N040。实际N1024/H30/M16/acc4/E5，每更新轮30,720条新转移和20个逻辑优化步骤；优势按资产在完整采样段归一化，价值仍使用全局RMS。奖励采用全塑形下限1、进展截断0.04、严格达标附奖3及零关节初姿锚。代码默认值与某次冻结运行的解析配置分别保留。
+
+正式结果为训练96/128可靠资产、30/32拓扑，隔离同拓扑未见变体76/128，整体强验收为partial。训练域120秒净圈中位7.252是耐久补充。单一checkpoint为`leap-right-32x4-average-polish-lr030-strict3-s42-u160-20260907`运行的160点，SHA以`logs/benchmarks/leap-right-final-selection-20260907.json`为准。
+
+完整数学与配置材料位于可选Research vault的`总体/rl/RL 异构掌旋研究索引.md`；运行时不依赖该文档。下列通用入口与早期对照示例不自动代表这个正式配置。
+
 ## Registered aliases
 
 | Gym ID | 环境/网络用途 | 配置 |
@@ -13,7 +21,7 @@
 | `AnyMani-GM-Leap-MLP-v0` | LEAP GM 环境的 MLP alias | 复用 single-asset MLP YAML；不是当前主线结论 |
 | `AnyMani-GM-SingleAsset-TactileRotation-GRU-v0` | current-frame observation + GRU history baseline | `agents/gm_tactile_rotation_gru_ppo.yaml` |
 | `AnyMani-GM-SingleAsset-TactileRotation-TCN-v0` | explicit 30-frame history + causal TCN baseline | `agents/gm_tactile_rotation_tcn_ppo.yaml` |
-| `AnyMani-Hetero-Generated-PalmRotation-MVP-RLGames-v0` | 80手掌托旋转、structured actor/critic与cached N040 | `agents/heterogeneous_palm_rotation_mvp_ppo.yaml` |
+| `AnyMani-Hetero-Generated-PalmRotation-MVP-RLGames-v0` | 冻结cohort掌托旋转，结构化策略/价值与N040；MVP80为历史默认 | `agents/heterogeneous_palm_rotation_mvp_ppo.yaml` |
 
 GRU/TCN 名称只属于 training alias，不进入 `tasks` 的 environment-semantic ID。两条 tactile baseline 共享
 seed、PPO optimizer、4096 env、central critic schema、`horizon_length=30`、`minibatch_size=30720` 与
@@ -24,7 +32,7 @@ Generated heterogeneous掌托旋转使用独立rl_games alias。`tasks/hetero`�
 Dict experience。`palm_rotation_ppo.py`在网络内按信息边界分流actor与privileged critic，所有mini-epochs复用
 缓存。Asset row只作opaque routing和分层采样certificate，不进入连续policy feature。
 
-Actor的History30路径可选择逐JOINT TCN，或把每个JOINT的$30\times5=150$个oldest-to-latest标量直接交给local MLP；后者保留全部固定lag并避免learned temporal bottleneck。两条路径随后共享dynamic-first geometry FiLM、finger/hand base和一层graph-biased bounded residual。低维控制状态先编码为$h_{t,j}^{dyn}$，$Z_{t,j}^e$只产生零初始化、有界的FiLM scale/shift：
+Actor的History30路径可选择逐JOINT TCN，或把每个JOINT的$30\times5=150$个oldest-to-latest标量直接交给local MLP；后者保留全部固定lag。两条路径随后共享几何FiLM、手指/整手摘要与一层图偏置上下文，最终动作由明确选择的读出分支产生。低维控制状态先编码为$h_{t,j}^{dyn}$，$Z_{t,j}^e$产生零初始化、有界的FiLM scale/shift：
 
 $$
 h_{t,j}^{loc}=\left(1+0.25\tanh\gamma(Z_{t,j}^e)\right)\odot h_{t,j}^{dyn}+0.25\tanh\beta(Z_{t,j}^e).
@@ -38,7 +46,7 @@ $$
 
 其中$h_j^{loc}$是关节局部控制latent，$H_j$已包含投影后的局部信息与整手上下文；token-only删除的是额外动作读出旁路，不是局部控制信息。Residual head零初始化，`base`对照则只执行局部base。Actor与两层structured critic完全分参，分别由actor optimizer（局部与contextual两个LR组）和critic optimizer更新；checkpoint同时保存两套Adam、value normalizer、当前支持集/cell curriculum、Parquet shard游标及dataset/catalog/N040 identity。掌旋PPO使用直接Embedding关系查表，不物化逐sample one-hot graph bias；该局部实现不改变共享SSL backbone的独立compile合同。
 
-动作均值位于$[-1,1]$；随机策略在latent空间以$\operatorname{atanh}(\mu_j)$为Normal中心，经$tanh$推到实际动作空间。Likelihood包含同一变换的Jacobian，ghost关节从概率、熵、KL、动作和统计分母中排除。几何表示随当前$q$变化，每个rollout state计算一次，随后由该state对应的五轮PPO重复使用。
+确定性动作中心位于$[-1,1]$；随机策略在latent空间以$\operatorname{atanh}(\mu_j)$为Normal中心，经$tanh$推到实际动作空间，其统计期望一般不等于$\mu_j$。联合likelihood沿活跃关节求和并包含变换Jacobian；熵和调度KL按活跃关节平均，ghost从相应分母排除。几何表示随当前$q$变化，每个rollout state计算一次，随后由该state对应的五轮PPO重复使用。
 
 ## Train
 
@@ -156,6 +164,8 @@ python -m anymani.distill.diagnostics.analysis.rl.palm_rotation /absolute/path/t
 
 训练入口与评估入口分别拥有训练分布和能力测量窗口。评估读取checkpoint声明的actor触觉信息，显式传入相同`--cohort_lock`；30秒主评估使用`--steps 600 --num_replicas 16 --reference <fixed30-reference.json>`，`--trace_stride 1`额外保存20 Hz接触/角速时序。默认2400步保留耐久检查入口。正式扩张资格只在30秒R16、TIP-only且无额外遮蔽干预时应用；R1、耐久和冻结干预仍保存物理结果，但不授予该资格。主要物理指标为净圈、方向性和drop/axis联合生存率，strict goal tracking单独报告。
 
+多拓扑入门覆盖另存为`reliable_topology_coverage`：固定30秒R16、TIP-only且无动作/观察干预时，每资产要求净圈至少1、方向至少0.7、安全至少75%；每拓扑至少一半代表资产达标才计入覆盖。拓扑按`group_name/mother_name`分组，允许显式`--cohort_transfer`报告目标集合的覆盖，R1/耐久只保留物理诊断。该字段从原始指标重新判定，不复用安全门较低的旧`viability_passed`，也不替换两圈的`scale_ladder`结果。
+
 冻结策略在另一集合上评价时，显式使用`--cohort_lock <target.canonical.lock.yaml> --cohort_transfer`。验证仍固定策略、任务、观察ABI、N040和精度/代码语义；重合物理资产必须保留相同预抓取。共享catalog新增条目前保存`index_history`，只读复测可核对真正使用的旧记录，避免无关新增条目改变旧结果。此兼容不等于不同目录版本下的完整PPO状态恢复已自动放宽。
 
 `--direct_logit_gain 1.5`是冻结Direct策略的显式读出诊断，形成$\mu=\tanh(1.5\,\mathrm{logit})$；原动作上限和参数保持，干预不授予原checkpoint的正式过门资格。`--trace_rewards --trace_stride 1`保存实际加权每步奖励分项、释放系数和分项重构误差。评价按source释放参数初始化，动态课程的评价状态不自动等于训练结束状态；解释时以记录的实际系数为准。
@@ -179,6 +189,8 @@ python -m anymani.distill.rl.evaluate_palm_rotation_mvp \
 任务、模型、N040、cohort和预抓取语义仍须一致，证书生成后任何被覆盖的源码变化都会使证书失效。数值等价与真实仿真回放分别验证，工程检查不替代学习能力或视觉验收。
 
 ## Logs and checkpoints
+
+新benchmark遵循`logs/benchmarks/<topic>/<case>/`，评价、分析与视频按同一试验归组；若调用旧入口，显式覆盖输出路径。已有平铺产物和其身份引用不在文档整理中迁移。
 
 训练输出锚定到仓库根，而不是 shell 当前目录：
 

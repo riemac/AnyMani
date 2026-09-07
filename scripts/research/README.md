@@ -2,6 +2,20 @@
 
 本目录保留资产选择、预抓取和几何表征的跨阶段工具。RL专属的评估、梯度审计、性能与structured-policy对照位于`source/anymani/anymani/distill/rl/scripts`，统一使用`python -m anymani.distill.rl.scripts.<name>`；训练主入口仍为`anymani.distill.rl.train_palm_rotation_mvp`，具体数据流与命令见[RL说明](../../source/anymani/anymani/distill/rl/README.md)。历史实验中的旧脚本路径按当时Git版本解释，不改写既有artifact。
 
+## 后续新增与历史保留
+
+本目录中的现有文件保留其运行来源，不在本次阶段归档中搬动。后续专属工具优先归入实际拥有其语义的模块：资产集合归`assets/scripts`，预抓取归`pregrasp/scripts`，策略与PPO归`distill/rl/scripts`，通用只读分析归`distill/diagnostics`。只有真正跨模块的编排才继续放在本目录，并按`<topic>/`归组。
+
+新benchmark使用`logs/benchmarks/<topic>/<case>/`，例如`logs/benchmarks/heterogeneous_rotation/20260907-leap-right-final/`；同一试验的身份、命令、评价JSON、轨迹、分析和视频在其内部组织。这个路径是后续组织示例，既有20260907产物仍保留原位置。调用旧脚本时通过已有输出参数显式指定新case目录；修改生产入口时再对齐其默认值。
+
+脚本归属与产物归属分开：可复用实现进入源码，结果进入logs，科研解释进入明确授权的Research阶段。当前物理搜索脚本仍显式管理Isaac生命周期，不由纯搜索数学模块隐式启动仿真。
+
+## 手型集合与预抓取
+
+`build_pure_leap_right_cohorts.py --scale 128`表示32拓扑各4个代表资产。使用`--cohort-id <new-name> --exclude-mother <full-mother-name>`可在保持原cell配额的同时排除研究留出的整个母体系；多个排除项重复传入，派生集合不覆盖历史文件。`finalize_hand_asset_cohort.py`通过训练同路径的实际canonical转换发布对应的`.canonical.lock.yaml`。
+
+已有canonical集合可用`prepare_cohort_pregrasp_shards.py --cohort-lock <canonical.lock.yaml> --output-dir <new-directory> --shard-assets 16`核验strict缓存并生成缺失成员的分片。查询键由runtime正向构造，命中条目重验Top-8且保持只读；分片由已验证父集合派生，避免每片重复解析整份训练源。`inspection.json`保存完整键与缺失轴，`preparation.json`列出生成任务。随后串行调用`generate_heterogeneous_mvp80_pregrasp_strict.py --cohort-lock <shard.canonical.lock.yaml>`，全部完成后再核对完整训练集合；分片成功不代表整套训练资产已准备完，也不代表旋转能力。
+
 ## Material-point Jacobian
 
 本目录保存可复现的研究 probe，不是正式 SSL 训练入口。当前主题是 fixed-material anchor-relational Jacobian：owner-local home-surface material point 随 POE/FK 运动后，相对固定 PALM anchor constellation 的四通道关系导数。正式物理公式位于 `source/anymani/anymani/distill/representations/targets/material_point_jacobian.py`。
