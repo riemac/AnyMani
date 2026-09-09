@@ -140,20 +140,53 @@ def test_progress_reward_weight_is_distinct_from_clip_and_action_authority(tmp_p
     assert changed["identity_digest"] != baseline["identity_digest"]
 
 
-@pytest.mark.parametrize("weight", (-1.0, float("nan"), float("inf"), -float("inf")))
-def test_progress_reward_weight_rejects_nonfinite_or_reversed_objective(tmp_path: Path, weight: float) -> None:
-    r"""有向旋转的奖励系数须有限且非负；负数不是本任务的同向奖励干预。"""
+@pytest.mark.parametrize("weight", (0.0, 0.25))
+def test_full_pose_weight_changes_shaping_without_changing_progress_or_physics(tmp_path: Path, weight: float) -> None:
+    r"""物体全位姿kernel系数独立于进展20与关节初姿罚；0是整项塑形消融。
 
-    with pytest.raises(ValueError, match="progress.*weight"):
-        _identity(tmp_path, learning_rate=3.0e-4, rotation_progress_reward_weight=weight)
+    $r_t^{pose}=w_{pose}K_{pose}(s_t,g_t)\Delta t$；kernel无量纲，系数单位为reward/s。
+    它同时包含物体位置和姿态，不是joint_pose_anchor，也不改变硬物理终止。
+    """
+
+    baseline = _identity(tmp_path, learning_rate=3.0e-4, rotation_progress_reward_weight=20.0)
+    changed = _identity(
+        tmp_path, learning_rate=3.0e-4, rotation_progress_reward_weight=20.0, pose_keypoint_reward_weight=weight
+    )
+    assert "pose_keypoint_reward_weight" not in baseline["task_contract"]  # 历史默认1保持字段布局
+    assert changed["task_contract"]["pose_keypoint_reward_weight"] == weight
+    remaining = dict(changed["task_contract"])
+    remaining.pop("pose_keypoint_reward_weight")
+    assert remaining == baseline["task_contract"]  # 保留进展、goal、release与物理边界
+    assert changed["policy"] == baseline["policy"]
+    assert changed["identity_digest"] != baseline["identity_digest"]
+
+
+@pytest.mark.parametrize("field", ("rotation_progress_reward_weight", "pose_keypoint_reward_weight"))
+@pytest.mark.parametrize("weight", (-1.0, float("nan"), float("inf"), -float("inf")))
+def test_positive_reward_weights_reject_nonfinite_or_reversed_objective(
+    tmp_path: Path, field: str, weight: float
+) -> None:
+    r"""进展和全位姿的奖励系数须有限且非负；负号不是这两项的同目标干预。"""
+
+    with pytest.raises(ValueError, match="reward weight"):
+        _identity(tmp_path, learning_rate=3.0e-4, **{field: weight})
 
 
 @pytest.mark.parametrize(
-    "contract,expected",
-    (({}, 5.0), ({"rotation_progress_reward_weight": 0.0}, 0.0), ({"rotation_progress_reward_weight": 20.0}, 20.0)),
+    "term,contract,expected",
+    (
+        ("rotation_progress", {}, 5.0),
+        ("rotation_progress", {"rotation_progress_reward_weight": 0.0}, 0.0),
+        ("rotation_progress", {"rotation_progress_reward_weight": 20.0}, 20.0),
+        ("pose_keypoint", {}, 1.0),
+        ("pose_keypoint", {"pose_keypoint_reward_weight": 0.0}, 0.0),
+        ("pose_keypoint", {"pose_keypoint_reward_weight": 0.25}, 0.25),
+    ),
 )
-def test_evaluation_restores_progress_weight_without_starting_simulator(contract: dict, expected: float) -> None:
-    r"""执行评价入口的真实赋值语句：旧checkpoint恢复5，新任务恢复0或20。
+def test_evaluation_restores_reward_weights_without_starting_simulator(
+    term: str, contract: dict, expected: float
+) -> None:
+    r"""执行评价入口的真实赋值：缺字段按历史进展5/全位姿1，显式零值不得丢失。
 
     只提取该赋值AST，不import会启动AppLauncher的评价模块；真实环境链由独立canary覆盖。
     """
@@ -164,16 +197,16 @@ def test_evaluation_restores_progress_weight_without_starting_simulator(contract
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Assign)
-        and any(ast.unparse(target) == "env_cfg.rewards.rotation_progress.weight" for target in node.targets)
+        and any(ast.unparse(target) == f"env_cfg.rewards.{term}.weight" for target in node.targets)
     ]
-    assert len(assignments) == 1, "evaluation must restore the recorded progress reward weight"
+    assert len(assignments) == 1, f"evaluation must restore the recorded {term} reward weight"
     reward = SimpleNamespace(weight=-999.0)  # sentinel不能被环境默认值掩盖
     namespace = {
-        "env_cfg": SimpleNamespace(rewards=SimpleNamespace(rotation_progress=reward)),
+        "env_cfg": SimpleNamespace(rewards=SimpleNamespace(**{term: reward})),
         "run_contract": contract,
     }
     exec(compile(ast.Module(body=assignments, type_ignores=[]), str(path), "exec"), namespace)
-    assert reward.weight == expected  # 零系数是合法消融，不能被truthy fallback误改成5
+    assert reward.weight == expected  # 零系数是合法消融，不能被truthy fallback改回历史值
 
 
 def test_strict_goal_weight_is_explicit_without_adding_frontier_reward(tmp_path: Path) -> None:

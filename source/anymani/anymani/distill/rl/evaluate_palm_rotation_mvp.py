@@ -323,6 +323,9 @@ def main() -> None:
     evaluation_horizon_s = int(args_cli.steps) * policy_dt_s  # 固定评价窗口，不修改checkpoint训练协议
     env_cfg.episode_length_s = evaluation_horizon_s
     env_cfg.commands.goal_pose.horizon_s = evaluation_horizon_s
+    env_cfg.rewards.pose_keypoint.weight = float(
+        run_contract.get("pose_keypoint_reward_weight", 1.0)
+    )  # reward/s；旧checkpoint恢复1，显式0只关闭物体全位姿塑形
     env_cfg.rewards.rotation_progress.params["clip_rad_per_step"] = float(
         run_contract.get("rotation_progress_clip_rad_per_step", 0.025)
     )  # 物理评价仍用未截断净转角；保留checkpoint训练奖励配置供协议审计

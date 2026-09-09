@@ -228,6 +228,9 @@ def build_palm_rotation_method_identity(
     progress_weight = float(run_contract.get("rotation_progress_reward_weight", 5.0))  # reward/rad，历史值为5
     if not math.isfinite(progress_weight) or progress_weight < 0.0:
         raise ValueError("rotation progress reward weight must be finite and non-negative")
+    pose_weight = float(run_contract.get("pose_keypoint_reward_weight", 1.0))  # 全位姿kernel系数，reward/s
+    if not math.isfinite(pose_weight) or pose_weight < 0.0:
+        raise ValueError("pose keypoint reward weight must be finite and non-negative")
     joint_anchor_weight = float(run_contract.get("joint_pose_anchor_weight", -0.5))
     if not math.isfinite(joint_anchor_weight) or joint_anchor_weight > 0.0:
         raise ValueError("joint pose anchor weight must be finite and non-positive")
@@ -260,6 +263,7 @@ def build_palm_rotation_method_identity(
             ),
             # 非默认系数属于MDP身份；旧checkpoint的隐式5保持原字段布局。
             **({"rotation_progress_reward_weight": progress_weight} if progress_weight != 5.0 else {}),
+            **({"pose_keypoint_reward_weight": pose_weight} if pose_weight != 1.0 else {}),
             "strict_tracking_reward_weight": float(run_contract.get("strict_goal_reward_weight", 10.0)),
             **({"joint_pose_anchor_weight": joint_anchor_weight} if joint_anchor_weight != -0.5 else {}),
             "critic_task_state": "axis-goal-error-max-positive-net-and-current-net",

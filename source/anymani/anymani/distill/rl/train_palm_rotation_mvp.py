@@ -208,6 +208,12 @@ parser.add_argument(
     help="有符号进展系数w（reward/rad）：每步奖励为w*clip(delta_psi, +/-clip_rad)，不改变动作authority。",
 )
 parser.add_argument(
+    "--pose_keypoint_reward_weight",
+    type=float,
+    default=1.0,
+    help="物体全位姿kernel系数（reward/s），含位置与姿态；0关闭该塑形，不改变物理终止。",
+)
+parser.add_argument(
     "--learning_rate", type=float, default=None, help="Override actor base LR and scale other groups by the same ratio."
 )
 parser.add_argument(
@@ -245,6 +251,8 @@ if not 0 < args_cli.rotation_progress_clip_rad < math.inf:
     raise ValueError("rotation progress clip must be finite and positive")
 if not 0 <= args_cli.rotation_progress_reward_weight < math.inf:
     raise ValueError("rotation progress reward weight must be finite and non-negative")
+if not 0 <= args_cli.pose_keypoint_reward_weight < math.inf:
+    raise ValueError("pose keypoint reward weight must be finite and non-negative")
 if not 0 <= args_cli.strict_goal_reward_weight < math.inf:
     raise ValueError("strict goal reward weight must be finite and non-negative")
 if not math.isfinite(args_cli.joint_pose_anchor_weight) or args_cli.joint_pose_anchor_weight > 0.0:
@@ -464,6 +472,8 @@ def main() -> None:
         params={"minimum_seconds": args_cli.episode_seconds_min, "maximum_seconds": args_cli.episode_seconds_max},
     )
     env_cfg.terminations.time_out = TerminationTermCfg(func=planned_time_out, time_out=True)
+    # 物体全位姿kernel乘一次policy dt；它与关节初姿罚joint_pose_anchor不是同一项。
+    env_cfg.rewards.pose_keypoint.weight = float(args_cli.pose_keypoint_reward_weight)  # reward/s
     # $r_t^\psi=w_\psi\,\operatorname{clip}(\Delta\psi_t,\pm c)$：clip管饱和点，weight管相对激励。
     # RewardManager乘policy dt一次；不改进展符号、动作authority或物理终止。
     env_cfg.rewards.rotation_progress.params["clip_rad_per_step"] = float(args_cli.rotation_progress_clip_rad)
@@ -572,6 +582,11 @@ def main() -> None:
             "reward_release_reference_seconds": float(args_cli.reward_release_reference_seconds),
             "rotation_progress_clip_rad_per_step": float(args_cli.rotation_progress_clip_rad),
             **(
+                {"pose_keypoint_reward_weight": float(args_cli.pose_keypoint_reward_weight)}
+                if args_cli.pose_keypoint_reward_weight != 1.0
+                else {}  # 历史checkpoint的全位姿系数隐式为1
+            ),
+            **(
                 {"rotation_progress_reward_weight": float(args_cli.rotation_progress_reward_weight)}
                 if args_cli.rotation_progress_reward_weight != 5.0
                 else {}  # 历史checkpoint缺省为5，不给默认任务添加新的必需字段
@@ -674,6 +689,7 @@ def main() -> None:
                 "reward_release_end_turns": float(args_cli.reward_release_end_turns),
                 "reward_release_ema_alpha": reward_release_ema_alpha,
                 "rotation_progress_reward_weight": float(args_cli.rotation_progress_reward_weight),
+                "pose_keypoint_reward_weight": float(args_cli.pose_keypoint_reward_weight),
                 "full_gradient_shadow_frequency": agent_cfg["params"]["config"]["full_gradient_shadow_frequency"],
                 "mini_epochs": agent_cfg["params"]["config"]["mini_epochs"],
                 "max_updates": max_updates,
