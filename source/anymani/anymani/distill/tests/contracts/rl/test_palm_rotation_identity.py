@@ -2,9 +2,11 @@ r"""MVP80 method/run identity对task、policy与PPO配置的fail-closed合同。
 
 from __future__ import annotations
 
+import ast
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -117,6 +119,61 @@ def test_progress_clip_is_a_task_contract_parameter_not_just_training_metadata(t
     assert baseline["task_contract"]["rotation_progress_clip_rad_per_step"] == 0.025
     assert faster["task_contract"]["rotation_progress_clip_rad_per_step"] == 0.04
     assert baseline["identity_digest"] != faster["identity_digest"]
+
+
+@pytest.mark.parametrize("weight", (0.0, 20.0))
+def test_progress_reward_weight_is_distinct_from_clip_and_action_authority(tmp_path: Path, weight: float) -> None:
+    r"""进展系数只改变$w_\psi\operatorname{clip}(\Delta\psi,\pm c)$，不能改写动作或截断。
+
+    $w_\psi$单位为reward/rad；0表示显式消融，20表示旋转激励增强。
+    历史checkpoint未保存该字段时，其任务系数仍为5，不能在重放时隐式改成新值。
+    """
+
+    baseline = _identity(tmp_path, learning_rate=3.0e-4)  # 历史任务的默认进展系数为5
+    changed = _identity(tmp_path, learning_rate=3.0e-4, rotation_progress_reward_weight=weight)
+    assert "rotation_progress_reward_weight" not in baseline["task_contract"]  # 保持已发布任务字段布局
+    assert changed["task_contract"]["rotation_progress_reward_weight"] == weight  # 新系数必须属于MDP身份
+    remaining = dict(changed["task_contract"])
+    remaining.pop("rotation_progress_reward_weight")
+    assert remaining == baseline["task_contract"]  # 包括clip、reward-release、终止等合同均不变
+    assert changed["policy"] == baseline["policy"]  # 不借奖励干预改变动作authority或观测
+    assert changed["identity_digest"] != baseline["identity_digest"]
+
+
+@pytest.mark.parametrize("weight", (-1.0, float("nan"), float("inf"), -float("inf")))
+def test_progress_reward_weight_rejects_nonfinite_or_reversed_objective(tmp_path: Path, weight: float) -> None:
+    r"""有向旋转的奖励系数须有限且非负；负数不是本任务的同向奖励干预。"""
+
+    with pytest.raises(ValueError, match="progress.*weight"):
+        _identity(tmp_path, learning_rate=3.0e-4, rotation_progress_reward_weight=weight)
+
+
+@pytest.mark.parametrize(
+    "contract,expected",
+    (({}, 5.0), ({"rotation_progress_reward_weight": 0.0}, 0.0), ({"rotation_progress_reward_weight": 20.0}, 20.0)),
+)
+def test_evaluation_restores_progress_weight_without_starting_simulator(contract: dict, expected: float) -> None:
+    r"""执行评价入口的真实赋值语句：旧checkpoint恢复5，新任务恢复0或20。
+
+    只提取该赋值AST，不import会启动AppLauncher的评价模块；真实环境链由独立canary覆盖。
+    """
+
+    path = Path(__file__).resolve().parents[3] / "rl" / "evaluate_palm_rotation_mvp.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))  # 生产入口的源码，不复制一份恢复公式
+    assignments: list[ast.stmt] = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(ast.unparse(target) == "env_cfg.rewards.rotation_progress.weight" for target in node.targets)
+    ]
+    assert len(assignments) == 1, "evaluation must restore the recorded progress reward weight"
+    reward = SimpleNamespace(weight=-999.0)  # sentinel不能被环境默认值掩盖
+    namespace = {
+        "env_cfg": SimpleNamespace(rewards=SimpleNamespace(rotation_progress=reward)),
+        "run_contract": contract,
+    }
+    exec(compile(ast.Module(body=assignments, type_ignores=[]), str(path), "exec"), namespace)
+    assert reward.weight == expected  # 零系数是合法消融，不能被truthy fallback误改成5
 
 
 def test_strict_goal_weight_is_explicit_without_adding_frontier_reward(tmp_path: Path) -> None:

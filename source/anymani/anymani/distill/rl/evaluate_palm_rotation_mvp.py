@@ -326,6 +326,9 @@ def main() -> None:
     env_cfg.rewards.rotation_progress.params["clip_rad_per_step"] = float(
         run_contract.get("rotation_progress_clip_rad_per_step", 0.025)
     )  # 物理评价仍用未截断净转角；保留checkpoint训练奖励配置供协议审计
+    env_cfg.rewards.rotation_progress.weight = float(
+        run_contract.get("rotation_progress_reward_weight", 5.0)
+    )  # reward/rad；旧checkpoint缺省为5，增强奖励的模型必须恢复其记录值
     env_cfg.rewards.goal_success.weight = float(run_contract.get("strict_goal_reward_weight", 10.0))
     env_cfg.rewards.joint_pose_anchor.weight = float(run_contract.get("joint_pose_anchor_weight", -0.5))
     # 奖励诊断采用source的实际释放配置；lambda只进入reward/critic，不进入deterministic Actor。
