@@ -228,9 +228,15 @@ def build_palm_rotation_method_identity(
     progress_weight = float(run_contract.get("rotation_progress_reward_weight", 5.0))  # reward/rad，历史值为5
     if not math.isfinite(progress_weight) or progress_weight < 0.0:
         raise ValueError("rotation progress reward weight must be finite and non-negative")
-    pose_weight = float(run_contract.get("pose_keypoint_reward_weight", 1.0))  # 全位姿kernel系数，reward/s
+    pose_weight = float(run_contract.get("pose_keypoint_reward_weight", 1.0))  # 所选位置/全位姿kernel系数，reward/s
     if not math.isfinite(pose_weight) or pose_weight < 0.0:
         raise ValueError("pose keypoint reward weight must be finite and non-negative")
+    pose_mode = run_contract.get("pose_keypoint_mode", "full_pose")  # 历史缺字段表示原全位姿核
+    if pose_mode not in ("full_pose", "position_only"):
+        raise ValueError("pose keypoint mode must be full_pose or position_only")
+    canonical_run_contract = dict(run_contract)  # 调用者的训练记录不被原地修改
+    if pose_mode == "full_pose":
+        canonical_run_contract.pop("pose_keypoint_mode", None)  # 显式/隐式默认使用同一规范字段布局
     joint_anchor_weight = float(run_contract.get("joint_pose_anchor_weight", -0.5))
     if not math.isfinite(joint_anchor_weight) or joint_anchor_weight > 0.0:
         raise ValueError("joint pose anchor weight must be finite and non-positive")
@@ -264,6 +270,7 @@ def build_palm_rotation_method_identity(
             # 非默认系数属于MDP身份；旧checkpoint的隐式5保持原字段布局。
             **({"rotation_progress_reward_weight": progress_weight} if progress_weight != 5.0 else {}),
             **({"pose_keypoint_reward_weight": pose_weight} if pose_weight != 1.0 else {}),
+            **({"pose_keypoint_mode": pose_mode} if pose_mode != "full_pose" else {}),  # 测量几何独立于系数
             "strict_tracking_reward_weight": float(run_contract.get("strict_goal_reward_weight", 10.0)),
             **({"joint_pose_anchor_weight": joint_anchor_weight} if joint_anchor_weight != -0.5 else {}),
             "critic_task_state": "axis-goal-error-max-positive-net-and-current-net",
@@ -326,7 +333,7 @@ def build_palm_rotation_method_identity(
             "parquet_writer": "polars-1.32.3-zstd",
             "trajectory_writer": "hdf5-gzip-v1",
         },
-        "training": json.loads(json.dumps(dict(run_contract), sort_keys=True)),
+        "training": json.loads(json.dumps(canonical_run_contract, sort_keys=True)),  # 非默认模式保留以供评价恢复
     }
     return {**payload, "identity_digest": _stable_digest(payload)}
 

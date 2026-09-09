@@ -2,7 +2,10 @@ r"""Heterogeneous tactile-rotation纯$SO(3)$/reward/metric边界测试。"""
 
 from __future__ import annotations
 
+import ast
 import math
+from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -140,6 +143,81 @@ def test_full_pose_reward_and_impulse_rate_have_expected_units() -> None:
     assert torch.allclose(reward, torch.ones_like(reward), atol=1.0e-7)
     rate = impulse_to_rate(torch.tensor((True, False)), 0.05)
     assert torch.equal(rate, torch.tensor((20.0, 0.0)))
+
+
+def _pose_reward_wrapper(command: SimpleNamespace):
+    r"""提取真实reward wrapper并绑定可控物体状态，避免纯数学测试加载Isaac Articulation。"""
+
+    path = Path(__file__).resolve().parents[1] / "mdp" / "rewards.py"  # 实际MDP wrapper
+    definition = next(
+        n
+        for n in ast.parse(path.read_text()).body
+        if isinstance(n, ast.FunctionDef) and n.name == "pose_keypoint_reward"
+    )  # 仅提取待验证函数
+    namespace = {
+        "torch": torch,
+        "ManagerBasedRLEnv": object,
+        "get_rotation_command": lambda _env, _name: command,
+        "full_pose_keypoint_reward": full_pose_keypoint_reward,
+    }  # 全局依赖指向真实纯数学kernel；只替代环境状态读取
+    exec(compile(ast.Module(body=[definition], type_ignores=[]), str(path), "exec"), namespace)  # 执行原函数体
+    return namespace["pose_keypoint_reward"]  # 两个测试共享同一生产wrapper加载方法
+
+
+def test_position_only_kernel_is_rotation_invariant_and_decreases_with_center_distance() -> None:
+    r"""位置核应等于$\operatorname{sech}^2(25d)$，对姿态自由、对中心偏移单调。
+
+    $d$单位m，系数25单位$m^{-1}$；此处返回无量纲kernel，RewardManager随后乘weight与policy dt。
+    90°旋转在位置模式可获满分，但strict goal继续以0.05 m半径判定姿态误差。
+    """
+
+    dtype = torch.float64  # 用高精度隔离测量公式的差异
+    distance = torch.tensor([0.0, 0.02, 0.07], dtype=dtype)  # 从中心到物理位置终止尺度，m
+    anchor = torch.zeros(3, 3, dtype=dtype)  # 三个环境的共同位置anchor
+    position = anchor.clone()  # 构造纯平移误差，无坐标框架变换
+    position[:, 0] = distance  # 世界x方向偏移，范数恰为d
+    identity = _axis_quaternion((0.0, 0.0, 1.0), 0.0).expand(3, -1)  # 目标四元数wxyz
+    rotated = _axis_quaternion((0.0, 0.0, 1.0), math.pi / 2).expand(3, -1)  # 同一90°姿态误差
+    command = SimpleNamespace(
+        object=SimpleNamespace(data=SimpleNamespace(root_pos_w=position, root_quat_w=rotated)),
+        position_anchor_w=anchor,
+        goal_quat_w=identity,
+        cfg=SimpleNamespace(keypoint_radius_m=0.05),
+    )  # strict goal与reward共享状态，但各自使用规定的测量半径
+    reward = _pose_reward_wrapper(command)  # 真实wrapper与纯math实现
+    measured = reward(None, "goal_pose", position_only=True)  # 新模式：只有中心位置误差
+    torch.testing.assert_close(
+        measured, 1.0 / torch.cosh(25.0 * distance).square(), atol=1e-14, rtol=1e-14
+    )  # 核函数解析式
+    assert measured[0] == 1 and bool((measured[:-1] > measured[1:]).all())  # 中心满分，距离增大则奖励下降
+    command.object.data.root_quat_w = identity  # 仅改变物体姿态，位置数据逐值保留
+    torch.testing.assert_close(
+        reward(None, "goal_pose", position_only=True), measured, atol=0, rtol=0
+    )  # 姿态不影响位置核
+    assert command.cfg.keypoint_radius_m == 0.05  # reward调用不改变strict goal配置
+    _, _, _, success = goal_errors_and_success(
+        position, rotated, anchor, identity, keypoint_radius_m=command.cfg.keypoint_radius_m
+    )  # 原姿态门
+    assert not bool(success.any())  # 位置模式的满分不等于strict姿态成功
+
+
+def test_default_full_pose_wrapper_preserves_existing_values() -> None:
+    r"""默认模式与显式False都逐值恢复原full-pose核，正半径继续测量位置与姿态。"""
+
+    position = torch.tensor([[0.01, -0.02, 0.005]], dtype=torch.float64)  # 非零位置误差，m
+    anchor = torch.zeros_like(position)  # 固定世界anchor
+    identity = _axis_quaternion((0.0, 0.0, 1.0), 0.0)  # 目标姿态
+    rotated = _axis_quaternion((1.0, 0.0, 0.0), 0.3)  # 绕x轴姿态偏差，rad
+    command = SimpleNamespace(
+        object=SimpleNamespace(data=SimpleNamespace(root_pos_w=position, root_quat_w=rotated)),
+        position_anchor_w=anchor,
+        goal_quat_w=identity,
+        cfg=SimpleNamespace(keypoint_radius_m=0.05),
+    )  # 非退化六点半径
+    reward = _pose_reward_wrapper(command)  # 默认函数应保持旧任务语义
+    expected = full_pose_keypoint_reward(position, rotated, anchor, identity, keypoint_radius_m=0.05)  # 已有数学定义
+    torch.testing.assert_close(reward(None, "goal_pose"), expected, atol=0, rtol=0)  # 隐式默认
+    torch.testing.assert_close(reward(None, "goal_pose", position_only=False), expected, atol=0, rtol=0)  # 显式默认
 
 
 def test_contact_reward_masks_ghost_roles_and_excludes_palm() -> None:

@@ -30,16 +30,35 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
-def pose_keypoint_reward(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
-    r"""返回六点full-pose kernel$\frac16\sum_i4/(e^{50x_i}+2+e^{-50x_i})$。"""
+def pose_keypoint_reward(env: ManagerBasedRLEnv, command_name: str, *, position_only: bool = False) -> torch.Tensor:
+    r"""返回物体全位姿或纯位置kernel，形状$[N]$，尚未乘weight和policy dt。
 
-    command = get_rotation_command(env, command_name)
+    对局部六点$\mathbf b_i\in\{\pm r\mathbf e_x,\pm r\mathbf e_y,\pm r\mathbf e_z\}$，
+    $d_i=\|\mathbf p_o+R_o\mathbf b_i-\mathbf p_\star-R_g\mathbf b_i\|$，单位m。
+    默认full-pose核为$K=\frac16\sum_i\kappa(d_i)$，
+    $\kappa(d)=4/(e^{50d}+2+e^{-50d})=\operatorname{sech}^2(25d)$；50的单位为$m^{-1}$。
+    数值实现取$s=\min(50d,30)$并计算$4/(e^s+2+e^{-s})$，限制极端距离的指数幅值。
+    在原非终止位置范围与0.05 m六点半径下，该上限不改变数学核。
+
+    position_only将奖励专属的$r$设为0，此时六点均为物体中心，严格退化为
+    $K_{pos}=\kappa(\|\mathbf p_o-\mathbf p_\star\|)$，姿态不参与此稠密项。
+    command自己的非零keypoint半径继续定义strict goal的姿态误差；此函数不写入command状态。
+    RewardManager形成每步贡献$w_{pose}K\Delta t$；20Hz、$w_{pose}=1$时中心处为0.05 reward/step。
+
+    Args:
+        env: 提供物体世界位姿与固定位置anchor的环境。
+        command_name: 原旋转command名称，其goal与物理终止合同独立于reward模式。
+        position_only: True选择纯位置核；False保留全位姿六点测量。
+    """
+
+    command = get_rotation_command(env, command_name)  # 只读取原物体与goal状态
+    reward_radius_m = 0.0 if position_only else float(command.cfg.keypoint_radius_m)  # 仅本奖励的测量几何
     return full_pose_keypoint_reward(
-        command.object.data.root_pos_w,
-        command.object.data.root_quat_w,
-        command.position_anchor_w,
-        command.goal_quat_w,
-        keypoint_radius_m=float(command.cfg.keypoint_radius_m),
+        command.object.data.root_pos_w,  # 世界系物体中心[N,3]，m
+        command.object.data.root_quat_w,  # 物体姿态[N,4]，wxyz；r=0时不影响输出
+        command.position_anchor_w,  # 原位置anchor[N,3]，m
+        command.goal_quat_w,  # 原目标姿态[N,4]；strict goal继续使用它
+        keypoint_radius_m=reward_radius_m,  # 六点平均；r=0时六项均为同一中心距离核
     )
 
 

@@ -161,6 +161,70 @@ def test_full_pose_weight_changes_shaping_without_changing_progress_or_physics(t
     assert changed["identity_digest"] != baseline["identity_digest"]
 
 
+def test_pose_mode_default_is_canonical_and_position_only_is_an_explicit_task_change(tmp_path: Path) -> None:
+    r"""相同系数下，位置核与全位姿核是不同MDP；默认full_pose保持隐式字段布局。
+
+    模式只决定pose_keypoint的测量几何，Actor信息、动作authority与strict goal合同不随它改变。
+    显式full_pose与缺省full_pose需产生相同语义身份，以免CLI默认值制造额外的checkpoint分支。
+    """
+
+    baseline = _identity(tmp_path, learning_rate=3.0e-4)  # 历史默认使用全位姿kernel
+    explicit = _identity(tmp_path, learning_rate=3.0e-4, pose_keypoint_mode="full_pose")  # 同一数学模式
+    assert baseline == explicit  # 包括training字段：默认模式应规范化为省略字段
+    position = _identity(tmp_path, learning_rate=3.0e-4, pose_keypoint_mode="position_only")  # 新的稠密塑形
+    assert position["task_contract"]["pose_keypoint_mode"] == "position_only"  # 任务身份必须绑定测量模式
+    assert position["training"]["pose_keypoint_mode"] == "position_only"  # 评价应从训练记录恢复实际模式
+    other = dict(position["task_contract"])  # 除模式外的任务参数应一致
+    other.pop("pose_keypoint_mode")  # 去掉唯一被干预的任务字段
+    assert other == baseline["task_contract"] and position["policy"] == baseline["policy"]  # strict goal与信息边界
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        validate_anymani_checkpoint_identity(runtime_identity=position, checkpoint_identity=baseline)  # 不跨MDP续训
+    with pytest.raises(RuntimeError, match="semantic identity mismatch"):
+        identity_module.validate_palm_rotation_evaluation_identity(
+            runtime_identity=position, checkpoint_identity=baseline
+        )  # 新模式不能冒充旧checkpoint训练时的奖励语义
+
+
+@pytest.mark.parametrize("mode", (None, "position", "", 1))
+def test_pose_mode_rejects_ambiguous_or_unknown_measurement_geometry(tmp_path: Path, mode: Any) -> None:
+    r"""测量几何只允许full_pose或position_only，不能将拼写错误静默回退。"""
+
+    with pytest.raises(ValueError, match="pose keypoint mode"):
+        _identity(tmp_path, learning_rate=3.0e-4, pose_keypoint_mode=mode)  # 非法模式必须在身份构造时拒绝
+
+
+@pytest.mark.parametrize("entry", ("train_palm_rotation_mvp.py", "evaluate_palm_rotation_mvp.py"))
+@pytest.mark.parametrize("mode", (None, "full_pose", "position_only"))
+def test_pose_mode_runtime_wiring_does_not_modify_strict_goal_radius(entry: str, mode: str | None) -> None:
+    r"""执行真实入口的reward参数赋值；评价旧字段缺失时恢复full_pose。
+
+    只执行该赋值AST，命令的0.05 m keypoint半径仍归strict goal使用。
+    完整的配置装配、奖励输出与保存恢复由全cohort运行检查验证。
+    """
+
+    path = Path(__file__).resolve().parents[3] / "rl" / entry  # 两个真实生产入口
+    tree = ast.parse(path.read_text())  # 读取实际代码，而不是复制一个恢复表达式
+    target_name = "env_cfg.rewards.pose_keypoint.params['position_only']"  # 仅reward term的局部参数
+    statements: list[ast.stmt] = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and any(ast.unparse(t) == target_name for t in node.targets)
+    ]  # mode不应通过修改command全局半径实现
+    assert len(statements) == 1, "entry must configure reward-only pose mode"  # 入口有且仅有一处明确赋值
+    command_cfg = SimpleNamespace(keypoint_radius_m=0.05)  # strict goal的原始几何尺度，m
+    reward = SimpleNamespace(params={})  # 模式必须真实写入term.params
+    namespace = {
+        "env_cfg": SimpleNamespace(
+            rewards=SimpleNamespace(pose_keypoint=reward), commands=SimpleNamespace(goal_pose=command_cfg)
+        ),  # reward与command配置是独立对象
+        "args_cli": SimpleNamespace(pose_keypoint_mode=mode or "full_pose"),
+        "run_contract": {} if mode is None else {"pose_keypoint_mode": mode},
+    }  # 训练默认由CLI形成；旧评价允许缺字段
+    exec(compile(ast.Module(body=statements, type_ignores=[]), str(path), "exec"), namespace)  # 不启动AppLauncher
+    assert reward.params["position_only"] is (mode == "position_only")  # 位置模式显式True，其余False
+    assert command_cfg.keypoint_radius_m == 0.05  # strict orientation尺度未改变
+
+
 @pytest.mark.parametrize("field", ("rotation_progress_reward_weight", "pose_keypoint_reward_weight"))
 @pytest.mark.parametrize("weight", (-1.0, float("nan"), float("inf"), -float("inf")))
 def test_positive_reward_weights_reject_nonfinite_or_reversed_objective(

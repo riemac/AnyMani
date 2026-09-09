@@ -325,7 +325,12 @@ def main() -> None:
     env_cfg.commands.goal_pose.horizon_s = evaluation_horizon_s
     env_cfg.rewards.pose_keypoint.weight = float(
         run_contract.get("pose_keypoint_reward_weight", 1.0)
-    )  # reward/s；旧checkpoint恢复1，显式0只关闭物体全位姿塑形
+    )  # reward/s；缺字段恢复1，显式0关闭所选物体kernel
+    if run_contract.get("pose_keypoint_mode", "full_pose") not in ("full_pose", "position_only"):
+        raise ValueError("pose keypoint mode must be full_pose or position_only")  # 在创建环境前拒绝未知测量模式
+    env_cfg.rewards.pose_keypoint.params["position_only"] = (
+        run_contract.get("pose_keypoint_mode", "full_pose") == "position_only"
+    )  # 缺字段恢复原全位姿测量；只修改reward参数，不改变command的strict goal半径
     env_cfg.rewards.rotation_progress.params["clip_rad_per_step"] = float(
         run_contract.get("rotation_progress_clip_rad_per_step", 0.025)
     )  # 物理评价仍用未截断净转角；保留checkpoint训练奖励配置供协议审计
