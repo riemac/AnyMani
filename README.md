@@ -15,7 +15,7 @@ assets -> robots -> tasks -> distill
 | `source/anymani/anymani/assets/` | Generated-hand topology, mutation, validation, export, physics closure, and asset bank |
 | `source/anymani/anymani/robots/` | Lower generated or real hand assets into Isaac Lab robot configurations |
 | `source/anymani/anymani/tasks/` | Scene, observation, action, command, reward, reset, termination, and Gym registration |
-| `source/anymani/anymani/distill/` | Physical representations, shared models, runnable RL and geometry SSL, and future IL stages |
+| `source/anymani/anymani/distill/` | Physical representations, shared models, geometry SSL, family RL teachers, and offline IL students |
 
 `Research/` is an independent downstream Obsidian vault for experiment evidence and scientific interpretation. Runtime
 code does not require it.
@@ -52,8 +52,11 @@ AnyMani public names.
 
 ### Heterogeneous in-hand rotation
 
-The current LEAP-right stage uses one geometry-conditioned, TIP-only policy over 32 topologies with four assets each. The frozen model covers 30/32 training topologies and 96/128 training assets; the isolated same-topology unseen-variant result is 76/128, so the stronger overall acceptance remains partial. The v0.8.5 milestone documents this configuration and its evidence rather than claiming a completed dual-family policy.
+The v1.0.0 research milestone freezes two family teachers and one shared LEAP-right / revised Allegro-right student. The teachers cover 96/128 and 89/128 training assets, respectively. The selected pure-distillation student covers 95/128 LEAP and 81/128 Allegro training assets and 76/128 strictly held-out hands. The paired three-seed comparison reports strict held-out coverage of 73.7 ± 3.2 for Ours, 52.7 ± 4.9 for No-Z, and 57.3 ± 5.0 for the FK auxiliary-head control. All coverage uses the fixed 30-second, R16 protocol and original denominators.
 
+Teacher training is a staged lineage with explicit initialization, continuation and selection decisions. LEAP includes parameter averaging and optimizer-reset polishing; Allegro includes family-specific joint-limit revision and optimizer-preserving continuation. Final-stage configurations are frozen evaluation and continuation anchors; a common from-scratch recipe for both families has not been demonstrated. The shared student was trained with offline supervision; no RL fine-tuning is included.
+
+The [v1.0.0 release](https://github.com/riemac/AnyMani/releases/tag/v1.0.0) binds the source milestone. Model weights, exact runtime snapshots, asset/cohort/pregrasp dependencies and recovery instructions are archived separately in the private Research release. These artifacts are required to recover the reported runs; a source checkout alone does not contain the experiment data. Historical run identities remain tied to their original source snapshots.
 Training and fixed evaluation use `anymani.distill.rl.train_palm_rotation_mvp` and `anymani.distill.rl.evaluate_palm_rotation_mvp`. See the [RL module guide](source/anymani/anymani/distill/rl/README.md) for configuration and identity-aware entry points. The optional Research vault provides the detailed mathematical source material at `Research/总体/rl/RL 异构掌旋研究索引.md`; runtime code does not depend on the vault.
 
 New benchmark outputs are grouped as `logs/benchmarks/<topic>/<case>/`. Existing outputs retain their historical paths; task-specific scripts belong to their owning modules, while cross-module orchestration uses topic subdirectories under `scripts/research/`.
@@ -101,16 +104,12 @@ Geometry SSL is a task-free PyTorch/Warp process and does not launch Isaac Sim. 
 ```bash
 source /home/hac/isaac/env_isaaclab/bin/activate
 python -m anymani.distill.ssl.pretrain \
-  --phase calibrate_objectives \
-  --num_minibatches 128 \
-  --assets_per_minibatch 64 \
-  --q_per_asset_per_minibatch 8 \
-  --mini_epochs 5 \
-  --seed 20260813 \
-  --experiment_name canonical_multi_anchor_gaussian_preexperiment
+  --config geometry_ssl_multitask_representation_v0_7_5 \
+  --device cuda:0 \
+  --seed 20260813
 ```
 
-Schema 5 composes concrete `data / method / trainer / run` roles from the Python preset. Resolved configuration, dataset and expanded physical manifests, JSONL metrics, validation evidence, full resume checkpoints, and the standalone retained artifact are written under `logs/ssl/<experiment>/<UTC timestamp>/`. See `source/anymani/anymani/distill/ssl/README.md` for the physical target and lifecycle contract.
+Schema 9 composes concrete `data / method / trainer / run` roles from the Python preset. Resolved configuration, dataset and expanded physical manifests, JSONL metrics, validation evidence, full resume checkpoints, and the standalone retained artifact are written under `logs/ssl/<experiment>/<UTC timestamp>/`. See `source/anymani/anymani/distill/ssl/README.md` for the physical target and lifecycle contract.
 
 ## Tests
 
