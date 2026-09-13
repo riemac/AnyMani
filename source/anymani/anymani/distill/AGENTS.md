@@ -33,7 +33,7 @@ distill/
 │   ├── runtime/                    sampling、resident window、lifecycle、checkpoint
 │   └── pretrain.py                 python -m CLI
 ├── rl/                             rl_games 入口、YAML、masked PPO
-├── il/                             边界占位，尚无 trainer
+├── il/                             accepted-teacher mean imitation与后续distillation stage
 ├── diagnostics/                    recording / evaluation / analysis
 └── tests/                          contracts / integration / performance / training_sanity
 ```
@@ -53,7 +53,7 @@ distill/
 
 ### 环境与入口
 
-使用 `source ~/isaac/env_isaaclab/bin/activate`。SSL：`python -m anymani.distill.ssl.pretrain`。GM RL：`python -m anymani.distill.rl.train` / `play`。`tasks/inhand` 仍走仓库根 `scripts/rl_games/`。IL 尚未建立 trainer。
+使用 `source ~/isaac/env_isaaclab/bin/activate`。SSL：`python -m anymani.distill.ssl.pretrain`。GM RL：`python -m anymani.distill.rl.train` / `play`。`tasks/inhand` 仍走仓库根 `scripts/rl_games/`。当前窄IL入口为`python -m anymani.distill.il.train`，只消费固定teacher mean数据，不代表统一BC/DAgger框架。
 
 ### 出清与注释
 
@@ -71,13 +71,17 @@ retained encoder 的输入是当前物理 `q` 与静态证据；distance、最�
 
 ### 几何 SSL 合同
 
-主线是多锚点条件 Gaussian 场与 unified owner-token $Z$。active loss 固定为 run-local teacher-baseline-normalized density/κ；derived-field、density JVP 与 full-gradient 只作显式事后诊断。schema 8 根配置为 `data / method / trainer / run`，训练层级是 epoch → mini-epoch → minibatch → microbatch；每个 minibatch 独立更新，microbatch 只解决显存切分。Trainer 只调 Method/session 封闭接口；full checkpoint 只服务 SSL resume，RL/IL 只消费 schema-5 standalone retained artifact。
+主线是多锚点条件 Gaussian 场与 unified owner-token $Z$。active loss 固定为 run-local teacher-baseline-normalized density/κ；derived-field、density JVP 与 full-gradient 只作显式事后诊断。schema 9 根配置为 `data / method / trainer / run`，训练层级是 epoch → mini-epoch → minibatch → microbatch；每个 minibatch 独立更新，microbatch 只解决显存切分。Trainer 只调 Method/session 封闭接口；full checkpoint 服务 SSL resume 与显式 evaluation，RL/IL 只消费 schema-5 standalone retained artifact。
 
 official LEAP/Allegro 不参与 train 或 checkpoint selection。split 按 `physical_geometry_hash` 隔离；路径、asset ID 或 `content_hash` 不足以识别 limit-only 重复。
 
-### 性能门槛
+### 批量吞吐与部署时延
 
-RTX 5070 Ti、`B=4096`、单结构组、20 预热 + 50 CUDA Event，p95 ≤ 40 ms。计时覆盖 adapter、聚合与 backbone final-norm unified $Z$，边界从 GPU-resident 输入开始并止于 retained 表征。PPO full fine-tune 每次重算 learned activation，以保持参数更新后的特征一致。
+Retained encoder的工程吞吐门固定为RTX 5070 Ti、`B=4096`、单结构组、20次预热与50次CUDA Event，p95 ≤ 40 ms。计时从GPU-resident输入开始，覆盖adapter、聚合与backbone final-norm unified $Z$；它排除policy、Isaac/physics、CPU/GPU搬运和设备通信，回答的是一张GPU处理大批训练状态的速度，不是真机20 Hz控制deadline。
+
+20 Hz在同步Isaac训练中定义每0.05秒模拟时间更新一次动作。即使批量前向在墙钟上超过50 ms，模拟器仍以相同simulation dt推进，只会降低real-time factor和训练吞吐，不会改变MDP中的动作保持时间。真机实时性必须另测`B=1`的完整sensor → observation → retained encoder → actor → transport → actuator command链，并报告p50/p95/p99与deadline miss rate；不得用`B=4096`的总耗时替代或线性外推。
+
+模型容量同时受两条独立边界约束：`B=1`端到端部署必须满足目标控制周期，大batch训练则按throughput、显存、update wall time与学习收益形成Pareto比较。PPO若full fine-tune encoder，每次参数更新后都必须重算learned activation；当前冻结retained encoder的consumer可对每个rollout state只计算一次并在mini-epochs中复用，但不能跨状态复用q-dependent $Z$。
 
 ## Common Operations And Tools
 

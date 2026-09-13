@@ -13,7 +13,7 @@ from typing import Any
 
 import torch
 
-CHECKPOINT_SCHEMA_VERSION = "8.0.0"
+CHECKPOINT_SCHEMA_VERSION = "9.0.0"
 
 
 @dataclass(frozen=True)

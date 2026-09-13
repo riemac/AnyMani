@@ -1,12 +1,12 @@
-r"""Geometry SSL 事后 validation/evaluation 的独立声明配置与 façade。
+r"""Geometry SSL 显式 evaluation 的独立声明配置与 façade。
 
-训练配置不包含本模块的任何字段。两个阶段只消费已经完成的 schema-8 full checkpoint，
+训练配置不包含本模块的任何字段。本阶段只消费已经完成的 schema-9 full checkpoint，
 不会创建 optimizer、改变参数或回写源训练目录。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
@@ -14,51 +14,15 @@ from typing import Any, ClassVar
 from omegaconf import MISSING, OmegaConf
 
 from .contracts import build_runtime
-
-VALIDATION_SCHEMA_VERSION = "1.0.0"
-"""独立 validation 配置与结果合同的首个稳定版本。"""
+from .runtime.pretrainer import ExecutionPrecisionCfg
 
 EVALUATION_SCHEMA_VERSION = "1.0.0"
 """独立 evaluation 配置与结果合同的首个稳定版本。"""
 
 
 @dataclass(frozen=True)
-class ValidationCfg:
-    r"""固定 validation bank、teacher-baseline selection 和 GPU 资源配置。"""
-
-    q_per_asset: int = 64
-    assets_per_minibatch: int = 2
-    q_per_asset_per_minibatch: int = 2
-    selection_metrics: tuple[str, ...] = ("density", "kappa")
-    seed_offset: int = 1_000_003
-    max_resident_assets: int = 64
-    device: str = "cuda:0"
-    dtype: str = "float32"
-    source_cache_root: str = "logs/ssl/_cache/geometry_source/v1"
-    source_cache_mode: str = "readonly"
-
-    def __post_init__(self) -> None:
-        r"""验证固定 q-bank、selection 指标和资源上限。"""
-
-        object.__setattr__(self, "selection_metrics", tuple(self.selection_metrics))
-        counts = (
-            self.q_per_asset,
-            self.assets_per_minibatch,
-            self.q_per_asset_per_minibatch,
-            self.seed_offset,
-            self.max_resident_assets,
-        )
-        if min(counts) < 1 or not self.selection_metrics:
-            raise ValueError("validation q/batch/seed/resource values and selection metrics must be non-empty")
-        if self.max_resident_assets < self.assets_per_minibatch:
-            raise ValueError("validation max_resident_assets must cover one asset minibatch")
-        _validate_cuda_float32(self.device, self.dtype, role="validation")
-        _validate_source_cache(self.source_cache_root, self.source_cache_mode, role="validation")
-
-
-@dataclass(frozen=True)
 class EvaluationCfg:
-    r"""冻结 checkpoint 后的 unseen suites、可选训练 q-bank 与消融配置。"""
+    r"""冻结 checkpoint 后的 held-out suites、资源上限与显式消融配置。"""
 
     q_per_asset: int = 64
     assets_per_minibatch: int = 2
@@ -69,23 +33,21 @@ class EvaluationCfg:
         "cross_asset_shuffle",
         "joint_token_shuffle",
     )
-    selection_metrics: tuple[str, ...] = ("density", "kappa")
     bootstrap_replicates: int = 2_000
     evaluation_seed_offset: int = 2_000_003
-    training_q_bank_seed_offset: int = 3_000_003
     bootstrap_seed_offset: int = 4_000_003
     max_resident_assets: int = 64
     device: str = "cuda:0"
     dtype: str = "float32"
-    source_cache_root: str = "logs/ssl/_cache/geometry_source/v1"
-    source_cache_mode: str = "readonly"
+    source_cache_root: str = "logs/ssl/_cache/geometry_source/v2"
+    source_cache_mode: str = "read-write"
     z_compression_ranks: tuple[int, ...] = (32, 64, 96, 128)
+    execution: ExecutionPrecisionCfg = field(default_factory=ExecutionPrecisionCfg)
 
     def __post_init__(self) -> None:
         r"""验证固定测度预算、消融集合与互不重叠的随机域。"""
 
         object.__setattr__(self, "final_ablations", tuple(self.final_ablations))
-        object.__setattr__(self, "selection_metrics", tuple(self.selection_metrics))
         object.__setattr__(self, "z_compression_ranks", tuple(self.z_compression_ranks))
         counts = (
             self.q_per_asset,
@@ -96,11 +58,10 @@ class EvaluationCfg:
         )
         offsets = (
             self.evaluation_seed_offset,
-            self.training_q_bank_seed_offset,
             self.bootstrap_seed_offset,
         )
-        if min(counts) < 1 or not self.final_ablations or not self.selection_metrics:
-            raise ValueError("evaluation q/batch/bootstrap/resource budgets and metric sets must be non-empty")
+        if min(counts) < 1 or not self.final_ablations:
+            raise ValueError("evaluation q/batch/bootstrap/resource budgets and ablations must be non-empty")
         if self.z_compression_ranks not in {(), (32, 64, 96, 128)}:
             raise ValueError("Z compression ranks must be disabled or exactly 32/64/96/128")
         if min(offsets) < 1 or len(set(offsets)) != len(offsets):
@@ -121,7 +82,7 @@ def _validate_cuda_float32(device: str, dtype: str, *, role: str) -> None:
 
 
 def _validate_source_cache(root: str, mode: str, *, role: str) -> None:
-    """事后固定测度默认只读预构建 source，不允许 silent cache fallback。"""
+    """事后固定测度默认增量构建 evaluation objects；显式 readonly 时缺失即失败。"""
 
     if mode not in {"readonly", "read-write", "off"}:
         raise ValueError(f"{role} source_cache_mode is invalid")
@@ -129,62 +90,8 @@ def _validate_source_cache(root: str, mode: str, *, role: str) -> None:
         raise ValueError(f"{role} source_cache_root is required unless cache mode is off")
 
 
-class ValidationRun:
-    r"""管理一次显式 validation 的输入 checkpoint 与独立 artifact 目录。"""
-
-    def __init__(self, config: ValidationRunCfg) -> None:
-        r"""保存运行声明；构造阶段不访问 checkpoint 或文件系统。"""
-
-        self.config = config
-
-    def resolve_output_dir(self, override: Path | None = None) -> Path:
-        r"""只解析 validation 输出路径；安全 gate 通过前不创建目录。"""
-
-        output_dir = override
-        if output_dir is None:
-            timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-            output_dir = Path(self.config.output_dir) / self.config.experiment_name / timestamp
-        return output_dir.expanduser().resolve(strict=False)
-
-    def prepare_output_dir(self, override: Path | None = None) -> Path:
-        r"""创建 validation 独占目录，不复用或回写训练 run。"""
-
-        output_dir = self.resolve_output_dir(override)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        return output_dir
-
-
-@dataclass(frozen=True)
-class ValidationRunCfg:
-    r"""显式 baseline/candidate 列表和 validation 复现随机种子。"""
-
-    runtime_type: ClassVar[type[ValidationRun]] = ValidationRun
-    output_dir: str = "logs/ssl"
-    experiment_name: str = "canonical_multi_anchor_gaussian_validation"
-    baseline_checkpoint: str = ""
-    checkpoints: tuple[str, ...] = ()
-    seed: int = 20260813
-    deterministic_algorithms: bool = True
-
-    def __post_init__(self) -> None:
-        r"""规范候选 tuple，并验证不依赖 checkpoint IO 的运行字段。"""
-
-        object.__setattr__(self, "checkpoints", tuple(self.checkpoints))
-        if not self.output_dir or not self.experiment_name or self.seed < 0:
-            raise ValueError("validation run requires output identity and non-negative seed")
-
-    def validate_inputs(self) -> None:
-        r"""在执行边界要求一个 baseline 和至少一个显式候选 checkpoint。"""
-
-        if not self.baseline_checkpoint or not self.checkpoints:
-            raise ValueError("validation requires --baseline_checkpoint and at least one --checkpoint")
-        normalized = tuple(str(Path(path).expanduser().resolve()) for path in self.checkpoints)
-        if len(set(normalized)) != len(normalized):
-            raise ValueError("validation checkpoint list must not contain duplicate paths")
-
-
 class EvaluationRun:
-    r"""管理一次显式 evaluation 的目标 checkpoint、可选 baseline 与输出目录。"""
+    r"""管理一次显式 evaluation 的目标 checkpoint、分析开关与输出目录。"""
 
     def __init__(self, config: EvaluationRunCfg) -> None:
         r"""保存运行声明；构造阶段不访问 checkpoint 或 CUDA。"""
@@ -210,13 +117,14 @@ class EvaluationRun:
 
 @dataclass(frozen=True)
 class EvaluationRunCfg:
-    r"""目标 checkpoint、可选 epoch-0 baseline 与 evaluation 随机种子。"""
+    r"""目标 checkpoint、显式分析开关、basis 位置与 evaluation 随机种子。"""
 
     runtime_type: ClassVar[type[EvaluationRun]] = EvaluationRun
     output_dir: str = "logs/ssl"
     experiment_name: str = "canonical_multi_anchor_gaussian_evaluation"
     checkpoint: str = ""
-    baseline_checkpoint: str = ""
+    analyses: tuple[str, ...] = ()
+    compression_basis: str = ""  # 空值表示从 checkpoint 所属 train run 读取固定 basis
     seed: int = 20260813
     deterministic_algorithms: bool = True
 
@@ -225,59 +133,18 @@ class EvaluationRunCfg:
 
         if not self.output_dir or not self.experiment_name or self.seed < 0:
             raise ValueError("evaluation run requires output identity and non-negative seed")
+        object.__setattr__(self, "analyses", tuple(self.analyses))
+        unknown = set(self.analyses) - {"ablations", "compression"}
+        if unknown or len(set(self.analyses)) != len(self.analyses):
+            raise ValueError(f"evaluation analyses must be unique registered names, got {sorted(unknown)}")
 
     def validate_inputs(self) -> None:
-        r"""要求一个显式目标 checkpoint；baseline 始终可选。"""
+        r"""要求一个显式目标 checkpoint；compression basis 仅在显式分析时解析。"""
 
         if not self.checkpoint:
             raise ValueError("evaluation requires --checkpoint")
-
-
-class EmbodimentValidation:
-    r"""装配 data/method/validation/run，并执行一次独立 checkpoint selection。"""
-
-    def __init__(self, config: EmbodimentValidationCfg, *, output_dir: Path | None = None) -> None:
-        r"""保存完整配置和可选测试输出目录，不初始化 CUDA。"""
-
-        self.config = config
-        self.output_dir = output_dir
-
-    def run(self) -> Path:
-        r"""构造四个 role runtime，并交给独立 validation 内核。"""
-
-        self.config.validate_composed()
-        data = build_runtime(self.config.data)
-        method = build_runtime(self.config.method)
-        run = build_runtime(self.config.run)
-        from .runtime.post_training import validate_checkpoints
-
-        return validate_checkpoints(
-            data=data,
-            method=method,
-            config=self.config.validation,
-            run=run,
-            output_dir_override=self.output_dir,
-            resolved_config=resolved_post_training_config_dict(self.config),
-        )
-
-
-@dataclass(frozen=True)
-class EmbodimentValidationCfg:
-    r"""独立 validation 的 data/method/validation/run 四角色根配置。"""
-
-    schema_version: str = VALIDATION_SCHEMA_VERSION
-    data: Any = MISSING
-    method: Any = MISSING
-    validation: ValidationCfg = MISSING
-    run: Any = MISSING
-
-    def validate_composed(self) -> None:
-        r"""验证 schema、运行输入与所有 concrete roles。"""
-
-        _validate_root(self, schema=VALIDATION_SCHEMA_VERSION, roles=("data", "method", "run"))
-        if not isinstance(self.validation, ValidationCfg):
-            raise TypeError("validation root requires a concrete ValidationCfg")
-        self.run.validate_inputs()
+        if "compression" not in self.analyses and self.compression_basis:
+            raise ValueError("compression_basis is only valid with --analysis compression")
 
 
 class EmbodimentEvaluation:
@@ -355,16 +222,10 @@ def resolved_post_training_config_dict(config: Any) -> dict[str, Any]:
 
 __all__ = [
     "EVALUATION_SCHEMA_VERSION",
-    "VALIDATION_SCHEMA_VERSION",
     "EmbodimentEvaluation",
     "EmbodimentEvaluationCfg",
-    "EmbodimentValidation",
-    "EmbodimentValidationCfg",
     "EvaluationCfg",
     "EvaluationRun",
     "EvaluationRunCfg",
-    "ValidationCfg",
-    "ValidationRun",
-    "ValidationRunCfg",
     "resolved_post_training_config_dict",
 ]

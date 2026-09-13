@@ -18,7 +18,7 @@ from collections import defaultdict
 from itertools import zip_longest
 from pathlib import Path
 
-import yaml
+from anymani.assets.bank.cohort import parse_hand_asset_cohort_document
 
 
 def main() -> None:
@@ -40,7 +40,7 @@ def main() -> None:
     output_root = args.output_dir.expanduser().resolve()  # 独占的准备证据目录。
     if output_root.exists():
         raise FileExistsError(f"pregrasp preparation output already exists: {output_root}")
-    parent = yaml.safe_load(parent_path.read_text(encoding="utf-8"))
+    parent = parse_hand_asset_cohort_document(parent_path.read_bytes())
     if not isinstance(parent, dict) or parent.get("schema_version") != "1.2.0":
         raise ValueError("pregrasp preparation requires a canonical-final cohort lock")
 
@@ -114,6 +114,11 @@ def main() -> None:
                     "algorithm": "missing-exact-pregrasp-cell-interleaved-v1",
                     "purpose": "pregrasp-generation-only",
                     "catalog_root": str(catalog.root),  # 后续仅给分片锁时，也保持本次明确选择的数据位置。
+                    **(
+                        {"pregrasp_generation_identity": parent_cohort.selection["pregrasp_generation_identity"]}
+                        if "pregrasp_generation_identity" in parent_cohort.selection
+                        else {}
+                    ),
                 },
             )  # 子集发布不重新解析完整训练库；实际生成器加载时仍执行全部source/canonical核对。
             shards.append(

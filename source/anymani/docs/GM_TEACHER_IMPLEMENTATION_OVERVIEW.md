@@ -5,24 +5,25 @@ that exists from behavior that has been proven by an Isaac Sim smoke or a traini
 
 ## Current Status
 
-GM is no longer a zero-reward or unbound-scene scaffold. The repository contains generated-hand and LEAP scene
-bindings, executable reorientation commands and rewards, contact sensors, single-asset MLP training aliases, and a
-minimal heterogeneous spawn environment.
+GM contains generated single-asset and LEAP scene bindings, executable reorientation commands/rewards, contact sensors,
+and single-asset rl_games aliases. Cross-topology generated-hand training is owned by `tasks/hetero` plus the structured
+model/PPO implementation in `distill`.
 
-The complete morphology-token teacher/distillation design is not implemented. In particular, there is no grasp-cache
-reset pipeline, active hand-orientation reset event, full PALM/JOINT/TIP policy, or end-to-end heterogeneous teacher
-training route.
+The generated heterogeneous route now has an identity-keyed pregrasp cache, fail-closed reset, structured
+PALM/JOINT/TIP observations, a frozen N040 geometry provider, separate actor/critic, and bounded direct PPO. Arbitrary
+hand-orientation reset, full 2048-asset contact coverage, gravity-robust pregrasps, and end-to-end distillation remain out
+of scope.
 
 ## Registered Task Surfaces
 
 ### Task-owned environments
 
-- `AnyMani-GM-InHand-v0` / `-Play-v0`: same-topology generated-hand GM assembly;
 - `AnyMani-GM-SingleAsset-v0` / `-Play-v0`: generated mother-asset probe;
 - `AnyMani-GM-Leap-v0` / `-Play-v0`: official LEAP URDF comparison;
-- `AnyMani-GM-Heterogeneous-Test-v0`: three-hand spawn/reset/step test without the full manipulation MDP.
+- `AnyMani-Hetero-Generated-TactileRotation-v0`: generated cross-topology structured tactile-rotation task.
 
-Registrations live in `source/anymani/anymani/tasks/gm/__init__.py`.
+Registrations live in the corresponding `tasks/gm/__init__.py` and `tasks/hetero/__init__.py` packages. GM no longer
+registers same-topology/canonical multi-asset compatibility IDs.
 
 ### Training aliases
 
@@ -30,8 +31,8 @@ Registrations live in `source/anymani/anymani/tasks/gm/__init__.py`.
 - `AnyMani-GM-Leap-MLP-v0`.
 
 These aliases bind task configs to `distill/rl/agents/gm_single_asset_mlp_ppo.yaml` and are consumed by
-`python -m anymani.distill.train` / `play`. No active alias trains the generic multi-asset GM environment with the
-planned morphology-token model.
+`python -m anymani.distill.rl.train` / `python -m anymani.distill.rl.play`. Heterogeneous bounded experiments use
+`scripts/research/train_hetero_structured_ppo.py` directly, so task identity and reset tier remain explicit.
 
 ## Implemented Environment Semantics
 
@@ -41,14 +42,14 @@ planned morphology-token model.
 lowers generated URDF assets to Isaac Lab `ArticulationCfg`. GM configs use this path for generated assets; the LEAP
 variant uses `robots/leap_urdf.py`.
 
-Environment configs may declare reproducible asset selection and routing because those values determine scene
-construction. Asset generation and long-lived train/validation split policy remain outside GM MDP terms.
+`tasks/hetero/config/generated/asset_binding.py` declares reproducible dataset selection, physical identity and
+round-robin routing. Asset generation and long-lived train/validation split policy remain outside task MDP terms.
 
 ### Action and observation
 
-The generic GM environment uses a current-joint-relative clamped action. Single-asset and LEAP probes use Isaac Lab
-relative joint-position actions with variant-specific scales. ADR relative/EMA actions exist as reusable components but
-are not selected by the current GM configs.
+Single-asset and LEAP probes use Isaac Lab relative joint-position or explicit ADR actions with variant-specific scales.
+The heterogeneous task uses a preload-aware masked relative target that advances at most $1/24$ rad once per 20 Hz
+policy step and holds that target across six 120 Hz physics substeps.
 
 Observation contracts differ by variant. Implemented reusable terms include raw/normalized joint state, previous action,
 joint limits, sidecar-derived contact signals, hand-relative object position, and object orientation encoded as rot6d,
@@ -72,8 +73,9 @@ future work but are not the active single-asset/LEAP reward path.
 
 ### Reset, contact, and termination
 
-Generic GM uses joint/object reset events and records an object reset anchor. Single-asset and LEAP variants use fixed
-grasp presets with object-yaw randomization. There is no grasp-cache loader/sampler in the current source.
+Single-asset and LEAP variants use fixed grasp presets with object-yaw randomization. The heterogeneous task resolves an
+exact schema-2.1 basin record by physical/cube/scale/physics/search identity and writes separate actual joint state,
+controller preload target and hand-frame object pose; cache miss or tier mismatch fails closed before PhysX writes.
 
 Generated contact topology is derived from `hand.yaml`: one filtered ContactSensor is installed per tip/non-tip link and
 filtered to the manipulated object. The generated single-asset variant also authors structural collision filtering for
@@ -95,27 +97,24 @@ declarative config scaffold only; no active reset event samples and writes a new
 
 ## Model and Distillation Surface
 
-The active GM training aliases use an rl_games MLP. A minimal flat-layout Transformer adapter exists, but no current YAML
-selects it and its declared observation layout does not cover the complete generic GM policy group.
-
-The planned PALM/JOINT/TIP tokenizer, relation builder, hybrid SE(3) attention bias, shared backbone, action/value heads,
-IL loop, student, and distillation pipeline remain design targets rather than an executable stack.
+The active GM aliases use rl_games MLP/GRU/TCN networks. The heterogeneous route consumes named role tensors, computes
+q-dependent frozen N040 geometry, uses a shared per-joint actor head and a fully separate masked-pooling scalar critic,
+and applies active-joint Gaussian/GAE/clipped PPO without flattening task semantics.
 
 ## Validation Evidence
 
 Default tests under `tasks/gm/tests` and `distill/tests` validate tensor math, configs, frame semantics, contact layout,
 reward ownership, collision pairs, and model shapes without launching Isaac Sim.
 
-The current GM runtime evidence is
-`source/anymani/anymani/smokes/isaacsim/test_gm_single_asset_structural_collision.py`. It constructs two generated
-single-asset environments, checks authored PhysX filtered pairs, and executes random steps with finite tensors. It does
-not prove grasp quality, contact values, all reward terms, LEAP runtime, or a full training run.
+Single-asset runtime evidence remains
+`source/anymani/anymani/smokes/isaacsim/test_gm_single_asset_structural_collision.py`. Heterogeneous evidence is produced
+by `hetero_structured_env_smoke.py`, `hetero_structured_network_smoke.py` and the matched PPO artifacts. The current
+row16 comparison completed no subgoal or full turn; runtime correctness therefore does not imply rotation capability.
 
 ## Remaining Closure Work
 
-1. Add runtime smokes for command resampling, contact values, reward components, and LEAP GM.
-2. Decide and implement grasp-cache ownership before claiming cache-driven reset.
-3. Implement hand-orientation reset only after its frame/reference distribution is fixed and tested.
-4. Reconcile the generic GM observation schema with a selected network adapter before heterogeneous teacher training.
-5. Implement the morphology-token and distillation stack incrementally, without treating design dataclasses as working
-   capability.
+1. Add runtime smokes for remaining single-asset/LEAP command and contact boundaries.
+2. Implement hand-orientation reset only after its frame/reference distribution is fixed and tested.
+3. Expand heterogeneous pregrasp coverage only when a bounded cohort produces a positive learning signal.
+4. Test contact action-sequence recoverability and actor object-orientation observability before increasing PPO scale.
+5. Implement IL/student distillation separately; do not infer it from the working structured PPO infrastructure.

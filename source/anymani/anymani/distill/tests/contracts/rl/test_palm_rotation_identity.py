@@ -33,7 +33,7 @@ class _Pregrasp:
 
 
 def _identity(
-    tmp_path: Path, *, learning_rate: float, reward_release_start_turns: float = 1.0, **overrides: Any
+    tmp_path: Path, *, learning_rate: float, reward_release_start_turns: float = 1.0, arm: str = "residual", **overrides: Any
 ) -> dict[str, Any]:
     r"""构造只改变base LR的一组完整identity。"""
 
@@ -50,7 +50,7 @@ def _identity(
             catalog_root=str(catalog),
             bindings=tuple(_Binding(f'{{"row":{row}}}') for row in range(80)),
         ),
-        arm="residual",
+        arm=arm,
         run_contract={
             "seed": 42,
             "actor_base_lr": learning_rate,
@@ -85,6 +85,44 @@ def test_identity_binds_film_contact_reward_and_training_contract(tmp_path: Path
     assert "dynamic-film-base" in first["policy"]["residual_decomposition"]
     assert first["manifest"]["support_asset_count"] == 80
     assert first["identity_digest"] != changed["identity_digest"]
+
+
+def test_phase_identity_binds_runtime_clock_without_changing_physics_or_geometry(tmp_path: Path) -> None:
+    base = _identity(tmp_path, learning_rate=3e-5, arm="direct_token")
+    explicit_off = _identity(tmp_path, learning_rate=3e-5, arm="direct_token", phase_period_steps=None)
+    clock = _identity(tmp_path, learning_rate=3e-5, arm="direct_token", phase_period_steps=43)
+    changed_period = _identity(tmp_path, learning_rate=3e-5, arm="direct_token", phase_period_steps=44)
+    assert base == explicit_off
+    assert clock["task_contract"] == base["task_contract"]
+    assert clock["geometry_provider"] == base["geometry_provider"]
+    assert clock["transport_abi"]["float_shapes"]["phase_clock"] == [2]
+    assert "phase_clock" not in base["transport_abi"]["float_shapes"]
+    assert clock["policy"]["phase_clock"]["period_policy_steps"] == 43
+    assert clock["policy"]["phase_clock"]["encoding"] == ["sin", "cos"]
+    assert len({base["identity_digest"], clock["identity_digest"], changed_period["identity_digest"]}) == 3
+    with pytest.raises(ValueError, match="direct"):
+        _identity(tmp_path, learning_rate=3e-5, arm="residual", phase_period_steps=43)
+
+
+def test_limit_recovery_distribution_enters_method_identity(tmp_path: Path) -> None:
+    r"""同样的Actor张量配合不同局部探索规则仍是不同方法，且物理动作权限保持。"""
+    baseline = _identity(tmp_path, learning_rate=3e-5)
+    recovery = _identity(tmp_path, learning_rate=3e-5, recovery_sigma_floor=0.6, max_log_std=-0.5)
+    assert baseline["identity_digest"] != recovery["identity_digest"]
+    rule = recovery["policy"]["recovery_exploration"]
+    assert rule["sigma_floor"] == 0.6
+    assert rule["limit_margin_rad"] == 0.02
+    assert rule["previous_outward_action_min"] == 0.05
+    assert rule["contact_scope"] == "all-valid-tips-zero"
+    assert recovery["policy"]["action_authority_rad_per_policy_step"] == 1 / 24
+    assert "recovery_exploration" not in baseline["policy"]
+
+
+@pytest.mark.parametrize("floor", [0.0, -0.1, float("nan"), float("inf"), 0.7])
+def test_limit_recovery_identity_rejects_invalid_floor(tmp_path: Path, floor: float) -> None:
+    r"""声明不能静默超过原潜高斯上限，也不能保存非法尺度。"""
+    with pytest.raises(ValueError, match="recovery"):
+        _identity(tmp_path, learning_rate=3e-5, recovery_sigma_floor=floor, max_log_std=-0.5)
 
 
 def test_identity_binds_early_reward_release_schedule(tmp_path: Path) -> None:
@@ -392,3 +430,22 @@ def test_readonly_replay_requires_exact_certificate_and_never_weakens_resume(tmp
         identity_module.validate_palm_rotation_evaluation_identity(
             runtime_identity=changed, checkpoint_identity=legacy, implementation_certificate=certificate
         )
+
+
+def test_rejected_action_auxiliary_identity(tmp_path: Path) -> None:
+    r"""辅助目标身份和MDP合同分别记录，显式零权重保持旧默认布局。"""
+    baseline = _identity(tmp_path, learning_rate=3e-5)
+    zero = _identity(tmp_path, learning_rate=3e-5, rejected_action_weight=0.0)
+    changed = _identity(tmp_path, learning_rate=3e-5, rejected_action_weight=0.05)
+    assert zero == baseline
+    assert changed["task_contract"] == baseline["task_contract"]
+    assert changed["policy"] == baseline["policy"]
+    assert changed["transport_abi"] == baseline["transport_abi"]
+    assert changed["identity_digest"] != baseline["identity_digest"]
+    contract = changed["training"]["rejected_action_regularization"]
+    assert contract["weight"] == 0.05
+    assert contract["applied_to"] == "actor-objective-only-not-environment-reward"
+    assert contract["action_authority_rad_per_policy_step"] == 1 / 24
+    for invalid in [-1.0, float("nan"), float("inf")]:
+        with pytest.raises(ValueError, match="rejected action weight"):
+            _identity(tmp_path, learning_rate=3e-5, rejected_action_weight=invalid)

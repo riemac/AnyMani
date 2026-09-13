@@ -45,6 +45,39 @@ HAND_WIDTH = 64
 BASE_ACTION_LIMIT = 0.8
 RESIDUAL_LIMIT = 0.2
 FILM_LIMIT = 0.25
+RECOVERY_LIMIT_MARGIN_RAD = 0.02
+RECOVERY_OUTWARD_ACTION_MIN = 0.05
+
+
+def recovery_exploration_contract(
+    sigma_floor: float | None, *, max_log_std: float, sigma_mode: str = "global"
+) -> dict[str, object] | None:
+    r"""定义可选的限位恢复探索合同；尺度属于tanh之前的无量纲高斯。
+
+    下限不能超过既有探索上限。该规则仅改变给定合法观测下的采样方差，不改变动作中心、
+    $a/24$控制权限或任何MDP状态；与带新参数的conditional sigma分开研究。
+    """
+    if sigma_floor is None:
+        return None
+    if (
+        sigma_mode != "global"
+        or not math.isfinite(sigma_floor)
+        or sigma_floor <= 0.0
+        or not math.isfinite(max_log_std)
+        or math.log(sigma_floor) > max_log_std
+    ):
+        raise ValueError("recovery sigma floor requires global sigma and a finite positive value within its ceiling")
+    return {
+        "rule": "tip-silent-target-limit-outward-previous-action-v1",
+        "sigma_floor": float(sigma_floor),
+        "limit_margin_rad": RECOVERY_LIMIT_MARGIN_RAD,
+        "previous_outward_action_min": RECOVERY_OUTWARD_ACTION_MIN,
+        "contact_scope": "all-valid-tips-zero",
+        "target_and_limits_units": "rad-divided-by-pi",
+        "mean": "unchanged",
+        "effective_log_sigma": "gate?max(global_log_std,log(sigma_floor)):global_log_std",
+        "maximum_log_sigma": float(max_log_std),
+    }
 
 
 class _PalmRotationGraphBiasedTransformer(GraphBiasedTransformer):
@@ -80,9 +113,7 @@ class _PalmRotationGraphBiasedTransformer(GraphBiasedTransformer):
         parent = parent_direction.clamp(min=0, max=self.max_graph_distance)  # parent方向桶$d_{ij}^{pa}$
         child = child_direction.clamp(min=0, max=self.max_graph_distance)  # child方向桶$d_{ij}^{ch}$
         bias = (
-            self.shortest_path_bias(shortest)
-            + self.parent_direction_bias(parent)
-            + self.child_direction_bias(child)
+            self.shortest_path_bias(shortest) + self.parent_direction_bias(parent) + self.child_direction_bias(child)
         )  # `[...,N,N,H]`，三类可学习head-wise scalar bias相加
         if bias.ndim == 3:
             return bias.permute(2, 0, 1).contiguous()  # 单结构共享图`[H,N,N]`
@@ -101,6 +132,68 @@ def _bool_mask(value: torch.Tensor, *, name: str, shape: tuple[int, ...]) -> tor
         f"{name} numeric transport must contain finite 0/1 values",
     )
     return value.to(dtype=torch.bool)
+
+
+def _phase_clock_input(
+    phase_clock: torch.Tensor | None,
+    *,
+    enabled: bool,
+    batch_size: int,
+    reference: torch.Tensor,
+    role: str,
+    validated: bool,
+) -> torch.Tensor | None:
+    r"""验证可选的 episode phase 编码，并保留 ``torch.func`` 的纯张量路径。
+
+    phase clock 由 runtime 以
+
+    $$
+    \mathbf{p}_t=[\sin(\phi_t),\cos(\phi_t)]\in\mathbb{R}^{2}
+    $$
+
+    形成；模型只消费已经编码好的 `[B,2]` 有限 tensor，不在 forward 内推进或保存时钟。普通
+    forward 对有限性做 tensor assertion；``_validated=True`` 是 functional/vmap 路径的边界，
+    其输入已在 vmap 外完成有限性验证，因此这里不做 data-dependent Python 判断。
+
+    Args:
+        phase_clock (torch.Tensor | None): runtime 交付的 sin/cos 编码，形状 `[B,2]`。
+        enabled (bool): 当前模型是否声明 phase 分支。
+        batch_size (int): observation 的批大小。
+        reference (torch.Tensor): 用来约束 dtype/device 的主 observation tensor。
+        role (str): 错误信息中的模型角色名。
+        validated (bool): 是否处于已完成外部检查的 functional/vmap 路径。
+
+    Returns:
+        torch.Tensor | None: 启用时返回原 phase tensor；禁用时返回 ``None`` 并保持旧路径。
+
+    Raises:
+        ValueError: 启用时 phase 缺失、shape、dtype 或 device 不符合合同。
+        RuntimeError: 普通 forward 检测到非有限 phase 时由 tensor assertion 抛出。
+    """
+
+    if not enabled:
+        return None  # 禁用分支不读取 phase，确保旧模型不注册也不消费新输入。
+    if phase_clock is None:
+        raise ValueError(f"{role} phase_clock_enabled=True requires phase_clock with shape [{batch_size},2]")
+    expected_shape = (batch_size, 2)  # sin/cos 两列与 observation batch 轴严格对齐。
+    if tuple(phase_clock.shape) != expected_shape:
+        raise ValueError(
+            f"{role} phase_clock must have shape {expected_shape}, got {tuple(phase_clock.shape)}"
+        )
+    if phase_clock.dtype != reference.dtype:
+        raise ValueError(
+            f"{role} phase_clock must have dtype {reference.dtype}, got {phase_clock.dtype}"
+        )
+    if phase_clock.device != reference.device:
+        raise ValueError(
+            f"{role} phase_clock must be on device {reference.device}, got {phase_clock.device}"
+        )
+    if not validated:
+        torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]  # 保持 assertion 为纯 tensor 操作
+            torch.isfinite(phase_clock).all(),
+            f"{role} phase_clock must contain finite sin/cos values",
+        )
+    return phase_clock
 
 
 def masked_mean(tokens: torch.Tensor, mask: torch.Tensor, *, dim: int) -> torch.Tensor:
@@ -148,7 +241,9 @@ class PalmRotationGeometry:
             _bool_mask(self.owner_valid, name="geometry owner_valid", shape=(batch, OWNER_COUNT)),
         )
         graph_shape = (batch, OWNER_COUNT, OWNER_COUNT)
-        if any(matrix.shape != graph_shape for matrix in (self.shortest_path, self.parent_direction, self.child_direction)):
+        if any(
+            matrix.shape != graph_shape for matrix in (self.shortest_path, self.parent_direction, self.child_direction)
+        ):
             raise ValueError("palm-rotation graph matrices must have shape [B,21,21]")
         tensors = (self.tokens, self.owner_valid, self.shortest_path, self.parent_direction, self.child_direction)
         if len({tensor.device for tensor in tensors}) != 1:
@@ -290,7 +385,7 @@ class PalmRotationActorOutput:
 
     mean: torch.Tensor  # `[B,16]`，最终有界物理动作均值
     film_modulation_rms: torch.Tensor  # `[B,16]`，geometry对dynamic local hidden的RMS改变量
-    log_std: torch.Tensor  # scalar
+    log_std: torch.Tensor  # global标量，或可选条件/恢复探索的`[B,16]`有效log sigma
     base_mean: torch.Tensor | None = None  # residual/base arm；两种direct为None
     residual_mean: torch.Tensor | None = None  # residual/base arm；两种direct为None
     direct_mean: torch.Tensor | None = None  # 两种direct arm；residual/base为None
@@ -307,6 +402,8 @@ class PalmRotationResidualActor(nn.Module):
         max_log_std: float = -0.43,
         base_action_limit: float = BASE_ACTION_LIMIT,
         history_encoder: Literal["tcn", "raw_stack"] = "tcn",
+        sigma_mode: Literal["global", "conditional"] = "global",
+        recovery_sigma_floor: float | None = None,
     ) -> None:
         r"""构造History30路径、hierarchical pooling、base head与zero-init residual head。
 
@@ -320,7 +417,13 @@ class PalmRotationResidualActor(nn.Module):
         if not 0.0 < base_action_limit <= 1.0 - RESIDUAL_LIMIT:
             raise ValueError("base_action_limit plus residual limit must remain within physical action bounds")
         self.residual_enabled = bool(residual_enabled)
+        self.phase_clock_enabled = False  # base/residual arm 永远不启用 phase；统一暴露只读语义标记供 runtime 查询。
+        if sigma_mode not in {"global", "conditional"} or (sigma_mode == "conditional" and not residual_enabled):
+            raise ValueError("conditional sigma requires a contextual Actor")
+        self.sigma_mode = sigma_mode  # 共享标量或由同一关节上下文产生的条件探索尺度。
         self.max_log_std = float(max_log_std)  # $\sigma_{max}=e^{-0.43}\approx0.65$，匹配N000 early budget
+        recovery_exploration_contract(recovery_sigma_floor, max_log_std=max_log_std, sigma_mode=sigma_mode)
+        self.recovery_sigma_floor = recovery_sigma_floor  # 固定分布规则，无新增parameter/buffer或跨步隐藏状态。
         self.base_action_limit = float(base_action_limit)  # base保留80% authority，residual保留20%
         self.history_encoder_name = history_encoder  # checkpoint外run identity明确区分两种时间归纳偏置
         if history_encoder == "tcn":
@@ -399,6 +502,11 @@ class PalmRotationResidualActor(nn.Module):
         nn.init.zeros_(self.residual_head[-1].weight)  # type: ignore[arg-type]
         nn.init.zeros_(self.residual_head[-1].bias)  # type: ignore[arg-type]
         self.global_log_std = nn.Parameter(torch.tensor(float(initial_log_std)))
+        self.conditional_sigma_head = None
+        if sigma_mode == "conditional":
+            self.conditional_sigma_head = nn.Linear(GEOMETRY_WIDTH, 1)  # 所有关节共用头，不读任何资产ID。
+            nn.init.zeros_(self.conditional_sigma_head.weight)
+            nn.init.zeros_(self.conditional_sigma_head.bias)  # 初始每个关节恢复统一的sigma基线。
 
     @torch.no_grad()
     def project_exploration_parameters(self) -> None:
@@ -409,6 +517,54 @@ class PalmRotationResidualActor(nn.Module):
         """
 
         self.global_log_std.clamp_(max=self.max_log_std)
+        if self.sigma_mode == "conditional":
+            self.global_log_std.clamp_(min=math.log(0.05))  # 保持基线处于可学习区间。
+
+    def recovery_exploration_mask(self, observation: PalmRotationActorObservation) -> torch.Tensor:
+        r"""从动作前合法观测识别无TIP接触且仍向目标限位外推的真实关节。
+
+        $u$是控制器目标而非物理$q$；两者可能存在跟踪误差。归一化目标与限位同为rad/pi，
+        因此0.02 rad邻域先除以pi；上一动作保持无量纲。任一有效TIP接触就关闭整手的该规则。
+        不把History30初始padding解释成持续失触，也不跨forward维护额外时钟。
+        """
+        if self.recovery_sigma_floor is None:
+            return torch.zeros_like(observation.jnt_valid)
+        tip_contact = observation.owner_contact[:, 17:21, 0] > 0.5
+        no_tip = observation.tip_valid.any(dim=-1) & ~(tip_contact & observation.tip_valid).any(dim=-1)
+        target = observation.jnt_current[..., 1]
+        previous_action = observation.jnt_current[..., 2]
+        margin = RECOVERY_LIMIT_MARGIN_RAD / math.pi
+        lower_outward = (target <= observation.jnt_limits[..., 0] + margin) & (
+            previous_action < -RECOVERY_OUTWARD_ACTION_MIN
+        )
+        upper_outward = (target >= observation.jnt_limits[..., 1] - margin) & (
+            previous_action > RECOVERY_OUTWARD_ACTION_MIN
+        )
+        return observation.jnt_valid & no_tip[:, None] & (lower_outward | upper_outward)
+
+    def _policy_log_std(
+        self, contextual: torch.Tensor | None, observation: PalmRotationActorObservation
+    ) -> torch.Tensor:
+        r"""所有采样与PPO概率路径共同消费此处的有效log sigma。
+
+        默认global仍返回原标量。恢复规则只在gate内设下限；下限绑定时对base log sigma的梯度为零，
+        gate外保留原梯度。规则只依赖存储观测，使rollout与重算log-prob使用同一条件。
+        """
+        if self.sigma_mode == "global":
+            if self.recovery_sigma_floor is None:
+                return self.global_log_std  # 关闭新规则时保持原标量合同和数值路径。
+            floor = self.global_log_std.new_tensor(math.log(self.recovery_sigma_floor))
+            log_std = torch.where(
+                self.recovery_exploration_mask(observation),
+                torch.maximum(self.global_log_std, floor),
+                self.global_log_std,
+            )
+            return torch.where(observation.jnt_valid, log_std, torch.zeros_like(log_std))
+        if contextual is None or self.conditional_sigma_head is None:
+            raise RuntimeError("conditional sigma requires contextual joint features")
+        offset = self.conditional_sigma_head(contextual[:, 1:17]).squeeze(-1)
+        log_std = (self.global_log_std + math.log(2.0) * torch.tanh(offset)).clamp(math.log(0.05), self.max_log_std)
+        return torch.where(observation.jnt_valid, log_std, torch.zeros_like(log_std))  # ghost的辅助Normal取sigma=1。
 
     def _local_and_hand(
         self,
@@ -484,6 +640,7 @@ class PalmRotationResidualActor(nn.Module):
         base = self.base_action_limit * torch.tanh(raw_base)  # $\mu^{base}\in[-0.8,0.8]$
         base = torch.where(observation.jnt_valid, base, torch.zeros_like(base))
 
+        contextual = None
         if self.residual_enabled:
             contextual = self._contextual_tokens(observation, geometry, local, finger, hand)
             raw_residual = self.residual_head(torch.cat((contextual[:, 1:17], local), dim=-1)).squeeze(-1)
@@ -495,7 +652,7 @@ class PalmRotationResidualActor(nn.Module):
         return PalmRotationActorOutput(
             mean=mean,
             film_modulation_rms=film_modulation_rms,
-            log_std=self.global_log_std,
+            log_std=self._policy_log_std(contextual, observation),
             base_mean=base,
             residual_mean=residual,
         )
@@ -542,6 +699,11 @@ class PalmRotationDirectActor(PalmRotationResidualActor):
     已有``direct``checkpoint保持``[H^a_{t,j},Z^{a,loc}_{t,j}]``的local-skip语义。Token-only用96维head
     hidden，使首层权重数$128\times96$与local-skip的$192\times64$相同；两者及Residual总参数量差保持在
     ±5%内。它们都不是``residual_enabled=False``，后者表示只有local base、没有global context。
+
+    ``phase_clock_enabled`` 只在 direct/direct_token route 上打开。runtime 传入的
+    ``phase_clock=[\sin\phi,\cos\phi]`` 经过零初始化的 ``Linear(2,128,bias=False)`` 后，
+    仅广播到真实 JOINT contextual token，再进入原有 direct head；因此 phase 不会改变 local skip、
+    TCN、geometry FiLM 或 global/conditional log sigma 的定义。
     """
 
     def __init__(
@@ -551,6 +713,9 @@ class PalmRotationDirectActor(PalmRotationResidualActor):
         max_log_std: float = -0.43,
         history_encoder: Literal["tcn", "raw_stack"] = "tcn",
         local_skip: bool = True,
+        sigma_mode: Literal["global", "conditional"] = "global",
+        recovery_sigma_floor: float | None = None,
+        phase_clock_enabled: bool = False,
     ) -> None:
         r"""构造共享trunk，并按显式feature-route以direct head替换两条Residual动作heads。"""
 
@@ -560,6 +725,8 @@ class PalmRotationDirectActor(PalmRotationResidualActor):
             max_log_std=max_log_std,
             base_action_limit=BASE_ACTION_LIMIT,
             history_encoder=history_encoder,
+            sigma_mode=sigma_mode,
+            recovery_sigma_floor=recovery_sigma_floor,
         )
         del self.base_head  # direct没有local base动作读出；local仍进入context与最终head
         del self.residual_head  # direct没有0.2 correction语义
@@ -575,23 +742,47 @@ class PalmRotationDirectActor(PalmRotationResidualActor):
         )
         nn.init.orthogonal_(self.direct_head[-1].weight, gain=0.01)  # type: ignore[arg-type]
         nn.init.zeros_(self.direct_head[-1].bias)  # type: ignore[arg-type]
+        self.phase_clock_enabled = bool(phase_clock_enabled)  # phase 只属于 Direct 两个显式 feature route
+        if self.phase_clock_enabled:
+            # 零初始化 $\Delta H^a_j=W_p\mathbf{p}_t$，使启用模型起点逐值复现旧 contextual token。
+            self.phase_contextual_adapter = nn.Linear(2, GEOMETRY_WIDTH, bias=False)
+            nn.init.zeros_(self.phase_contextual_adapter.weight)  # `[128,2]`，新 route 初始严格无影响
 
     def forward(
         self,
         observation: PalmRotationActorObservation,
         geometry: PalmRotationGeometry,
+        *,
+        phase_clock: torch.Tensor | None = None,
+        _validated: bool = False,
     ) -> PalmRotationActorOutput:
         r"""输出全authority direct mean、FiLM机制量与共享探索尺度。"""
 
-        if observation.jnt_current.shape[0] != geometry.tokens.shape[0]:
-            raise ValueError("actor observation and geometry batch sizes disagree")
-        torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]
-            torch.all(observation.owner_valid == geometry.owner_valid), "actor/geometry masks disagree"
+        # 向量化任务梯度仅对外部已完整验证的批次切片设置_validated；普通forward仍执行生产检查。
+        if not _validated:
+            if observation.jnt_current.shape[0] != geometry.tokens.shape[0]:
+                raise ValueError("actor observation and geometry batch sizes disagree")
+            torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]
+                torch.all(observation.owner_valid == geometry.owner_valid), "actor/geometry masks disagree"
+            )
+        phase_clock = _phase_clock_input(
+            phase_clock,
+            enabled=self.phase_clock_enabled,
+            batch_size=observation.jnt_current.shape[0],
+            reference=observation.jnt_current,
+            role="direct actor",
+            validated=_validated,
         )
         local, finger, hand, film_modulation_rms = self._local_and_hand(observation, geometry)
         contextual = self._contextual_tokens(observation, geometry, local, finger, hand)
+        contextual_joint = contextual[:, 1:17]  # 旧 global contextual JOINT token，形状 `[B,16,128]`
+        if phase_clock is not None:
+            # 同一 hand-level $\mathbf{p}_t$ 广播到真实 JOINT；ghost 行严格不接收 phase residual。
+            phase_delta = self.phase_contextual_adapter(phase_clock).unsqueeze(1).expand(-1, JOINT_COUNT, -1)
+            joint_mask = observation.jnt_valid.unsqueeze(-1).to(dtype=phase_delta.dtype)
+            contextual_joint = contextual_joint + phase_delta * joint_mask  # 只改变均值分支的 direct 输入
         direct_input = (
-            torch.cat((contextual[:, 1:17], local), dim=-1) if self.local_skip else contextual[:, 1:17]
+            torch.cat((contextual_joint, local), dim=-1) if self.local_skip else contextual_joint
         )  # local-skip为`[B,16,192]`；token-only为$H^a_{t,j}\in\mathbb R^{128}$
         raw_direct = self.direct_head(direct_input).squeeze(-1)
         mean = torch.tanh(raw_direct)  # 完整物理动作authority$[-1,1]$
@@ -599,18 +790,24 @@ class PalmRotationDirectActor(PalmRotationResidualActor):
         return PalmRotationActorOutput(
             mean=mean,
             film_modulation_rms=film_modulation_rms,
-            log_std=self.global_log_std,
+            log_std=self._policy_log_std(contextual, observation),
             direct_mean=mean,
         )
 
 
 class PalmRotationStructuredCritic(nn.Module):
-    r"""两层graph context与critic-only LN-c的privileged hand-level value。"""
+    r"""两层graph context与critic-only LN-c的privileged hand-level value。
 
-    def __init__(self) -> None:
+    启用 ``phase_clock_enabled`` 时，``[\sin\phi,\cos\phi]`` 经过零初始化的
+    ``Linear(2,896,bias=False)`` 加到七个 128D readout 拼接结果，再进入原有 value-head LayerNorm；
+    该 route 只读 hand-level value，不改变 Actor 或其探索尺度。
+    """
+
+    def __init__(self, *, phase_clock_enabled: bool = False) -> None:
         r"""构造owner/object/task adapters、两层Pre-LN backbone与scalar readout。"""
 
         super().__init__()
+        self.phase_clock_enabled = bool(phase_clock_enabled)  # phase adapter 只影响 hand-level value readout
         owner_input_width = GEOMETRY_WIDTH + 2 + 4
         self.owner_adapter = nn.Sequential(
             nn.Linear(owner_input_width, 128),
@@ -639,23 +836,44 @@ class PalmRotationStructuredCritic(nn.Module):
             nn.GELU(),
             nn.Linear(128, 1),
         )
+        if self.phase_clock_enabled:
+            # 零初始化 $\Delta r=W_v\mathbf{p}_t$，保持旧 value_head LayerNorm 与宽度完全不变。
+            self.phase_readout_adapter = nn.Linear(2, 7 * GEOMETRY_WIDTH, bias=False)
+            nn.init.zeros_(self.phase_readout_adapter.weight)  # `[896,2]`，启用起点与旧价值逐值等价
 
-    def forward(self, observation: PalmRotationCriticObservation, geometry: PalmRotationGeometry) -> torch.Tensor:
+    def forward(
+        self,
+        observation: PalmRotationCriticObservation,
+        geometry: PalmRotationGeometry,
+        *,
+        phase_clock: torch.Tensor | None = None,
+        _validated: bool = False,
+    ) -> torch.Tensor:
         r"""融合privileged owner/object/task state并输出`[B]` scalar value。"""
 
-        if observation.jnt_state.shape[0] != geometry.tokens.shape[0]:
-            raise ValueError("critic observation and geometry batch sizes disagree")
-        torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]
-            torch.all(observation.owner_valid == geometry.owner_valid), "critic/geometry masks disagree"
+        if not _validated:
+            if observation.jnt_state.shape[0] != geometry.tokens.shape[0]:
+                raise ValueError("critic observation and geometry batch sizes disagree")
+            torch._assert_async(  # pyright: ignore[reportPrivateImportUsage]
+                torch.all(observation.owner_valid == geometry.owner_valid), "critic/geometry masks disagree"
+            )
+        phase_clock = _phase_clock_input(
+            phase_clock,
+            enabled=self.phase_clock_enabled,
+            batch_size=observation.jnt_state.shape[0],
+            reference=observation.jnt_state,
+            role="structured critic",
+            validated=_validated,
         )
-        owner_joint = torch.zeros(
-            observation.jnt_state.shape[0],
-            OWNER_COUNT,
-            4,
-            device=observation.jnt_state.device,
-            dtype=observation.jnt_state.dtype,
+        # PALM/TIP无joint state；函数式拼接保留vmap的任务轴，不向未分批零张量原位copy。
+        owner_joint = torch.cat(
+            (
+                torch.zeros_like(observation.jnt_state[:, :1]),
+                observation.jnt_state,
+                torch.zeros_like(observation.jnt_state[:, :4]),
+            ),
+            dim=1,
         )
-        owner_joint[:, 1:17] = observation.jnt_state
         owner_raw = torch.cat((geometry.tokens, observation.owner_contact, owner_joint), dim=-1)
         owner = self.owner_adapter(owner_raw) * observation.owner_valid.unsqueeze(-1)
         contextual = self.backbone(
@@ -675,11 +893,17 @@ class PalmRotationStructuredCritic(nn.Module):
         object_hidden = self.object_adapter(observation.obj[:, 0])
         task_hidden = self.task_adapter(torch.cat((observation.task[:, 0], observation.reward_release), dim=-1))
         readout = torch.cat((palm, joint_mean, joint_max, tip_mean, tip_max, object_hidden, task_hidden), dim=-1)
+        if phase_clock is not None:
+            readout = readout + self.phase_readout_adapter(phase_clock)  # `[B,896]`，只进入 value 分支
         return self.value_head(readout).squeeze(-1)
 
 
 class PalmRotationActorCritic(nn.Module):
-    r"""完全分参的actor/critic checkpoint namespace容器。"""
+    r"""完全分参的actor/critic checkpoint namespace容器。
+
+    ``phase_clock_enabled`` 是显式方法开关，仅对 ``direct`` 与 ``direct_token`` 合法；base/residual
+    arm 保持 phase-disabled。模型不保存或推进 episode 时钟，时钟周期与 episode reset 语义由 runtime 提供。
+    """
 
     def __init__(
         self,
@@ -689,16 +913,25 @@ class PalmRotationActorCritic(nn.Module):
         max_log_std: float = -0.43,
         base_action_limit: float = BASE_ACTION_LIMIT,
         history_encoder: Literal["tcn", "raw_stack"] = "tcn",
+        sigma_mode: Literal["global", "conditional"] = "global",
+        recovery_sigma_floor: float | None = None,
+        phase_clock_enabled: bool = False,
     ) -> None:
         r"""按显式arm实例化actor与共同critic；冻结N040不属于本module。"""
 
         super().__init__()
+        self.phase_clock_enabled = bool(phase_clock_enabled)  # phase 只对 direct/direct_token 合法
+        if self.phase_clock_enabled and arm not in {"direct", "direct_token"}:
+            raise ValueError("phase_clock_enabled is supported only for direct or direct_token arm")
         if arm in {"direct", "direct_token"}:
             self.actor: PalmRotationResidualActor | PalmRotationDirectActor = PalmRotationDirectActor(
                 initial_log_std=initial_log_std,
                 max_log_std=max_log_std,
                 history_encoder=history_encoder,
                 local_skip=arm == "direct",
+                sigma_mode=sigma_mode,
+                recovery_sigma_floor=recovery_sigma_floor,
+                phase_clock_enabled=self.phase_clock_enabled,
             )
         elif arm in {"base", "residual"}:
             self.actor = PalmRotationResidualActor(
@@ -707,11 +940,13 @@ class PalmRotationActorCritic(nn.Module):
                 max_log_std=max_log_std,
                 base_action_limit=base_action_limit,
                 history_encoder=history_encoder,
+                sigma_mode=sigma_mode,
+                recovery_sigma_floor=recovery_sigma_floor,
             )
         else:
             raise ValueError(f"unsupported palm-rotation actor arm: {arm!r}")
         self.arm = arm  # checkpoint/model诊断显式区分Residual、local-skip Direct与token-only Direct
-        self.critic = PalmRotationStructuredCritic()
+        self.critic = PalmRotationStructuredCritic(phase_clock_enabled=self.phase_clock_enabled)
 
     def trainable_parameter_sets(self) -> tuple[set[int], set[int]]:
         r"""返回actor/critic parameter object IDs供optimizer/checkpoint断言。"""
@@ -721,7 +956,19 @@ class PalmRotationActorCritic(nn.Module):
         }
 
 
+def expanded_policy_log_std(log_std: torch.Tensor, mean: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
+    r"""只允许全局标量或精确[B,16]条件尺度；在概率计算前中和ghost。"""
+    if log_std.numel() == 1:
+        expanded = log_std.expand_as(mean)
+    elif log_std.shape == mean.shape:
+        expanded = log_std
+    else:
+        raise ValueError("policy log_std must be scalar or match the [batch,joint] mean")
+    return torch.where(active, expanded, torch.zeros_like(expanded))
+
+
 __all__ = [
+    "expanded_policy_log_std",
     "BASE_ACTION_LIMIT",
     "GEOMETRY_WIDTH",
     "FILM_LIMIT",

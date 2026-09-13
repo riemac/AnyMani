@@ -1,7 +1,7 @@
-r"""Schema-8 full checkpoint 的独立 held-out evaluation 命令行入口。
+r"""Schema-9 full checkpoint 的独立 held-out evaluation 命令行入口。
 
-运行入口：``python -m anymani.distill.ssl.evaluate``。只有显式提供 ``--baseline_checkpoint``
-时才执行训练形态 q-bank 前后对比。
+运行入口：``python -m anymani.distill.ssl.evaluate``。默认只执行 core；昂贵消融或压缩分析由
+可重复 ``--analysis`` 显式开启。
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate one AnyMani Geometry SSL checkpoint.")
     parser.add_argument("--config", default=DEFAULT_EXPERIMENT_NAME)
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--baseline_checkpoint", default="")
+    parser.add_argument("--analysis", action="append", choices=("ablations", "compression"), default=[])
+    parser.add_argument("--compression_basis", default=None)
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--experiment_name", default=None)
     parser.add_argument("--q_per_asset", type=int, default=None)
@@ -57,7 +58,8 @@ def main(argv: Sequence[str] | None = None) -> Path:
     }
     run_updates = {
         "checkpoint": args.checkpoint,
-        "baseline_checkpoint": args.baseline_checkpoint,
+        "analyses": tuple(args.analysis),
+        "compression_basis": args.compression_basis or "",
         **{
             name: getattr(args, name)
             for name in ("output_dir", "experiment_name", "seed", "deterministic_algorithms")

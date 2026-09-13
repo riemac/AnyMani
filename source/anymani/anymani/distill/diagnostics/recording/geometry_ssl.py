@@ -189,9 +189,9 @@ class GeometrySSLRunLogger:
             if not isinstance(value, (float, int)) or float(value) <= 0.0:
                 raise ValueError(f"final teacher baseline {name}.baseline_mse must be positive")
             baselines[name] = float(value)
-
         if not baselines:
             raise ValueError("final teacher baselines must contain at least one objective mapping")
+
         sources = []
         if lineage_metrics_path is not None and lineage_metrics_path.resolve() != self.jsonl_path.resolve():
             sources.append(lineage_metrics_path)

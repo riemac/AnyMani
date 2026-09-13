@@ -30,8 +30,10 @@ FATAL_RUNTIME_PATTERNS = (
     "compressContactStage",
     "getRigidDynamicData: CUDA error",
     "CUDA error, code 2",
+    "palm-rotation training exhausted CUDA driver headroom:",
+    "palm-rotation training exceeded PyTorch allocated safety fraction:",
 )
-"""一旦出现便不再允许写入后续科学trajectory/checkpoint的PhysX/CUDA故障标记。"""
+"""物理损坏或训练资源安全门的停止标记；Kit返回零也不能把这些运行解释为完成。"""
 
 
 def _utc_now() -> str:
@@ -89,7 +91,7 @@ def record_optional_rl_phase(phase: str, event: str, **fields: Any) -> None:
 
 
 def scan_appended_fatal_log(path: Path, previous_size: int) -> tuple[int, str | None]:
-    r"""增量扫描stdout/stderr，并返回首个PhysX/CUDA不可恢复故障行。
+    r"""增量扫描stdout/stderr，并返回首个物理故障或资源安全门停止行。
 
     每次从旧文件尾前512 bytes开始，避免错误标记恰好跨越两次采样写入边界。该函数只供父进程调用，
     不触碰Isaac/PyTorch CUDA stream；重复overlap不会产生二次动作，因为首个match后父进程立即终止child。

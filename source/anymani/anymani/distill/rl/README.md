@@ -96,6 +96,14 @@ TIP-only保留每关节本体状态、动作历史和所属指尖接触，同时
 
 需要保留动作均值而重新设置探索范围时，`python -m anymani.distill.rl.scripts.prepare_palm_rotation_actor_initialization --checkpoint <parent.pth> --latent_std 0.35 --output <new-init.pth>`生成仅初始化用artifact。它只改变global latent标准差，保留其余Actor、Critic和value张量，不导出optimizer或训练计数；输出只供`--actor_init_checkpoint`，不用于完整`--checkpoint`恢复。`scripts.check_palm_rotation_depth_growth`则验证额外零输出残差层的CPU函数/梯度保持性质，尚不构成大模型学习收益。
 
+可选`--recovery_sigma_floor 0.6`仅在全部有效TIP无接触、真实关节目标距对应限位不超过0.02 rad、上一无量纲动作向外且绝对值大于0.05时，提高该关节的潜高斯sigma至所设下限。它读取已有动作前观测，保持动作中心、参数键、物理动作权限与History30不变；下限必须在原探索上限内且仅支持global模式。改变该规则的初始化必须显式加`--adapt_recovery_exploration --actor_init_checkpoint <parent.pth>`，以新方法身份记录源/目标规则；完整`--checkpoint`续训仍要求相同身份。固定评价从检查点合同恢复规则，正式动作仍使用deterministic mean；示例尺度不构成效果保证。
+
+`--rejected_action_weight`默认0，可显式给Actor增加无TIP时的无效命令成本。对当前目标$u$和均值动作$\mu$，预测目标为$u'=\mathrm{clip}(u+\mu/24,l,h)$，未被执行的无量纲分量为$e=\mu-24(u'-u)$；成本是在整手有效TIP均无接触时，对真实关节的$e^2$取均值。代码在rad/pi观测上用等价action-space夹紧计算，以使完全可执行动作的成本精确为0。该项加在普通PPO与functional CAGrad的同一Actor目标中，不加入环境reward或Critic回报，也不读取物体信息；权重、公式与归约写入方法身份。它是待验证的训练先验，不能用成本下降代替正式圈数表现。
+
+`--phase_period_steps P` 为 `direct`/`direct_token` 显式增加内部时钟，要求整数 $P\ge2$；例如 20 Hz 下的43步对应2.15秒。VecEnv 从物理回合计数产生 $[\sin\phi,\cos\phi]$，$\phi=2\pi(n\bmod P)/P$，在物理 reset 后归零，并随原始 rollout sample 保存。Actor 在原 contextual JOINT token 后、Critic 在原 value readout 后添加零初始化线性适配器；既有 LayerNorm 宽度、History30、N040 输入和动作权限保持不变。模型 forward 与 PPO minibatch 重放不自行推进时间。时钟是待检验的归纳偏置，不保证学到有效换指或持续旋转。
+
+从无时钟策略迁移时必须声明 `--adapt_phase_clock --actor_init_checkpoint <parent.pth>`；增加 `--init_critic` 保留 Critic/value RMS，增加 `--init_optimizers --actor_init_optimizer_names <names.json>` 则按绑定 source SHA 的参数名称表复制旧 Adam 状态，仅新增适配器的状态从零开始。旧权重与零适配器的函数保持性质必须先核验，不能用放宽所有 missing keys 代替迁移合同。新 checkpoint 同时保存参数名称表、初始化证据和首次真实 rollout 的 `phase_rollout_witness.h5` 身份；见证核对动作前 phase 与 done 标记的时序，独立于物理能力评分。
+
 `--rotation_progress_clip_rad`显式控制进展奖励$5\,\mathrm{clip}(\Delta\psi,-c,c)$的对称半宽，默认$c=0.025$ rad/step；20 Hz下对应增量速率0.5 rad/s，候选0.04对应0.8 rad/s。改变它保留未饱和区的斜率和反向惩罚，进入任务与训练身份；它不是动作幅度或物理速度上限。固定评价始终使用未截断的物理净圈，奖励重算不能代替实际重训后的能力比较。
 
 `--strict_goal_reward_weight`控制姿态与位置双门命中的脉冲权重，默认10。该单因素对照保持goal事件定义、pose奖励、位置/轴失败条件和frontier reward=0；降低它不等于放宽物理安全门。判定时同时检查固定净圈/方向、位置保持及120秒耐久，不能只根据同轨迹重算后的奖励相关性选择配置。
@@ -164,11 +172,26 @@ python -m anymani.distill.diagnostics.analysis.rl.palm_rotation /absolute/path/t
 
 训练入口与评估入口分别拥有训练分布和能力测量窗口。评估读取checkpoint声明的actor触觉信息，显式传入相同`--cohort_lock`；30秒主评估使用`--steps 600 --num_replicas 16 --reference <fixed30-reference.json>`，`--trace_stride 1`额外保存20 Hz接触/角速时序。默认2400步保留耐久检查入口。正式扩张资格只在30秒R16、TIP-only且无额外遮蔽干预时应用；R1、耐久和冻结干预仍保存物理结果，但不授予该资格。主要物理指标为净圈、方向性和drop/axis联合生存率，strict goal tracking单独报告。
 
+`--orientation_goal`选择新的姿态目标任务：KD关闭，实际每策略步姿态奖励为`1/(theta+0.1)`，角误差≤0.2rad即把上一目标沿手轴推进30°；同时位置在本回合reset锚点2.5cm内才获得一次250奖金。7cm/45°仍是物理失败边界，失败惩罚为−20，非TIP接触与初始关节姿态惩罚为0。该选项是明确的新任务配方，参数写入`training.orientation_goal`与task identity；不将原`position_only`消融冒称完整姿态引导。`--sigma_mode conditional`在原关节上下文上增加共享sigma头，输出有界的逐状态/关节尺度；默认global结构仍保留。
+
+`--position_adr`通过`env_cfg.adr.object_position`启用逐环境位置组件。沿用25档谱`0.01*k/25`米，本轮最高允许第5档（±2mm），初始第1档（±0.4mm），仅在reset施加手掌平面偏移。每个环境独立用本档至少3个回合的首30秒净圈EMA升降，1圈且首窗口安全可升档，低于0.5圈可退档，分数在2圈饱和。位置扰动后重新捕获episode anchor；固定评价自动关闭扰动。每回合ADR档位、实际偏移及首30秒统计进入训练产物，完整checkpoint保存逐环境课程状态。
+
 多拓扑入门覆盖另存为`reliable_topology_coverage`：固定30秒R16、TIP-only且无动作/观察干预时，每资产要求净圈至少1、方向至少0.7、安全至少75%；每拓扑至少一半代表资产达标才计入覆盖。拓扑按`group_name/mother_name`分组，允许显式`--cohort_transfer`报告目标集合的覆盖，R1/耐久只保留物理诊断。该字段从原始指标重新判定，不复用安全门较低的旧`viability_passed`，也不替换两圈的`scale_ladder`结果。
 
 冻结策略在另一集合上评价时，显式使用`--cohort_lock <target.canonical.lock.yaml> --cohort_transfer`。验证仍固定策略、任务、观察ABI、N040和精度/代码语义；重合物理资产必须保留相同预抓取。共享catalog新增条目前保存`index_history`，只读复测可核对真正使用的旧记录，避免无关新增条目改变旧结果。此兼容不等于不同目录版本下的完整PPO状态恢复已自动放宽。
 
 `--direct_logit_gain 1.5`是冻结Direct策略的显式读出诊断，形成$\mu=\tanh(1.5\,\mathrm{logit})$；原动作上限和参数保持，干预不授予原checkpoint的正式过门资格。`--trace_rewards --trace_stride 1`保存实际加权每步奖励分项、释放系数和分项重构误差。评价按source释放参数初始化，动态课程的评价状态不自动等于训练结束状态；解释时以记录的实际系数为准。
+
+接力诊断用于区分“当前策略的动作配合”与“此前形成的握持状态”。`--diagnostic_only --diagnostic_boundary_step 300 --actor_switch_checkpoint <after.pth>`表示完成前300个旧动作后，在15秒处载入同方法另一checkpoint的Actor，第301个动作开始交给接替策略。控制目标、观察历史和物理状态在交接处逐值检查；两段Actor分别保持冻结。参照条件省去`--actor_switch_checkpoint`，保留同一边界取样。该入口要求完整`--trace_stride 1 --trace_rewards`，在`.boundary.h5`中保存交接状态和两个策略对同一输入的动作，trace用`actor_checkpoint_phase`标记每步来源。所有`--diagnostic_only`结果均以诊断角色发布，正式cohort、可靠覆盖及scale字段为空。
+
+```bash
+python -m anymani.distill.rl.evaluate_palm_rotation_mvp \
+  --headless --rl_games_strict --checkpoint <before.pth> \
+  --cohort_lock <focus.canonical.lock.yaml> --cohort_transfer \
+  --num_replicas 16 --steps 600 --reference <fixed30-reference.json> \
+  --diagnostic_only --diagnostic_boundary_step 300 --actor_switch_checkpoint <after.pth> \
+  --trace_stride 1 --trace_rewards --output <new-relay-result.json>
+```
 
 回放导出使用`--video <new.mp4> --viewer_asset_index <selection-local-index>`，通常配合`--num_replicas 1 --steps 600`。入口自动启用离屏相机，以选中副本的实际reset物体位置设置固定世界取景，按20 Hz保存动作前图像；第一轨迹结束后不接入自动重置的新回合。视频是人工机制检查材料，R1回放不替代R16能力评价。
 

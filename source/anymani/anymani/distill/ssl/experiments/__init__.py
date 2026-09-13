@@ -1,7 +1,7 @@
 r"""Geometry SSL 实验快照 registry。
 
 每个 registry entry 指向一个语义自包含的 Python 快照。快照同时导出训练配置，以及在论文
-作图或泛化分析时可选使用的 validation/evaluation 配置。这里使用显式注册而不是自动扫描目录，
+作图或泛化分析时使用的 explicit evaluation 配置。这里使用显式注册而不是自动扫描目录，
 因为实验名称、默认版本和历史 preset 都是需要审计的科研身份。
 """
 
@@ -20,15 +20,14 @@ from typing import Any
 class ExperimentPreset:
     r"""一个可被 CLI 和 ConfigStore 加载的完整实验快照。
 
-    ``EXPERIMENT`` 是训练主配置；validation/evaluation 导出保持在同一快照中，但不属于训练
-    生命周期。``config_sha256`` 用于 checkpoint lineage，使同名文件被修改后不会伪装成同一实验。
+    ``EXPERIMENT`` 是训练主配置；evaluation 导出保持在同一快照中，但不属于训练生命周期。
+    ``config_sha256`` 用于 checkpoint lineage，使同名文件被修改后不会伪装成同一实验。
     """
 
     name: str
     module_name: str
     module: ModuleType
     pretrain: Any
-    validation: Any | None
     evaluation: Any | None
     path: Path
     config_sha256: str
@@ -36,17 +35,17 @@ class ExperimentPreset:
 
 # 只有这里声明公开实验名称；版本化快照作为默认值，历史文件只通过显式名称访问。
 _MODULES: dict[str, str] = {
+    "geometry_ssl_density_material_jacobian_se3_depth3_v0_8_1": (
+        "anymani.distill.ssl.experiments.geometry_ssl_density_material_jacobian_se3_depth3_v0_8_1"
+    ),
     "geometry_ssl_density_material_jacobian_se3_v0_8_1": (
         "anymani.distill.ssl.experiments.geometry_ssl_density_material_jacobian_se3_v0_8_1"
     ),
     "geometry_ssl_density_material_jacobian_v0_8_0": (
         "anymani.distill.ssl.experiments.geometry_ssl_density_material_jacobian_v0_8_0"
     ),
-    "geometry_ssl_multitask_representation_v0_7_3": (
-        "anymani.distill.ssl.experiments.geometry_ssl_multitask_representation_v0_7_3"
-    ),
-    "multi_anchor_gaussian_implicit_field": (
-        "anymani.distill.ssl.experiments.multi_anchor_gaussion_implicit_field"
+    "geometry_ssl_multitask_representation_v0_7_5": (
+        "anymani.distill.ssl.experiments.geometry_ssl_multitask_representation_v0_7_5"
     ),
 }
 
@@ -77,7 +76,6 @@ def _build_preset(name: str, module: ModuleType) -> ExperimentPreset:
         module_name=module.__name__,
         module=module,
         pretrain=module.EXPERIMENT,
-        validation=getattr(module, "VALIDATION_EXPERIMENT", None),
         evaluation=getattr(module, "EVALUATION_EXPERIMENT", None),
         path=path,
         config_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -126,7 +124,7 @@ def load_experiment(config_ref: str | Path) -> ExperimentPreset:
     return _build_preset(str(config_ref), importlib.import_module(module_name))
 
 
-DEFAULT_EXPERIMENT_NAME = "geometry_ssl_multitask_representation_v0_7_3"
+DEFAULT_EXPERIMENT_NAME = "geometry_ssl_multitask_representation_v0_7_5"
 
 
 __all__ = [

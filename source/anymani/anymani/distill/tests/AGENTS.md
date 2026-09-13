@@ -11,7 +11,8 @@ tests/
 │   ├── models/              entity/joint/anchor shape、奇偶性、routing、retained keys
 │   ├── objectives/          gauge、selector 与候选重建公式
 │   ├── ssl/                 façade、split、预实验、minibatch/复用、checkpoint
-│   └── rl/                  alias、YAML、adapter、observer、masked PPO
+│   ├── rl/                  alias、YAML、adapter、observer、masked PPO
+│   └── il/                  teacher packet、replica split与监督指标
 ├── integration/             synthetic / padded / real mother：encoder → loss → backward
 ├── performance/             RTX 5070 Ti retained encoder latency
 └── training_sanity/         真实 mother 固定 batch tiny-overfit

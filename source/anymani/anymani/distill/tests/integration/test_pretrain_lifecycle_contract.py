@@ -1,69 +1,85 @@
-r"""Geometry SSL schema-8 pure pretrain、run-local baseline、validation 与 evaluation 闭环。"""
+r"""Geometry SSL schema-9 streaming train、epoch recovery、retained export 与 explicit evaluation 闭环。"""
 
 from __future__ import annotations
 
-from dataclasses import asdict
+import json
+from dataclasses import asdict, replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
 import yaml
-from anymani.distill.methods.contracts import (
-    MethodEvaluationReport,
-    MethodParameterGroup,
-    MethodStep,
-    MethodUpdate,
-)
-from anymani.distill.objectives.contracts import AdditiveStatistic, ObjectiveTermResult
-from anymani.distill.ssl.post_training import (
-    EvaluationCfg,
-    EvaluationRun,
-    EvaluationRunCfg,
-    ValidationCfg,
-    ValidationRun,
-    ValidationRunCfg,
-)
+from anymani.distill.methods.contracts import MethodEvaluationReport, MethodParameterGroup, MethodUpdate
+from anymani.distill.ssl.post_training import EvaluationCfg, EvaluationRun, EvaluationRunCfg
 from anymani.distill.ssl.runtime.lifecycle import fit_embodiment_pretrain
-from anymani.distill.ssl.runtime.post_training import evaluate_checkpoint, validate_checkpoints
-from anymani.distill.ssl.runtime.pretrainer import (
-    AdamWCfg,
-    EmbodimentPretrainTrainer,
-    EmbodimentPretrainTrainerCfg,
-)
+from anymani.distill.ssl.runtime.post_training import evaluate_checkpoint
+from anymani.distill.ssl.runtime.pretrainer import AdamWCfg, EmbodimentPretrainTrainer, EmbodimentPretrainTrainerCfg
 from anymani.distill.ssl.runtime.run import PretrainRun, PretrainRunCfg
 from anymani.distill.ssl.runtime.sampling import OnlineSamplingCfg
 
 pytestmark = [pytest.mark.contract, pytest.mark.skipif(not torch.cuda.is_available(), reason="fit requires CUDA")]
 
 _TERMS = ("density", "kappa")
-_METRICS = ("density", "kappa", "derived_field")  # derived-field 只属于显式事后评估
 
 
 class _Dataset:
+    r"""Synthetic manifest identity；角色解析由 _Data 显式分离。"""
+
     source_sha256 = "synthetic-dataset-sha"
     source_path = Path("synthetic-ssl.yaml")
 
     @staticmethod
     def config_dict() -> dict[str, object]:
-        return {"schema_version": "synthetic"}
+        return {"schema_version": "synthetic", "validation": None}
+
+
+class _Catalog:
+    r"""只暴露当前 role 的最小 catalog surface。"""
+
+    def __init__(self, role: str) -> None:
+        self.dataset = _Dataset()
+        self.train = ("asset-a", "asset-b") if role == "train" else ()
+        self.evaluation = {"unseen": ("asset-c",), "official_zero_shot": ()} if role == "evaluation" else {}
+
+    @staticmethod
+    def training_dataset_identity() -> dict[str, object]:
+        return {
+            "schema_version": "1.0.0",
+            "source_sha256": "synthetic-dataset-sha",
+            "train_asset_count": 2,
+            "train_asset_axis_sha256": "synthetic-axis",
+        }
 
 
 class _Data:
-    def resolve(self):
-        return SimpleNamespace(
-            dataset=_Dataset(),
-            training_dataset_identity=lambda: {
-                "schema_version": "1.0.0",
-                "source_sha256": "synthetic-dataset-sha",
-                "train_asset_count": 2,
-                "train_asset_axis_sha256": "synthetic-axis",
-            },
-        )
+    r"""记录 train/evaluation resolver 是否发生越权调用。"""
+
+    def __init__(self) -> None:
+        self.resolved_roles: list[str] = []
+
+    def resolve_train(self) -> _Catalog:
+        self.resolved_roles.append("train")
+        return _Catalog("train")
+
+    def resolve_evaluation(self) -> _Catalog:
+        self.resolved_roles.append("evaluation")
+        return _Catalog("evaluation")
+
+
+class _Unit:
+    r"""Synthetic 2-pair stream unit；只提供 Trainer/logger 读取的 typed axes。"""
+
+    def __init__(self, sample_count: int, device: torch.device) -> None:
+        self.sample_count = sample_count
+        self.q = torch.zeros(sample_count, 1, device=device)
+        self.asset_ids = tuple(f"asset-{index}" for index in range(sample_count))
+        self.q_index = torch.arange(sample_count, device=device)
 
 
 class _Session:
+    r"""Synthetic split session，train 通过 realize_units，evaluation 通过 realize。"""
+
     def __init__(self, role: str, suite: str, asset_count: int, device: torch.device, trace: list[object]) -> None:
         self.role = role
         self.suite = suite
@@ -72,36 +88,49 @@ class _Session:
         self.cursor = 0
         self.trace = trace
 
-    def realize(self, item, *, schedule, step: int):
+    def realize_units(self, item: Any, *, schedule: Any, step: int):
         del schedule, step
-        if self.role == "train":
-            self.trace.append(item)
+        self.trace.append(item)
         self.cursor += item.sample_count
-        return SimpleNamespace(sample_count=item.sample_count)
+        yield _Unit(item.sample_count, self.device)
+
+    def realize(self, item: Any, *, schedule: Any, step: int) -> _Unit:
+        del schedule, step
+        self.cursor += item.sample_count
+        return _Unit(item.sample_count, self.device)
 
     def state_dict(self) -> dict[str, object]:
         return {"cursor": self.cursor, "role": self.role, "suite": self.suite}
 
-    def load_state_dict(self, state) -> None:
+    def load_state_dict(self, state: dict[str, object]) -> None:
         self.cursor = int(state["cursor"])
+
+    def drain_runtime_events(self) -> tuple[dict[str, object], ...]:
+        return ()
 
     def close(self) -> None:
         return None
 
 
 class _Method:
-    r"""只实现 Trainer 窄合同；内部单参数让 validation 能确定 best checkpoint。"""
+    r"""只实现 schema-9 Trainer/explicit-evaluation 窄合同。"""
 
     def __init__(self) -> None:
         self.parameter: torch.nn.Parameter | None = None
         self.forward_steps: list[int] = []
         self.training_trace: list[object] = []
         self.opened_roles: list[str] = []
+        self.prepared_roles: list[str] = []
         self.retained_export_count = 0
         self.z_gradient_requests: list[bool] = []
+        self.fail_after_updates: int | None = None
 
-    def prepare(self, catalog, *, device: torch.device, dtype: torch.dtype) -> None:
+    def prepare(self, catalog: _Catalog, *, role: str, device: torch.device, dtype: torch.dtype) -> None:
         del catalog, device, dtype
+        self.prepared_roles.append(role)
+
+    def configure_execution(self, policy: Any) -> None:
+        self.execution = policy
 
     def initialize_model(self, *, device: torch.device, dtype: torch.dtype) -> None:
         self.parameter = torch.nn.Parameter(torch.tensor(1.0, device=device, dtype=dtype))
@@ -112,9 +141,6 @@ class _Method:
         assert self.parameter is not None
         return self.parameter
 
-    def parameters(self):
-        return (self._parameter(), self.density_private, self.kappa_private)
-
     def train_mode(self) -> None:
         return None
 
@@ -122,25 +148,24 @@ class _Method:
         return None
 
     def split_names(self, role: str) -> tuple[str, ...]:
-        return {
-            "train": ("",),
-            "training_evaluation": ("",),
-            "validation": ("validation",),
-            "evaluation": ("unseen", "official_zero_shot"),
-        }[role]
+        assert role == "evaluation"
+        return ("unseen", "official_zero_shot")
 
     def split_asset_count(self, role: str, *, suite: str = "") -> int:
-        if role == "evaluation" and suite == "official_zero_shot":
-            return 0
-        return 2 if role in {"train", "training_evaluation"} else 1
+        assert role == "evaluation"
+        return 0 if suite == "official_zero_shot" else 1
 
-    def open_session(self, role: str, *, suite: str = "", device: torch.device, **_kwargs):
+    def open_session(self, role: str, *, suite: str = "", device: torch.device, **_kwargs: Any) -> _Session:
         self.opened_roles.append(role)
-        return _Session(role, suite, self.split_asset_count(role, suite=suite), device, self.training_trace)
+        count = 2 if role == "train" else self.split_asset_count(role, suite=suite)
+        return _Session(role, suite, count, device, self.training_trace)
 
-    def asset_manifest(self, catalog) -> dict[str, object]:
+    def asset_manifest(self, catalog: _Catalog) -> dict[str, object]:
         del catalog
-        return {"schema_version": "synthetic", "train": ["a", "b"], "validation": ["v"], "evaluation": ["e"]}
+        return {"schema_version": "synthetic", "train": [], "evaluation": {"unseen": ["asset-c"]}}
+
+    def source_artifact_identity(self) -> dict[str, object]:
+        return {}
 
     def declared_objective_weights(self) -> dict[str, float]:
         return {name: 1.0 for name in _TERMS}
@@ -152,109 +177,77 @@ class _Method:
         return {"algorithm": "synthetic-fairgrad", "near_opposition_tolerance": 1.0e-6}
 
     def optimizer_parameter_groups(self) -> tuple[MethodParameterGroup, ...]:
-        # synthetic lifecycle 只有一个 shared 参数；两个 private 组用零乘辅助参数保持三组合同。
         return (
             MethodParameterGroup("shared_encoder", (self._parameter(),)),
             MethodParameterGroup("density_reader", (self.density_private,)),
             MethodParameterGroup("kappa_reader", (self.kappa_private,)),
         )
 
-    def teacher_baseline_statistics(self, batch) -> dict[str, torch.Tensor]:
+    def teacher_baseline_statistics(self, batch: _Unit) -> dict[str, torch.Tensor]:
         count = torch.tensor(float(batch.sample_count), device=self._parameter().device)
         return {"density_sum": count, "kappa_sum": count, "count": count}
 
-    def merge_teacher_baseline_statistics(self, total, block):
+    def merge_teacher_baseline_statistics(self, total: Any, block: dict[str, torch.Tensor]):
         if total is None:
             return {name: value.clone() for name, value in block.items()}
         return {name: total[name] + block[name] for name in total}
 
-    def finalize_teacher_baselines(self, statistics) -> dict[str, object]:
+    def finalize_teacher_baselines(self, statistics: Any) -> dict[str, object]:
+        del statistics
         return {
-            "density": {"predictor": "constant_teacher_mean_per_bandwidth_slot", "baseline_mse": 1.0},
+            "density": {"predictor": "constant", "baseline_mse": 1.0},
             "kappa": {"predictor": "zero", "baseline_mse": 1.0},
         }
 
-    def forward_objectives(
+    def backward_update_units(
         self,
-        batch,
-        *,
-        step: int,
-        mode: str = "train",
-        microbatch_size: int | None = None,
-    ) -> MethodStep:
-        del mode, microbatch_size
-        self.forward_steps.append(step)
-        error = self._parameter().square()
-        denominator = torch.tensor(float(batch.sample_count), device=error.device)
-        objectives = {
-            name: ObjectiveTermResult(
-                name=name,
-                components=(AdditiveStatistic(name, error * denominator, denominator),),
-                metrics={"loss": error},
-            )
-            for name in _TERMS
-        }
-        return MethodStep(objectives=objectives, sample_count=batch.sample_count)
-
-    def reduce_update(self, steps: tuple[MethodStep, ...]) -> MethodUpdate:
-        total_samples = sum(step.sample_count for step in steps)
-        value = float(self._parameter().detach().square())
-        return MethodUpdate(
-            terms={name: value for name in _TERMS},
-            sample_count=total_samples,
-            denominators={name: float(total_samples) for name in _TERMS},
-        )
-
-    def backward_update(
-        self,
-        batch,
+        units: Any,
         *,
         forward_step: int,
+        logical_sample_count: int,
         microbatch_size: int,
         collect_z_gradients: bool = False,
     ) -> MethodUpdate:
-        r"""模拟 concrete streaming backward，并记录 lifecycle 传入的 4-epoch cadence。"""
-
+        del microbatch_size
+        if self.fail_after_updates is not None and len(self.forward_steps) >= self.fail_after_updates:
+            raise RuntimeError("synthetic interruption after completed epoch boundary")
+        observed = sum(unit.sample_count for unit in units)
+        assert observed == logical_sample_count
+        self.forward_steps.append(forward_step)
         self.z_gradient_requests.append(collect_z_gradients)
-        step = self.forward_objectives(batch, step=forward_step, microbatch_size=microbatch_size)
-        update = self.reduce_update((step,))
+        value = float(self._parameter().detach().square())
         self._parameter().grad = torch.full_like(self._parameter(), 2.0**0.5)
         self.density_private.grad = torch.zeros_like(self.density_private)
         self.kappa_private.grad = torch.zeros_like(self.kappa_private)
-        if not collect_z_gradients:
-            return update
+        evidence = {"fairgrad/cosine": 0.0} if collect_z_gradients else {}
         return MethodUpdate(
-            terms=update.terms,
-            sample_count=update.sample_count,
-            denominators=update.denominators,
-            gradient_evidence={"fairgrad/cosine": 0.0, "fairgrad/combined_norm": 2.0**0.5},
+            terms={name: value for name in _TERMS},
+            sample_count=observed,
+            denominators={name: float(observed) for name in _TERMS},
+            gradient_evidence=evidence,
         )
 
-    def evaluate_session(self, session, schedule, *, include_ablations: bool = False) -> MethodEvaluationReport:
+    def evaluate_session(self, session: _Session, schedule: Any, *, include_ablations: bool = False):
         while not schedule.complete:
             session.realize(schedule.next(), schedule=schedule, step=0)
         value = float(self._parameter().detach().square())
-        metrics = {name: value for name in _METRICS}
+        metrics = {"density": value, "kappa": value, "derived_field": value}
         ablations = None
         if include_ablations:
-            ablation_names = ("full", "query_only", "same_asset_q_shuffle", "cross_asset_shuffle", "joint_token_shuffle")
-            per_ablation = {name: {metric: value for metric in metrics} for name in ablation_names}
+            names = ("full", "query_only", "same_asset_q_shuffle", "cross_asset_shuffle", "joint_token_shuffle")
             ablations = {
                 "pairing_key": ["asset_id", "q_index"],
-                "ablations": ablation_names,
-                "records": [{"asset_id": session.suite, "q_index": 0, "metrics": per_ablation}],
+                "ablations": names,
+                "records": [{"asset_id": session.suite, "q_index": 0, "metrics": {name: metrics for name in names}}],
             }
         return MethodEvaluationReport(
             metrics=metrics,
-            strata={"metric_scores": metrics, "bank_digest_sha256": f"fixed-{session.role}-{session.suite}"},
-            teacher_baselines={
-                "density": {"baseline_mse": 1.0},
-                "kappa": {"baseline_mse": 100.0, "physical_baseline_mse": 1.0},
-            },
+            strata={"metric_scores": metrics, "bank_digest_sha256": f"fixed-{session.suite}"},
+            teacher_baselines={"density": {"baseline_mse": 1.0}, "kappa": {"physical_baseline_mse": 1.0}},
             ablations=ablations,
         )
 
-    def analyze_ablations(self, evidence, *, bootstrap_replicates: int, seed: int) -> dict[str, object]:
+    def analyze_ablations(self, evidence: Any, *, bootstrap_replicates: int, seed: int) -> dict[str, object]:
         return {"record_count": len(evidence["records"]), "bootstrap_replicates": bootstrap_replicates, "seed": seed}
 
     def training_state_dict(self) -> dict[str, torch.Tensor]:
@@ -264,12 +257,12 @@ class _Method:
             "kappa_private": self.kappa_private.detach().clone(),
         }
 
-    def load_training_state_dict(self, state) -> None:
+    def load_training_state_dict(self, state: dict[str, torch.Tensor]) -> None:
         self._parameter().data.copy_(state["parameter"])
         self.density_private.data.copy_(state["density_private"])
         self.kappa_private.data.copy_(state["kappa_private"])
 
-    def retained_artifact_payload(self, *, metadata, source_checkpoint: Path) -> dict[str, object]:
+    def retained_artifact_payload(self, *, metadata: dict[str, object], source_checkpoint: Path) -> dict[str, object]:
         self.retained_export_count += 1
         return {
             "schema_version": "synthetic",
@@ -278,214 +271,355 @@ class _Method:
             "lineage": {"source_checkpoint": str(source_checkpoint), "code_revision": metadata["code_revision"]},
         }
 
+    def fit_z_compression_basis(self, session: _Session, schedule: Any):
+        del session, schedule
+        from anymani.distill.diagnostics.evaluation.z_compression import UnifiedPCABasis
+
+        return UnifiedPCABasis(
+            mean=torch.zeros(4, dtype=torch.float64),
+            components=torch.eye(4, dtype=torch.float64),
+            eigenvalues=torch.ones(4, dtype=torch.float64),
+            sample_count=2,
+        )
+
     def close(self) -> None:
         return None
 
 
-def _trainer(*, mini_epochs: int, max_epochs: int = 2, num_minibatches: int = 2) -> EmbodimentPretrainTrainer:
+def _trainer() -> EmbodimentPretrainTrainer:
     config = EmbodimentPretrainTrainerCfg(
-        sampling=OnlineSamplingCfg(
-            assets_per_minibatch=2,
-            q_per_asset_per_minibatch=1,
-            shuffle_assets=False,
-            seed=17,
-        ),
-        max_epochs=max_epochs,
-        num_minibatches=num_minibatches,
-        mini_epochs=mini_epochs,
+        sampling=OnlineSamplingCfg(assets_per_minibatch=2, q_per_asset_per_minibatch=1, shuffle_assets=False, seed=17),
+        max_epochs=4,
+        num_minibatches=1,
+        mini_epochs=1,
         microbatch_size=2,
         optimizer=AdamWCfg(learning_rate=0.1, weight_decay=0.0),
-        checkpoint_every_epochs=1,
-        max_resident_assets=2,
+        checkpoint_every_epochs=2,
     )
     return EmbodimentPretrainTrainer(config)
 
 
 def _resolved(trainer: EmbodimentPretrainTrainer) -> dict[str, object]:
+    method = {
+        "state_measure": {"kind": "synthetic"},
+        "representation": {"kind": "synthetic"},
+        "model": {"kind": "synthetic"},
+        "objectives": {name: {} for name in _TERMS},
+        "fairgrad": {"algorithm": "synthetic-fairgrad", "near_opposition_tolerance": 1.0e-6},
+        "entity_permutation": {"enabled": True, "seed_offset": 31_337},
+        "joint_sign_rewrite": {"probability": 0.2},
+    }
     return {
-        "schema_version": "8.0.0",
+        "schema_version": "9.0.0",
         "data": {"manifest": "synthetic-ssl.yaml"},
-        "method": {
-            "state_measure": {"kind": "synthetic"},
-            "representation": {"kind": "synthetic"},
-            "model": {"kind": "synthetic"},
-            "objectives": {name: {} for name in _TERMS},
-            "fairgrad": {"algorithm": "synthetic-fairgrad", "near_opposition_tolerance": 1.0e-6},
-            "entity_permutation": {"enabled": True, "seed_offset": 31_337},
-            "joint_sign_rewrite": {"probability": 0.2},
-        },
+        "method": method,
         "trainer": asdict(trainer.config),
-        "run": {
-            "seed": 17,
-            "source_cache_root": "",
-            "source_cache_mode": "off",
-        },
+        "run": {"seed": 17, "source_cache_root": "", "source_cache_mode": "off", "new_run": False},
     }
 
 
-def _stage_resolved(*, role: str, stage_config: Any, run_config: Any) -> dict[str, object]:
-    r"""构造 synthetic 事后阶段配置；data/method 必须与训练 checkpoint 完全一致。"""
-
+def _evaluation_resolved(config: EvaluationCfg, run: EvaluationRunCfg) -> dict[str, object]:
+    train = _resolved(_trainer())
     return {
         "schema_version": "1.0.0",
-        "data": {"manifest": "synthetic-ssl.yaml"},
-        "method": {
-            "state_measure": {"kind": "synthetic"},
-            "representation": {"kind": "synthetic"},
-            "model": {"kind": "synthetic"},
-            "objectives": {name: {} for name in _TERMS},
-            "fairgrad": {"algorithm": "synthetic-fairgrad", "near_opposition_tolerance": 1.0e-6},
-            "entity_permutation": {"enabled": True, "seed_offset": 31_337},
-            "joint_sign_rewrite": {"probability": 0.2},
-        },
-        role: asdict(stage_config),
-        "run": asdict(run_config),
+        "data": train["data"],
+        "method": train["method"],
+        "evaluation": asdict(config),
+        "run": asdict(run),
     }
 
 
-def test_pretrain_validation_and_evaluation_are_explicit_stages(
+def test_train_exports_final_state_and_evaluation_is_explicit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """纯训练内闭合 baseline 且无评估副作用；事后阶段消费同一组 schema-8 checkpoints。"""
+    r"""训练只解析 train 并交付 last/retained；evaluation 只解析 held-out 且不产生 best。"""
 
     from anymani.distill.ssl.runtime import lifecycle
 
     monkeypatch.setattr(lifecycle, "_worktree_fingerprint", lambda: (False, ""))
     pretrain_dir = tmp_path / "pretrain"
-    pretrain_trainer = _trainer(mini_epochs=1, max_epochs=4, num_minibatches=1)
-    pretrain_run = PretrainRun(
-        PretrainRunCfg(
-            seed=17,
-            deterministic_algorithms=False,
-            source_cache_mode="off",
-        )
-    )
-    pretrain_method = _Method()
+    trainer = _trainer()
+    data = _Data()
+    method = _Method()
     fit_embodiment_pretrain(
-        trainer=pretrain_trainer,
-        data=_Data(),
-        method=pretrain_method,
-        run=pretrain_run,
+        trainer=trainer,
+        data=data,
+        method=method,
+        run=PretrainRun(PretrainRunCfg(seed=17, deterministic_algorithms=False, source_cache_mode="off")),
         output_dir_override=pretrain_dir,
-        resolved_config=_resolved(pretrain_trainer),
+        resolved_config=_resolved(trainer),
     )
 
+    assert data.resolved_roles == ["train"]
+    assert method.prepared_roles == ["train"]
+    assert method.opened_roles == ["train"]
+    assert method.forward_steps == [0, 1, 2, 3]
+    assert method.z_gradient_requests == [False, False, False, True]
+    assert method.retained_export_count == 1
     assert (pretrain_dir / "checkpoints" / "epoch_000000.pt").is_file()
-    assert (pretrain_dir / "checkpoints" / "epoch_000001.pt").is_file()
     assert (pretrain_dir / "checkpoints" / "epoch_000002.pt").is_file()
     assert (pretrain_dir / "checkpoints" / "epoch_000004.pt").is_file()
-    last = pretrain_dir / "checkpoints" / "last.pt"
-    assert last.is_file()
-    assert last.stat().st_ino == (pretrain_dir / "checkpoints" / "epoch_000004.pt").stat().st_ino
+    assert (pretrain_dir / "checkpoints" / "last.pt").is_file()
+    assert (pretrain_dir / "retained_encoder.pt").is_file()
+    assert not (pretrain_dir / "checkpoints" / "recovery.pt").exists()
+    assert not (pretrain_dir / "INCOMPLETE").exists()
+    assert (pretrain_dir / "COMPLETE").is_file()
     assert not (pretrain_dir / "checkpoints" / "best.pt").exists()
-    assert not (pretrain_dir / "retained_artifact.pt").exists()
-    assert not (pretrain_dir / "final_evaluation.yaml").exists()
-    assert not (pretrain_dir / "training_morphology_q_bank.yaml").exists()
-    assert (pretrain_dir / "run_teacher_baselines.yaml").is_file()
-    assert (pretrain_dir / "metrics_finalized.jsonl").is_file()
-    assert (pretrain_dir / "training_summary.yaml").is_file()
-    assert not (pretrain_dir / "asset_manifest.yaml").exists()
-    assert pretrain_method.opened_roles == ["train"]
-    assert pretrain_method.retained_export_count == 0
-    assert len(pretrain_method.training_trace) == 4
-    assert pretrain_method.forward_steps == list(range(4))
-    assert pretrain_method.z_gradient_requests == [False, False, False, True]
+    final_payload = torch.load(pretrain_dir / "checkpoints" / "last.pt", map_location="cpu", weights_only=False)
+    offsets = final_payload["trainer_state"]["log_continuation_offsets"]
+    assert offsets["metrics_jsonl_bytes"] == (pretrain_dir / "metrics.jsonl").stat().st_size
+    assert offsets["runtime_jsonl_bytes"] == (pretrain_dir / "runtime.jsonl").stat().st_size
 
-    source_files = tuple(sorted(path.relative_to(pretrain_dir) for path in pretrain_dir.rglob("*") if path.is_file()))
-    validation_config = ValidationCfg(
-        q_per_asset=1,
-        assets_per_minibatch=1,
-        q_per_asset_per_minibatch=1,
-        max_resident_assets=2,
-    )
-    validation_run_config = ValidationRunCfg(
-        baseline_checkpoint=str(pretrain_dir / "checkpoints" / "epoch_000000.pt"),
-        checkpoints=(
-            str(pretrain_dir / "checkpoints" / "epoch_000001.pt"),
-            str(pretrain_dir / "checkpoints" / "epoch_000002.pt"),
-        ),
-        seed=17,
-        deterministic_algorithms=False,
-    )
-    validation_dir = tmp_path / "validation"
-    validation_method = _Method()
-    validate_checkpoints(
-        data=_Data(),
-        method=validation_method,
-        config=validation_config,
-        run=ValidationRun(validation_run_config),
-        output_dir_override=validation_dir,
-        resolved_config=_stage_resolved(
-            role="validation",
-            stage_config=validation_config,
-            run_config=validation_run_config,
-        ),
-    )
-
-    assert (validation_dir / "checkpoints" / "best.pt").is_file()
-    selection = yaml.safe_load((validation_dir / "checkpoint_selection.yaml").read_text(encoding="utf-8"))
-    assert selection["best_source_checkpoint"].endswith("epoch_000002.pt")
-    assert validation_method.opened_roles == ["validation", "validation", "validation"]
-    assert validation_method.retained_export_count == 0
-    assert tuple(sorted(path.relative_to(pretrain_dir) for path in pretrain_dir.rglob("*") if path.is_file())) == source_files
-
-    evaluation_config = EvaluationCfg(
+    evaluation_cfg = EvaluationCfg(
         q_per_asset=1,
         assets_per_minibatch=1,
         q_per_asset_per_minibatch=1,
         bootstrap_replicates=2,
-        max_resident_assets=2,
+        max_resident_assets=1,
+        source_cache_mode="off",
     )
-    evaluation_run_config = EvaluationRunCfg(
-        checkpoint=str(validation_dir / "checkpoints" / "best.pt"),
-        baseline_checkpoint=str(pretrain_dir / "checkpoints" / "epoch_000000.pt"),
+    evaluation_run_cfg = EvaluationRunCfg(
+        checkpoint=str(pretrain_dir / "checkpoints" / "last.pt"),
+        analyses=("ablations",),
         seed=17,
         deterministic_algorithms=False,
     )
-    evaluation_dir = tmp_path / "evaluation"
+    evaluation_data = _Data()
     evaluation_method = _Method()
+    evaluation_dir = tmp_path / "evaluation"
     evaluate_checkpoint(
-        data=_Data(),
+        data=evaluation_data,
         method=evaluation_method,
-        config=evaluation_config,
-        run=EvaluationRun(evaluation_run_config),
+        config=evaluation_cfg,
+        run=EvaluationRun(evaluation_run_cfg),
         output_dir_override=evaluation_dir,
-        resolved_config=_stage_resolved(
-            role="evaluation",
-            stage_config=evaluation_config,
-            run_config=evaluation_run_config,
-        ),
+        resolved_config=_evaluation_resolved(evaluation_cfg, evaluation_run_cfg),
     )
 
     final = yaml.safe_load((evaluation_dir / "evaluation.yaml").read_text(encoding="utf-8"))["suites"]
+    assert evaluation_data.resolved_roles == ["evaluation"]
+    assert evaluation_method.prepared_roles == ["evaluation"]
+    assert evaluation_method.opened_roles == ["evaluation"]
     assert final["unseen"]["metrics"]
     assert final["unseen"]["teacher_baselines"]["kappa"]["physical_baseline_mse"] == 1.0
     assert final["unseen"]["ablation_analysis"]["bootstrap_replicates"] == 2
     assert final["official_zero_shot"] == {"status": "empty", "asset_count": 0}
-    assert (evaluation_dir / "training_morphology_q_bank.yaml").is_file()
-    assert not (evaluation_dir / "retained_artifact.pt").exists()
-    assert evaluation_method.retained_export_count == 0
+    assert not (evaluation_dir / "checkpoints" / "best.pt").exists()
 
-    no_baseline_run_config = EvaluationRunCfg(
-        checkpoint=str(validation_dir / "checkpoints" / "best.pt"),
-        seed=17,
-        deterministic_algorithms=False,
-    )
-    no_baseline_dir = tmp_path / "evaluation_without_baseline"
-    no_baseline_method = _Method()
-    evaluate_checkpoint(
+
+def test_epoch_boundary_recovery_replays_only_the_incomplete_epoch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""中断发生在下一 epoch 时，自动 recovery 只重做该 epoch 且继续原 forward cursor。"""
+
+    from anymani.distill.ssl.runtime import lifecycle
+
+    monkeypatch.setattr(lifecycle, "_worktree_fingerprint", lambda: (False, ""))
+    base = _trainer().config
+    config = replace(base, max_epochs=2, checkpoint_every_epochs=1)
+    interrupted = _Method()
+    interrupted.fail_after_updates = 1
+    output_dir = tmp_path / "recovery"
+    with pytest.raises(RuntimeError, match="synthetic interruption"):
+        fit_embodiment_pretrain(
+            trainer=EmbodimentPretrainTrainer(config),
+            data=_Data(),
+            method=interrupted,
+            run=PretrainRun(PretrainRunCfg(seed=17, deterministic_algorithms=False, source_cache_mode="off")),
+            output_dir_override=output_dir,
+            resolved_config=_resolved(EmbodimentPretrainTrainer(config)),
+        )
+    assert (output_dir / "checkpoints" / "recovery.pt").is_file()
+    assert (output_dir / "INCOMPLETE").is_file()
+
+    resumed = _Method()
+    fit_embodiment_pretrain(
+        trainer=EmbodimentPretrainTrainer(config),
         data=_Data(),
-        method=no_baseline_method,
-        config=evaluation_config,
-        run=EvaluationRun(no_baseline_run_config),
-        output_dir_override=no_baseline_dir,
-        resolved_config=_stage_resolved(
-            role="evaluation",
-            stage_config=evaluation_config,
-            run_config=no_baseline_run_config,
-        ),
+        method=resumed,
+        run=PretrainRun(PretrainRunCfg(seed=17, deterministic_algorithms=False, source_cache_mode="off")),
+        output_dir_override=output_dir,
+        resolved_config=_resolved(EmbodimentPretrainTrainer(config)),
+    )
+    assert resumed.forward_steps == [1]
+    assert (output_dir / "COMPLETE").is_file()
+    assert not (output_dir / "INCOMPLETE").exists()
+    assert not (output_dir / "checkpoints" / "recovery.pt").exists()
+
+
+def test_completed_run_extension_matches_uninterrupted_training_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""`2 epochs + explicit extension to 4` 必须与从头声明 4 epochs 的完整轨迹逐值一致。"""
+
+    from anymani.distill.ssl.runtime import lifecycle
+
+    monkeypatch.setattr(lifecycle, "_worktree_fingerprint", lambda: (False, ""))
+    base = _trainer().config
+    prefix_config = replace(base, max_epochs=2, checkpoint_every_epochs=1)
+    full_config = replace(base, max_epochs=4, checkpoint_every_epochs=1)
+
+    full_dir = tmp_path / "full"
+    fit_embodiment_pretrain(
+        trainer=EmbodimentPretrainTrainer(full_config),
+        data=_Data(),
+        method=_Method(),
+        run=PretrainRun(PretrainRunCfg(seed=17, deterministic_algorithms=False, source_cache_mode="off")),
+        output_dir_override=full_dir,
+        resolved_config=_resolved(EmbodimentPretrainTrainer(full_config)),
     )
 
-    assert not (no_baseline_dir / "training_morphology_q_bank.yaml").exists()
-    assert "training_evaluation" not in no_baseline_method.opened_roles
+    prefix_dir = tmp_path / "prefix"
+    fit_embodiment_pretrain(
+        trainer=EmbodimentPretrainTrainer(prefix_config),
+        data=_Data(),
+        method=_Method(),
+        run=PretrainRun(PretrainRunCfg(seed=17, deterministic_algorithms=False, source_cache_mode="off")),
+        output_dir_override=prefix_dir,
+        resolved_config=_resolved(EmbodimentPretrainTrainer(prefix_config)),
+    )
+    prefix_checkpoint = prefix_dir / "checkpoints" / "last.pt"
+    prefix_bytes = prefix_checkpoint.read_bytes()
+
+    extension_dir = tmp_path / "extension"
+    extension_method = _Method()
+    extension_resolved = _resolved(EmbodimentPretrainTrainer(full_config))
+    extension_resolved["run"] = dict(extension_resolved["run"], extend_completed_run=True)
+    fit_embodiment_pretrain(
+        trainer=EmbodimentPretrainTrainer(full_config),
+        data=_Data(),
+        method=extension_method,
+        run=PretrainRun(
+            PretrainRunCfg(
+                seed=17,
+                deterministic_algorithms=False,
+                source_cache_mode="off",
+                resume_checkpoint=str(prefix_checkpoint),
+                extend_completed_run=True,
+            )
+        ),
+        output_dir_override=extension_dir,
+        resolved_config=extension_resolved,
+    )
+
+    full = torch.load(full_dir / "checkpoints" / "last.pt", map_location="cpu", weights_only=False)
+    extended = torch.load(extension_dir / "checkpoints" / "last.pt", map_location="cpu", weights_only=False)
+    for name, value in full["method_state"].items():
+        torch.testing.assert_close(extended["method_state"][name], value, atol=0.0, rtol=0.0)
+    assert extended["optimizer_state"] == full["optimizer_state"]
+    assert extended["trainer_state"]["sampling"] == full["trainer_state"]["sampling"]
+    assert extension_method.forward_steps == [2, 3]
+    assert prefix_checkpoint.read_bytes() == prefix_bytes
+    assert not (extension_dir / "checkpoints" / "epoch_000000.pt").exists()
+    assert (extension_dir / "checkpoints" / "epoch_000004.pt").is_file()
+    def scientific_records(path: Path) -> list[dict[str, object]]:
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        for record in records:
+            record.pop("wall_time_seconds", None)
+            record.pop("z_gradient_diagnostic_seconds", None)
+        return records
+
+    assert scientific_records(extension_dir / "metrics_finalized.jsonl") == scientific_records(
+        full_dir / "metrics_finalized.jsonl"
+    )
+
+
+def test_completed_extension_recovery_preserves_prefix_and_finishes_in_place(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""Extension child 中断后恢复自身 segment，并继续引用 immutable source metrics prefix。"""
+
+    from anymani.distill.ssl.runtime import lifecycle
+
+    monkeypatch.setattr(lifecycle, "_worktree_fingerprint", lambda: (False, ""))
+    base = _trainer().config
+    prefix_config = replace(base, max_epochs=2, checkpoint_every_epochs=1)
+    target_config = replace(base, max_epochs=4, checkpoint_every_epochs=1)
+    prefix_dir = tmp_path / "prefix"
+    fit_embodiment_pretrain(
+        trainer=EmbodimentPretrainTrainer(prefix_config),
+        data=_Data(),
+        method=_Method(),
+        run=PretrainRun(PretrainRunCfg(seed=17, deterministic_algorithms=False, source_cache_mode="off")),
+        output_dir_override=prefix_dir,
+        resolved_config=_resolved(EmbodimentPretrainTrainer(prefix_config)),
+    )
+    prefix_checkpoint = prefix_dir / "checkpoints" / "last.pt"
+    prefix_bytes = prefix_checkpoint.read_bytes()
+    extension_resolved = _resolved(EmbodimentPretrainTrainer(target_config))
+    extension_resolved["run"] = dict(extension_resolved["run"], extend_completed_run=True)
+    extension_dir = tmp_path / "extension"
+    interrupted = _Method()
+    interrupted.fail_after_updates = 1
+    with pytest.raises(RuntimeError, match="synthetic interruption"):
+        fit_embodiment_pretrain(
+            trainer=EmbodimentPretrainTrainer(target_config),
+            data=_Data(),
+            method=interrupted,
+            run=PretrainRun(
+                PretrainRunCfg(
+                    seed=17,
+                    deterministic_algorithms=False,
+                    source_cache_mode="off",
+                    resume_checkpoint=str(prefix_checkpoint),
+                    extend_completed_run=True,
+                )
+            ),
+            output_dir_override=extension_dir,
+            resolved_config=extension_resolved,
+        )
+    recovery = extension_dir / "checkpoints" / "recovery.pt"
+    recovery_payload = torch.load(recovery, map_location="cpu", weights_only=False)
+    assert recovery_payload["trainer_state"]["lineage_metrics_path"] == str(prefix_dir / "metrics.jsonl")
+
+    resumed = _Method()
+    fit_embodiment_pretrain(
+        trainer=EmbodimentPretrainTrainer(target_config),
+        data=_Data(),
+        method=resumed,
+        run=PretrainRun(
+            PretrainRunCfg(
+                seed=17,
+                deterministic_algorithms=False,
+                source_cache_mode="off",
+                resume_checkpoint=str(recovery),
+                extend_completed_run=True,
+            )
+        ),
+        output_dir_override=extension_dir,
+        resolved_config=extension_resolved,
+    )
+    assert resumed.forward_steps == [3]
+    assert prefix_checkpoint.read_bytes() == prefix_bytes
+    assert (extension_dir / "COMPLETE").is_file()
+    assert not recovery.exists()
+
+
+def test_formal_train_can_publish_a_train_derived_compression_basis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""train 完成后可发布固定 q-bank basis，且 basis 不需要 evaluation role。"""
+
+    from anymani.distill.ssl.runtime import lifecycle
+
+    monkeypatch.setattr(lifecycle, "_worktree_fingerprint", lambda: (False, ""))
+    trainer_config = replace(_trainer().config, emit_compression_basis=True, compression_q_per_asset=4)
+    output_dir = tmp_path / "basis"
+    fit_embodiment_pretrain(
+        trainer=EmbodimentPretrainTrainer(trainer_config),
+        data=_Data(),
+        method=_Method(),
+        run=PretrainRun(PretrainRunCfg(seed=17, deterministic_algorithms=False, source_cache_mode="off")),
+        output_dir_override=output_dir,
+        resolved_config=_resolved(EmbodimentPretrainTrainer(trainer_config)),
+    )
+    assert (output_dir / "z_compression_basis.npz").is_file()
+    basis_metadata = yaml.safe_load((output_dir / "z_compression_basis.yaml").read_text(encoding="utf-8"))
+    assert basis_metadata["source"] == "train_role_fixed_q_bank"
+    assert basis_metadata["q_per_asset"] == 4
+    assert len(basis_metadata["basis_sha256"]) == 64

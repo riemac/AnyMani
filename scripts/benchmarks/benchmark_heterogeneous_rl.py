@@ -22,9 +22,13 @@ python scripts/benchmarks/benchmark_heterogeneous_rl.py \
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import os
 import signal
 import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -105,7 +109,10 @@ def _gpu_process_memory_bytes(pids: set[int]) -> int | None:
 def _terminate_process_group(process: subprocess.Popen[str]) -> None:
     r"""先SIGTERM再有界SIGKILL回收整个Isaac/Kit process group。"""
 
-    os.killpg(process.pid, signal.SIGTERM)  # 给Kit最多15秒释放scene与CUDA context
+    try:
+        os.killpg(process.pid, signal.SIGTERM)  # 给Kit最多15秒释放scene与CUDA context
+    except ProcessLookupError:
+        return  # 子进程可能在日志采样与发送信号之间退出；仍由调用方wait并发布失败。
     try:
         process.wait(timeout=15.0)
     except subprocess.TimeoutExpired:
@@ -119,6 +126,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", type=Path, required=True, help="Unique benchmark evidence directory.")
     parser.add_argument("--sample_period_s", type=float, default=1.0, help="Parent resource sample period.")
     parser.add_argument("--timeout_s", type=float, default=0.0, help="Wall timeout; 0 disables timeout.")
+    parser.add_argument("--live_output", action="store_true", help="Relay durable child logs to the controlling terminal.")
     parser.add_argument(
         "--disable_fatal_watchdog",
         action="store_true",
@@ -136,6 +144,28 @@ def _parse_args() -> argparse.Namespace:
     if not args.command:
         parser.error("a child command is required after --")
     return args
+
+
+def _relay_log(path: Path, stop: threading.Event) -> None:
+    r"""把原始落盘日志实时送到控制终端；完整配置仍保留在原文件中。
+
+    Python child使用无缓冲输出，终端读取与资源采样互不阻塞。
+    启动配置的机器指纹不显示在终端，只显示运行名、规模和奖励核。
+    """
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        while True:
+            line = stream.readline()  # 每次发送完整可读行，保留原有FPS与错误信息。
+            if line:
+                if line.lstrip().startswith('{"actor_init_checkpoint_sha256"'):
+                    data = json.loads(line)
+                    goal = data.get("orientation_goal") or {}
+                    line = f"[CONFIG] N={data.get('num_envs')} H={data.get('horizon')} epochs={data.get('max_updates')} kernel={goal.get('kernel', 'inverse')} run={data.get('run_dir')}\n"
+                sys.stdout.write(line)
+                sys.stdout.flush()
+            elif stop.is_set():
+                break  # child已退出且文件尾已排空。
+            else:
+                stop.wait(.1)  # 仅终端流的低频等待，不占用训练线程。
 
 
 def main() -> int:
@@ -165,6 +195,18 @@ def main() -> int:
     timed_out = False
     fatal_runtime_line: str | None = None  # 首个不可恢复C++/CUDA日志；不在损坏后请求checkpoint
     log_sizes = {"stdout": 0, "stderr": 0}  # 两个append-only文件的增量扫描cursor
+    interrupts: list[int] = []  # 父进程拥有child的新process group，必须显式转发用户中断。
+    previous_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+
+    def request_stop(signum: int, _frame: object) -> None:
+        r"""只登记中断请求，由监控循环转发并保留最后的资源/退出记录。"""
+        interrupts.append(signum)
+
+    for sig in previous_handlers:
+        signal.signal(sig, request_stop)
+    stop_relay = threading.Event()
+    relay_threads: list[threading.Thread] = []
+    interrupt_deadline: float | None = None  # 给child退出清理的有界时间。
 
     # 新 process group 允许 timeout 时同时终止 isaaclab.sh 派生的 Python/Kit 进程。
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
@@ -172,6 +214,7 @@ def main() -> int:
             **os.environ,
             "ANYMANI_RL_EVIDENCE_DIR": str(output_dir),
             "ANYMANI_RL_STARTED_MONOTONIC_NS": str(recorder.started_monotonic_ns),
+            "PYTHONUNBUFFERED": "1",  # 文件日志也按行实时落盘，终端可直接查看进度。
         }  # child phase events 与 parent resource samples 共用同一 run/time origin
         process = subprocess.Popen(
             args.command,
@@ -181,7 +224,25 @@ def main() -> int:
             start_new_session=True,
             env=child_env,
         )
+        (output_dir / "supervisor.json").write_text(
+            json.dumps({"wrapper_pid": os.getpid(), "child_pid": process.pid}) + "\n"
+        )  # 独立终端与外层PTY通过同一监督进程控制唯一训练实例。
+        if args.live_output:
+            for path in (stdout_path, stderr_path):
+                thread = threading.Thread(target=_relay_log, args=(path, stop_relay), daemon=True)
+                thread.start()
+                relay_threads.append(thread)
+            print("[CONTROL] Ctrl+C stops the training process group; completed checkpoints are retained.", flush=True)
         while process.poll() is None:
+            if interrupts and interrupt_deadline is None:
+                print("\n[CONTROL] Stop requested. Cleaning up training; a second Ctrl+C forces termination.", flush=True)
+                recorder.record_phase("user_interrupt", "start", signal=int(interrupts[0]))
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGINT)  # 进入child的finally，避免留下孤儿GPU进程。
+                interrupt_deadline = time.monotonic() + 30.0
+            if interrupt_deadline is not None and (len(interrupts) > 1 or time.monotonic() >= interrupt_deadline):
+                _terminate_process_group(process)
+                break
             process_tree = _descendant_pids(process.pid)  # shell + Python/Kit 当前存活 descendants
             tree_resources = [read_linux_process_resources(pid) for pid in process_tree]
             recorder.record_resources(
@@ -215,10 +276,28 @@ def main() -> int:
                 break
             time.sleep(args.sample_period_s)  # 父进程低频采样；不轮询 CUDA event
         return_code = process.wait()
+        stop_relay.set()
+        for thread in relay_threads:
+            thread.join(timeout=3.0)  # 退出后排空终端中的最后错误/统计行。
+
+    failure_path = output_dir / "python_failure.json"
+    python_failure = json.loads(failure_path.read_text()) if failure_path.is_file() else None
+    if python_failure is not None:
+        fatal_runtime_line = f"python: {python_failure['exception_type']}: {python_failure['message']}"
+        recorder.record_phase("python_exception", "failed", **python_failure)  # Kit的exit(0)不能覆盖已捕获的异常。
+
+    # 快速失败可能在两次采样之间完成；关闭日志writer后补扫durable尾部，退出码不是唯一证据。
+    if not args.disable_fatal_watchdog and fatal_runtime_line is None:
+        for label, path in (("stdout", stdout_path), ("stderr", stderr_path)):
+            log_sizes[label], matched_line = scan_appended_fatal_log(path, log_sizes[label])
+            if matched_line is not None:
+                fatal_runtime_line = f"{label}: {matched_line}"
+                recorder.record_phase("runtime_watchdog", "failed", fatal_runtime_line=fatal_runtime_line)
+                break  # 已退出的进程无需再发信号；保持首个故障的流与原文。
 
     # 子进程退出后的最后 partial sample 保留 process_alive=False 与系统余量。
     recorder.record_resources(process.pid, phase="child_process", gpu_process_memory_bytes=None)
-    effective_code = 125 if fatal_runtime_line is not None else (124 if timed_out else int(return_code))
+    effective_code = 128 + interrupts[0] if interrupts else (125 if fatal_runtime_line is not None else (124 if timed_out else int(return_code)))
     event = "complete" if effective_code == 0 else "failed"
     recorder.record_phase(
         "child_process",
@@ -231,15 +310,21 @@ def main() -> int:
     artifact_summary = summarize_rl_runtime_artifacts(output_dir)  # 只读已落盘 JSONL
     recorder.write_summary(
         {
-            "status": "passed" if effective_code == 0 else "failed",
+            "status": "interrupted" if interrupts else ("passed" if effective_code == 0 else "failed"),
             "return_code": effective_code,
             "timed_out": timed_out,
             "fatal_runtime_line": fatal_runtime_line,
             "stdout": str(stdout_path),
             "stderr": str(stderr_path),
+            "user_interrupted": bool(interrupts),
+            "python_failure": python_failure,
             **artifact_summary,
         }
     )
+    for sig, handler in previous_handlers.items():
+        signal.signal(sig, handler)
+    if args.live_output:
+        print(f"[FINISHED] exit={effective_code}; evidence={output_dir}", flush=True)
     return effective_code
 
 

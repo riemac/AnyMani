@@ -22,7 +22,7 @@ from anymani.assets.bank.dataset import (
 )
 from anymani.assets.bank.hand_container import HandContainer
 
-_CATALOG_CACHE_SCHEMA = "hand-asset-catalog-cache-v3"
+_CATALOG_CACHE_SCHEMA = "hand-asset-catalog-cache-v4"
 _CATALOG_CACHE_MAX_BYTES = 512 * 1024 * 1024  # 最多保留 512 MiB 本机解析索引
 _STALE_TEMPORARY_AGE_SECONDS = 24 * 60 * 60  # 只回收确认不属于活跃写入的临时文件
 
@@ -135,12 +135,14 @@ def _catalog_fingerprint(
     return digest.hexdigest()
 
 
-def _cache_file(manifest: str, *, allow_legacy_left_handedness: bool) -> Path:
-    r"""按 manifest 路径和解析安全选项定位 cache 文件。"""
+def _cache_file(manifest: str, *, role: str, allow_legacy_left_handedness: bool) -> Path:
+    r"""按 manifest、运行角色和解析安全选项定位互不扫描的 catalog cache。"""
 
     identity = hashlib.sha256(str(Path(manifest).expanduser().resolve()).encode("utf-8")).hexdigest()
     option = "legacy" if allow_legacy_left_handedness else "strict"
-    return _cache_root() / f"{identity}.{option}.pkl"
+    if role not in {"train", "evaluation", "all"}:
+        raise ValueError(f"unknown asset catalog role={role!r}")
+    return _cache_root() / f"{identity}.{role}.{option}.pkl"
 
 
 def _prune_catalog_cache(
@@ -363,12 +365,28 @@ class HandAssetCatalog:
         self.config = config
 
     def resolve(self) -> EmbodimentCatalog:
-        r"""读取 manifest、展开固定 roles 并验证可选的预期 SHA-256。"""
+        r"""读取 manifest 并展开全部角色；仅供通用数据审计，不供 Geometry SSL 热路径。"""
+
+        return self._resolve_role("all")
+
+    def resolve_train(self) -> EmbodimentCatalog:
+        r"""只展开 train partition，evaluation 路径不会进入 cache fingerprint。"""
+
+        return self._resolve_role("train")
+
+    def resolve_evaluation(self) -> EmbodimentCatalog:
+        r"""只展开 evaluation suites，以 manifest mother 坐标轻量核对 train lineage。"""
+
+        return self._resolve_role("evaluation")
+
+    def _resolve_role(self, role: str) -> EmbodimentCatalog:
+        r"""解析一个明确运行角色，并发布只含该角色的 slim catalog。"""
 
         parsed = HandAssetDataset.from_yaml(self.config.manifest)
         parsed_source_sha256 = parsed.source_sha256  # cache identity 来自本次实际读取的 manifest bytes
         cache_path = _cache_file(
             str(parsed.source_path),
+            role=role,
             allow_legacy_left_handedness=self.config.allow_legacy_left_handedness,
         )
         dataset = _load_cached_dataset(
@@ -380,10 +398,39 @@ class HandAssetCatalog:
             print(f"[SSL] Catalog cache hit: {cache_path}")
         else:
             print(f"[SSL] Catalog cache miss: resolving assets from {parsed.source_path}")
-            resolved_dataset = parsed.resolve(
-                require_geometry_semantics=True,
-                allow_legacy_left_handedness=self.config.allow_legacy_left_handedness,
-            )
+            if role == "all":
+                resolved_dataset = parsed.resolve(
+                    require_geometry_semantics=True,
+                    allow_legacy_left_handedness=self.config.allow_legacy_left_handedness,
+                )
+            elif role == "train":
+                train = parsed.resolve_train(
+                    require_geometry_semantics=True,
+                    allow_legacy_left_handedness=self.config.allow_legacy_left_handedness,
+                )
+                resolved_dataset = ResolvedHandAssetDataset(
+                    source_path=parsed.source_path,
+                    source_sha256=parsed.source_sha256,
+                    config=parsed.config,
+                    train=train,
+                    validation={},
+                    evaluation={},
+                )
+            elif role == "evaluation":
+                evaluation = parsed.resolve_evaluation(
+                    require_geometry_semantics=True,
+                    allow_legacy_left_handedness=self.config.allow_legacy_left_handedness,
+                )
+                resolved_dataset = ResolvedHandAssetDataset(
+                    source_path=parsed.source_path,
+                    source_sha256=parsed.source_sha256,
+                    config=parsed.config,
+                    train=ResolvedHandAssetPartition(name="train", records=()),
+                    validation={},
+                    evaluation=evaluation,
+                )
+            else:
+                raise ValueError(f"unknown asset catalog role={role!r}")
             _write_cached_dataset(
                 cache_path,
                 resolved_dataset,

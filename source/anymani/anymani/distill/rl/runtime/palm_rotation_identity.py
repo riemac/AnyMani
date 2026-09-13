@@ -17,11 +17,13 @@ from typing import Any, Protocol
 
 from anymani.assets.bank.path_utils import resolve_anymani_root
 from anymani.distill.diagnostics.recording.rl.palm_rotation import PALM_ROTATION_METRICS_SCHEMA_VERSION
+from anymani.distill.models.palm_rotation_policy import recovery_exploration_contract
 
+from .palm_rotation_phase import normalize_phase_period_steps, phase_clock_contract
 from .palm_rotation_vecenv import (
     PALM_ROTATION_BOOL_SHAPES,
-    PALM_ROTATION_FLOAT_SHAPES,
     PALM_ROTATION_INT16_SHAPES,
+    palm_rotation_float_shapes,
 )
 
 TASK_ID = "AnyMani-Hetero-Generated-PalmRotation-MVP-RLGames-v0"
@@ -32,10 +34,22 @@ _IMPLEMENTATION_PATHS = (
     "source/anymani/anymani/distill/models/palm_rotation_policy.py",
     "source/anymani/anymani/distill/rl/palm_rotation_ppo.py",
     "source/anymani/anymani/distill/rl/algorithms/ppo_batch.py",
+    "source/anymani/anymani/distill/rl/algorithms/policy_statistics.py",
+    "source/anymani/anymani/distill/rl/algorithms/action_regularization.py",
+    "source/anymani/anymani/distill/rl/algorithms/popart.py",
+    "source/anymani/anymani/distill/rl/algorithms/cagrad.py",
+    "source/anymani/anymani/distill/rl/algorithms/task_gradients.py",
+    "source/anymani/anymani/distill/diagnostics/recording/rl/training_evidence.py",
+    "source/anymani/anymani/distill/diagnostics/recording/rl/first_window.py",
+    "source/anymani/anymani/distill/diagnostics/recording/rl/episode_evidence.py",
+    "source/anymani/anymani/distill/diagnostics/recording/rl/optimization_evidence.py",
     "source/anymani/anymani/distill/rl/runtime/palm_rotation_network.py",
+    "source/anymani/anymani/distill/rl/runtime/palm_rotation_experience.py",
     "source/anymani/anymani/distill/rl/runtime/palm_rotation_diagnostics.py",
     "source/anymani/anymani/distill/rl/runtime/palm_rotation_probes.py",
     "source/anymani/anymani/distill/rl/runtime/palm_rotation_warm_start.py",
+    "source/anymani/anymani/distill/rl/runtime/palm_rotation_optimizer_init.py",
+    "source/anymani/anymani/distill/rl/runtime/palm_rotation_phase.py",
     "source/anymani/anymani/distill/models/temporal_encoder.py",
     "source/anymani/anymani/distill/models/backbones/geometry_transformer.py",
     "source/anymani/anymani/distill/models/input_adapters/encoder.py",
@@ -51,7 +65,14 @@ _IMPLEMENTATION_PATHS = (
     "source/anymani/anymani/distill/rl/runtime/palm_rotation_vecenv.py",
     "source/anymani/anymani/distill/rl/agents/heterogeneous_palm_rotation_mvp_ppo.yaml",
     "source/anymani/anymani/tasks/hetero/config/generated/palm_rotation_mvp_env_cfg.py",
+    "source/anymani/anymani/tasks/hetero/config/generated/asset_binding.py",
+    "source/anymani/anymani/tasks/hetero/config/generated/scene.py",
+    "source/anymani/anymani/pregrasp/good_catalog.py",
+    "source/anymani/anymani/pregrasp/revalidation.py",
+    "source/anymani/anymani/assets/bank/cohort.py",
     "source/anymani/anymani/tasks/hetero/mdp/actions.py",
+    "source/anymani/anymani/tasks/hetero/mdp/adr.py",
+    "source/anymani/anymani/tasks/hetero/mdp/orientation_goal.py",
     "source/anymani/anymani/tasks/hetero/mdp/commands.py",
     "source/anymani/anymani/tasks/hetero/mdp/contact_state.py",
     "source/anymani/anymani/tasks/hetero/mdp/curriculum_state.py",
@@ -235,6 +256,32 @@ def build_palm_rotation_method_identity(
     if pose_mode not in ("full_pose", "position_only"):
         raise ValueError("pose keypoint mode must be full_pose or position_only")
     canonical_run_contract = dict(run_contract)  # 调用者的训练记录不被原地修改
+    phase_period_steps = normalize_phase_period_steps(run_contract.get("phase_period_steps"))
+    phase_contract = phase_clock_contract(phase_period_steps)
+    if phase_contract is not None:
+        if arm not in {"direct", "direct_token"}:
+            raise ValueError("phase clock requires a direct actor")
+        canonical_run_contract["phase_period_steps"] = phase_period_steps
+    else:
+        canonical_run_contract.pop("phase_period_steps", None)
+    rejected_action_weight = float(run_contract.get("rejected_action_weight", 0.0))
+    if not math.isfinite(rejected_action_weight) or rejected_action_weight < 0.0:
+        raise ValueError("rejected action weight must be finite and nonnegative")
+    if rejected_action_weight > 0.0:
+        canonical_run_contract["rejected_action_regularization"] = {
+            "formula": "tip-silent-squared-rejected-target-action-v1",
+            "weight": rejected_action_weight,
+            "applied_to": "actor-objective-only-not-environment-reward",
+            "mean_source": "current-ppo-forward-not-rollout-or-kl-reference",
+            "target_and_limits_units": "rad-divided-by-pi",
+            "action_authority_rad_per_policy_step": 1.0 / 24.0,
+            "contact_scope": "all-valid-tips-zero-with-at-least-one-valid-tip",
+            "reduction": "mean-active-joints-then-mean-samples",
+            "diagnostic_fraction_threshold": 1.0e-6,
+        }
+    else:
+        canonical_run_contract.pop("rejected_action_weight", None)
+        canonical_run_contract.pop("rejected_action_regularization", None)
     if pose_mode == "full_pose":
         canonical_run_contract.pop("pose_keypoint_mode", None)  # 显式/隐式默认使用同一规范字段布局
     joint_anchor_weight = float(run_contract.get("joint_pose_anchor_weight", -0.5))
@@ -250,6 +297,16 @@ def build_palm_rotation_method_identity(
     if not resolved_manifest.is_file() or not catalog_index.is_file():
         raise FileNotFoundError("palm-rotation manifest or strict catalog index is missing")
     implementation_files = palm_rotation_implementation_files()
+    orientation_goal = run_contract.get("orientation_goal")  # 新任务独立于旧KD变体命名。
+    adr_config = run_contract.get("adr", {})
+    sigma_mode = run_contract.get("sigma_mode", "global")
+    if sigma_mode not in {"global", "conditional"}:
+        raise ValueError("unknown sigma parameterization")
+    recovery_exploration = recovery_exploration_contract(
+        run_contract.get("recovery_sigma_floor"),
+        max_log_std=float(run_contract.get("max_log_std", -0.43)),
+        sigma_mode=sigma_mode,
+    )  # 合同由Actor的同一规则定义，避免元数据与执行阈值分叉。
     key_digests = [hashlib.sha256(binding.key_json.encode("utf-8")).hexdigest() for binding in pregrasp.bindings]
     payload = {
         "identity_schema_version": PALM_ROTATION_IDENTITY_SCHEMA_VERSION,
@@ -259,8 +316,9 @@ def build_palm_rotation_method_identity(
             "object_scale": 1.1,
             "rotation_axis_h": [0.0, 0.0, 1.0],
             "subgoal_degrees": 30.0,
-            "training_mdp_anchor": "N000-gm-tactile-rotation-v0.5.0",
-            "training_goal_bonus": "strict-full-pose-and-position-2p5cm",
+            "training_mdp_anchor": "orientation-goal-cold" if orientation_goal else "N000-gm-tactile-rotation-v0.5.0",
+            "training_goal_bonus": "so3-angle-and-position-qualified" if orientation_goal else "strict-full-pose-and-position-2p5cm",
+            **({"orientation_goal": orientation_goal, "goal_advance": "angle-only", "goal_reference": "previous-goal"} if orientation_goal else {}),
             "evaluation_primary": "physical-frontier-net-turns-directionality-and-survival",
             "rotation_frontier_degrees": 30.0,
             "rotation_frontier_reward_weight": 0.0,
@@ -277,7 +335,8 @@ def build_palm_rotation_method_identity(
             "episode_seconds": float(run_contract.get("episode_seconds_max", 120.0)),
             "episode_seconds_min": float(run_contract.get("episode_seconds_min", 120.0)),
             "episode_horizon_sampling": "uniform-policy-step-interval",
-            "adr_enabled": False,
+            "adr_enabled": bool(adr_config.get("object_position", {}).get("enabled", False)),
+            **({"adr": adr_config, "strict_pregrasp_scope": "nominal-anchor-before-declared-reset-perturbation"} if adr_config else {}),
             "pregrasp_rank": 0,
             "pregrasp_strict": True,
             "stable_joint_reduction": "reference-dof-16",
@@ -293,10 +352,14 @@ def build_palm_rotation_method_identity(
         },
         "policy": {
             "arm": arm,
+            **({"phase_clock": phase_contract} if phase_contract is not None else {}),
             "actor_contact": "tip-only-binary"
             if run_contract.get("actor_contact", "all") == "tip"
             else "all-owner-binary-no-force",
             "distribution": "mean-preserving-tanh-squashed-active-joint-diagonal-normal",
+            **({"recovery_exploration": recovery_exploration} if recovery_exploration is not None else {}),
+            **({"sigma_mode": sigma_mode, "sigma_parameterization": "global-baseline-plus-log2-tanh-contextual-joint-head",
+                "sigma_min": 0.05, "sigma_max_log": float(run_contract.get("max_log_std", -0.43))} if sigma_mode != "global" else {}),
             "action_authority_rad_per_policy_step": 1.0 / 24.0,
             "residual_decomposition": (
                 "bounded-0p8-dynamic-film-base-plus-bounded-0p2-global-action-residual"
@@ -324,7 +387,7 @@ def build_palm_rotation_method_identity(
             "files": implementation_files,
         },
         "transport_abi": {
-            "float_shapes": {key: list(shape) for key, shape in PALM_ROTATION_FLOAT_SHAPES.items()},
+            "float_shapes": {key: list(shape) for key, shape in palm_rotation_float_shapes(phase_period_steps).items()},
             "bool_shapes": {key: list(shape) for key, shape in PALM_ROTATION_BOOL_SHAPES.items()},
             "int16_shapes": {key: list(shape) for key, shape in PALM_ROTATION_INT16_SHAPES.items()},
         },
@@ -332,8 +395,12 @@ def build_palm_rotation_method_identity(
             "metrics_schema_version": PALM_ROTATION_METRICS_SCHEMA_VERSION,
             "parquet_writer": "polars-1.32.3-zstd",
             "trajectory_writer": "hdf5-gzip-v1",
+            "first_window_seconds": 30.0,  # 实际时间窗，与奖励课程参考时长独立。
+            "first_window_capacity_per_asset": 32,
+            "first_window_proxy_minimum_count": 16,
+            "first_window_reduction": "median-of-asset-medians-and-asset-equal-safety",
         },
-        "training": json.loads(json.dumps(canonical_run_contract, sort_keys=True)),  # 非默认模式保留以供评价恢复
+        "training": json.loads(json.dumps(canonical_run_contract, sort_keys=True)),  # 非默认模式和Actor目标保留供评价恢复。
     }
     return {**payload, "identity_digest": _stable_digest(payload)}
 

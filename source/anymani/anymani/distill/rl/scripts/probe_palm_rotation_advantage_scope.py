@@ -65,6 +65,7 @@ def probe(packet_path: Path, output_dir: Path, *, device: torch.device, chunk_si
         max_log_std=cfg["max_log_std"],
         base_action_limit=cfg["base_action_limit"],
         history_encoder=cfg["history_encoder"],
+        sigma_mode=cfg.get("sigma_mode", "global"),
     )  # N040 encoder不属于该package，消费保存的几何tokens
     prefix = "a2c_network.package."  # 正式checkpoint命名空间
     state = {name[len(prefix):]: value for name, value in packet["model"].items() if name.startswith(prefix)}

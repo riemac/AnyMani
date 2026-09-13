@@ -94,6 +94,69 @@ def test_actor_only_warm_start_loads_exact_namespace_and_leaves_critic_fresh(tmp
     }
 
 
+def test_actor_init_sigma_override_changes_only_exploration_parameter(tmp_path: Path) -> None:
+    r"""显式sigma在权重加载后生效，动作中心的全部权重与source逐值一致。"""
+
+    checkpoint, source = _checkpoint(tmp_path / "source.pth")
+    target = PalmRotationActorCritic(arm="residual")
+    evidence = inspect_actor_init_checkpoint(
+        checkpoint,
+        target_arm="residual",
+        target_history_encoder="tcn",
+        target_provider_identity=_provider(),
+        actor_init_sigma=0.15,
+    )
+    load_actor_init_checkpoint(
+        target.actor,
+        checkpoint,
+        expected_checkpoint_sha256=evidence["checkpoint_sha256"],
+        actor_init_sigma=0.15,
+    )
+    assert evidence["actor_init_sigma"] == 0.15
+    assert "actor_exploration" in evidence["reset_components"]
+    assert target.actor.global_log_std.exp().item() == pytest.approx(0.15)
+    for key, value in source.actor.state_dict().items():
+        if key != "global_log_std":
+            torch.testing.assert_close(target.actor.state_dict()[key], value, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("sigma", [0.0, -0.1, float("nan"), float("inf")])
+def test_actor_init_rejects_invalid_sigma_before_loading_source(tmp_path: Path, sigma: float) -> None:
+    r"""非法分布尺度在读取checkpoint之前拒绝，避免昂贵初始化后才发现参数错误。"""
+
+    with pytest.raises(ValueError, match="sigma"):
+        inspect_actor_init_checkpoint(
+            tmp_path / "not-loaded.pth",
+            target_arm="residual",
+            target_history_encoder="tcn",
+            target_provider_identity=_provider(),
+            actor_init_sigma=sigma,
+        )
+
+
+def test_actor_init_sigma_ceiling_rejection_preserves_target_parameters(tmp_path: Path) -> None:
+    r"""超过目标模型探索上界的请求明确拒绝，而非静默clip或先写入部分source参数。"""
+
+    checkpoint, _source = _checkpoint(tmp_path / "source.pth")
+    target = PalmRotationActorCritic(arm="residual")
+    before = {key: value.clone() for key, value in target.actor.state_dict().items()}
+    evidence = inspect_actor_init_checkpoint(
+        checkpoint,
+        target_arm="residual",
+        target_history_encoder="tcn",
+        target_provider_identity=_provider(),
+    )
+    with pytest.raises(ValueError, match="ceiling"):
+        load_actor_init_checkpoint(
+            target.actor,
+            checkpoint,
+            expected_checkpoint_sha256=evidence["checkpoint_sha256"],
+            actor_init_sigma=0.8,
+        )
+    for key, value in before.items():
+        torch.testing.assert_close(target.actor.state_dict()[key], value, rtol=0, atol=0)
+
+
 def test_actor_only_warm_start_rejects_arm_history_and_retained_encoder_mismatch(tmp_path: Path) -> None:
     r"""Shape可能偶合也不能跨arm、History归纳偏置或N040 artifact静默迁移。"""
 
@@ -204,3 +267,152 @@ def test_critic_transfer_rejects_same_shape_with_different_privileged_semantics(
             target_provider_identity=_provider(),
             initialize_critic=True,
         )
+
+
+def test_recovery_exploration_warm_start_requires_explicit_adaptation(tmp_path: Path) -> None:
+    r"""参数形状相同也不能隐式更换探索规则；显式分支同时记录源和目标。"""
+    path, source = _checkpoint(tmp_path / "source.pth")
+    kwargs = dict(target_arm="residual", target_history_encoder="tcn", target_provider_identity=_provider())
+    with pytest.raises(ValueError, match="recovery"):
+        inspect_actor_init_checkpoint(path, **kwargs, target_recovery_sigma_floor=0.6)
+    evidence = inspect_actor_init_checkpoint(
+        path, **kwargs, target_recovery_sigma_floor=0.6, allow_recovery_exploration_adaptation=True
+    )
+    adaptation = evidence["recovery_exploration_adaptation"]
+    assert adaptation["source_sigma_floor"] is None
+    assert adaptation["target_sigma_floor"] == 0.6
+    assert evidence["loaded_tensor_count"] == len(source.actor.state_dict())
+    document = torch.load(path, weights_only=False)
+    document["anymani_identity"]["training"]["recovery_sigma_floor"] = 0.6
+    torch.save(document, path)
+    with pytest.raises(ValueError, match="recovery"):
+        inspect_actor_init_checkpoint(path, **kwargs)
+    same_rule = inspect_actor_init_checkpoint(path, **kwargs, target_recovery_sigma_floor=0.6)
+    assert "recovery_exploration_adaptation" not in same_rule
+
+
+def test_phase_clock_actor_migration_zero_initializes_only_new_adapter(tmp_path: Path) -> None:
+    r"""旧Direct Actor迁移到43步phase clock时只新增零权重，source均值权重逐值不变。"""
+
+    path, source = _checkpoint(tmp_path / "direct-source.pth", arm="direct_token")
+    target = PalmRotationActorCritic(arm="direct_token")
+    target.actor.phase_contextual_adapter = torch.nn.Linear(3, 1, bias=False)
+    with torch.no_grad():
+        target.actor.phase_contextual_adapter.weight.fill_(9.0)
+    evidence = inspect_actor_init_checkpoint(
+        path,
+        target_arm="direct_token",
+        target_history_encoder="tcn",
+        target_provider_identity=_provider(),
+        target_phase_period_steps=43,
+        allow_phase_clock_adaptation=True,
+    )
+    adaptation = evidence["phase_clock_adaptation"]
+    assert adaptation["source_period_steps"] is None
+    assert adaptation["target_period_steps"] == 43
+    assert adaptation["new_actor_key"] == "phase_contextual_adapter.weight"
+    assert adaptation["new_critic_key"] == "phase_readout_adapter.weight"
+    assert adaptation["zero_initialized"] is True
+    loaded = load_actor_init_checkpoint(
+        target.actor,
+        path,
+        expected_checkpoint_sha256=evidence["checkpoint_sha256"],
+        allow_phase_clock_adaptation=True,
+    )
+    assert len(loaded) == evidence["loaded_tensor_count"] == len(source.actor.state_dict())
+    assert torch.count_nonzero(target.actor.phase_contextual_adapter.weight) == 0
+    for key, value in source.actor.state_dict().items():
+        torch.testing.assert_close(target.actor.state_dict()[key], value, rtol=0, atol=0)
+
+
+def test_phase_clock_actor_migration_requires_explicit_declaration(tmp_path: Path) -> None:
+    r"""周期变化不能靠shape相同的旧路径静默通过。"""
+
+    path, _source = _checkpoint(tmp_path / "direct-source.pth", arm="direct_token")
+    with pytest.raises(ValueError, match="explicit adaptation"):
+        inspect_actor_init_checkpoint(
+            path,
+            target_arm="direct_token",
+            target_history_encoder="tcn",
+            target_provider_identity=_provider(),
+            target_phase_period_steps=43,
+        )
+
+
+@pytest.mark.parametrize("mutation", ("missing_old", "unexpected_old"))
+def test_phase_clock_migration_does_not_swallow_other_actor_key_differences(tmp_path: Path, mutation: str) -> None:
+    r"""phase例外只覆盖唯一新adapter，旧权重缺失或source多键仍严格失败。"""
+
+    path, _source = _checkpoint(tmp_path / f"direct-{mutation}.pth", arm="direct_token")
+    document = torch.load(path, map_location="cpu", weights_only=False)
+    actor_keys = [key for key in document["model"] if key.startswith(ACTOR_CHECKPOINT_PREFIX)]
+    if mutation == "missing_old":
+        document["model"].pop(actor_keys[0])
+    else:
+        document["model"][f"{ACTOR_CHECKPOINT_PREFIX}unexpected.weight"] = torch.ones(1)
+    torch.save(document, path)
+    evidence = inspect_actor_init_checkpoint(
+        path,
+        target_arm="direct_token",
+        target_history_encoder="tcn",
+        target_provider_identity=_provider(),
+        target_phase_period_steps=43,
+        allow_phase_clock_adaptation=True,
+    )
+    target = PalmRotationActorCritic(arm="direct_token")
+    target.actor.phase_contextual_adapter = torch.nn.Linear(3, 1, bias=False)
+    with pytest.raises(ValueError, match="state mismatch"):
+        load_actor_init_checkpoint(
+            target.actor,
+            path,
+            expected_checkpoint_sha256=evidence["checkpoint_sha256"],
+            allow_phase_clock_adaptation=True,
+        )
+
+
+def test_phase_clock_critic_migration_zero_initializes_adapter_and_copies_rms(tmp_path: Path) -> None:
+    r"""Critic phase readout的唯一缺项置零，source Critic与value RMS仍严格复制。"""
+
+    path, source = _checkpoint(tmp_path / "direct-critic-source.pth", arm="direct_token")
+    document = torch.load(path, map_location="cpu", weights_only=False)
+    document["anymani_identity"]["task_contract"]["critic_task_state"] = (
+        "axis-goal-error-max-positive-net-and-current-net"
+    )
+    document["model"].pop("a2c_network.package.critic.sentinel")
+    document["model"].update(
+        {f"a2c_network.package.critic.{key}": value.clone() for key, value in source.critic.state_dict().items()}
+    )
+    for key, value in (("running_mean", 12.0), ("running_var", 25.0), ("count", 10001.0)):
+        document["model"][f"value_mean_std.{key}"] = torch.tensor(value, dtype=torch.float64)
+    torch.save(document, path)
+
+    target = PalmRotationActorCritic(arm="direct_token")
+    target.critic.phase_readout_adapter = torch.nn.Linear(2, 1, bias=False)
+    with torch.no_grad():
+        target.critic.phase_readout_adapter.weight.fill_(8.0)
+    normalizer = torch.nn.Module()
+    for key, value in (("running_mean", 0.0), ("running_var", 1.0), ("count", 1.0)):
+        normalizer.register_buffer(key, torch.tensor(value, dtype=torch.float64))
+    model = SimpleNamespace(
+        a2c_network=SimpleNamespace(package=target), normalize_value=True, value_mean_std=normalizer
+    )
+    evidence = inspect_actor_init_checkpoint(
+        path,
+        target_arm="direct_token",
+        target_history_encoder="tcn",
+        target_provider_identity=_provider(),
+        initialize_critic=True,
+        target_phase_period_steps=43,
+        allow_phase_clock_adaptation=True,
+    )
+    load_critic_init_checkpoint(
+        model,
+        path,
+        expected_checkpoint_sha256=evidence["checkpoint_sha256"],
+        allow_phase_clock_adaptation=True,
+    )
+    assert torch.count_nonzero(target.critic.phase_readout_adapter.weight) == 0
+    for key, value in source.critic.state_dict().items():
+        torch.testing.assert_close(target.critic.state_dict()[key], value, rtol=0, atol=0)
+    assert normalizer.state_dict()["count"].item() == 10001.0
+    assert normalizer.state_dict()["running_var"].item() == 25.0

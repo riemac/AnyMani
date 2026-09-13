@@ -20,7 +20,7 @@ import h5py
 import numpy as np
 import polars as pl
 
-PALM_ROTATION_METRICS_SCHEMA_VERSION = "2.3.0"
+PALM_ROTATION_METRICS_SCHEMA_VERSION = "2.8.0"
 
 # 一个固定nullable宽表避免不同scope/flush由inference产生不兼容Parquet schemas。
 PALM_ROTATION_METRICS_SCHEMA: dict[str, Any] = {
@@ -33,7 +33,42 @@ PALM_ROTATION_METRICS_SCHEMA: dict[str, Any] = {
     "dataset_row": pl.Int32,
     "cell_id": pl.Int8,
     "reward_mean": pl.Float64,
+    **{
+        f"reward_term_{name}": pl.Float64
+        for name in (
+            "pose_keypoint",
+            "orientation_tracking",
+            "rotation_progress",
+            "goal_success",
+            "good_tip_contact",
+            "bad_finger_non_tip_contact",
+            "speed_band",
+            "speed_jitter",
+            "off_axis_angular_velocity",
+            "object_linear_velocity",
+            "joint_pose_anchor",
+            "mechanical_power",
+            "torque_l2",
+            "action_l2",
+            "action_rate_l2",
+            "failure",
+        )
+    },
     "goal_count_mean": pl.Float64,  # strict full-pose+position tracking count
+    **{
+        name: pl.Int64
+        for name in (
+            "first30_asset_count", "first30_observed_assets", "first30_qualified_assets", "first30_window_count",
+            "first30_windows_min", "first30_windows_max", "first30_one_turn_proxy_assets", "first30_two_turn_proxy_assets",
+            "first30_policy_start_min", "first30_policy_end_max",
+        )
+    },  # 首30秒训练窗口的实际分母、版本范围与样本充足资产数。
+    **{
+        name: pl.Float64
+        for name in ("first30_net_median", "first30_goal_median", "first30_direction_median", "first30_safe_fraction")
+    },  # 前三项逐资产中位后再取组中位；安全先资产内比例再等权。无窗口为null。
+    "adr_position_level_at_update_end": pl.Float64,
+    "adr_position_half_width_m_at_update_end": pl.Float64,
     "frontier_count_mean": pl.Float64,  # 核心$K_t$，历史正向30°物理前沿数
     "frontier_pulse_rate": pl.Float64,  # 当前policy step有新物理前沿的env比例
     "max_positive_net_turns_mean": pl.Float64,  # $M_t/(2\pi)$，历史正向包络
@@ -72,6 +107,15 @@ PALM_ROTATION_METRICS_SCHEMA: dict[str, Any] = {
     "counterfactual_adr_level": pl.Float64,
     "actor_grad_norm": pl.Float64,
     "critic_grad_norm": pl.Float64,
+    "actor_cagrad_relative_gap": pl.Float64,
+    "critic_cagrad_relative_gap": pl.Float64,
+    "actor_cagrad_worst_projection": pl.Float64,
+    "critic_cagrad_worst_projection": pl.Float64,
+    "actor_cagrad_iterations": pl.Float64,
+    "critic_cagrad_iterations": pl.Float64,
+    "popart_weight_error": pl.Float64,
+    "popart_bias_error": pl.Float64,
+    "popart_count": pl.Float64,
     "gradient_cosine": pl.Float64,
     "actor_probe_grad_norm": pl.Float64,
     "critic_probe_grad_norm": pl.Float64,
@@ -88,6 +132,10 @@ PALM_ROTATION_METRICS_SCHEMA: dict[str, Any] = {
     "critic_loss": pl.Float64,
     "entropy": pl.Float64,
     "policy_sigma": pl.Float64,
+    "policy_base_sigma": pl.Float64,
+    "recovery_floor_fraction": pl.Float64,
+    "actor_rejected_action_cost": pl.Float64,
+    "actor_rejected_action_fraction": pl.Float64,
     "actor_base_lr": pl.Float64,
     "actor_residual_lr": pl.Float64,
     "actor_contextual_lr": pl.Float64,

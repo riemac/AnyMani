@@ -3,6 +3,8 @@ r"""MVP80 residual policy的fixed-scale、ADR-0正式能力评估入口。
 主评估固定16 replicas/asset、deterministic actor mean、600个20 Hz policy steps（30 s），2400步用于耐久复查。每个replica只消费第一次
 trajectory；若底层ManagerBased环境在drop/axis/timeout后自动reset，后续state不再进入该replica统计。
 所有终局量来自RewardManager最后一项冻结的post-physics/pre-reset snapshot，避免读取rank-0新回合零值。
+显式--action_mode sample以checkpoint原tanh-Normal分布执行冻结随机诊断，使用独立动作seed和采样trace；正式覆盖门仍只匹配均值。
+显式--diagnostic_only支持控制状态连续的Actor接力；边界k表示完成k个旧动作后，第k+1个动作使用接替策略。
 """
 
 from __future__ import annotations
@@ -73,6 +75,11 @@ parser.add_argument(
 parser.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE, help="Accepted N000 fixed reference JSON.")
 parser.add_argument("--num_replicas", type=int, default=16, help="Fixed replicas per asset; formal protocol uses 16.")
 parser.add_argument("--steps", type=int, default=2400, help="Fixed episode policy steps: 600=30 s, 2400=120 s.")
+parser.add_argument("--action_mode", choices=("mean", "sample"), default="mean", help="Mean is formal evaluation; sample is a frozen-policy diagnostic.")  # 动作模式独立于回放时长
+parser.add_argument("--action_seed", type=int, default=None, help="Explicit seed for the independent sample-mode action generator.")  # mean模式不使用seed
+parser.add_argument("--diagnostic_only", action="store_true", help="Publish diagnostic trajectories without formal capability verdicts.")
+parser.add_argument("--diagnostic_boundary_step", type=int, default=None, help="Capture the state after this many actions; optionally hand off the Actor before the next action.")
+parser.add_argument("--actor_switch_checkpoint", type=Path, default=None, help="Same-method Actor taking over at the diagnostic boundary; requires --diagnostic_only.")
 parser.add_argument(
     "--trace_stride", type=int, default=0, help="Per-step diagnostic sampling stride; 0 disables trace."
 )
@@ -125,6 +132,15 @@ if not math.isfinite(args_cli.direct_logit_gain) or args_cli.direct_logit_gain <
     raise ValueError("direct logit gain must be finite and positive")
 if args_cli.cohort_transfer and args_cli.cohort_lock is None:
     raise ValueError("--cohort_transfer requires an explicit --cohort_lock")
+if args_cli.actor_switch_checkpoint is not None and args_cli.diagnostic_boundary_step is None:
+    raise ValueError("Actor handoff requires an explicit completed-step boundary")
+if args_cli.diagnostic_boundary_step is not None:
+    if not args_cli.diagnostic_only or not 0 < args_cli.diagnostic_boundary_step < args_cli.steps:
+        raise ValueError("a diagnostic boundary must lie strictly inside a diagnostic trajectory")
+    if args_cli.action_mode != "mean" or args_cli.residual_off or args_cli.tip_only_intervention or args_cli.direct_logit_gain != 1:
+        raise ValueError("Actor relay uses unmodified deterministic checkpoint means")
+    if args_cli.trace_stride != 1 or not args_cli.trace_rewards:
+        raise ValueError("Actor relay requires complete stride-1 reward traces")
 if args_cli.video is not None:
     if args_cli.video.suffix.lower() != ".mp4" or args_cli.video.exists():
         raise ValueError("--video requires a new .mp4 output path")
@@ -197,9 +213,16 @@ from anymani.distill.diagnostics.recording.rl.palm_rotation import (  # noqa: E4
 )
 from anymani.distill.models.palm_rotation_policy import (  # noqa: E402
     PalmRotationActorObservation,
+    PalmRotationActorOutput,
     PalmRotationGeometry,
 )
 from anymani.distill.rl.palm_rotation_ppo import PalmRotationRlGamesBuilder  # noqa: E402
+from anymani.distill.rl.runtime import frozen_action_selection, frozen_actor_switch  # noqa: E402
+from anymani.distill.rl.runtime.frozen_action_selection import (  # noqa: E402
+    select_frozen_actor_actions,
+    validate_frozen_action_mode,
+)  # 只切换冻结动作执行方式，不改训练分布实现
+from anymani.distill.rl.runtime.frozen_actor_switch import FrozenActorSwitch  # noqa: E402
 from anymani.distill.rl.runtime.palm_rotation_geometry import (  # noqa: E402
     build_palm_rotation_bf16_geometry_provider,
 )
@@ -211,16 +234,19 @@ from anymani.distill.rl.runtime.palm_rotation_identity import (  # noqa: E402
 from anymani.distill.rl.runtime.palm_rotation_precision import enforce_palm_rotation_precision  # noqa: E402
 from anymani.distill.rl.runtime.palm_rotation_vecenv import (  # noqa: E402
     PALM_ROTATION_BOOL_SHAPES,
-    PALM_ROTATION_FLOAT_SHAPES,
     PALM_ROTATION_INT16_SHAPES,
     PalmRotationRlGamesVecEnv,
+    palm_rotation_float_shapes,
 )
 from anymani.tasks.hetero.config.generated.palm_rotation_mvp_env_cfg import (  # noqa: E402
     GOOD_PREGRASP_RESET_CFG,
     GeneratedPalmRotationMvpEnvCfg,
 )
 from anymani.tasks.hetero.config.generated.scene import ASSET_BINDING  # noqa: E402
+from anymani.tasks.hetero.mdp.actions import PreloadAwareMaskedRelativeJointPositionAction  # noqa: E402
+from anymani.tasks.hetero.mdp.adr import HeterogeneousAdrCfg, ObjectPositionAdrCfg  # noqa: E402
 from anymani.tasks.hetero.mdp.contact_state import HETERO_CONTACT_STATE_ATTR  # noqa: E402
+from anymani.tasks.hetero.mdp.orientation_goal import OrientationGoalCfg, configure_orientation_goal  # noqa: E402
 
 SINGLE_CLOSURE_NET_TURNS_MIN = 1.0  # RL tiny-overfit最低持续有向旋转能力
 SINGLE_CLOSURE_DIRECTIONAL_CONSISTENCY_MIN = 0.7  # 排除absolute path由往返jitter构成
@@ -237,8 +263,8 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _actor_mean(network: Any, observation: Mapping[str, torch.Tensor]) -> torch.Tensor:
-    r"""只执行deterministic actor，不为正式能力评估额外计算privileged critic。"""
+def _actor_output(network: Any, observation: Mapping[str, torch.Tensor]) -> PalmRotationActorOutput:
+    r"""仅从合法Actor输入形成有界中心与共享logstd，动作选择随后独立执行。"""
 
     geometry = PalmRotationGeometry(
         tokens=observation["geometry_tokens"].float(),
@@ -256,7 +282,9 @@ def _actor_mean(network: Any, observation: Mapping[str, torch.Tensor]) -> torch.
         tip_valid=observation["tip_valid"].bool(),
         owner_valid=observation["owner_valid"].bool(),
     )
-    return network.package.actor(actor_observation, geometry).mean  # deterministic$\mu_t\in\mathbb R^{N\times16}$
+    if network.phase_period_steps is not None:
+        return network.package.actor(actor_observation, geometry, phase_clock=observation["phase_clock"].float())
+    return network.package.actor(actor_observation, geometry)  # 同一前向的中心/logstd，不额外计算Critic
 
 
 def _group_by_asset(values: torch.Tensor, replicas: int) -> np.ndarray:
@@ -282,9 +310,20 @@ def _manifest_pairs(path: Path) -> tuple[tuple[int, int], ...]:
     return tuple(pairs)
 
 
-def main() -> None:
+def main(*, collector: Any = None, actor_override: Any = None) -> None:
     r"""运行fixed first-trajectory evaluation并原子发布JSON/HDF5能力证据。"""
 
+    validate_frozen_action_mode(args_cli.action_mode, args_cli.action_seed)  # 创建物理环境前验证模式与seed
+    if collector is not None and (args_cli.cohort_lock is None or args_cli.action_mode != "mean" or args_cli.diagnostic_boundary_step is not None or args_cli.residual_off or args_cli.tip_only_intervention or args_cli.direct_logit_gain != 1):
+        raise ValueError("collection callback requires an explicit cohort and one unmodified mean Actor entry")
+    if actor_override is not None and (
+        collector is not None or args_cli.cohort_lock is None or args_cli.action_mode != "mean"
+        or args_cli.diagnostic_boundary_step is not None or args_cli.residual_off
+        or args_cli.tip_only_intervention or args_cli.direct_logit_gain != 1 or args_cli.diagnostic_only
+    ):
+        raise ValueError("student evaluation requires one explicit cohort and an unmodified deterministic control route")
+    if args_cli.action_mode == "sample" and (args_cli.residual_off or args_cli.tip_only_intervention or args_cli.direct_logit_gain != 1):
+        raise ValueError("sample-mode control requires the unmodified checkpoint action/input routes")  # 单独隔离动作采样因素
     checkpoint_path = args_cli.checkpoint.expanduser().resolve()
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     checkpoint_identity = checkpoint.get("anymani_identity")
@@ -296,6 +335,20 @@ def main() -> None:
     run_contract = checkpoint_identity.get("training")
     if not isinstance(run_contract, dict):
         raise RuntimeError("checkpoint identity is missing the exact training contract")
+    replacement_checkpoint_path = None  # 接力诊断的第二个真实参数来源。
+    replacement_checkpoint_sha = None
+    replacement_actor_state = None
+    if args_cli.actor_switch_checkpoint is not None:
+        replacement_checkpoint_path = args_cli.actor_switch_checkpoint.expanduser().resolve()
+        replacement_checkpoint = torch.load(replacement_checkpoint_path, map_location="cpu", weights_only=False)
+        if replacement_checkpoint.get("anymani_identity") != checkpoint_identity:
+            raise ValueError("Actor relay requires two checkpoints of the exact same learned method")
+        actor_prefix = "a2c_network.package.actor."  # 只替换Actor，Critic不参与动作执行。
+        replacement_actor_state = {
+            name[len(actor_prefix):]: value for name, value in replacement_checkpoint["model"].items()
+            if name.startswith(actor_prefix)
+        }
+        replacement_checkpoint_sha = _sha256(replacement_checkpoint_path)
     enforce_palm_rotation_precision(allow_tf32=bool(run_contract.get("allow_tf32", False)))
 
     reference_doc = json.loads(args_cli.reference.read_text(encoding="utf-8"))
@@ -347,6 +400,11 @@ def main() -> None:
         release_floor=float(run_contract.get("reward_release_floor", 0.0)),
         reference_seconds=float(run_contract.get("reward_release_reference_seconds", 120.0)),
     )
+    if "orientation_goal" in run_contract:
+        configure_orientation_goal(
+            env_cfg, OrientationGoalCfg(**run_contract["orientation_goal"]), training=False,
+            adr=HeterogeneousAdrCfg(object_position=ObjectPositionAdrCfg(**run_contract["adr"]["object_position"])),
+        )  # 同一奖励和目标任务，固定评价明确关闭初态ADR。
     if args_cli.video is not None:
         env_cfg.viewer.resolution = (960, 720)
         env_cfg.viewer.origin_type = "world"
@@ -366,6 +424,7 @@ def main() -> None:
         rl_device=device,
         clip_observations=100.0,
         clip_actions=1.0,
+        phase_period_steps=run_contract.get("phase_period_steps"),
     )
 
     video_writer: Any = None
@@ -413,12 +472,18 @@ def main() -> None:
                     "max_log_std": float(run_contract["max_log_std"]),
                     "base_action_limit": float(run_contract["base_action_limit"]),
                     "history_encoder": str(run_contract.get("history_encoder", "tcn")),
+                    "sigma_mode": str(run_contract.get("sigma_mode", "global")),
+                    "recovery_sigma_floor": run_contract.get("recovery_sigma_floor"),
+                    "phase_period_steps": run_contract.get("phase_period_steps"),
                     "compile_mode": None,  # fixed evaluation不承担训练compile cold-start或私有pool
                 },
                 "anymani_identity": checkpoint_identity,
             }
         )
-        input_shape = {**PALM_ROTATION_FLOAT_SHAPES, **PALM_ROTATION_BOOL_SHAPES, **PALM_ROTATION_INT16_SHAPES}
+        input_shape = {
+            **palm_rotation_float_shapes(run_contract.get("phase_period_steps")),
+            **PALM_ROTATION_BOOL_SHAPES, **PALM_ROTATION_INT16_SHAPES,
+        }
         network = builder.build("a2c", actions_num=16, input_shape=input_shape, value_size=1, num_seqs=1).to(device)
         model_state = checkpoint.get("model")
         if not isinstance(model_state, dict):
@@ -431,7 +496,10 @@ def main() -> None:
         if args_cli.residual_off:
             network.package.actor.residual_enabled = False  # 同checkpoint反事实，不改base/FiLM参数
         network.eval()
-        frozen_actor_state = None
+        frozen_actor_state = (
+            {name: value.detach().clone() for name, value in network.package.actor.state_dict().items()}
+            if args_cli.action_mode == "sample" else None
+        )  # 随机诊断逐值验证参数/Actor buffer始终冻结
         direct_gain_hook = None
         if args_cli.direct_logit_gain != 1.0:
             if checkpoint_identity["policy"]["arm"] not in {"direct", "direct_token"}:
@@ -449,8 +517,15 @@ def main() -> None:
             )
 
         # 每env持续保存其first trajectory最新充分统计；done后即冻结并忽略自动reset的新episode。
+        actor_relay = (
+            FrozenActorSwitch(network.package.actor, replacement_actor_state, boundary_step=args_cli.diagnostic_boundary_step)
+            if args_cli.diagnostic_boundary_step is not None else None
+        )  # 全程同策略参照同样检查边界，但replacement为None。
+        boundary_arrays: dict[str, np.ndarray] | None = None  # 保存交接状态，供独立模型交叉前向。
+        relay_report = None  # 实际事件在回放完成后形成。
         active = torch.ones(num_envs, dtype=torch.bool, device=device)
         goal_count = torch.zeros(num_envs, dtype=torch.float32, device=device)
+        orientation_goal_count = torch.zeros_like(goal_count)  # 角度推进与位置合格奖金计数独立。
         frontier_count = torch.zeros_like(goal_count)  # $K_T$，历史正向30°物理前沿总数
         frontier_delta_recount = torch.zeros_like(goal_count)  # $\sum_t\Delta K_t$生命周期重计
         max_positive_rotation_rad = torch.zeros_like(goal_count)  # $M_T$，rad
@@ -485,6 +560,19 @@ def main() -> None:
         net_turns_at_last_goal_success = torch.zeros_like(goal_count)  # 最后pulse时的signed累计净圈
         position_error_at_last_goal_success_m = torch.zeros_like(goal_count)  # 最后pulse时的anchor误差，单位m
         observation = transport.reset()["obs"]
+        for policy_callback in (collector, actor_override):
+            if policy_callback is None:
+                continue
+            policy_callback.start(
+                checkpoint_path=checkpoint_path, checkpoint_identity=checkpoint_identity,
+                runtime_identity=current_identity, binding=ASSET_BINDING, observation=observation, actor=network.package.actor,
+                cohort_path=support_manifest_path, cohort_members=cohort_members,
+                steps=int(args_cli.steps), replicas=int(args_cli.num_replicas),
+            )  # 真正reset后的H0；callback只记录合法Actor输入。
+        action_generator = (
+            torch.Generator(device=device).manual_seed(args_cli.action_seed)
+            if args_cli.action_mode == "sample" else None
+        )  # 初始化后持续推进，环境reset和其它Torch随机流不消耗此状态
         if args_cli.video is not None:
             import imageio.v2 as imageio
 
@@ -514,8 +602,51 @@ def main() -> None:
                     # 保存动作前状态；所选首轨迹结束后不录自动reset状态，时间轴固定为真实policy dt。
                     video_writer.append_data(transport.unwrapped.render())
                     video_frames += 1
-                actions = _actor_mean(network, observation)
+                at_boundary = actor_relay is not None and _step == actor_relay.boundary_step
+                if at_boundary:
+                    assert actor_relay is not None  # 显式关联边界判定与接力对象。
+                    # 边界处不reset、不step；保留真正的观察历史、控制目标及物理状态见证。
+                    hand = transport.unwrapped.scene["robot"]
+                    obj = transport.unwrapped.scene["object"]
+                    action_name = getattr(env_cfg.observations.policy, "jnt_current").params["action_name"]
+                    action_term = transport.unwrapped.action_manager.get_term(action_name)
+                    if not isinstance(action_term, PreloadAwareMaskedRelativeJointPositionAction):
+                        raise TypeError("Actor relay requires the original target-buffer controller")
+                    continuity = {"obs__" + key: value for key, value in observation.items()}
+                    continuity.update({
+                        "controller__current_targets": action_term.current_targets,
+                        "controller__previous_targets": action_term.previous_targets,
+                        "controller__pregrasp_targets": action_term.pregrasp_targets,
+                        "physics__joint_position": hand.data.joint_pos,
+                        "physics__joint_velocity": hand.data.joint_vel,
+                        "physics__object_root_state": obj.data.root_state_w,
+                        "active_first_trajectory": active,
+                    })  # 这些引用只用于核对，Actor只接收其原具名观察。
+                    old_boundary_mean = _actor_output(network, observation).mean.detach().clone()
+                    boundary_arrays = {key: value.detach().cpu().numpy().copy() for key, value in continuity.items()}
+                    boundary_arrays["actor_mean_before"] = old_boundary_mean.cpu().numpy()
+                    actor_relay.apply(_step, continuity)  # 第_step个动作已完成，下一动作才来自接替Actor。
+                    if torch.cuda.mem_get_info(device)[0] < 2 * 1024**3:
+                        raise RuntimeError("Actor relay crossed the 2GiB driver-free boundary")
+                if actor_override is not None:
+                    actions = actor_override.act(_step, observation)  # 只执行共享学生，参考教师不参与动作混合。
+                    action_trace = {}  # 确定性学生没有虚构的教师分布样本。
+                else:
+                    actor_output = _actor_output(network, observation)  # 与原均值入口同一Actor前向
+                    if at_boundary:
+                        assert boundary_arrays is not None
+                        boundary_arrays["actor_mean_after"] = actor_output.mean.detach().cpu().numpy().copy()
+                    actions, action_trace = select_frozen_actor_actions(
+                        actor_output.mean, actor_output.log_std, observation["jnt_valid"].bool(),
+                        mode=args_cli.action_mode, generator=action_generator,
+                    )  # sample来自训练的masked tanh-Normal，mean直接保留原Tensor
+                    if collector is not None:
+                        actions = collector.act(_step, observation, actor_output.mean, actor_output.log_std)
                 next_observation, _reward, done, _extras = transport.step(actions)
+                if collector is not None:
+                    collector.after_step(done)  # 独立更新采集首轨迹mask，不改本函数active。
+                if actor_override is not None:
+                    actor_override.after_step()  # 只有真实物理 step 返回后才记入离线策略的评价成本。
                 command = transport.unwrapped.command_manager.get_term("goal_pose")
                 snapshot = command.post_physics_evaluation_snapshot
                 if not bool(snapshot["valid"].all().item()):
@@ -536,6 +667,8 @@ def main() -> None:
                             "goal_success_pulse",
                             "position_error_m",
                             "orientation_keypoint_error_m",
+                            "orientation_error_rad",
+                            "goal_advance_pulse",
                             "termination_object_out_of_anchor",
                             "termination_goal_axis_misaligned",
                             "termination_time_out",
@@ -553,6 +686,13 @@ def main() -> None:
                             "post_goal_axis_alignment": command.goal_normal_alignment,  # cos(物体z轴,目标z轴)，仅post_state_valid内有效
                         }
                     )
+                    values.update(action_trace)  # sample保存中心、sigma、latent样本与mask；mean无附加字段
+                    if "phase_clock" in observation:
+                        values["pre_phase_clock"] = observation["phase_clock"]  # `[N,2]`，真正动作前的内部时钟。
+                    if actor_relay is not None:
+                        values["actor_checkpoint_phase"] = torch.full(
+                            (num_envs,), actor_relay.phase, dtype=torch.int8, device=device
+                        )  # 0为初始Actor、1为接替Actor；完整首轨迹掩码仍独立保存。
                     if args_cli.trace_rewards:
                         # RewardManager保存weight*rate，reset只清episode sums；乘dt恢复真实每步贡献。
                         values["reward_terms_step"] = transport.unwrapped.reward_manager._step_reward * policy_dt_s
@@ -567,6 +707,7 @@ def main() -> None:
                         trace_buffers[name][trace_count].copy_(value)
                     trace_count += 1
                 goal_count[active] = snapshot["completed_subgoals"][active]
+                orientation_goal_count[active] = snapshot["completed_orientation_subgoals"][active]
                 frontier_count[active] = snapshot["rotation_frontier_count"][active]
                 max_positive_rotation_rad[active] = snapshot["max_positive_net_rotation_rad"][active]
                 net_turns[active] = snapshot["net_rotation_rad"][active] / two_pi
@@ -576,7 +717,11 @@ def main() -> None:
                 # Snapshot与active mask共同保证terminal step被计入一次，automatic reset后的新episode不进入旧轨迹。
                 orientation_error = snapshot["orientation_keypoint_error_m"]  # `[N]`，六轴keypoint平均距离m
                 position_error = snapshot["position_error_m"]  # `[N]`，相对reset anchor的中心距离m
-                orientation_gate = orientation_error < float(command.cfg.orientation_success_threshold_m)
+                orientation_gate = (
+                    snapshot["orientation_error_rad"] <= float(command.cfg.orientation_success_threshold_rad)
+                    if command.cfg.orientation_only_advance
+                    else orientation_error < float(command.cfg.orientation_success_threshold_m)
+                )
                 position_gate = position_error < float(command.cfg.position_success_threshold_m)
                 success_pulse = snapshot["goal_success_pulse"].bool()
                 active_float = active.to(dtype=goal_count.dtype)  # bool轨迹membership转为可累计的0/1权重
@@ -620,6 +765,16 @@ def main() -> None:
             raise RuntimeError(
                 f"fixed evaluation ended before {int(active.sum().item())}/{num_envs} first trajectories terminated"
             )
+        if actor_relay is not None:
+            relay_report = actor_relay.finish()  # 参数前后两段冻结与边界连续性的真实见证。
+        if collector is not None:
+            collector.finish(
+                net_turns=net_turns, path_turns=path_turns, duration_s=duration_s,
+                termination_drop=termination_drop, termination_axis=termination_axis,
+                termination_timeout=termination_timeout, policy_step_count=diagnostic_steps.long(),
+            )  # 原pre-reset累计量直接成为质量标签，不用reward代替净圈。
+        if actor_override is not None:
+            actor_override.finish()  # 同时验证学生参数、部署文件与参考来源全程冻结。
         if video_writer is not None:
             video_writer.close()
             video_writer = None
@@ -628,7 +783,7 @@ def main() -> None:
                 not torch.equal(value, network.package.actor.state_dict()[name])
                 for name, value in frozen_actor_state.items()
             ):
-                raise RuntimeError("Direct logit-gain diagnostic changed frozen Actor parameters")
+                raise RuntimeError("frozen action diagnostic changed Actor parameters or buffers")
             if direct_gain_hook is not None:
                 direct_gain_hook.remove()
 
@@ -644,6 +799,7 @@ def main() -> None:
         )  # 每trajectory配对ratio，避免ratio-of-independent-medians掩盖多峰分布
         arrays = {
             "goal_count": _group_by_asset(goal_count, args_cli.num_replicas).astype(np.float32),
+            "orientation_goal_count": _group_by_asset(orientation_goal_count, args_cli.num_replicas).astype(np.float32),
             "rotation_frontier_count": _group_by_asset(frontier_count, args_cli.num_replicas).astype(np.float32),
             "rotation_frontier_delta_recount": _group_by_asset(frontier_delta_recount, args_cli.num_replicas).astype(
                 np.float32
@@ -737,6 +893,8 @@ def main() -> None:
         reliable_protocol_matched = (
             int(args_cli.steps) == 600
             and int(args_cli.num_replicas) == 16
+            and args_cli.action_mode == "mean"
+            and not args_cli.diagnostic_only
             and actor_tip_only
             and not args_cli.residual_off
             and not args_cli.tip_only_intervention
@@ -764,7 +922,7 @@ def main() -> None:
                 asset_results=asset_results,
                 finite_and_identity_valid=finite_and_identity_valid,
             )
-            if asset_count == 80
+            if asset_count == 80 and args_cli.action_mode == "mean" and not args_cli.diagnostic_only
             else None
         )  # 54/80 cohort gate只对完整冻结支持集有定义
         closure_passed_assets = sum(result.viability_passed for result in physical_asset_results)
@@ -788,22 +946,60 @@ def main() -> None:
             intervention += "-cohort-transfer" if args_cli.cohort_transfer else ""
             if args_cli.direct_logit_gain != 1.0:
                 intervention += f"-logit-gain-{args_cli.direct_logit_gain:g}"
+            if args_cli.action_mode == "sample":
+                intervention += f"-sample-s{args_cli.action_seed}"  # 独立命名，避免覆盖均值证据
+            if args_cli.diagnostic_only:
+                intervention += "-diagnostic"
+            if args_cli.diagnostic_boundary_step is not None:
+                intervention += f"-boundary{args_cli.diagnostic_boundary_step}"
+            if replacement_checkpoint_path is not None:
+                intervention += f"-to-{replacement_checkpoint_path.stem}"
             output = (
                 checkpoint_path.parent.parent
                 / "evaluation"
                 / f"{checkpoint_path.stem}-fixed{evaluation_horizon_s:g}s-r{args_cli.num_replicas}{intervention}.json"
             )
         output = output.expanduser().resolve()
-        if any(path.exists() for path in (output, output.with_suffix(".h5"), output.with_suffix(".trace.h5"))):
+        if any(path.exists() for path in (output, output.with_suffix(".h5"), output.with_suffix(".trace.h5"), output.with_suffix(".boundary.h5"))):
             raise FileExistsError(f"evaluation output already exists: {output}")
         output.parent.mkdir(parents=True, exist_ok=True)
         hdf5_path = output.with_suffix(".h5")
         checkpoint_sha = _sha256(checkpoint_path)
+        boundary_result = None
+        if boundary_arrays is not None:
+            boundary_path = output.with_suffix(".boundary.h5")
+            write_selected_trajectories_hdf5(
+                boundary_path, arrays=boundary_arrays,
+                metadata={
+                    "artifact_type": "anymani.palm_rotation_actor_boundary",
+                    "method_identity_digest": checkpoint_identity["identity_digest"],
+                    "initial_checkpoint_sha256": checkpoint_sha,
+                    "replacement_checkpoint_sha256": replacement_checkpoint_sha,
+                    "boundary_step": args_cli.diagnostic_boundary_step,
+                    "axes": "environment=replica*num_assets+asset,features",
+                    "source_member_keys": list(source_member_keys), "num_assets": asset_count,
+                    "replicas_per_asset": args_cli.num_replicas,
+                },
+            )  # 保存实际交接时的具名观察与动作；不声称可恢复PhysX全部隐藏状态。
+            boundary_result = {"path": str(boundary_path), "sha256": _sha256(boundary_path)}
+        relay_metadata = None
+        if actor_relay is not None:
+            assert relay_report is not None  # 只有finish检查后才允许发布接力结果。
+            relay_metadata = {
+                **relay_report, "initial_checkpoint_sha256": checkpoint_sha,
+                "replacement_checkpoint": str(replacement_checkpoint_path) if replacement_checkpoint_path else None,
+                "replacement_checkpoint_sha256": replacement_checkpoint_sha,
+                "boundary_time_s": actor_relay.boundary_step * policy_dt_s,
+                "first_replacement_action_step": actor_relay.boundary_step + 1 if replacement_checkpoint_path else None,
+                "boundary_snapshot": boundary_result,
+            }  # 两个真实来源和交接时刻共同定义本次诊断策略。
         evaluation_identity = {
-            "schema_version": "1.4.0",
+            "schema_version": "1.6.0",  # 增加显式诊断角色、冻结Actor接力与连续状态证据。
             "method_identity_digest": checkpoint_identity["identity_digest"],
             "execution_identity_digest": current_identity["identity_digest"],
             "evaluator_source_sha256": _sha256(Path(__file__).resolve()),
+            "action_selection_source_sha256": _sha256(Path(frozen_action_selection.__file__)),  # 冻结动作采样的额外源码身份
+            "actor_switch_source_sha256": _sha256(Path(frozen_actor_switch.__file__)) if actor_relay is not None else None,
             "physical_metrics_source_sha256": _sha256(Path(palm_rotation_metrics.__file__)),
             "transfer_validator_source_sha256": _sha256(Path(palm_rotation_transfer.__file__)),
             "transfer_validation": transfer_validation,
@@ -837,11 +1033,13 @@ def main() -> None:
                 "horizon_s": evaluation_horizon_s,
                 "trace_stride": int(args_cli.trace_stride),
                 "trace_rewards": bool(args_cli.trace_rewards),
+                "evaluation_role": "diagnostic" if args_cli.diagnostic_only or args_cli.action_mode == "sample" else "capability",
+                "actor_relay": relay_metadata,
                 "actor_contact_intervention": "tip-only-mask" if args_cli.tip_only_intervention else "none",
                 "cohort_transfer": bool(args_cli.cohort_transfer),
                 "direct_logit_gain_intervention": float(args_cli.direct_logit_gain),
                 "direct_logit_gain_parameter_check": (
-                    "bitwise-equal" if frozen_actor_state is not None else "not-applicable"
+                    "bitwise-equal" if args_cli.direct_logit_gain != 1.0 else "not-applicable"
                 ),
                 "actor_contact": "tip-only-binary" if actor_tip_only else "all-owner-binary-no-force",
                 "scale_ready_protocol_matched": scale_protocol_matched,
@@ -849,9 +1047,20 @@ def main() -> None:
                 "reliable_topology_coverage_thresholds": reliable_coverage["thresholds"] if reliable_coverage else None,
                 "reference_horizon_s": reference_doc.get("protocol", {}).get("horizon_s"),
                 "reference_horizon_matched": reference_doc.get("protocol", {}).get("horizon_s") == evaluation_horizon_s,
-                "deterministic_actor_mean": True,
+                "deterministic_actor_mean": args_cli.action_mode == "mean",  # 不把随机诊断声明为正式均值
+                "action_selection": {
+                    "mode": args_cli.action_mode,  # 冻结均值或冻结分布采样
+                    "seed": args_cli.action_seed,  # mean为None；sample必须显式声明
+                    "generator_device": str(action_generator.device) if action_generator is not None else None,
+                    "distribution": "masked-tanh-normal" if args_cli.action_mode == "sample" else None,
+                    "latent_action_epsilon": frozen_action_selection.LATENT_ACTION_EPSILON if args_cli.action_mode == "sample" else None,
+                    "actor_parameter_check": "bitwise-equal" if args_cli.action_mode == "sample" else "not-applicable",
+                },  # 动作law和参数冻结证据进入evaluation identity
                 "first_trajectory_only": True,
                 "pregrasp_rank": 0,
+                "goal_advance": "angle-only" if env_cfg.commands.goal_pose.orientation_only_advance else "qualified-pose",
+                "goal_reference": env_cfg.commands.goal_pose.goal_reference,
+                "orientation_tolerance_rad": env_cfg.commands.goal_pose.orientation_success_threshold_rad if env_cfg.commands.goal_pose.orientation_only_advance else None,
                 "adr_enabled": False,
                 "command_turn_ratio_relative_tolerance": 0.10,
                 "asset_failure_replica_fraction": 0.5,
@@ -866,6 +1075,28 @@ def main() -> None:
                 },
             },
         }
+        if collector is not None:
+            evaluation_identity["teacher_collection"] = collector.metadata
+            evaluation_identity["protocol"].update(
+                evaluation_role="teacher-data-collection", action_mode=collector.mode,
+                action_seed=collector.seed, deterministic_actor_mean=collector.mode == "mean",
+                action_selection={"mode": collector.mode, "seed": collector.seed,
+                                  "distribution": "masked-tanh-normal" if collector.mode == "sample" else None,
+                                  "latent_location": "frozen backend _action_to_latent",
+                                  "actor_parameter_check": "bitwise-equal"},
+            )  # 在散列和HDF5序列化之前声明真实行为模式。
+        student_document_updates = None
+        if actor_override is not None:
+            student_updates = actor_override.identity_updates()
+            student_document_updates = student_updates.pop("document_updates")
+            evaluation_identity.update(student_updates)
+            evaluation_identity["checkpoint_sha256"] = student_updates["student_checkpoint_sha256"]
+            evaluation_identity["protocol"].update(
+                evaluation_role="student-capability", action_mode="mean", action_seed=None,
+                deterministic_actor_mean=True,
+                action_selection={"mode": "mean", "source": "frozen-offline-student-torchscript",
+                                  "actor_parameter_check": "bitwise-equal"},
+            )  # 在 JSON/HDF5 散列前绑定真正执行的 IL 学生，教师身份只保留为 MDP 来源。
         evaluation_identity["identity_digest"] = hashlib.sha256(
             json.dumps(evaluation_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -908,6 +1139,9 @@ def main() -> None:
                     "sensor_names": list(ASSET_BINDING.contact_layout.state_sensor_names),
                     "post_state_valid_semantics": "sensor forces/bits, post q and post axis alignment exclude automatic-reset terminal rows",
                     "pre_owner_contact_semantics": "actor input before the applied action; aggregates are post-physics/pre-reset",
+                    **({"pre_phase_clock_semantics": "sin/cos from physical episode counter before applied action",
+                        "phase_clock": current_identity["policy"]["phase_clock"]}
+                       if "phase_clock" in current_identity["policy"] else {}),
                     "reward_term_names": list(transport.unwrapped.reward_manager.active_terms)
                     if args_cli.trace_rewards
                     else None,
@@ -997,11 +1231,13 @@ def main() -> None:
             )
         document = {
             "artifact_type": (
-                "anymani.palm_rotation_mvp80_fixed_evaluation"
-                if asset_count == 80
-                else "anymani.palm_rotation_support_fixed_evaluation"
+                "anymani.palm_rotation_stochastic_diagnostic" if args_cli.action_mode == "sample"
+                else ("anymani.palm_rotation_actor_relay_diagnostic" if actor_relay is not None
+                      else "anymani.palm_rotation_frozen_diagnostic" if args_cli.diagnostic_only
+                      else "anymani.palm_rotation_mvp80_fixed_evaluation" if asset_count == 80
+                      else "anymani.palm_rotation_support_fixed_evaluation")
             ),
-            "schema_version": "1.3.0",
+            "schema_version": "1.4.0",
             "evaluation_identity": evaluation_identity,
             "checkpoint": str(checkpoint_path),
             "checkpoint_epoch": int(checkpoint["epoch"]),
@@ -1012,15 +1248,15 @@ def main() -> None:
                 "semantics": "legacy N000-relative strict-tracking conjunction; not the scale-ladder gate",
                 "closure_thresholds": closure_thresholds,
                 "finite_and_identity_valid": finite_and_identity_valid,
-                "closure_passed_assets": closure_passed_assets,
-                "closure_passed": closure_passed,
+                "closure_passed_assets": closure_passed_assets if not args_cli.diagnostic_only else None,
+                "closure_passed": closure_passed if not args_cli.diagnostic_only else None,
                 "asset_results": [asdict(result) for result in asset_results],
             },
             "physical_rotation": {
                 "semantics": "fixed-ADR-0 net turns, path directionality, joint drop/axis survival, and 30deg frontier",
                 "finite_and_identity_valid": physical_finite,
-                "viability_passed_assets": closure_passed_assets,
-                "all_assets_viable": closure_passed,
+                "viability_passed_assets": closure_passed_assets if not args_cli.diagnostic_only else None,
+                "all_assets_viable": closure_passed if not args_cli.diagnostic_only else None,
                 "asset_results": [asdict(result) for result in physical_asset_results],
                 "frontier_recount": frontier_assets,
             },
@@ -1042,6 +1278,20 @@ def main() -> None:
             "trajectory_hdf5_sha256": _sha256(hdf5_path),
             "step_trace": trace_result,
         }
+        if collector is not None:
+            document["artifact_type"] = "anymani.family_teacher_collection_evaluation"
+            document["teacher_collection"] = collector.metadata
+            document["support"]["closure_passed"] = None
+            document["support"]["closure_passed_assets"] = None
+            document["cohort"] = None
+            document["scale_ladder"] = None
+        if actor_override is not None:
+            assert student_document_updates is not None
+            document.update(student_document_updates)
+            document["artifact_type"] = "anymani.family_student_fixed_evaluation"
+            document["checkpoint"] = student_document_updates["student_checkpoint_path"]
+            document["checkpoint_epoch"] = student_document_updates["training_state"]["epoch"]
+            document.pop("checkpoint_frame")  # IL 保存 update/sample，不能借用参考教师 PPO frame。
         temporary = output.with_suffix(output.suffix + ".tmp")
         temporary.write_text(
             json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -1053,14 +1303,14 @@ def main() -> None:
                     "output": str(output),
                     "formal_cohort_applicable": cohort is not None,
                     "formal_cohort_passed": cohort.passed if cohort is not None else None,
-                    "formal_asset_passed_count": sum(result.passed for result in asset_results),
+                    "formal_asset_passed_count": sum(result.passed for result in asset_results) if args_cli.action_mode == "mean" and not args_cli.diagnostic_only else None,
                     "scale_ready_applicable": scale_ladder_result is not None,
                     "scale_ready_passed": scale_ladder_result.passed if scale_ladder_result is not None else None,
                     "scale_ready_passed_assets": (
                         scale_ladder_result.scale_ready_assets if scale_ladder_result is not None else None
                     ),
-                    "sustained_rotation_closure_passed": closure_passed,
-                    "sustained_rotation_closure_passed_assets": closure_passed_assets,
+                    "sustained_rotation_closure_passed": closure_passed if not args_cli.diagnostic_only else None,
+                    "sustained_rotation_closure_passed_assets": closure_passed_assets if not args_cli.diagnostic_only else None,
                     "reliable_passed_assets": reliable_coverage["passed_asset_count"] if reliable_coverage else None,
                     "reliable_passed_topologies": reliable_coverage["passed_topology_count"]
                     if reliable_coverage
@@ -1073,6 +1323,8 @@ def main() -> None:
             )
         )
     finally:
+        if collector is not None:
+            collector.close()  # 异常文件保持incomplete，不被离线reader误接受。
         if video_writer is not None:
             video_writer.close()
         transport.close()

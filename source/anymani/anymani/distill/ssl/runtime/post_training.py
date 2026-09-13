@@ -1,13 +1,12 @@
-r"""Schema-8 full checkpoint 的独立 validation 与 evaluation 执行内核。"""
+r"""Schema-9 full checkpoint 的显式 evaluation 执行内核。"""
 
 from __future__ import annotations
 
 import os
-import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from time import perf_counter
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -15,59 +14,9 @@ import torch
 from anymani.assets.asset_schema_geometry import SEMANTICS_SCHEMA_VERSION
 from anymani.distill.diagnostics.evaluation.z_compression import UnifiedPCABasis, unified_pca_basis_digest
 from anymani.distill.ssl.checkpoint import load_pretrain_checkpoint
-from anymani.distill.ssl.runtime.checkpointing import publish_checkpoint_alias
 from anymani.distill.ssl.runtime.lifecycle import _plain, _process_memory_evidence, _torch_dtype, _write_yaml
 from anymani.distill.ssl.runtime.sampling import FixedAssetQSchedule
 from anymani.distill.ssl.runtime.scheduler import ResidentGeometryAssetWindow
-
-
-def selection_baseline(
-    metrics: dict[str, dict[str, float]],
-    selection_metrics: tuple[str, ...],
-    *,
-    teacher_baselines: Mapping[str, Mapping[str, float]] | None = None,
-) -> dict[str, dict[str, float]]:
-    r"""为每条 validation suite 复制固定 teacher-only rho/kappa baseline。
-
-    ``metrics`` 只提供 suite 轴和字段完整性；epoch-0 网络仍可单独记录，但不定义 normalization。
-    """
-
-    if not metrics:
-        raise ValueError("validation selection requires at least one non-empty named suite")
-    baseline: dict[str, dict[str, float]] = {}
-    for suite_name, suite_metrics in metrics.items():
-        missing = set(selection_metrics) - suite_metrics.keys()
-        if missing:
-            raise ValueError(f"validation suite {suite_name!r} lacks selection terms: {sorted(missing)}")
-        source = teacher_baselines[suite_name] if teacher_baselines is not None else suite_metrics
-        missing_baselines = set(selection_metrics) - source.keys()
-        if missing_baselines:
-            raise ValueError(f"teacher baseline lacks selection terms: {sorted(missing_baselines)}")
-        baseline[suite_name] = {name: float(source[name]) for name in selection_metrics}
-    values = torch.tensor([value for suite in baseline.values() for value in suite.values()])
-    if not bool(torch.isfinite(values).all()) or bool((values <= 0.0).any()):
-        raise FloatingPointError("initial validation selection metrics must be finite and positive")
-    return baseline
-
-
-def normalized_validation_score(
-    metrics: dict[str, dict[str, float]],
-    baseline: dict[str, dict[str, float]],
-    selection_metrics: tuple[str, ...],
-) -> float:
-    r"""先对 rho/kappa teacher-baseline-normalized error 等权，再对 validation suites 等权。"""
-
-    if set(metrics) != set(baseline):
-        raise ValueError("validation metrics and teacher-baseline suites do not match")
-    suite_scores = [
-        sum(metrics[suite_name][name] / suite_baseline[name] for name in selection_metrics)
-        / len(selection_metrics)
-        for suite_name, suite_baseline in baseline.items()
-    ]
-    score = sum(suite_scores) / len(suite_scores)
-    if not torch.isfinite(torch.tensor(score)):
-        raise FloatingPointError("normalized validation score must be finite")
-    return score
 
 
 def _configure_execution(*, deterministic_algorithms: bool, seed: int, device_name: str, dtype_name: str) -> tuple[torch.device, torch.dtype]:
@@ -129,16 +78,25 @@ def _require_checkpoint_for_stage(
         raise FileNotFoundError(f"full checkpoint does not exist: {path}")
     payload = load_pretrain_checkpoint(path, map_location="cpu")
     identity = _checkpoint_identity(payload)
-    if identity["dataset_identity"] != _plain(dataset_identity):
-        raise ValueError("checkpoint dataset identity does not match the resolved catalog")
+    checkpoint_dataset = identity["dataset_identity"]
+    if not isinstance(checkpoint_dataset, Mapping) or checkpoint_dataset.get("source_sha256") != dataset_identity.get(
+        "source_sha256"
+    ):
+        raise ValueError("checkpoint train manifest identity does not match the evaluation manifest bytes")
     if identity["data"] != _plain(current_data) or identity["method"] != _plain(current_method):
         raise ValueError("checkpoint data/method config does not match the post-training preset")
     if identity["seed"] != seed:
         raise ValueError("checkpoint training seed does not match the post-training run seed")
     if identity["geometry_semantics_schema"] != SEMANTICS_SCHEMA_VERSION:
         raise ValueError("checkpoint geometry semantics schema does not match the current evaluator")
-    if current_source_artifact is not None and identity["source_artifact"] != _plain(current_source_artifact):
-        raise ValueError("checkpoint source artifact identity does not match the current post-training source")
+    if current_source_artifact is not None:
+        checkpoint_source = identity["source_artifact"]
+        current_source = _plain(current_source_artifact)
+        if not isinstance(checkpoint_source, Mapping) or not isinstance(current_source, Mapping):
+            raise ValueError("checkpoint/current source artifact identities must be mappings")
+        stable_fields = ("schema_version", "algorithms")
+        if any(checkpoint_source.get(name) != current_source.get(name) for name in stable_fields):
+            raise ValueError("checkpoint source artifact schema/algorithm identity does not match evaluation")
     return payload
 
 
@@ -204,7 +162,9 @@ def _run_suites(
     r"""在具名 held-out suites 上执行固定 Method q-bank。"""
 
     reports: dict[str, Any] = {}
-    offset = config.seed_offset if role == "validation" else config.evaluation_seed_offset
+    if role != "evaluation":
+        raise ValueError(f"post-training suite role must be evaluation, got {role!r}")
+    offset = config.evaluation_seed_offset
     for suite_index, suite_name in enumerate(method.split_names(role)):
         asset_count = method.split_asset_count(role, suite=suite_name)
         if asset_count == 0:
@@ -237,37 +197,6 @@ def _run_suites(
     return reports
 
 
-def _run_training_q_bank(
-    *,
-    method: Any,
-    config: Any,
-    seed: int,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> Any:
-    r"""从独立 cursor 0 在训练 morphology 上执行固定 Method 测度。"""
-
-    session = method.open_session(
-        "training_evaluation",
-        seed=seed + config.training_q_bank_seed_offset,
-        device=device,
-        dtype=dtype,
-        max_resident_assets=config.max_resident_assets,
-        window_factory=ResidentGeometryAssetWindow,
-    )
-    schedule = FixedAssetQSchedule(
-        session.asset_count,
-        q_per_asset=config.q_per_asset,
-        assets_per_minibatch=config.assets_per_minibatch,
-        q_per_asset_per_minibatch=config.q_per_asset_per_minibatch,
-        max_resident_assets=config.max_resident_assets,
-    )
-    try:
-        return method.evaluate_session(session, schedule, include_ablations=False)
-    finally:
-        session.close()
-
-
 def _run_z_compression(
     *,
     method: Any,
@@ -276,36 +205,22 @@ def _run_z_compression(
     device: torch.device,
     dtype: torch.dtype,
     output_dir: Path,
-) -> dict[str, object] | None:
-    """拟合 training-q unified PCA，并在 validation fixed banks 上重放原 readers。"""
+    basis: UnifiedPCABasis,
+) -> dict[str, Any] | None:
+    r"""消费 train-derived basis，并在 evaluation fixed banks 上重放原 readers。
 
-    fit = getattr(method, "fit_z_compression_basis", None)
+    basis 的拟合必须发生在训练角色，evaluation 进程只解析 held-out catalog，因而这里不打开 train
+    provider，也不把 8192 项 train source 重新展开。低秩结果只属于显式 compression analysis，核心
+    evaluation 的指标和 teacher baseline 不被替换。
+    """
+
     evaluate = getattr(method, "evaluate_z_compression_session", None)
-    if not config.z_compression_ranks or not callable(fit) or not callable(evaluate):
+    if not config.z_compression_ranks or not callable(evaluate):
         return None
-    training_session = method.open_session(
-        "training_evaluation",
-        seed=seed + config.training_q_bank_seed_offset,
-        device=device,
-        dtype=dtype,
-        max_resident_assets=config.max_resident_assets,
-        window_factory=ResidentGeometryAssetWindow,
-    )
-    training_schedule = FixedAssetQSchedule(
-        training_session.asset_count,
-        q_per_asset=config.q_per_asset,
-        assets_per_minibatch=config.assets_per_minibatch,
-        q_per_asset_per_minibatch=config.q_per_asset_per_minibatch,
-        max_resident_assets=config.max_resident_assets,
-    )
-    try:
-        basis = cast(UnifiedPCABasis, fit(training_session, training_schedule))
-    finally:
-        training_session.close()
     suites: dict[str, object] = {}
-    for suite_index, suite_name in enumerate(method.split_names("validation")):
+    for suite_index, suite_name in enumerate(method.split_names("evaluation")):
         session = method.open_session(
-            "validation",
+            "evaluation",
             suite=suite_name,
             seed=seed + config.evaluation_seed_offset + suite_index * 1_000_003,
             device=device,
@@ -337,10 +252,11 @@ def _run_z_compression(
             mean=basis.mean.detach().cpu().numpy(),
             components=basis.components.detach().cpu().numpy(),
             eigenvalues=basis.eigenvalues.detach().cpu().numpy(),
+            sample_count=np.asarray(basis.sample_count, dtype=np.int64),
         )
     temporary.replace(basis_path)
     return {
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "basis": {
             "sample_count": basis.sample_count,
             "basis_sha256": unified_pca_basis_digest(basis),
@@ -350,6 +266,34 @@ def _run_z_compression(
         "ranks": config.z_compression_ranks,
         "suites": suites,
     }
+
+
+def _load_z_compression_basis(path: Path, *, width: int) -> UnifiedPCABasis:
+    r"""读取并验证训练阶段发布的统一 PCA basis，不允许 evaluation 临时改拟合数据。"""
+
+    if not path.is_file():
+        raise FileNotFoundError(
+            "compression analysis requires the train-derived basis artifact; "
+            f"expected {path}. Run training to completion or pass --compression_basis."
+        )
+    with np.load(path, allow_pickle=False) as arrays:
+        required = {"mean", "components", "eigenvalues", "sample_count"}
+        missing = required - set(arrays.files)
+        if missing:
+            raise ValueError(f"compression basis is missing arrays: {sorted(missing)}")
+        mean = torch.from_numpy(np.array(arrays["mean"], copy=True)).to(torch.float64)
+        components = torch.from_numpy(np.array(arrays["components"], copy=True)).to(torch.float64)
+        eigenvalues = torch.from_numpy(np.array(arrays["eigenvalues"], copy=True)).to(torch.float64)
+        sample_count = int(np.asarray(arrays["sample_count"]).item())
+    if mean.shape != (width,) or components.shape != (width, width) or eigenvalues.shape != (width,):
+        raise ValueError(
+            "compression basis shape does not match evaluation encoder width: "
+            f"mean={tuple(mean.shape)}, components={tuple(components.shape)}, eigenvalues={tuple(eigenvalues.shape)}, "
+            f"width={width}"
+        )
+    if sample_count < 2 or not all(bool(torch.isfinite(value).all()) for value in (mean, components, eigenvalues)):
+        raise ValueError("compression basis must contain finite tensors and at least two fitted tokens")
+    return UnifiedPCABasis(mean, components, eigenvalues, sample_count)
 
 
 def _prepare_stage(
@@ -372,7 +316,7 @@ def _prepare_stage(
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
-        catalog = data.resolve()
+        catalog = data.resolve_evaluation()
         configure_source_artifacts = getattr(method, "configure_source_artifacts", None)
         if callable(configure_source_artifacts):
             configure_source_artifacts(
@@ -380,16 +324,16 @@ def _prepare_stage(
                 mode=config.source_cache_mode,
                 dataset_manifest_sha256=str(catalog.dataset.source_sha256),
                 producer_device=str(device),
+                role="evaluation",
             )
-        method.prepare(catalog, device=device, dtype=dtype)
+        method.prepare(catalog, role="evaluation", device=device, dtype=dtype)
+        torch.backends.cuda.matmul.allow_tf32 = bool(config.execution.allow_tf32)
+        torch.backends.cudnn.allow_tf32 = bool(config.execution.allow_tf32)
+        configure_execution = getattr(method, "configure_execution", None)
+        if callable(configure_execution):
+            configure_execution(config.execution)
         method.initialize_model(device=device, dtype=dtype)
-        identity_builder = getattr(catalog, "training_dataset_identity", None)
-        if not callable(identity_builder):
-            raise TypeError("resolved catalog must expose training_dataset_identity()")
-        dataset_identity = identity_builder()
-        if not isinstance(dataset_identity, Mapping):
-            raise TypeError("training_dataset_identity() must return a mapping")
-        dataset_identity = {str(name): value for name, value in dataset_identity.items()}
+        dataset_identity = {"source_sha256": str(catalog.dataset.source_sha256)}
         _write_yaml(output_dir / "resolved_config.yaml", resolved_config)
         _write_yaml(output_dir / "asset_dataset.yaml", catalog.dataset.config_dict())
         _write_yaml(output_dir / "training_dataset_identity.yaml", dataset_identity)
@@ -414,166 +358,6 @@ def _write_stage_resources(output_dir: Path, method: Any, *, started: float) -> 
     _write_yaml(output_dir / "runtime_resources.yaml", payload)
 
 
-def validate_checkpoints(
-    *,
-    data: Any,
-    method: Any,
-    config: Any,
-    run: Any,
-    output_dir_override: Path | None,
-    resolved_config: dict[str, Any],
-) -> Path:
-    r"""记录显式 epoch-0 网络证据，并用每条固定 validation suite 自身 teacher baseline 选择候选。"""
-
-    run.config.validate_inputs()
-    baseline_path = Path(run.config.baseline_checkpoint).expanduser().resolve()
-    candidate_paths = tuple(Path(path).expanduser().resolve() for path in run.config.checkpoints)
-    output_dir = run.resolve_output_dir(output_dir_override)
-    _require_independent_output_dir(output_dir, (baseline_path, *candidate_paths))
-    output_dir, catalog, dataset_identity, device, dtype, started = _prepare_stage(
-        data=data,
-        method=method,
-        config=config,
-        run=run,
-        output_dir=output_dir,
-        resolved_config=resolved_config,
-    )
-    try:
-        current_source_artifact = _method_source_artifact_identity(method)
-        baseline_payload = _require_checkpoint_for_stage(
-            baseline_path,
-            dataset_identity=dataset_identity,
-            current_data=resolved_config["data"],
-            current_method=resolved_config["method"],
-            seed=run.config.seed,
-            current_source_artifact=current_source_artifact,
-        )
-        if int(baseline_payload["epoch"]) != 0 or int(baseline_payload["optimizer_update"]) != 0:
-            raise ValueError("validation baseline checkpoint must be the unupdated epoch_000000 state")
-        baseline_identity = _checkpoint_identity(baseline_payload)
-        candidates: list[tuple[Path, int]] = []
-        candidate_epochs: set[int] = set()
-        for path in candidate_paths:
-            payload = _require_checkpoint_for_stage(
-                path,
-                dataset_identity=dataset_identity,
-                current_data=resolved_config["data"],
-                current_method=resolved_config["method"],
-                seed=run.config.seed,
-                current_source_artifact=current_source_artifact,
-            )
-            if _checkpoint_identity(payload) != baseline_identity:
-                raise ValueError("validation baseline and candidates do not share one training lineage")
-            epoch = int(payload["epoch"])
-            if epoch <= 0:
-                raise ValueError("validation candidates must be post-update epoch checkpoints")
-            if epoch in candidate_epochs:
-                raise ValueError("validation candidates must have distinct completed epochs")
-            candidate_epochs.add(epoch)
-            candidates.append((path, epoch))
-            del payload  # candidate optimizer/method state 留在 CPU，预检后立即释放
-
-        _run_physical_audit(method, catalog, output_dir)
-        method.eval_mode()
-        method.load_training_state_dict(baseline_payload["method_state"])
-        baseline_reports = _run_suites(
-            role="validation",
-            method=method,
-            config=config,
-            seed=run.config.seed,
-            device=device,
-            dtype=dtype,
-            include_ablations=False,
-        )
-        baseline_metrics = {
-            name: dict(report.metrics) for name, report in baseline_reports.items() if hasattr(report, "metrics")
-        }
-        suite_teacher_baselines = {
-            name: {
-                metric: float(
-                    report.teacher_baselines[metric][
-                        "physical_baseline_mse"
-                        if metric == "kappa"
-                        else "baseline_mse"
-                    ]
-                )
-                for metric in config.selection_metrics
-            }
-            for name, report in baseline_reports.items()
-            if hasattr(report, "teacher_baselines")
-        }
-        baseline = selection_baseline(
-            baseline_metrics,
-            config.selection_metrics,
-            teacher_baselines=suite_teacher_baselines,
-        )
-        _write_yaml(output_dir / "validation_baseline.yaml", baseline_reports)
-
-        history: list[dict[str, Any]] = []
-        for path, epoch in candidates:
-            payload = _require_checkpoint_for_stage(
-                path,
-                dataset_identity=dataset_identity,
-                current_data=resolved_config["data"],
-                current_method=resolved_config["method"],
-                seed=run.config.seed,
-                current_source_artifact=current_source_artifact,
-            )
-            method.load_training_state_dict(payload["method_state"])
-            reports = _run_suites(
-                role="validation",
-                method=method,
-                config=config,
-                seed=run.config.seed,
-                device=device,
-                dtype=dtype,
-                include_ablations=False,
-            )
-            metrics = {name: dict(report.metrics) for name, report in reports.items() if hasattr(report, "metrics")}
-            score = normalized_validation_score(metrics, baseline, config.selection_metrics)
-            _write_yaml(output_dir / f"validation_epoch_{epoch:06d}.yaml", reports)
-            trainer_state = payload["trainer_state"]
-            history.append(
-                {
-                    "source_checkpoint": str(path),
-                    "epoch": epoch,
-                    "optimizer_update": int(payload["optimizer_update"]),
-                    "new_pairs_seen": int(trainer_state.get("new_pairs_seen", 0)),
-                    "score": score,
-                    "metrics": metrics,
-                }
-            )
-            del payload  # 下一候选加载前释放当前 full checkpoint 与 AdamW state
-
-        best = min(history, key=lambda item: float(item["score"]))
-        source = Path(str(best["source_checkpoint"]))
-        immutable = output_dir / "checkpoints" / f"selected_epoch_{int(best['epoch']):06d}.pt"
-        immutable.parent.mkdir(parents=True, exist_ok=True)
-        if immutable.exists():
-            raise FileExistsError(f"immutable validation checkpoint already exists: {immutable}")
-        shutil.copy2(source, immutable)
-        publish_checkpoint_alias(output_dir / "checkpoints" / "best.pt", immutable)
-        _write_yaml(
-            output_dir / "checkpoint_selection.yaml",
-            {
-                "schema_version": "1.0.0",
-                "selection_metrics": config.selection_metrics,
-                "baseline_checkpoint": str(baseline_path),
-                "baseline_kind": "teacher_only_naive",
-                "baseline": baseline,
-                "history": history,
-                "best_source_checkpoint": str(source),
-                "best_checkpoint": str(immutable.relative_to(output_dir)),
-            },
-        )
-        return output_dir
-    finally:
-        try:
-            _write_stage_resources(output_dir, method, started=started)
-        finally:
-            method.close()
-
-
 def evaluate_checkpoint(
     *,
     data: Any,
@@ -583,16 +367,12 @@ def evaluate_checkpoint(
     output_dir_override: Path | None,
     resolved_config: dict[str, Any],
 ) -> Path:
-    r"""对一个显式 full checkpoint 运行 held-out suites；baseline 只控制 q-bank 对比。"""
+    r"""对一个显式 full checkpoint 运行 held-out core 与用户点名的昂贵分析。"""
 
     run.config.validate_inputs()
     checkpoint_path = Path(run.config.checkpoint).expanduser().resolve()
-    baseline_path = (
-        Path(run.config.baseline_checkpoint).expanduser().resolve() if run.config.baseline_checkpoint else None
-    )
     output_dir = run.resolve_output_dir(output_dir_override)
-    source_paths = (checkpoint_path,) if baseline_path is None else (checkpoint_path, baseline_path)
-    _require_independent_output_dir(output_dir, source_paths)
+    _require_independent_output_dir(output_dir, (checkpoint_path,))
     output_dir, catalog, dataset_identity, device, dtype, started = _prepare_stage(
         data=data,
         method=method,
@@ -611,57 +391,8 @@ def evaluate_checkpoint(
             seed=run.config.seed,
             current_source_artifact=current_source_artifact,
         )
-        baseline_payload: dict[str, Any] | None = None
-        if baseline_path is not None:
-            baseline_payload = _require_checkpoint_for_stage(
-                baseline_path,
-                dataset_identity=dataset_identity,
-                current_data=resolved_config["data"],
-                current_method=resolved_config["method"],
-                seed=run.config.seed,
-                current_source_artifact=current_source_artifact,
-            )
-            if _checkpoint_identity(payload) != _checkpoint_identity(baseline_payload):
-                raise ValueError("evaluation checkpoint and optional baseline do not share one training lineage")
-            if int(baseline_payload["epoch"]) != 0 or int(baseline_payload["optimizer_update"]) != 0:
-                raise ValueError("evaluation baseline checkpoint must be the unupdated epoch_000000 state")
-
         _run_physical_audit(method, catalog, output_dir)
         method.eval_mode()
-        if baseline_payload is not None:
-            method.load_training_state_dict(baseline_payload["method_state"])
-            initial_q_bank = _plain(
-                _run_training_q_bank(method=method, config=config, seed=run.config.seed, device=device, dtype=dtype)
-            )
-            method.load_training_state_dict(payload["method_state"])
-            final_q_bank = _plain(
-                _run_training_q_bank(method=method, config=config, seed=run.config.seed, device=device, dtype=dtype)
-            )
-            if initial_q_bank.get("strata", {}).get("bank_digest_sha256") != final_q_bank.get("strata", {}).get(
-                "bank_digest_sha256"
-            ):
-                raise RuntimeError("training morphology q-bank identity changed between baseline and checkpoint")
-            comparison = {
-                name: {
-                    "initial": float(initial_q_bank["metrics"][name]),
-                    "final": float(final_q_bank["metrics"][name]),
-                    "improvement_initial_minus_final": (
-                        float(initial_q_bank["metrics"][name]) - float(final_q_bank["metrics"][name])
-                    ),
-                }
-                for name in config.selection_metrics
-            }
-            _write_yaml(
-                output_dir / "training_morphology_q_bank.yaml",
-                {
-                    "baseline_checkpoint": str(baseline_path),
-                    "checkpoint": str(checkpoint_path),
-                    "initial": initial_q_bank,
-                    "final": final_q_bank,
-                    "comparison": comparison,
-                },
-            )
-
         method.load_training_state_dict(payload["method_state"])
         reports = _run_suites(
             role="evaluation",
@@ -670,7 +401,7 @@ def evaluate_checkpoint(
             seed=run.config.seed,
             device=device,
             dtype=dtype,
-            include_ablations=True,
+            include_ablations="ablations" in run.config.analyses,
         )
         summary: dict[str, Any] = {}
         for suite_index, (suite_name, report) in enumerate(reports.items()):
@@ -698,20 +429,34 @@ def evaluate_checkpoint(
             {
                 "schema_version": "1.0.0",
                 "source_checkpoint": str(checkpoint_path),
-                "baseline_checkpoint": str(baseline_path) if baseline_path is not None else None,
+                "analyses": run.config.analyses,
                 "suites": summary,
             },
         )
-        z_compression = _run_z_compression(
-            method=method,
-            config=config,
-            seed=run.config.seed,
-            device=device,
-            dtype=dtype,
-            output_dir=output_dir,
-        )
-        if z_compression is not None:
-            _write_yaml(output_dir / "z_compression.yaml", z_compression)
+        if "compression" in run.config.analyses:
+            basis_path = (
+                Path(run.config.compression_basis).expanduser().resolve()
+                if run.config.compression_basis
+                else _checkpoint_run_root(checkpoint_path) / "z_compression_basis.npz"
+            )
+            width = method.feature_spec().entity_width
+            basis = _load_z_compression_basis(basis_path, width=width)
+            compression = _run_z_compression(
+                method=method,
+                config=config,
+                seed=run.config.seed,
+                device=device,
+                dtype=dtype,
+                output_dir=output_dir,
+                basis=basis,
+            )
+            if compression is None:
+                raise RuntimeError("compression analysis was requested but Method does not expose its replay API")
+            basis_record = compression.get("basis")
+            if not isinstance(basis_record, dict):
+                raise TypeError("compression report lacks a basis mapping")
+            basis_record["artifact"] = str(basis_path)
+            _write_yaml(output_dir / "z_compression.yaml", compression)
         return output_dir
     finally:
         try:
@@ -722,7 +467,4 @@ def evaluate_checkpoint(
 
 __all__ = [
     "evaluate_checkpoint",
-    "normalized_validation_score",
-    "selection_baseline",
-    "validate_checkpoints",
 ]

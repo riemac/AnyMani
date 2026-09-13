@@ -8,7 +8,7 @@ r"""掌旋策略与rl_games之间的网络、概率分布适配边界。
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Literal, cast
 
 import torch
@@ -17,15 +17,19 @@ from torch import nn
 from anymani.distill.models.palm_rotation_policy import (
     PalmRotationActorCritic,
     PalmRotationActorObservation,
+    PalmRotationActorOutput,
     PalmRotationCriticObservation,
     PalmRotationGeometry,
+    expanded_policy_log_std,
 )
+from anymani.distill.rl.algorithms.popart import PopArtValueNormalizer
 
 from ..masked_ppo import AnyManiMaskedContinuousModel
+from .palm_rotation_phase import normalize_phase_period_steps
 from .palm_rotation_vecenv import (
     PALM_ROTATION_BOOL_SHAPES,
-    PALM_ROTATION_FLOAT_SHAPES,
     PALM_ROTATION_INT16_SHAPES,
+    palm_rotation_float_shapes,
 )
 
 
@@ -97,8 +101,10 @@ class PalmRotationRlGamesNetwork(nn.Module):
             raise ValueError("palm-rotation PPO requires 16 canonical actions and scalar value")
         if not isinstance(input_shape, Mapping):
             raise TypeError("palm-rotation PPO requires a Dict observation space")
+        network_cfg = params.get("palm_rotation", {})
+        self.phase_period_steps = normalize_phase_period_steps(network_cfg.get("phase_period_steps"))
         expected_shapes = {
-            **PALM_ROTATION_FLOAT_SHAPES,
+            **palm_rotation_float_shapes(self.phase_period_steps),
             **PALM_ROTATION_BOOL_SHAPES,
             **PALM_ROTATION_INT16_SHAPES,
         }
@@ -113,7 +119,6 @@ class PalmRotationRlGamesNetwork(nn.Module):
             )
             raise ValueError(f"palm-rotation observation ABI mismatch: missing={missing}, extra={extra}, wrong={wrong}")
 
-        network_cfg = params.get("palm_rotation", {})  # method-specific YAML block
         arm_raw = str(network_cfg.get("arm", "residual"))
         if arm_raw not in {"base", "residual", "direct", "direct_token"}:
             raise ValueError(f"unsupported palm-rotation actor arm: {arm_raw!r}")
@@ -131,13 +136,16 @@ class PalmRotationRlGamesNetwork(nn.Module):
             max_log_std=max_log_std,
             base_action_limit=base_action_limit,
             history_encoder=history_encoder,
+            sigma_mode=network_cfg.get("sigma_mode", "global"),
+            recovery_sigma_floor=network_cfg.get("recovery_sigma_floor"),
+            phase_clock_enabled=self.phase_period_steps is not None,
         )  # actor/critic完全分参；N040不属于此module
         compile_mode_raw = network_cfg.get("compile_mode")  # 只允许编译纯actor/critic forward，不包装rl_games model
         if compile_mode_raw not in {None, "default", "reduce-overhead"}:
             raise ValueError(f"unsupported palm-rotation compile mode: {compile_mode_raw!r}")
         self.compile_mode = None if compile_mode_raw is None else str(compile_mode_raw)
-        self._actor_forward = self.package.actor.forward
-        self._critic_forward = self.package.critic.forward
+        self._actor_forward: Callable[..., PalmRotationActorOutput] = self.package.actor.forward
+        self._critic_forward: Callable[..., torch.Tensor] = self.package.critic.forward
         if self.compile_mode is not None:
             self._actor_forward = torch.compile(self._actor_forward, mode=self.compile_mode)
             self._critic_forward = torch.compile(self._critic_forward, mode=self.compile_mode)
@@ -185,6 +193,11 @@ class PalmRotationRlGamesNetwork(nn.Module):
             actor.direct_head if self.arm in {"direct", "direct_token"} else actor.residual_head,  # type: ignore[union-attr]
         )
         contextual_ids = {id(parameter) for module in contextual_modules for parameter in module.parameters()}
+        if actor.conditional_sigma_head is not None:
+            contextual_ids.update(id(parameter) for parameter in actor.conditional_sigma_head.parameters())
+        phase_adapter = getattr(actor, "phase_contextual_adapter", None)
+        if phase_adapter is not None:
+            contextual_ids.update(id(parameter) for parameter in phase_adapter.parameters())
         base = [
             parameter for parameter in actor.parameters() if id(parameter) not in contextual_ids
         ]  # temporal/local trunk
@@ -239,8 +252,13 @@ class PalmRotationRlGamesNetwork(nn.Module):
             owner_valid=observation["owner_valid"].bool(),
         )  # privileged critic不读取prototype/cell one-hot
 
-        actor_output = self._actor_forward(actor_observation, geometry)  # base + bounded global residual
-        value = self._critic_forward(critic_observation, geometry).unsqueeze(-1)  # `[B,1]`
+        if self.phase_period_steps is None:
+            actor_output = self._actor_forward(actor_observation, geometry)
+            value = self._critic_forward(critic_observation, geometry).unsqueeze(-1)
+        else:
+            phase = observation["phase_clock"].float()  # 使用同一 rollout sample 的 phase，不在重放时重新计时。
+            actor_output = self._actor_forward(actor_observation, geometry, phase_clock=phase)
+            value = self._critic_forward(critic_observation, geometry, phase_clock=phase).unsqueeze(-1)
         self.last_active_joint_mask = actor_observation.jnt_valid  # probability/entropy/KL ghost mask
         self.last_residual_mean = (
             actor_output.residual_mean.detach() if actor_output.residual_mean is not None else None
@@ -249,7 +267,7 @@ class PalmRotationRlGamesNetwork(nn.Module):
             actor_output.direct_mean.detach() if actor_output.direct_mean is not None else None
         )  # direct diagnostics；residual/base保持None
         self.last_film_modulation_rms = actor_output.film_modulation_rms.detach()  # local hidden调制幅度
-        logstd = actor_output.log_std.expand_as(actor_output.mean)  # 一个共享scalar$\log\sigma$
+        logstd = expanded_policy_log_std(actor_output.log_std, actor_output.mean, actor_observation.jnt_valid)
         return actor_output.mean, logstd, value, None
 
 
@@ -266,6 +284,19 @@ class PalmRotationMaskedContinuousModel(AnyManiMaskedContinuousModel):
         r"""计算squashed likelihood/Jacobian并交付residual/FiLM side-channels。"""
 
         _ACTION_EPS = 1.0e-6  # float32 atanh/log-Jacobian边界，不改变常规open-interval samples
+
+        def __init__(self, a2c_network, **kwargs: Any) -> None:
+            r"""模型创建时确定value坐标策略，使训练、加载与诊断使用同一种normalizer。"""
+            super().__init__(a2c_network, **kwargs)
+            identity = getattr(a2c_network, "anymani_identity", {})
+            training = identity.get("training", {}) if isinstance(identity, Mapping) else {}
+            mode = training.get("value_normalization", "rms")
+            if mode not in {"rms", "popart"}:
+                raise ValueError("unknown value normalization strategy")
+            if mode == "popart":
+                if not self.normalize_value:
+                    raise ValueError("PopArt requires value normalization")
+                self.value_mean_std = PopArtValueNormalizer()
 
         @classmethod
         def _action_to_latent(cls, action: torch.Tensor) -> torch.Tensor:
@@ -314,6 +345,7 @@ class PalmRotationMaskedContinuousModel(AnyManiMaskedContinuousModel):
             )  # analytic bound仍逐forward fail closed，但不把CUDA stream同步回host
             active_float = active_mask.to(dtype=action_mean.dtype)
             active_count = active_float.sum(dim=-1).clamp_min(1.0)
+            logstd = expanded_policy_log_std(logstd, action_mean, active_mask)  # 全局/条件输出统一后再进入概率计算。
             sigma = torch.exp(logstd)  # latent Normal standard deviation，ghost随后由mask排除
             latent_mean = self._action_to_latent(action_mean)
             distribution = torch.distributions.Normal(latent_mean, sigma, validate_args=False)

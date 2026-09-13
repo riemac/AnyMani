@@ -19,6 +19,7 @@ r"""80手掌托旋转MVP的rl_games正式训练入口。
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -103,6 +104,18 @@ parser.add_argument(
     help="Member-level cohort lock; mutually exclusive with --support_rows and the legacy MVP80 axis.",
 )
 parser.add_argument("--num_envs", type=int, default=None, help="2560 formal, 1280 fallback, or 80 with --smoke.")
+parser.add_argument("--orientation_goal", action="store_true", help="Orientation goal sequence preset; replaces keypoint shaping, uses qualified +250 goal impulses.")
+parser.add_argument("--orientation_kernel", choices=("inverse", "exponential"), default="inverse", help="Dense angle kernel; exponential uses 1/(exp(4*theta)+0.1) per policy step.")  # 仅选择姿态核，保留其余配方。
+parser.add_argument("--position_adr", action="store_true", help="Enable nested per-environment object-position ADR (25-level scale, maximum level5).")
+parser.add_argument("--sigma_mode", choices=("global", "conditional"), default="global", help="Shared scalar or contextual per-joint diagonal exploration scale.")
+parser.add_argument(
+    "--recovery_sigma_floor", type=float, default=None,
+    help="Optional latent sigma floor only at TIP-silent outward target-limit states; global sigma only.",
+)
+parser.add_argument(
+    "--adapt_recovery_exploration", action="store_true",
+    help="Explicitly adapt the parameter-free recovery exploration rule when initializing a new method branch.",
+)
 parser.add_argument(
     "--arm",
     choices=("base", "residual", "direct", "direct_token"),
@@ -119,6 +132,11 @@ parser.add_argument("--seed", type=int, default=42, help="Formal protocol uses 4
 parser.add_argument(
     "--max_updates", type=int, default=None, help="Override PPO updates; default preserves 30M pulse budget."
 )
+parser.add_argument(
+    "--rollout_steps", type=int, default=30,
+    help="Consecutive policy steps per PPO rollout; default30=1.5s at20Hz. Non-default lengths require --max_updates.",
+)  # H控制连续采样段，Actor History30和物理/策略步长独立保持
+parser.add_argument("--gae_lambda", type=float, default=None, help="GAE trace parameter; None preserves the YAML value. Gamma and rollout length are independent.")  # 优势估计的时间追溯。
 parser.add_argument(
     "--reward_release_start_turns",
     type=float,
@@ -159,11 +177,21 @@ parser.add_argument(
     help="Actor GAE normalization population；per_asset_rollout使用每资产完整rollout moments。",
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Full actor/critic/optimizers/curriculum checkpoint.")
+parser.add_argument("--init_optimizers", action="store_true", help="New research branch: inherit both Adam states and sampling RNG; requires --actor_init_checkpoint --init_critic.")
+parser.add_argument("--phase_period_steps", type=int, default=None, help="Optional internal sin/cos clock period in policy steps; no object information.")
+parser.add_argument("--adapt_phase_clock", action="store_true", help="Explicit old-policy initialization with zero phase adapters.")
+parser.add_argument("--actor_init_optimizer_names", type=Path, default=None, help="SHA-bound source optimizer parameter-name ledger for architecture adaptation.")
 parser.add_argument(
     "--actor_init_checkpoint",
     type=str,
     default=None,
     help="只加载Actor参数的新run初始化；Critic/optimizers/normalizer/curricula全部重置。",
+)
+parser.add_argument(
+    "--actor_init_sigma",
+    type=float,
+    default=None,
+    help="新Actor迁移在加载后设置的共享潜高斯标准差；None继承，不能用于完整resume。",
 )
 parser.add_argument("--experiment_name", type=str, default=None, help="Run name under logs/distill/rl_games.")
 parser.add_argument("--sigma", type=float, default=None, help="Optional rl_games play-time sigma override.")
@@ -223,6 +251,29 @@ parser.add_argument(
     "--learning_rate", type=float, default=None, help="Override actor base LR and scale other groups by the same ratio."
 )
 parser.add_argument(
+    "--gamma", type=float, default=None, help="每个policy step的无量纲折扣因子，须在(0,1)；未提供时保留YAML值。"
+)
+parser.add_argument(
+    "--value_normalization",
+    choices=("rms", "popart"),
+    default="rms",
+    help="Value coordinate strategy: existing RMS or returns-only output-preserving global PopArt.",
+)
+parser.add_argument("--gradient_aggregation", choices=("mean", "cagrad"), default="mean")
+parser.add_argument(
+    "--rejected_action_weight", type=float, default=0.0,
+    help="Actor-only cost for TIP-silent mean-action components rejected by target limits; 0 disables.",
+)
+parser.add_argument("--cagrad_c", type=float, default=0.4)
+parser.add_argument("--cagrad_task_chunk", type=int, default=128)
+parser.add_argument("--optimization_audit_frequency", type=int, default=512)
+parser.add_argument("--console_metrics_frequency", type=int, default=0, help="Print research metrics every N updates; 0 disables.")
+parser.add_argument("--console_family_split", type=int, default=0, help="Explicit LEAP/Allegro boundary on the frozen asset axis; 0 prints global only.")
+parser.add_argument("--evaluation_frequency", type=int, default=None, help="Save a completed-update checkpoint every N updates.")
+parser.add_argument("--release_rollout_batch", action="store_true", help="Release stale flattened rollout after stratified dataset materialization.")
+parser.add_argument("--env_major_rollout_storage", action="store_true", help="Store rollout env-major beneath time-major views to avoid flatten copies.")
+parser.add_argument("--gpu_driver_free_gib", type=float, default=None, help="Explicit CUDA driver headroom at completed-update boundaries, in GiB.")
+parser.add_argument(
     "--strict_goal_reward_weight",
     type=float,
     default=10.0,
@@ -243,8 +294,33 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli, launcher_unknown_args = parser.parse_known_args()
 if args_cli.checkpoint is not None and args_cli.actor_init_checkpoint is not None:
     raise ValueError("--checkpoint and --actor_init_checkpoint are mutually exclusive")
+if args_cli.actor_init_sigma is not None:
+    if args_cli.actor_init_checkpoint is None:
+        raise ValueError("--actor_init_sigma requires a fresh --actor_init_checkpoint")
+    if not math.isfinite(args_cli.actor_init_sigma) or args_cli.actor_init_sigma <= 0.0:
+        raise ValueError("--actor_init_sigma must be finite and positive")
 if args_cli.init_critic and args_cli.actor_init_checkpoint is None:
     raise ValueError("--init_critic requires --actor_init_checkpoint")
+if args_cli.init_optimizers and (args_cli.actor_init_checkpoint is None or not args_cli.init_critic):
+    raise ValueError("--init_optimizers requires Actor and Critic initialization from the same checkpoint")
+if args_cli.phase_period_steps is not None and (
+    args_cli.phase_period_steps < 2 or args_cli.arm not in {"direct", "direct_token"}
+):
+    raise ValueError("--phase_period_steps requires a direct actor and an integer period >=2")
+if args_cli.adapt_phase_clock and args_cli.actor_init_checkpoint is None:
+    raise ValueError("--adapt_phase_clock requires a fresh --actor_init_checkpoint branch")
+if args_cli.actor_init_optimizer_names is not None and not args_cli.init_optimizers:
+    raise ValueError("--actor_init_optimizer_names requires --init_optimizers")
+if args_cli.recovery_sigma_floor is not None and (
+    args_cli.sigma_mode != "global"
+    or not math.isfinite(args_cli.recovery_sigma_floor)
+    or args_cli.recovery_sigma_floor <= 0.0
+):
+    raise ValueError("--recovery_sigma_floor requires global sigma and a finite positive value")
+if args_cli.adapt_recovery_exploration and args_cli.actor_init_checkpoint is None:
+    raise ValueError("--adapt_recovery_exploration requires a fresh --actor_init_checkpoint branch")
+if args_cli.gae_lambda is not None and (not math.isfinite(args_cli.gae_lambda) or not 0 <= args_cli.gae_lambda <= 1):
+    raise ValueError("--gae_lambda must lie in [0,1]")
 if not 0 < args_cli.episode_seconds_min <= args_cli.episode_seconds_max or not math.isfinite(
     args_cli.episode_seconds_max
 ):
@@ -253,6 +329,16 @@ if not 0 <= args_cli.reward_release_floor <= 1 or not 0 < args_cli.reward_releas
     raise ValueError("release floor/reference duration are invalid")
 if args_cli.learning_rate is not None and not 0 < args_cli.learning_rate < math.inf:
     raise ValueError("learning rate must be finite and positive")
+if args_cli.gamma is not None and (not math.isfinite(args_cli.gamma) or not 0 < args_cli.gamma < 1):
+    raise ValueError("--gamma must be finite and lie in (0,1)")  # 在启动仿真之前拒绝无效信用时域。
+if not 0 <= args_cli.cagrad_c < 1 or args_cli.cagrad_task_chunk < 1:
+    raise ValueError("CAGrad requires 0<=c<1 and positive task chunk size")
+if args_cli.optimization_audit_frequency < 0:
+    raise ValueError("optimization audit frequency must be nonnegative")
+if not math.isfinite(args_cli.rejected_action_weight) or args_cli.rejected_action_weight < 0.0:
+    raise ValueError("--rejected_action_weight must be finite and nonnegative")
+if args_cli.gradient_aggregation == "cagrad" and args_cli.arm not in {"direct", "direct_token"}:
+    raise ValueError("functional CAGrad requires direct or direct_token actor")
 if not 0 < args_cli.rotation_progress_clip_rad < math.inf:
     raise ValueError("rotation progress clip must be finite and positive")
 if not 0 <= args_cli.rotation_progress_reward_weight < math.inf:
@@ -351,6 +437,8 @@ from anymani.distill.rl.runtime.palm_rotation_identity import (  # noqa: E402
     build_palm_rotation_method_identity,
     palm_rotation_code_provenance,
 )
+from anymani.distill.rl.runtime.palm_rotation_optimizer_init import load_optimizer_parameter_names  # noqa: E402
+from anymani.distill.rl.runtime.palm_rotation_phase import normalize_phase_period_steps  # noqa: E402
 from anymani.distill.rl.runtime.palm_rotation_precision import enforce_palm_rotation_precision  # noqa: E402
 from anymani.distill.rl.runtime.palm_rotation_vecenv import (  # noqa: E402
     PalmRotationRlGamesGpuEnv,
@@ -365,11 +453,13 @@ from anymani.tasks.hetero.config.generated.palm_rotation_mvp_env_cfg import (  #
     GeneratedPalmRotationMvpEnvCfg,
 )
 from anymani.tasks.hetero.config.generated.scene import ASSET_BINDING  # noqa: E402
+from anymani.tasks.hetero.mdp.adr import HeterogeneousAdrCfg, ObjectPositionAdrCfg  # noqa: E402
 from anymani.tasks.hetero.mdp.episode_horizon import (  # noqa: E402
     EPISODE_HORIZON_STEPS_ATTR,
     planned_time_out,
     reset_episode_horizon,
 )
+from anymani.tasks.hetero.mdp.orientation_goal import OrientationGoalCfg, configure_orientation_goal  # noqa: E402
 
 
 def _resolve_seed(agent_cfg: dict[str, Any]) -> int:
@@ -387,12 +477,24 @@ def _configure_budget(agent_cfg: dict[str, Any]) -> tuple[int, int, int]:
     env下产生过大的反向activation；正式默认改为16份，使每份仍含全部80 assets但只改变优化microbatch，
     不改变rollout batch、每样本复用次数或global advantage denominator。
 
+    H由rollout_steps给出，表示一次PPO更新前每环境连续采样的策略步数；Actor History30与0.05秒策略步不变。
+    $B=N_{env}H$，每更新的逻辑优化步数为$E M/K$。非默认H要求显式更新预算，避免沿用H30的默认epoch数后改变交互总量。
+
     Returns:
         tuple[int, int, int]: ``(horizon, minibatch_size, max_updates)``。
     """
 
     config = agent_cfg["params"]["config"]  # rl_games PPO config
-    horizon = 4 if args_cli.smoke else 30  # smoke覆盖完整buffer但不等待30个physics steps
+    if getattr(args_cli, "gae_lambda", None) is not None:
+        config["tau"] = float(args_cli.gae_lambda)  # rl_games的tau；已有gae_lambda identity字段记录实际值。
+    rollout_steps = int(args_cli.rollout_steps)  # 默认30；研究分支显式指定H
+    if rollout_steps < 1:
+        raise ValueError("rollout_steps must be positive")  # 空采样段无法定义GAE和分层微批
+    if args_cli.smoke and rollout_steps != 30:
+        raise ValueError("smoke uses its fixed H4; custom rollout_steps requires a non-smoke run")  # 不静默覆盖研究配置
+    if not args_cli.smoke and rollout_steps != 30 and args_cli.max_updates is None:
+        raise ValueError("non-default rollout_steps requires an explicit --max_updates budget")  # 冻结实际NH×updates
+    horizon = 4 if args_cli.smoke else rollout_steps  # smoke保持原4步，其余使用实际连续采样长度
     batch_size = num_envs * horizon  # $B=N_{env}H$
     minibatch_count = int(args_cli.minibatches if args_cli.minibatches is not None else (4 if args_cli.smoke else 16))
     if minibatch_count < 1 or (batch_size // asset_count) % minibatch_count != 0:
@@ -432,6 +534,15 @@ def _configure_budget(agent_cfg: dict[str, Any]) -> tuple[int, int, int]:
     config["torch_compile"] = False  # 外部Runner wrapper保持eager，避免Isaac进程静默zero-update退出
     agent_cfg["params"]["network"]["palm_rotation"]["arm"] = args_cli.arm
     agent_cfg["params"]["network"]["palm_rotation"]["history_encoder"] = args_cli.history_encoder
+    agent_cfg["params"]["network"]["palm_rotation"]["sigma_mode"] = getattr(args_cli, "sigma_mode", "global")
+    phase_period = normalize_phase_period_steps(getattr(args_cli, "phase_period_steps", None))
+    if phase_period is not None:
+        agent_cfg["params"]["network"]["palm_rotation"]["phase_period_steps"] = phase_period
+    if args_cli.recovery_sigma_floor is not None:
+        max_log_std = float(agent_cfg["params"]["network"]["palm_rotation"]["max_log_std"])
+        if math.log(args_cli.recovery_sigma_floor) > max_log_std:
+            raise ValueError("recovery sigma floor exceeds the existing exploration ceiling")
+        agent_cfg["params"]["network"]["palm_rotation"]["recovery_sigma_floor"] = float(args_cli.recovery_sigma_floor)
     agent_cfg["params"]["network"]["palm_rotation"]["compile_mode"] = args_cli.torch_compile
     return horizon, minibatch_size, max_updates
 
@@ -497,12 +608,38 @@ def main() -> None:
     reward_release_ema_alpha = float(
         cast(Any, reward_release_params["ema_alpha"])
     )  # episode-cohort EMA更新率，baseline 0.05
+    if args_cli.orientation_kernel != "inverse" and not args_cli.orientation_goal:
+        raise ValueError("--orientation_kernel requires --orientation_goal")  # 核选择必须有对应任务配置。
+    orientation_goal_cfg = OrientationGoalCfg(kernel=args_cli.orientation_kernel) if args_cli.orientation_goal else None
+    adr_cfg = HeterogeneousAdrCfg(object_position=ObjectPositionAdrCfg(enabled=bool(args_cli.position_adr)))
+    if args_cli.position_adr and not args_cli.orientation_goal:
+        raise ValueError("position ADR is enabled through the explicit orientation-goal preset")
+    if orientation_goal_cfg is not None:
+        configure_orientation_goal(env_cfg, orientation_goal_cfg, training=True, adr=adr_cfg)
     agent_path = ANYMANI_ROOT / "source/anymani/anymani/distill/rl/agents/heterogeneous_palm_rotation_mvp_ppo.yaml"
     agent_cfg = yaml.safe_load(agent_path.read_text(encoding="utf-8"))  # versioned rl_games config
     if not isinstance(agent_cfg, dict):
         raise TypeError("palm-rotation rl_games YAML must contain a mapping")
     seed = _resolve_seed(agent_cfg)  # task随机状态与PPO RNG统一
     horizon, minibatch_size, max_updates = _configure_budget(agent_cfg)
+    if args_cli.gamma is not None:
+        agent_cfg["params"]["config"]["gamma"] = float(args_cli.gamma)  # 只改变未来回报权重；dt、奖励和安全门不变，值写入既有training identity。
+    agent_cfg["params"]["config"]["value_normalization"] = args_cli.value_normalization
+    agent_cfg["params"]["config"]["gradient_aggregation"] = args_cli.gradient_aggregation
+    agent_cfg["params"]["config"]["rejected_action_weight"] = float(args_cli.rejected_action_weight)
+    agent_cfg["params"]["config"]["cagrad_c"] = args_cli.cagrad_c
+    agent_cfg["params"]["config"]["cagrad_task_chunk"] = args_cli.cagrad_task_chunk
+    agent_cfg["params"]["config"]["optimization_audit_frequency"] = args_cli.optimization_audit_frequency
+    agent_cfg["params"]["config"]["console_metrics_frequency"] = args_cli.console_metrics_frequency
+    agent_cfg["params"]["config"]["console_family_split"] = args_cli.console_family_split
+    agent_cfg["params"]["config"]["release_rollout_batch"] = args_cli.release_rollout_batch
+    agent_cfg["params"]["config"]["env_major_rollout_storage"] = args_cli.env_major_rollout_storage
+    if args_cli.gpu_driver_free_gib is not None:
+        if args_cli.gpu_driver_free_gib <= 0:
+            raise ValueError("--gpu_driver_free_gib must be positive")
+        agent_cfg["params"]["config"]["gpu_driver_free_memory_bytes_min"] = int(args_cli.gpu_driver_free_gib * 2**30)
+    if args_cli.evaluation_frequency is not None:
+        agent_cfg["params"]["config"]["evaluation_frequency"] = args_cli.evaluation_frequency  # 只在完整update边界保存。
     if args_cli.learning_rate is not None:
         config = agent_cfg["params"]["config"]
         factor = float(args_cli.learning_rate) / float(config["learning_rate"])
@@ -546,11 +683,36 @@ def main() -> None:
             target_history_encoder=str(args_cli.history_encoder),
             target_provider_identity=provider.identity,
             initialize_critic=bool(args_cli.init_critic),
+            actor_init_sigma=args_cli.actor_init_sigma,
+            target_sigma_mode=args_cli.sigma_mode,
+            target_recovery_sigma_floor=args_cli.recovery_sigma_floor,
+            allow_recovery_exploration_adaptation=bool(args_cli.adapt_recovery_exploration),
+            target_phase_period_steps=args_cli.phase_period_steps,
+            allow_phase_clock_adaptation=bool(args_cli.adapt_phase_clock),
         )
         if actor_init_checkpoint is not None
         else (inspect_resumed_actor_warm_start(checkpoint) if checkpoint is not None else None)
     )
     if actor_init_checkpoint is not None:
+        if args_cli.init_optimizers:
+            assert actor_warm_start is not None
+            if actor_warm_start.get("phase_clock_adaptation") and args_cli.actor_init_optimizer_names is None:
+                raise ValueError("phase adapter Adam inheritance requires --actor_init_optimizer_names")
+            if args_cli.actor_init_optimizer_names is not None:
+                names_path = args_cli.actor_init_optimizer_names.expanduser().resolve(strict=True)
+                names_sha = hashlib.sha256(names_path.read_bytes()).hexdigest()
+                load_optimizer_parameter_names(
+                    names_path,
+                    expected_checkpoint_sha256=str(actor_warm_start["checkpoint_sha256"]),
+                    expected_ledger_sha256=names_sha,
+                )  # Runner 创建前验证 ledger 与本次 source 字节确实对应。
+                actor_warm_start["optimizer_name_ledger_sha256"] = names_sha
+                agent_cfg["params"]["config"]["actor_init_optimizer_names"] = str(names_path)
+            actor_warm_start["initialize_optimizers"] = True  # 明示新方法分支继承学习状态。
+            actor_warm_start["reset_components"] = [
+                name for name in actor_warm_start["reset_components"]
+                if name not in {"actor_optimizer", "critic_optimizer", "random_states"}
+            ]  # 新run重置计数和物理段；floor=1时课程重置不改变实际奖励。
         agent_cfg["params"]["config"]["actor_init_checkpoint"] = actor_init_checkpoint
     prototype_index = torch.tensor(
         ASSET_BINDING.asset_index_by_env(num_envs),
@@ -564,6 +726,7 @@ def main() -> None:
         rl_device=rl_device,
         clip_observations=float(agent_cfg["params"]["env"]["clip_observations"]),
         clip_actions=float(agent_cfg["params"]["env"]["clip_actions"]),
+        phase_period_steps=args_cli.phase_period_steps,
     )
 
     # Runtime identity必须在Runner build前注入network，checkpoint restore才能先验证再加载model tensors。
@@ -583,6 +746,11 @@ def main() -> None:
             "source_member_keys": list(ASSET_BINDING.source_member_keys),
             "actor_warm_start": actor_warm_start,
             "actor_contact": str(args_cli.actor_contact),
+            **({"phase_period_steps": args_cli.phase_period_steps} if args_cli.phase_period_steps is not None else {}),
+            **({"sigma_mode": args_cli.sigma_mode} if args_cli.sigma_mode != "global" else {}),
+            **({"recovery_sigma_floor": float(args_cli.recovery_sigma_floor)} if args_cli.recovery_sigma_floor is not None else {}),
+            **({"orientation_goal": orientation_goal_cfg.to_dict(),
+                "adr": {"object_position": vars(adr_cfg.object_position)}} if orientation_goal_cfg is not None else {}),
             "episode_seconds_min": float(args_cli.episode_seconds_min),
             "episode_seconds_max": float(args_cli.episode_seconds_max),
             "reward_release_floor": float(args_cli.reward_release_floor),
@@ -603,7 +771,7 @@ def main() -> None:
                 if args_cli.rotation_progress_reward_weight != 5.0
                 else {}  # 历史checkpoint缺省为5，不给默认任务添加新的必需字段
             ),
-            "strict_goal_reward_weight": float(args_cli.strict_goal_reward_weight),
+            "strict_goal_reward_weight": float(env_cfg.rewards.goal_success.weight),
             **(
                 {"joint_pose_anchor_weight": float(args_cli.joint_pose_anchor_weight)}
                 if args_cli.joint_pose_anchor_weight != -0.5
@@ -633,6 +801,12 @@ def main() -> None:
             "reward_release_end_turns": float(args_cli.reward_release_end_turns),
             "reward_release_ema_alpha": reward_release_ema_alpha,
             "normalize_value": bool(ppo_cfg["normalize_value"]),
+            "value_normalization": str(ppo_cfg["value_normalization"]),
+            "gradient_aggregation": str(ppo_cfg["gradient_aggregation"]),
+            **({"rejected_action_weight": float(args_cli.rejected_action_weight)} if args_cli.rejected_action_weight else {}),
+            "cagrad_c": float(ppo_cfg["cagrad_c"]),
+            "cagrad_task_chunk": int(ppo_cfg["cagrad_task_chunk"]),
+            "optimization_audit_frequency": int(ppo_cfg["optimization_audit_frequency"]),
             "initial_log_std": float(agent_cfg["params"]["network"]["palm_rotation"]["initial_log_std"]),
             "max_log_std": float(agent_cfg["params"]["network"]["palm_rotation"]["max_log_std"]),
             "base_action_limit": float(agent_cfg["params"]["network"]["palm_rotation"]["base_action_limit"]),
@@ -644,6 +818,9 @@ def main() -> None:
         },
     )
     agent_cfg["params"]["network"]["anymani_identity"] = identity
+    transport.configure_training_evidence(run_dir, str(identity["identity_digest"]))
+    if transport.training_evidence is not None:
+        agent_cfg["params"]["config"]["evidence_segment_id"] = transport.training_evidence.segment_id
     agent_cfg["params"]["config"]["num_actors"] = transport.num_envs
     agent_cfg["params"]["config"]["code_provenance"] = palm_rotation_code_provenance()
     dump_yaml(str(run_dir / "params" / "env.yaml"), env_cfg)
@@ -701,7 +878,12 @@ def main() -> None:
                 "reward_release_end_turns": float(args_cli.reward_release_end_turns),
                 "reward_release_ema_alpha": reward_release_ema_alpha,
                 "rotation_progress_reward_weight": float(args_cli.rotation_progress_reward_weight),
-                "pose_keypoint_reward_weight": float(args_cli.pose_keypoint_reward_weight),
+                "pose_keypoint_reward_weight": 0.0 if orientation_goal_cfg else float(args_cli.pose_keypoint_reward_weight),
+                "orientation_goal": orientation_goal_cfg.to_dict() if orientation_goal_cfg else None,
+                "sigma_mode": args_cli.sigma_mode,
+                "recovery_sigma_floor": args_cli.recovery_sigma_floor,
+                "rejected_action_weight": float(args_cli.rejected_action_weight),
+                "position_adr": vars(adr_cfg.object_position),
                 "full_gradient_shadow_frequency": agent_cfg["params"]["config"]["full_gradient_shadow_frequency"],
                 "mini_epochs": agent_cfg["params"]["config"]["mini_epochs"],
                 "max_updates": max_updates,
@@ -766,9 +948,19 @@ if __name__ == "__main__":
     exit_code = 0
     try:
         main()
-    except BaseException:
+    except BaseException as error:
         traceback.print_exc()
         exit_code = 1
+        evidence_dir = os.environ.get("ANYMANI_RL_EVIDENCE_DIR")
+        if evidence_dir:
+            (Path(evidence_dir) / "python_failure.json").write_text(
+                json.dumps({"exception_type": type(error).__name__, "message": str(error)}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )  # 在Kit关闭前保存异常事实；即使底层直接exit(0)，父进程仍能正确判定失败。
     finally:
-        simulation_app.close()
+        try:
+            simulation_app.close()
+        except SystemExit as shutdown:
+            if exit_code == 0:
+                exit_code = int(shutdown.code or 0)  # 已有训练异常优先于Kit的正常关闭码。
     raise SystemExit(exit_code)  # Kit shutdown不得把训练异常覆盖成exit 0

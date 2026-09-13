@@ -11,6 +11,7 @@ from anymani.distill.models.palm_rotation_policy import (
     PalmRotationActorObservation,
     PalmRotationCriticObservation,
     PalmRotationGeometry,
+    expanded_policy_log_std,
     masked_max,
 )
 
@@ -73,6 +74,31 @@ def test_zero_initialized_action_residual_is_exact_base_policy() -> None:
     assert torch.equal(output.residual_mean, torch.zeros_like(output.residual_mean))
     assert torch.equal(output.mean[~actor_observation.jnt_valid], torch.zeros_like(output.mean[~actor_observation.jnt_valid]))
     assert output.log_std.numel() == 1
+
+
+def test_conditional_sigma_initialization_bounds_and_joint_state_dependency():
+    r"""共享条件头初始恢复全局sigma，然后可按joint/state改变，ghost不贡献分布。"""
+    observation, _, geometry = _fixture()
+    global_policy = PalmRotationActorCritic(arm="direct_token")
+    conditional = PalmRotationActorCritic(arm="direct_token", sigma_mode="conditional")
+    missing = conditional.load_state_dict(global_policy.state_dict(), strict=False)
+    assert set(missing.missing_keys) == {"actor.conditional_sigma_head.weight", "actor.conditional_sigma_head.bias"}
+    expected = global_policy.actor(observation, geometry)
+    output = conditional.actor(observation, geometry)
+    torch.testing.assert_close(output.mean, expected.mean, rtol=0, atol=0)
+    assert output.log_std.shape == (3, 16)
+    torch.testing.assert_close(output.log_std[observation.jnt_valid], expected.log_std.expand_as(output.mean)[observation.jnt_valid])
+    assert bool((output.log_std[~observation.jnt_valid] == 0).all())
+    output.log_std[observation.jnt_valid].sum().backward()
+    head = conditional.actor.conditional_sigma_head
+    assert head is not None and head.weight.grad is not None and bool((head.weight.grad != 0).any())
+    with torch.no_grad():
+        head.weight.normal_(std=.1)
+    changed = conditional.actor(observation, geometry).log_std[observation.jnt_valid]
+    assert float(changed.std()) > 0 and bool((changed.exp() >= .05 - 1e-7).all())
+    assert bool((changed <= conditional.actor.max_log_std).all())
+    with pytest.raises(ValueError):
+        expanded_policy_log_std(torch.ones(3, 1), output.mean, observation.jnt_valid)
 
 
 def test_global_exploration_projection_enforces_n000_early_budget_ceiling() -> None:

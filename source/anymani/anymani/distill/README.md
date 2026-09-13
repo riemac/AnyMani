@@ -38,7 +38,7 @@ $$
 
 `methods` 把 representation、model 与双 objective 装配成对外封闭的科学方法。当前主线联合 density 与显式 Gamma；旧 density/κ method 保留为 v0.7.5 研究对照。Joint-sign rewrite 是输入增强，不是附加主损失。两项保留各自单位、mask、teacher baseline 和 $(asset,q)$ 等权归约，共享 encoder 由 FairGrad 更新。
 
-`ssl`、`rl` 与 `il` 定义生命周期。stage 可以更换 sampling、优化与评估协议，但不能复制或悄悄改写上述物理语义。当前 Geometry SSL 与 rl_games 路线可运行；IL 仍只是边界定义。
+`ssl`、`rl` 与 `il` 定义生命周期。stage可以更换sampling、优化与评估协议，但不能复制或悄悄改写上述物理语义。Geometry SSL与rl_games路线可运行；IL当前只有一个窄的accepted-teacher environment-action mean-imitation入口，用于固定数据tiny-overfit，不是通用BC、DAgger或policy-distribution distillation框架。
 
 ```mermaid
 flowchart LR
@@ -76,6 +76,9 @@ python -m anymani.distill.ssl.pretrain --config geometry_ssl_density_material_ja
 
 # GM rl_games
 /home/hac/isaac/IsaacLab/isaaclab.sh -p -m anymani.distill.rl.train --task AnyMani-GM-SingleAsset-MLP-v0 --num_envs 4096 --headless
+
+# 固定teacher数据上的current actor mean-imitation；需要显式新output目录
+python -m anymani.distill.il.train --headless --output_dir outputs/hetero/distillation/<run-name>
 ```
 
 `tasks/inhand` 的历史路线继续使用仓库根 `scripts/rl_games/train.py` / `play.py`，不与 `distill.rl` 合并入口。

@@ -299,7 +299,7 @@ def test_head_gradient_probe_separates_per_asset_objectives_without_parameter_gr
 
 
 def test_optimizer_scalar_drain_transfers_only_update_level_means() -> None:
-    r"""80份GPU scalar之和只在update drain转成六个Python值，且保持原归约分母。"""
+    r"""探索基础/有效尺度与下限比例按微批平均，梯度范数按optimizer步平均。"""
 
     fake = SimpleNamespace(
         _optimizer_step_count=20,
@@ -311,6 +311,10 @@ def test_optimizer_scalar_drain_transfers_only_update_level_means() -> None:
             "critic_loss": torch.tensor(240.0),
             "entropy": torch.tensor(320.0),
             "policy_sigma": torch.tensor(40.0),
+            "policy_base_sigma": torch.tensor(16.0),
+            "recovery_floor_fraction": torch.tensor(8.0),
+            "actor_rejected_action_cost": torch.tensor(2.4),
+            "actor_rejected_action_fraction": torch.tensor(12.0),
             "actor_grad_norm": torch.tensor(10.0),
             "critic_grad_norm": torch.tensor(30.0),
         },
@@ -319,6 +323,10 @@ def test_optimizer_scalar_drain_transfers_only_update_level_means() -> None:
 
     assert result["actor_loss"] == 2.0 and result["critic_loss"] == 3.0
     assert result["entropy"] == 4.0 and result["policy_sigma"] == 0.5
+    assert result["policy_base_sigma"] == pytest.approx(0.2)
+    assert result["recovery_floor_fraction"] == pytest.approx(0.1)
+    assert result["actor_rejected_action_cost"] == pytest.approx(0.03)
+    assert result["actor_rejected_action_fraction"] == pytest.approx(0.15)
     assert result["actor_grad_norm"] == 0.5 and result["critic_grad_norm"] == 1.5
     assert result["optimizer_microbatches"] == 80.0 and result["optimizer_steps"] == 20.0
 
@@ -541,16 +549,49 @@ def test_direct_mechanism_metrics_use_immutable_rollout_mean_across_mini_epochs(
     torch.testing.assert_close(token_metrics["direct_mean_rms"], expected_rms)
 
 
-def test_squashed_policy_kl_is_zero_for_identical_bounded_means_and_ignores_ghost() -> None:
+@pytest.mark.parametrize("sigma_value", [0.65, 0.15, 0.035087805, 0.001])
+def test_squashed_policy_kl_is_zero_for_identical_bounded_means_and_ignores_ghost(sigma_value: float) -> None:
     r"""Tanh双射下相同latent Normal的KL为0，ghost action mean任意污染不进入归约。"""
 
     current_mean = torch.tensor([[0.25, -0.75, 0.0]])
     old_mean = current_mean.clone()
-    sigma = torch.full_like(current_mean, 0.65)
+    sigma = torch.full_like(current_mean, sigma_value)
     active = torch.tensor([[True, True, False]])
     baseline = PalmRotationPpoAgent.masked_policy_kl(current_mean, sigma, old_mean, sigma, active)
     poisoned = current_mean.clone()
     poisoned[:, 2] = 1.0
     changed = PalmRotationPpoAgent.masked_policy_kl(poisoned, sigma, old_mean, sigma, active)
     torch.testing.assert_close(baseline, changed, rtol=0.0, atol=0.0)
-    assert abs(float(baseline.item())) < 1.0e-4
+    assert abs(float(baseline.item())) < 1.0e-12
+
+
+def test_model_identity_selects_popart_and_readonly_denormalization() -> None:
+    r"""实际rl_games model使用身份声明的PopArt，诊断和train模式不再次修改统计。"""
+    from anymani.distill.rl.algorithms.popart import PopArtValueNormalizer
+
+    builder = PalmRotationRlGamesBuilder()
+    builder.load(
+        {
+            "palm_rotation": {"arm": "direct_token", "initial_log_std": -0.5, "max_log_std": -0.43},
+            "anymani_identity": {"identity_digest": "contract-test", "training": {"value_normalization": "popart"}},
+        }
+    )
+    model = PalmRotationMaskedContinuousModel(builder).build(
+        {
+            "actions_num": 16,
+            "input_shape": _input_shapes(),
+            "value_size": 1,
+            "normalize_input": False,
+            "normalize_value": True,
+        }
+    )
+    assert isinstance(model.value_mean_std, PopArtValueNormalizer)
+    stats = model.value_mean_std
+    stats.update_from_returns(torch.tensor([[20.0], [30.0]]), model.a2c_network.package.critic.value_head[-1])
+    model.train()
+    count = stats.count.clone()
+    raw = torch.tensor([[1000.0]])
+    normalized = stats(raw)
+    torch.testing.assert_close(denormalize_value_readonly(model, normalized), raw)
+    torch.testing.assert_close(stats.count, count, rtol=0, atol=0)
+    assert stats.training

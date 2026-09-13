@@ -158,10 +158,13 @@ def drain_optimizer_scalars(agent: PalmRotationPpoAgent) -> dict[str, float]:
         raise RuntimeError("PPO update ended inside a logical accumulated minibatch")
     microbatch_denominator = float(agent._optimizer_microbatch_count)  # 正式$16\times5=80$
     step_denominator = float(agent._optimizer_step_count)  # 正式$(16/4)\times5=20$
-    return {
+    result = {
         **{
             name: float((agent._optimizer_scalar_sums[name] / microbatch_denominator).item())
-            for name in ("actor_loss", "critic_loss", "entropy", "policy_sigma")
+            for name in (
+                "actor_loss", "critic_loss", "entropy", "policy_sigma", "policy_base_sigma", "recovery_floor_fraction",
+                "actor_rejected_action_cost", "actor_rejected_action_fraction",
+            )
         },
         **{
             name: float((agent._optimizer_scalar_sums[name] / step_denominator).item())
@@ -170,6 +173,19 @@ def drain_optimizer_scalars(agent: PalmRotationPpoAgent) -> dict[str, float]:
         "optimizer_microbatches": microbatch_denominator,
         "optimizer_steps": step_denominator,
     }
+    if getattr(agent, "gradient_aggregation", "mean") == "cagrad":
+        for side in ("actor", "critic"):
+            for name in ("relative_gap", "worst_projection", "iterations"):
+                key = f"{side}_cagrad_{name}"
+                result[key] = float((agent._optimizer_scalar_sums[key] / step_denominator).item())
+    normalizer = getattr(agent, "value_mean_std", None)
+    compensation = getattr(agent, "_last_popart_compensation", None)
+    if compensation is not None:
+        assert normalizer is not None  # 已执行PopArt补偿时必须具有对应价值统计。
+        result["popart_weight_error"] = float(compensation["weight_error"].item())
+        result["popart_bias_error"] = float(compensation["bias_error"].item())
+        result["popart_count"] = float(normalizer.count.item())
+    return result
 
 
 def drain_optimization_metrics(agent: PalmRotationPpoAgent) -> dict[str, torch.Tensor]:
@@ -226,6 +242,61 @@ def mean_fields(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> dict[str
     r"""对同一cell或global的per-asset标量作资产等权均值。"""
 
     return {field: float(sum(float(row[field]) for row in rows) / len(rows)) for field in fields}
+
+
+def _print_live_metrics(agent: PalmRotationPpoAgent, global_row: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+    r"""在完整update边界打印科研摘要，避免把训练proxy或终止事件比例当固定安全率。
+
+    live_net/live_goal为资产等权的当前rollout状态均值；end_net仅聚合本轮结束回合，
+    用各资产completed_episode_count加权。drop与axis可能同时发生，分别报告，不相加。
+    分族范围由命令行显式绑定冻结成员轴，只用于终端显示，不进入Actor或Critic。
+    """
+    if int(agent.epoch_num) == 1:
+        print("[METRICS] live_net=visited training-state turns; end_net=completed episode turns; not fixed30/R16 evaluation.", flush=True)
+        print("[METRICS] drop/end and axis/end are separate terminal-event fractions; checkpoints contain completed updates only.", flush=True)
+        print("[FIRST30] per-asset recent windows: median turns/goals/direction; asset-equal safety; training proxies, not frozen R16.", flush=True)
+    free_gib = float(global_row.get("gpu_driver_free_bytes", 0)) / 2**30
+    print(
+        f"\n[UPDATE {agent.epoch_num:04d}/{agent.max_epochs}] frames={global_row['transitions']/1e6:.3f}M "
+        f"wall={global_row['epoch_total_seconds']:.2f}s "
+        f"rollout={global_row['rollout_policy_seconds']:.2f}s opt={global_row['ppo_update_seconds']:.2f}s "
+        f"sigma={global_row['policy_sigma']:.3f} GPU-free={free_gib:.2f}GiB",
+        flush=True,
+    )  # 时间为本次PPO更新的墙钟；sigma为无量纲潜高斯尺度。
+    split = int(agent.config.get("console_family_split", 0))
+    if split and len(rows) != 2 * split:
+        raise ValueError("console family split must exactly partition the declared frozen asset axis")
+    groups = [("LEAP", rows[:split]), ("Allegro", rows[split:])] if split else [("ALL", rows)]
+    for label, group in groups:
+        current = mean_fields(group, ("reward_mean", "net_turns_mean", "goal_count_mean"))
+        count = sum(row["completed_episode_count"] for row in group)  # 本轮真实结束回合数。
+        if count:
+            terminal = {
+                key: sum(row["completed_episode_count"] * row[key] for row in group) / count
+                for key in ("terminal_net_turns_mean", "terminal_drop_rate", "terminal_axis_failure_rate", "terminal_timeout_rate")
+            }  # 先恢复计数加权，再跨资产汇总；无结束回合的资产不贡献。
+            ending = (f"end_net={terminal['terminal_net_turns_mean']:.3f} "
+                      f"drop/end={terminal['terminal_drop_rate']:.1%} axis/end={terminal['terminal_axis_failure_rate']:.1%} "
+                      f"timeout/end={terminal['terminal_timeout_rate']:.1%}")
+        else:
+            ending = "end_net=-- (no completed episodes this update)"
+        print(f"  {label:7s} reward/step={current['reward_mean']:+.4f} live_net={current['net_turns_mean']:.3f} "
+               f"live_goal={current['goal_count_mean']:.2f} ended={int(count)} {ending}", flush=True)
+        evidence = getattr(getattr(agent.vec_env, "env", None), "training_evidence", None)
+        tracker = getattr(evidence, "first30_statistics", None)  # 统计已在rollout结束时更新，无额外仿真/模型前向。
+        if tracker is not None:
+            window = tracker.summary([int(row["scope_index"]) for row in group])  # 保留缺数据资产的分母。
+            formatted = {
+                name: "--" if window[name] is None else f"{window[name]:.3f}"
+                for name in ("first30_net_median", "first30_goal_median", "first30_direction_median", "first30_safe_fraction")
+            }  # 暂无样本显示--，不伪装成零能力。
+            print(
+                f"  {label:7s} FIRST30 net_med={formatted['first30_net_median']} turns "
+                f"goals_med={formatted['first30_goal_median']} direction={formatted['first30_direction_median']} "
+                f"safe={formatted['first30_safe_fraction']} assets={window['first30_observed_assets']}/{window['first30_asset_count']} "
+                f"windows={window['first30_window_count']} proxy_1turn={window['first30_one_turn_proxy_assets']} "
+                f"proxy_2turn={window['first30_two_turn_proxy_assets']}", flush=True,
+            )  # 目标次数始终独立显示，不按30°/次换算物理圈数。
 
 
 def record_update_metrics(agent: PalmRotationPpoAgent, epoch_result: tuple[Any, ...]) -> None:
@@ -294,6 +365,18 @@ def record_update_metrics(agent: PalmRotationPpoAgent, epoch_result: tuple[Any, 
         **agent._mean_fields(asset_rows, aggregate_fields),
         **optimizer_scalars,
     }
+    # 首30秒窗口的分位数和安全率不能套用普通per-asset标量算术均值。
+    # recorder返回每资产事实；聚合只纳入有窗口资产，同时明确保留完整资产分母。
+    evidence = getattr(wrapper, "training_evidence", None)
+    first30 = getattr(evidence, "first30_statistics", None)
+    if first30 is not None:
+        per_asset = first30.per_asset()  # 包括当前没有窗口的资产，浮点指标为None。
+        for row in asset_rows:
+            row.update(per_asset[int(row["scope_index"])])
+        for row in cell_rows:
+            indices = [int(asset["scope_index"]) for asset in asset_rows if asset["cell_id"] == row["cell_id"]]
+            row.update(first30.summary(indices))  # 同一个形态cell的实际成员集合。
+        global_row.update(first30.summary())  # 族内运行的完整128资产归约。
     if agent._gradient_probe_global is not None:
         global_row.update(agent._gradient_probe_global)  # pairwise/top-1/span及probe自身墙钟只属于global scope
     learning_rates = {str(group.get("name")): float(group["lr"]) for group in agent.optimizer.param_groups}
@@ -344,6 +427,9 @@ def record_update_metrics(agent: PalmRotationPpoAgent, epoch_result: tuple[Any, 
                 f"torch_reserved={current_reserved}"
             )
     agent.metrics_recorder.record([global_row, *cell_rows, *asset_rows])  # 89 rows/update
+    cadence = int(agent.config.get("console_metrics_frequency", 0))
+    if cadence > 0 and int(agent.epoch_num) % cadence == 0:
+        _print_live_metrics(agent, global_row, asset_rows)  # 只展示已经形成的事实，不改变采样或优化。
     if resource_violation is not None:
         agent.metrics_recorder.flush(reason="resource-safety")  # 保留故障前完整update但不生成新checkpoint
         raise RuntimeError(resource_violation)
@@ -363,7 +449,11 @@ def record_update_metrics(agent: PalmRotationPpoAgent, epoch_result: tuple[Any, 
         tensorboard_fields.append(
             "direct_mean_rms" if agent.actor_arm in {"direct", "direct_token"} else "residual_rms"
         )
+        if first30 is not None:
+            tensorboard_fields.extend(("first30_net_median", "first30_goal_median", "first30_direction_median", "first30_safe_fraction"))
         for field in tensorboard_fields:
-            agent.writer.add_scalar(f"mvp80/global/{field}", global_row[field], transitions)
+            if global_row[field] is not None:
+                agent.writer.add_scalar(f"mvp80/global/{field}", global_row[field], transitions)
             for row in cell_rows:
-                agent.writer.add_scalar(f"mvp80/cell_{row['cell_id']}/{field}", row[field], transitions)
+                if row[field] is not None:
+                    agent.writer.add_scalar(f"mvp80/cell_{row['cell_id']}/{field}", row[field], transitions)

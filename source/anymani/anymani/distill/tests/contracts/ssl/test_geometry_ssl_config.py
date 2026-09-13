@@ -1,4 +1,4 @@
-"""Schema 8 Hydra composition、完整单 seed 预算与 physical realization fingerprint 合同。"""
+"""Schema 9 train-evaluate composition、单 seed 预算与 physical realization fingerprint 合同。"""
 
 from __future__ import annotations
 
@@ -20,15 +20,14 @@ from anymani.distill.representations.sources.collision_geometry import (
     HomeSurfaceSamples,
     OwnerGeometryCache,
 )
-from anymani.distill.ssl.config_store import compose_evaluation_cfg, compose_pretrain_cfg, compose_validation_cfg
+from anymani.distill.ssl.config_store import compose_evaluation_cfg, compose_pretrain_cfg
 from anymani.distill.ssl.data import HandAssetCatalogCfg
 from anymani.distill.ssl.data import hand_assets as hand_assets_module
 from anymani.distill.ssl.data.hand_assets import EmbodimentCatalog, HandAssetCatalog, _prune_catalog_cache
 from anymani.distill.ssl.experiment import EmbodimentPretrain, EmbodimentPretrainCfg, resolved_config_dict
 from anymani.distill.ssl.experiments import available_experiments, load_experiment
 from anymani.distill.ssl.pretrain import _build_parser, _config_overrides
-from anymani.distill.ssl.runtime.post_training import normalized_validation_score, selection_baseline
-from anymani.distill.ssl.runtime.pretrainer import EmbodimentPretrainTrainerCfg
+from anymani.distill.ssl.runtime.pretrainer import EmbodimentPretrainTrainerCfg, ExecutionPrecisionCfg
 
 pytestmark = pytest.mark.contract
 
@@ -39,43 +38,38 @@ def _compose() -> EmbodimentPretrainCfg:
     return compose_pretrain_cfg()
 
 
-def test_experiment_registry_exposes_versioned_and_legacy_snapshots() -> None:
-    """registry 必须显式公开当前版本和保留的 legacy 快照。"""
+def test_experiment_registry_exposes_only_current_versioned_snapshot() -> None:
+    """Active registry 显式公开当前 N040、N031 baseline 与 v0.7.5 历史对照。"""
 
     assert available_experiments() == (
         "geometry_ssl_density_material_jacobian_se3_v0_8_1",
         "geometry_ssl_density_material_jacobian_v0_8_0",
-        "geometry_ssl_multitask_representation_v0_7_3",
-        "multi_anchor_gaussian_implicit_field",
+        "geometry_ssl_multitask_representation_v0_7_5",
     )
-    current = load_experiment("geometry_ssl_multitask_representation_v0_7_3")
-    legacy = load_experiment("multi_anchor_gaussian_implicit_field")
-    assert current.path.name == "geometry_ssl_multitask_representation_v0_7_3.py"
-    assert legacy.path.name == "multi_anchor_gaussion_implicit_field.py"
+    current = load_experiment("geometry_ssl_multitask_representation_v0_7_5")
+    assert current.path.name == "geometry_ssl_multitask_representation_v0_7_5.py"
     assert len(current.config_sha256) == 64
-    assert current.validation is not None
+    assert not hasattr(current, "validation")
     assert current.evaluation is not None
 
 
 def test_experiment_python_path_composes_the_same_snapshot() -> None:
-    """CLI 传入快照路径时，pretrain/validation/evaluation 必须来自同一文件。"""
+    """CLI 传入快照路径时，pretrain/evaluation 必须来自同一文件。"""
 
-    path = Path(__file__).parents[3] / "ssl" / "experiments" / "geometry_ssl_multitask_representation_v0_7_3.py"
-    named = compose_pretrain_cfg(config_ref="geometry_ssl_multitask_representation_v0_7_3")
+    path = Path(__file__).parents[3] / "ssl" / "experiments" / "geometry_ssl_multitask_representation_v0_7_5.py"
+    named = compose_pretrain_cfg(config_ref="geometry_ssl_multitask_representation_v0_7_5")
     from_path = compose_pretrain_cfg(config_ref=path)
-    validation = compose_validation_cfg(config_ref=path)
     evaluation = compose_evaluation_cfg(config_ref=path)
 
     assert from_path == named
-    assert validation.run.experiment_name == "geometry_ssl_multitask_representation_v0_7_3_validation"
-    assert evaluation.run.experiment_name == "geometry_ssl_multitask_representation_v0_7_3_evaluation"
+    assert evaluation.run.experiment_name == "geometry_ssl_multitask_representation_v0_7_5_evaluation"
 
 
 def test_training_cli_selects_snapshot_separately_from_run_name() -> None:
     """配置 identity 与本次输出 run name 必须是两个不同的 CLI 概念。"""
 
-    args = _build_parser().parse_args(("--config", "multi_anchor_gaussian_implicit_field", "--run_name", "probe"))
-    assert args.config == "multi_anchor_gaussian_implicit_field"
+    args = _build_parser().parse_args(("--config", "geometry_ssl_multitask_representation_v0_7_5", "--run_name", "probe"))
+    assert args.config == "geometry_ssl_multitask_representation_v0_7_5"
     assert args.experiment_name == "probe"
 
 
@@ -85,7 +79,7 @@ def test_backup_script_is_a_direct_training_wrapper() -> None:
     script = Path(__file__).parents[3] / "ssl" / "backup.sh"
     text = script.read_text(encoding="utf-8")
     assert "anymani.distill.ssl.pretrain" in text
-    assert "geometry_ssl_multitask_representation_v0_7_3" in text
+    assert "geometry_ssl_multitask_representation_v0_7_5" in text
     assert "anymani.distill.ssl.workflow" not in text
     assert "case " not in text
     assert "if [[" not in text
@@ -101,7 +95,7 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
     assert config.data.manifest == (
         "source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/ssl.yaml"
     )
-    assert config.data.expected_sha256 == "f1398417888e7c237cbb2583dcf8e9cd10bef7fee792b307c67dfa74fb6e0698"
+    assert config.data.expected_sha256 == "671e204e8542e69fab7adc05bb3516a28993a7aa744a333b31811eb2e9c0eeb8"
     assert type(config.method).__name__ == "MultiAnchorGaussianMethodCfg"
     assert type(config.trainer).__name__ == "EmbodimentPretrainTrainerCfg"
     assert not hasattr(config, "evaluation")
@@ -111,7 +105,9 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
     assert config.trainer.microbatch_size == 64
     assert not hasattr(config.trainer, "validation")
     assert not hasattr(config.trainer, "final_evaluation")
-    assert config.trainer.checkpoint_every_epochs == 4
+    assert config.trainer.checkpoint_every_epochs == 32
+    assert config.trainer.device_window_assets == 8
+    assert not hasattr(config.trainer, "max_resident_assets")
     assert not hasattr(config.trainer, "gradient_accumulation_steps")
     assert config.trainer.sampling.assets_per_minibatch == 64
     assert config.trainer.sampling.q_per_asset_per_minibatch == 8
@@ -136,7 +132,9 @@ def test_hydra_recovers_all_concrete_roles_and_objective_terms() -> None:
     assert config.method.model.ssl_decoders.sensitivity.physical_scale_m == pytest.approx(0.1)
     assert config.method.entity_permutation.enabled
     assert config.run.source_cache_mode == "auto"
-    assert tuple(config.method.representation.field.validation_bandwidths_m) == (0.004, 0.016, 0.064)
+    assert config.run.source_cache_root.endswith("geometry_source/v2")
+    assert config.trainer.execution == ExecutionPrecisionCfg()
+    assert tuple(config.method.representation.field.fixed_bandwidths_m) == (0.004, 0.016, 0.064)
     assert not hasattr(config.method.representation, "layout")
     assert "paired" not in config.method.objectives.enabled()
     assert all(term.qualified_func_name().endswith(f"{name}_objective") for name, term in config.method.objectives.enabled().items())
@@ -147,23 +145,21 @@ def test_hydra_cli_override_changes_local_cfg_without_central_parser() -> None:
 
     config = compose_pretrain_cfg(["trainer.optimizer.learning_rate=0.0007"])
     assert config.trainer.optimizer.learning_rate == pytest.approx(7.0e-4)
-    assert resolved_config_dict(config)["schema_version"] == "8.0.0"
+    assert resolved_config_dict(config)["schema_version"] == "9.0.0"
 
 
-def test_post_training_configs_are_independent_from_trainer() -> None:
-    r"""validation/evaluation 应各自组合 data/method/stage/run，不回填 Trainer 字段。"""
+def test_evaluation_config_is_independent_from_trainer_and_selection() -> None:
+    r"""evaluation 只组合 data/method/stage/run，不回填 Trainer 或 checkpoint-selection 字段。"""
 
-    validation = compose_validation_cfg()
     evaluation = compose_evaluation_cfg()
 
-    assert validation.schema_version == "1.0.0"
     assert evaluation.schema_version == "1.0.0"
-    assert not hasattr(validation, "trainer")
     assert not hasattr(evaluation, "trainer")
-    assert validation.validation.selection_metrics == ("density", "kappa")
+    assert not hasattr(evaluation.evaluation, "selection_metrics")
+    assert not hasattr(evaluation.run, "baseline_checkpoint")
     assert evaluation.evaluation.final_ablations[-1] == "joint_token_shuffle"
-    assert validation.data == evaluation.data == _compose().data
-    assert validation.method == evaluation.method == _compose().method
+    assert evaluation.data == _compose().data
+    assert evaluation.method == _compose().method
 
 
 def test_flat_cli_flags_compose_one_run_without_exposing_config_paths() -> None:
@@ -183,10 +179,13 @@ def test_flat_cli_flags_compose_one_run_without_exposing_config_paths() -> None:
             "1",
             "--microbatch_size",
             "64",
+            "--checkpoint_every_epochs",
+            "8",
             "--seed",
             "42",
             "--experiment_name",
             "objective_probe_seed42",
+            "--no-emit_compression_basis",
         )
     )
     config = compose_pretrain_cfg(_config_overrides(args))
@@ -194,6 +193,7 @@ def test_flat_cli_flags_compose_one_run_without_exposing_config_paths() -> None:
     assert not hasattr(config.run, "phase")
     assert config.run.experiment_name == "objective_probe_seed42"
     assert config.run.seed == config.trainer.sampling.seed == 42
+    assert not config.trainer.emit_compression_basis
     assert config.trainer.max_epochs == 8
     assert config.trainer.num_minibatches == 2
     assert config.trainer.sampling.assets_per_minibatch == 64
@@ -208,17 +208,17 @@ def test_experiment_constructor_has_no_filesystem_or_cuda_side_effect(tmp_path) 
     output_dir = tmp_path / "not-created-until-run"
     experiment = EmbodimentPretrain(_compose(), output_dir=output_dir)
 
-    assert experiment.config.schema_version == "8.0.0"
+    assert experiment.config.schema_version == "9.0.0"
     assert experiment.output_dir == output_dir
     assert not output_dir.exists()
 
 
 def test_old_schemas_are_fail_closed() -> None:
-    """旧配置不通过 alias 或 parser 猜测进入 schema 8。"""
+    """旧配置不通过 alias 或 parser 猜测进入 schema 9。"""
 
     config = _compose()
-    for version in ("1.0.0", "2.0.0", "6.0.0", "7.0.0"):
-        with pytest.raises(ValueError, match="schema must be exactly 8.0.0"):
+    for version in ("1.0.0", "2.0.0", "7.0.0", "8.0.0"):
+        with pytest.raises(ValueError, match="schema must be exactly 9.0.0"):
             replace(config, schema_version=version).validate_composed()
 
 
@@ -231,7 +231,7 @@ def test_model_does_not_freeze_target_sigma_sample_count() -> None:
         field=replace(
             config.method.representation.field,
             bandwidth_centers_m=(0.004, 0.008, 0.016, 0.032, 0.064),
-            validation_bandwidths_m=(0.004, 0.008, 0.016, 0.032, 0.064),
+            fixed_bandwidths_m=(0.004, 0.008, 0.016, 0.032, 0.064),
         ),
     )
     model = GeometrySSLModel(config.method.model)
@@ -272,11 +272,11 @@ def test_warp_training_config_rejects_non_cuda_device(device: str) -> None:
         EmbodimentPretrainTrainerCfg(device=device)
 
 
-def test_warp_training_config_rejects_float64() -> None:
-    """正式 Warp bridge 只接受 CUDA float32。"""
+def test_execution_policy_rejects_non_float32_teacher() -> None:
+    """正式 Warp teacher 只接受 FP32；learned model 精度由独立 autocast 字段控制。"""
 
-    with pytest.raises(ValueError, match="dtype.*float32"):
-        EmbodimentPretrainTrainerCfg(dtype="float64")
+    with pytest.raises(ValueError, match="teacher.*float32"):
+        ExecutionPrecisionCfg(teacher_dtype="float64")
 
 
 def test_hand_catalog_rejects_missing_manifest_without_io() -> None:
@@ -365,37 +365,6 @@ def test_catalog_cache_miss_reloads_slim_dataset_after_releasing_full_heap(
     assert catalog.dataset is slim_dataset  # cold miss 与下一进程 pickle hit 使用同一精简数据轴
 
 
-def test_validation_selection_weights_named_suites_equally() -> None:
-    r"""checkpoint score 应先在 suite 内归一化，再对两条泛化轴等权平均。
-
-    该合同与每条 suite 的资产数量无关；否则把 validation-unseen-mother 扩容会
-    隐式改变 checkpoint objective，而不是只提高同一指标的统计精度。
-    """
-
-    metrics = ("density", "kappa")
-    baseline = selection_baseline(
-        {
-            "unseen_variant_set": {"density": 9.0, "kappa": 9.0},
-            "unseen_mother": {"density": 9.0, "kappa": 9.0},
-        },
-        metrics,
-        teacher_baselines={
-            "unseen_variant_set": {"density": 1.0, "kappa": 2.0},
-            "unseen_mother": {"density": 1.0, "kappa": 2.0},
-        },
-    )
-    score = normalized_validation_score(
-        {
-            "unseen_variant_set": {"density": 0.5, "kappa": 1.0},
-            "unseen_mother": {"density": 1.0, "kappa": 2.0},
-        },
-        baseline,
-        metrics,
-    )
-
-    assert score == pytest.approx(0.75)
-
-
 @pytest.mark.parametrize(
     ("identity_name", "error"),
     [("content_hash", "content hashes leak"), ("physical_geometry_hash", "physical geometry hashes leak")],
@@ -404,18 +373,17 @@ def test_expanded_manifest_rejects_identity_leakage(identity_name: str, error: s
     r"""路径/ID 或 limits 不同也不能掩盖 content/physical mapping 的跨 role 重复。"""
 
     train = {"asset_id": "train", "content_hash": "content-a", "physical_geometry_hash": "physical-a"}
-    validation = {
+    evaluation = {
         "asset_id": "renamed",
         "content_hash": "content-b",
         "physical_geometry_hash": "physical-b",
     }
-    validation[identity_name] = train[identity_name]
+    evaluation[identity_name] = train[identity_name]
     with pytest.raises(ValueError, match=error):
         validate_asset_manifest_isolation(
             {
                 "train": [train],
-                "validation": {"unseen_variant_set": [validation], "unseen_mother": []},
-                "evaluation": {},
+                "evaluation": {"unseen_variant_set": [evaluation], "unseen_mother": []},
             }
         )
 

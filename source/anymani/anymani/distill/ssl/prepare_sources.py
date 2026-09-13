@@ -1,6 +1,6 @@
-r"""预构建 Geometry SSL 静态 source base 与 selected anchor shards。
+r"""维护 Geometry SSL 静态 source base 与 selected anchor shards。
 
-默认覆盖 train 的 8 个 bank，以及 validation/evaluation 每条 suite 的 bank 0。该进程不构造模型、
+默认只覆盖 train 的 8 个 bank；evaluation 角色可显式选择并只构建 evaluation bank 0。该进程不构造模型、
 optimizer、query 或 teacher target；cold preparation 时间与后续 warm training 墙钟分开记录。
 """
 
@@ -24,8 +24,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default=DEFAULT_EXPERIMENT_NAME)
     parser.add_argument("--source_cache_root", default=None)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--role", choices=("train", "evaluation"), default="train")
     parser.add_argument("--partition", action="append", default=[])
-    parser.add_argument("--minimum_free_gib", type=float, default=10.0)
+    parser.add_argument("--minimum_free_gib", type=float, default=100.0)
     return parser
 
 
@@ -46,15 +47,16 @@ def main(argv: Sequence[str] | None = None) -> Path:
 
     data = build_runtime(config.data)
     method = build_runtime(config.method)
-    catalog = data.resolve()
+    catalog = data.resolve_train() if args.role == "train" else data.resolve_evaluation()
     method.configure_source_artifacts(
         root=str(root),
         mode="read-write",
         dataset_manifest_sha256=str(catalog.dataset.source_sha256),
         producer_device=str(device),
+        role=args.role,
     )
     try:
-        method.prepare(catalog, device=device, dtype=torch.float32)
+        method.prepare(catalog, role=args.role, device=device, dtype=torch.float32)
         summary = method.prepare_source_artifacts(
             device=device,
             dtype=torch.float32,

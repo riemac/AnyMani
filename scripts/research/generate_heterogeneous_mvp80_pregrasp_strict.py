@@ -2,14 +2,18 @@ r"""生成MVP80或resolved cohort的DexCube scale-1.1 strict Top-8 good-pregrasp
 
 每资产先生成256个13维scrambled-Sobol几何提案，仅选Top-32进入训练同路径的1 s cold-reset物理筛选。
 若任一资产不足8个严格候选，从其已测physical elites拟合4D joint-PCA + 3D object-position CEM，最多
-追加3轮；每轮生成128个提案、cheap geometry筛到Top-32再做物理验证。门限始终固定，不按资产手调：
+追加3轮；每轮128个提案分批完成物理验证。门限始终固定，不按资产手调：
 
 - active joint margin ≥10%；三指TIP-center距离≤10 cm；面内sector≥30°；
 - penetration≤0.5 mm；1 s位移≤5 mm；倾角≤10°；
 - 前0.2 s线速度≤0.25 m/s、**总**角速度≤2 rad/s；后0.5 s PALM support≥50%。
 
-Legacy MVP80要求80只资产全部通过；``--cohort-lock``要求该lock的全部成员通过。任一成员不足8项时只保存
-候选证据与失败分解并返回非零，避免训练时把缺失资产静默替换成其他reset分布。
+Legacy MVP80及cohort默认要求整批全部通过才发布。cohort准备可显式使用``--publish-passing-assets``，
+保留已经完整通过的资产Top-8；其余资产继续记录为失败，整批all-selected判据及最终集合分母保持原定义。
+
+显式``--revalidation-candidates``从cohort协议绑定的原Top-8/投影候选开始，不执行Sobol。
+纯重验为0轮；显式新协议可对不足Top-8者接续3轮既有CEM。两者使用相同120-step物理门，
+每资产8个环境和独立generation identity；旧metrics不参与认证。
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import yaml
+from anymani.assets.bank.cohort import parse_hand_asset_cohort_document
 
 ASSETS_PER_RUN = 80
 CANDIDATES_PER_PHYSICS_BATCH = 32
@@ -49,9 +54,17 @@ def _parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--selection", type=Path, default=DEFAULT_SELECTION)
-    parser.add_argument("--cohort-lock", type=Path, default=None, help="待完整覆盖并发布的resolved member-level cohort lock。")
+    parser.add_argument(
+        "--cohort-lock", type=Path, default=None, help="待完整覆盖并发布的resolved member-level cohort lock。"
+    )
     parser.add_argument("--catalog", type=Path, default=None, help="显式覆盖目录；否则使用分片声明或对应任务默认目录。")
     parser.add_argument("--evidence", type=Path, default=DEFAULT_EVIDENCE)
+    parser.add_argument(
+        "--revalidation-candidates",
+        type=Path,
+        default=None,
+        help="按cohort显式重验协议加载已绑定SHA的原Top-8候选；CEM为协议声明的0或3轮。",
+    )
     parser.add_argument("--asset-limit", type=int, default=None, help="Development-only ordered prefix; never publish.")
     parser.add_argument("--rows", type=str, default=None, help="Development-only comma-separated selected rows.")
     parser.add_argument(
@@ -61,28 +74,42 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-cem-rounds", type=int, default=3)
     parser.add_argument("--seed", type=int, default=20260902)
+    parser.add_argument(
+        "--publish-passing-assets",
+        action="store_true",
+        help="仅cohort准备：保存完整通过资产的Top-8，未通过成员仍保留在失败与整批判据中。",
+    )
     args = parser.parse_args()
     if args.asset_limit is not None and not 1 <= args.asset_limit <= ASSETS_PER_RUN:
         parser.error("--asset-limit must lie in [1,80]")
     if args.asset_limit is not None and args.rows is not None:
         parser.error("--asset-limit and --rows are mutually exclusive")
-    if args.cohort_lock is not None and (args.asset_limit is not None or args.rows is not None or args.publish_selection):
+    if args.cohort_lock is not None and (
+        args.asset_limit is not None or args.rows is not None or args.publish_selection
+    ):
         parser.error("--cohort-lock is mutually exclusive with legacy --asset-limit/--rows/--publish-selection")
     if args.publish_selection and (args.rows is None or args.asset_limit is not None):
         parser.error("--publish-selection requires --rows and forbids --asset-limit")
+    if args.publish_passing_assets and args.cohort_lock is None:
+        parser.error("--publish-passing-assets requires --cohort-lock")
+    if args.revalidation_candidates is not None and (args.cohort_lock is None or args.max_cem_rounds not in (0, 3)):
+        parser.error("candidate revalidation requires --cohort-lock and protocol-matched --max-cem-rounds 0 or 3")
     if not 0 <= args.max_cem_rounds <= 3:
         parser.error("--max-cem-rounds must lie in [0,3]")
     return args
 
 
 ARGS = _parse_args()
+GENERATOR_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()  # 运行前固定实际生成入口身份
 COHORT_RUN = ARGS.cohort_lock is not None
+REVALIDATION_RUN = ARGS.revalidation_candidates is not None
+REVALIDATION_IDENTITY: dict[str, Any] | None = None
 COHORT_DOCUMENT: dict[str, Any] | None = None
 COHORT_LOCK_SHA256 = ""
 if COHORT_RUN:
     cohort_path = cast(Path, ARGS.cohort_lock).resolve()
     cohort_bytes = cohort_path.read_bytes()
-    loaded = yaml.safe_load(cohort_bytes)
+    loaded = parse_hand_asset_cohort_document(cohort_bytes)
     if not isinstance(loaded, dict) or not isinstance(loaded.get("members"), list) or not loaded["members"]:
         raise ValueError("--cohort-lock must contain a non-empty resolved members list")
     COHORT_DOCUMENT = cast(dict[str, Any], loaded)
@@ -98,6 +125,18 @@ if COHORT_RUN:
     selection = COHORT_DOCUMENT.get("selection", {})
     if not isinstance(selection, dict):
         raise ValueError("cohort selection must be a mapping")
+    if REVALIDATION_RUN:
+        from anymani.pregrasp.revalidation import validate_revalidation_generation_identity
+
+        declared_revalidation = selection.get("pregrasp_generation_identity")
+        if not isinstance(declared_revalidation, dict):
+            raise ValueError("revalidation cohort must declare a complete generation identity mapping")
+        REVALIDATION_IDENTITY = validate_revalidation_generation_identity(declared_revalidation)
+        if ARGS.max_cem_rounds != int(REVALIDATION_IDENTITY.get("refinement_rounds", 0)):
+            raise ValueError("requested CEM rounds disagree with the frozen revalidation generation identity")
+        CANDIDATES_PER_PHYSICS_BATCH = int(REVALIDATION_IDENTITY["candidate_count"])  # 原Top-8直接物理重验
+    elif "pregrasp_generation_identity" in selection:
+        raise ValueError("a revalidation cohort must use its explicit --revalidation-candidates source")
     declared_catalog = selection.get("catalog_root")
     environment_catalog = os.environ.get("ANYMANI_HETERO_GOOD_PREGRASP_CATALOG_ROOT")
     for location in (declared_catalog, environment_catalog):
@@ -135,7 +174,9 @@ else:
         if not set(SELECTED_ROWS).issubset(FROZEN_CANDIDATE_ROWS):
             raise ValueError("development --rows must be drawn from the frozen pair-candidate manifest")
     else:
-        SELECTED_ROWS = FORMAL_SELECTED_ROWS[: ARGS.asset_limit] if ARGS.asset_limit is not None else FORMAL_SELECTED_ROWS
+        SELECTED_ROWS = (
+            FORMAL_SELECTED_ROWS[: ARGS.asset_limit] if ARGS.asset_limit is not None else FORMAL_SELECTED_ROWS
+        )
     os.environ.pop("ANYMANI_HETERO_COHORT_LOCK", None)
     os.environ["ANYMANI_HETERO_ASSET_ROWS"] = ",".join(str(row) for row in SELECTED_ROWS)
 DEVELOPMENT_RUN = not COHORT_RUN and (ARGS.asset_limit is not None or ARGS.rows is not None)
@@ -152,7 +193,7 @@ simulation_app = app_launcher.app
 
 
 def main() -> int:
-    r"""执行Sobol/Top-32/CEM/strict physical筛选并全有或全无地发布formal catalog。"""
+    r"""执行固定Sobol/CEM/strict物理筛选，按明确发布模式提交完整资产条目。"""
 
     import isaaclab.sim as sim_utils
     import isaaclab.utils.math as math_utils
@@ -185,7 +226,7 @@ def main() -> int:
         stable_asset_stream_key,
         strict_pass_mask,
     )
-    from anymani.pregrasp.strict_gate import MVP80_STRICT_GOOD_PREGRASP_GATE
+    from anymani.pregrasp.strict_gate import MVP80_STRICT_GOOD_PREGRASP_GATE, top8_publication_indices
     from anymani.tasks.hetero.config.generated.cohort_good_pregrasp_identity import (
         COHORT_GOOD_PREGRASP_CATALOG_ROOT,
         COHORT_GOOD_PREGRASP_GENERATION_DIGEST,
@@ -222,14 +263,28 @@ def main() -> int:
     generation_identity_digest = (
         COHORT_GOOD_PREGRASP_GENERATION_DIGEST if COHORT_RUN else STRICT_GOOD_PREGRASP_GENERATION_DIGEST
     )
-    physics_identity_digest = (
-        COHORT_GOOD_PREGRASP_PHYSICS_DIGEST if COHORT_RUN else STRICT_GOOD_PREGRASP_PHYSICS_DIGEST
-    )
+    physics_identity_digest = COHORT_GOOD_PREGRASP_PHYSICS_DIGEST if COHORT_RUN else STRICT_GOOD_PREGRASP_PHYSICS_DIGEST
+    if REVALIDATION_RUN:
+        from anymani.pregrasp.schema import stable_digest
+
+        generation_identity = cast(dict[str, Any], REVALIDATION_IDENTITY)
+        generation_identity_digest = stable_digest(generation_identity)
+        if generation_identity["physics_identity_digest"] != physics_identity_digest:
+            raise ValueError("revalidation must preserve strict physics identity")
+        if generation_identity["strict_gate_digest"] != MVP80_STRICT_GOOD_PREGRASP_GATE.digest:
+            raise ValueError("revalidation must preserve the complete strict gate")
+        if ARGS.seed != STRICT_GOOD_PREGRASP_SEED:
+            raise ValueError("revalidation must preserve the fixed strict physics scene seed")
+        if ARGS.max_cem_rounds:
+            if generation_identity["refinement"] != COHORT_GOOD_PREGRASP_GENERATION_IDENTITY["refinement"]:
+                raise ValueError("seeded refinement must use the existing strict CEM profile unchanged")
     if COHORT_RUN and Path(COHORT_GOOD_PREGRASP_CATALOG_ROOT) != DEFAULT_COHORT_CATALOG:
         raise RuntimeError("script and runtime cohort catalog defaults drifted")
 
     # Formal invocation必须与runtime候选身份逐值一致；development prefix只允许减少资产，不改算法数字。
-    if ARGS.seed != STRICT_GOOD_PREGRASP_SEED or ARGS.max_cem_rounds != STRICT_GOOD_PREGRASP_CEM_ROUNDS:
+    if not REVALIDATION_RUN and (
+        ARGS.seed != STRICT_GOOD_PREGRASP_SEED or ARGS.max_cem_rounds != STRICT_GOOD_PREGRASP_CEM_ROUNDS
+    ):
         if not DEVELOPMENT_RUN or ARGS.publish_selection:
             raise ValueError("formal strict generation requires shared seed and three CEM rounds")
     if ASSET_BINDING.dataset_rows != SELECTED_ROWS or ASSET_BINDING.asset_count != ASSET_COUNT:
@@ -263,9 +318,7 @@ def main() -> int:
         tip_body_ids, _ = robot.find_bodies(list(CONTACT_LAYOUT.fingertip_links), preserve_order=True)
         if len(tip_body_ids) != 4:
             raise RuntimeError("strict generator requires four canonical TIP body slots")
-        sensors = {
-            name: cast(ContactSensor, runtime_env.scene[name]) for name in CONTACT_LAYOUT.state_sensor_names
-        }
+        sensors = {name: cast(ContactSensor, runtime_env.scene[name]) for name in CONTACT_LAYOUT.state_sensor_names}
         sensor_owner_indices = torch.tensor(CONTACT_LAYOUT.sensor_owner_indices, dtype=torch.long, device=device)
         active_by_asset = torch.tensor(ASSET_BINDING.active_joint_masks, dtype=torch.bool, device=device)
         asset_stream_keys = tuple(
@@ -447,9 +500,7 @@ def main() -> int:
                     linear = torch.linalg.vector_norm(object_asset.data.root_lin_vel_w, dim=-1)
                     angular_h = math_utils.quat_apply_inverse(hand_quat_w, object_asset.data.root_ang_vel_w)
                     peak_linear = torch.maximum(peak_linear, linear)
-                    peak_total_angular = torch.maximum(
-                        peak_total_angular, torch.linalg.vector_norm(angular_h, dim=-1)
-                    )
+                    peak_total_angular = torch.maximum(peak_total_angular, torch.linalg.vector_norm(angular_h, dim=-1))
                     peak_off_axis_angular = torch.maximum(
                         peak_off_axis_angular, torch.linalg.vector_norm(angular_h[:, :2], dim=-1)
                     )
@@ -552,28 +603,64 @@ def main() -> int:
             angular = concatenate(results, "peak_angular_rad_s")
             return 1000.0 * passed - 100.0 * violation + palm + margin - displacement / 0.005 - angular / 2.0
 
-        # Stage 0：256 Sobol proposals -> geometry Top-32 -> full physics。
-        sobol = sobol_bank(
-            asset_stream_keys if COHORT_RUN else SELECTED_ROWS,
-            candidate_count=STRICT_GOOD_PREGRASP_SOBOL_CANDIDATES,
-            seed=ARGS.seed,
-            device=device,
-        )
-        q_initial, _ = initial_joint_candidates(
-            lower_by_asset,
-            upper_by_asset,
-            active_by_asset,
-            sobol,
-            margin_fraction=0.11,
-        )
-        initial_geometry = realize_geometry(q_initial, sobol_values=sobol)
-        initial_selected = geometry_top32(initial_geometry)
-        initial_selected["refinement_target"] = torch.ones(
-            ASSET_COUNT, CANDIDATES_PER_PHYSICS_BATCH, dtype=torch.bool, device=device
-        )
-        results = [physical_screen(initial_selected, stage=0)]
-        counts = concatenate(results, "passed").sum(dim=1)
-        print({"stage": "sobol_top32", "passed_assets": int((counts >= 8).sum()), "min_passed": int(counts.min())})
+        revalidation_candidates = None  # 新旧模式共享物理筛选，候选来源有独立身份。
+        if REVALIDATION_RUN:
+            from anymani.pregrasp.revalidation import load_revalidation_candidates
+
+            revalidation_candidates = load_revalidation_candidates(
+                ARGS.revalidation_candidates,
+                generation_identity=generation_identity,
+                asset_ids=tuple(asset.asset_id for asset in ASSET_BINDING.source_assets),
+                active_joint_masks=ASSET_BINDING.active_joint_masks,
+                joint_names=tuple(robot.joint_names),
+            )  # 通过SHA、asset-ID、mask与upright合同后才进入真实物理环境。
+            q_replay = torch.as_tensor(
+                revalidation_candidates.projected_q_rad.copy(), device=device, dtype=torch.float32
+            )
+            position_replay = torch.as_tensor(
+                revalidation_candidates.object_position_h_m.copy(), device=device, dtype=torch.float32
+            )
+            selected = realize_geometry(q_replay, direct_positions=position_replay)  # 重新计算TIP包络，不复用旧指标。
+            selected["source_index"] = (
+                torch.arange(CANDIDATES_PER_PHYSICS_BATCH, device=device).unsqueeze(0).expand(ASSET_COUNT, -1)
+            )
+            selected["refinement_target"] = torch.ones(
+                ASSET_COUNT, CANDIDATES_PER_PHYSICS_BATCH, dtype=torch.bool, device=device
+            )
+            results = [physical_screen(selected, stage=0)]  # 与原搜索逐值相同的120-step严格门。
+            counts = concatenate(results, "passed").sum(dim=1)
+            rounds_executed = 0  # 重验没有隐含追加Sobol/CEM预算。
+            print(
+                {
+                    "stage": "original_top8_revalidation",
+                    "passed_assets": int((counts >= 8).sum()),
+                    "min_passed": int(counts.min()),
+                },
+                flush=True,
+            )
+        else:
+            # Stage 0：256 Sobol proposals -> geometry Top-32 -> full physics。
+            sobol = sobol_bank(
+                asset_stream_keys if COHORT_RUN else SELECTED_ROWS,
+                candidate_count=STRICT_GOOD_PREGRASP_SOBOL_CANDIDATES,
+                seed=ARGS.seed,
+                device=device,
+            )
+            q_initial, _ = initial_joint_candidates(
+                lower_by_asset,
+                upper_by_asset,
+                active_by_asset,
+                sobol,
+                margin_fraction=0.11,
+            )
+            initial_geometry = realize_geometry(q_initial, sobol_values=sobol)
+            initial_selected = geometry_top32(initial_geometry)
+            initial_selected["refinement_target"] = torch.ones(
+                ASSET_COUNT, CANDIDATES_PER_PHYSICS_BATCH, dtype=torch.bool, device=device
+            )
+            results = [physical_screen(initial_selected, stage=0)]
+            counts = concatenate(results, "passed").sum(dim=1)
+            print({"stage": "sobol_top32", "passed_assets": int((counts >= 8).sum()), "min_passed": int(counts.min())})
 
         # Stages 1..3：只把尚不足8项的assets标为eligible，其他env仅保持vectorized scene shape。
         rounds_executed = 0
@@ -642,9 +729,7 @@ def main() -> int:
                     torch.argsort(violation_so_far[asset_index, basin_indices], descending=False)
                 ][:16]
                 exploit_count = min(96, STRICT_GOOD_PREGRASP_CEM_CANDIDATES)
-                center_indices = basin_indices[
-                    torch.arange(exploit_count, device=device) % basin_indices.numel()
-                ]
+                center_indices = basin_indices[torch.arange(exploit_count, device=device) % basin_indices.numel()]
                 generator = torch.Generator(device=device).manual_seed(
                     ARGS.seed
                     + round_index * 10_000_019
@@ -652,9 +737,12 @@ def main() -> int:
                 )
                 q_noise = torch.randn(exploit_count, 16, generator=generator, device=device) * 5.0e-4
                 q_exploit = q_so_far[asset_index, center_indices] + q_noise * active_by_asset[asset_index]
-                q_exploit = torch.maximum(
-                    torch.minimum(q_exploit, comfortable_upper[asset_index]), comfortable_lower[asset_index]
-                ) * active_by_asset[asset_index]
+                q_exploit = (
+                    torch.maximum(
+                        torch.minimum(q_exploit, comfortable_upper[asset_index]), comfortable_lower[asset_index]
+                    )
+                    * active_by_asset[asset_index]
+                )
                 position_noise = torch.randn(exploit_count, 3, generator=generator, device=device)
                 position_noise *= torch.tensor((5.0e-5, 5.0e-5, 2.5e-5), device=device)
                 position_exploit = position_so_far[asset_index, center_indices].clone()
@@ -674,12 +762,10 @@ def main() -> int:
             for start in range(0, STRICT_GOOD_PREGRASP_CEM_CANDIDATES, CANDIDATES_PER_PHYSICS_BATCH):
                 stop = start + CANDIDATES_PER_PHYSICS_BATCH
                 cem_selected = {name: value[:, start:stop] for name, value in cem_geometry.items()}
-                cem_selected["source_index"] = torch.arange(start, stop, device=device).unsqueeze(0).expand(
-                    ASSET_COUNT, -1
+                cem_selected["source_index"] = (
+                    torch.arange(start, stop, device=device).unsqueeze(0).expand(ASSET_COUNT, -1)
                 )
-                cem_selected["refinement_target"] = failing.unsqueeze(1).expand(
-                    -1, CANDIDATES_PER_PHYSICS_BATCH
-                )
+                cem_selected["refinement_target"] = failing.unsqueeze(1).expand(-1, CANDIDATES_PER_PHYSICS_BATCH)
                 screened = physical_screen(cem_selected, stage=round_index)
                 screened["passed"] &= screened["refinement_target"]
                 results.append(screened)
@@ -729,6 +815,21 @@ def main() -> int:
             source_rows=np.asarray(ASSET_BINDING.source_rows, dtype=np.int64),
             source_member_keys=np.asarray(ASSET_BINDING.source_member_keys),
             asset_stream_keys=np.asarray(asset_stream_keys, dtype=np.int64),
+            # 记录 importer/PhysX 的实际限位，供局部资产设计修订与 canonical URDF 逐关节核对。
+            # 这些只是证据字段，不进入 proposal、严格安全门或策略观测；schema/name 保留独立关节轴。
+            runtime_joint_names=np.asarray(robot.joint_names),
+            runtime_joint_pos_limits_rad=robot.root_physx_view.get_dof_limits()[:ASSET_COUNT].cpu().numpy(),
+            runtime_soft_joint_pos_limits_rad=limits.detach().cpu().numpy(),
+            runtime_active_joint_mask=active_by_asset.detach().cpu().numpy(),
+            **(
+                {
+                    "revalidation_original_q_rad": revalidation_candidates.original_q_rad,
+                    "revalidation_parent_asset_id": revalidation_candidates.parent_asset_id,
+                    "revalidation_parent_entry_digest": revalidation_candidates.parent_entry_digest,
+                }
+                if revalidation_candidates is not None
+                else {}
+            ),
             **evidence,
         )
 
@@ -776,24 +877,29 @@ def main() -> int:
             "displacement": int(((concatenate(results, "displacement_m") > 0.005) & target).sum()),
             "tilt": int(((concatenate(results, "tilt_deg") > 10.0) & target).sum()),
             "peak_linear_velocity": int(((concatenate(results, "peak_linear_m_s") > 0.25) & target).sum()),
-            "peak_total_angular_velocity": int(
-                ((concatenate(results, "peak_angular_rad_s") > 2.0) & target).sum()
-            ),
+            "peak_total_angular_velocity": int(((concatenate(results, "peak_angular_rad_s") > 2.0) & target).sum()),
             "palm_contact_fraction": int(((concatenate(results, "palm_fraction") < 0.5) & target).sum()),
         }
 
         published: list[dict[str, Any]] = []
         entries: list[GoodPregraspEntry] = []
-        publication_ready = not failed_assets and (
+        publication_indices = top8_publication_indices(
+            passed_all.sum(dim=1).tolist(), allow_partial=bool(ARGS.publish_passing_assets)
+        )  # 原资产轴保持，后续身份与结果同轴索引
+        publication_ready = bool(publication_indices) and (
             COHORT_RUN or (ASSET_COUNT == ASSETS_PER_RUN and (not DEVELOPMENT_RUN or ARGS.publish_selection))
         )
         if publication_ready:
             finger_names = ("index", "middle", "ring", "thumb")
             all_values = {name: concatenate(results, name) for name in evidence_names}
             quality = physical_quality(results)
-            for asset_index, dataset_row in enumerate(SELECTED_ROWS):
+            for asset_index in publication_indices:
                 passed_indices = torch.nonzero(all_values["passed"][asset_index], as_tuple=False).flatten()
-                ranked = passed_indices[torch.argsort(quality[asset_index, passed_indices], descending=True)][:8]
+                ranked = (
+                    torch.arange(8, device=device)
+                    if REVALIDATION_RUN and bool(all_values["passed"][asset_index, :8].all())
+                    else passed_indices[torch.argsort(quality[asset_index, passed_indices], descending=True)][:8]
+                )  # 原八项全通过时保留parent rank；否则从真实通过的refinement候选中按物理质量取八项。
                 members: list[GoodPregraspMember] = []
                 for rank, index_tensor in enumerate(ranked):
                     candidate_index = int(index_tensor.item())
@@ -843,7 +949,9 @@ def main() -> int:
                         -float(metrics.peak_angular_velocity_rad_s or 0.0),
                         -metrics.penetration_depth_max_m,
                     )
-                    members.append(GoodPregraspMember(rank=rank, candidate=candidate, metrics=metrics, selection_score=score))
+                    members.append(
+                        GoodPregraspMember(rank=rank, candidate=candidate, metrics=metrics, selection_score=score)
+                    )
                 artifact = ASSET_BINDING.canonical_artifacts[asset_index]
                 source_asset = ASSET_BINDING.source_assets[asset_index]
                 key = GoodPregraspKey(
@@ -862,15 +970,14 @@ def main() -> int:
                 MVP80_STRICT_GOOD_PREGRASP_GATE.validate_entry(entry)
                 entries.append(entry)
 
-            # 全部entries先在内存验证，再以一次index replace提交；resolver不会看见部分cohort。
+            # 本批拟发布的所有完整entries先验证，再一次提交；partial模式也不发布残缺Top-8。
             catalog = GoodPregraspCatalog(ARGS.catalog.resolve())
             index_entries = catalog.publish_many(entries)
-            for asset_index, (dataset_row, entry, index_entry) in enumerate(
-                zip(SELECTED_ROWS, entries, index_entries, strict=True)
-            ):
+            for asset_index, entry, index_entry in zip(publication_indices, entries, index_entries, strict=True):
                 published.append(
                     {
-                        "dataset_row": dataset_row,
+                        "asset_index": asset_index,
+                        "dataset_row": SELECTED_ROWS[asset_index],
                         "source_row": ASSET_BINDING.source_rows[asset_index],
                         "source_member_key": ASSET_BINDING.source_member_keys[asset_index],
                         "asset_id": entry.key.asset_id,
@@ -894,11 +1001,16 @@ def main() -> int:
             "object": {"asset_id": "DexCube", "scale": 1.1, "orientation_h_wxyz": [1.0, 0.0, 0.0, 0.0]},
             "generation_identity": generation_identity,
             "generation_identity_digest": generation_identity_digest,
+            "generator_source_sha256": GENERATOR_SOURCE_SHA256,
+            "publication_policy": "passing-assets" if ARGS.publish_passing_assets else "all-selected",
             "physics_identity_digest": physics_identity_digest,
             "strict_gate_digest": MVP80_STRICT_GOOD_PREGRASP_GATE.digest,
-            "sobol_proposals_per_asset": STRICT_GOOD_PREGRASP_SOBOL_CANDIDATES,
-            "initial_physics_candidates_per_asset": STRICT_GOOD_PREGRASP_PHYSICS_TOP_K,
-            "cem_physics_candidates_per_target_asset_round": STRICT_GOOD_PREGRASP_CEM_CANDIDATES,
+            "sobol_proposals_per_asset": 0 if REVALIDATION_RUN else STRICT_GOOD_PREGRASP_SOBOL_CANDIDATES,
+            "initial_physics_candidates_per_asset": CANDIDATES_PER_PHYSICS_BATCH,
+            "cem_physics_candidates_per_target_asset_round": STRICT_GOOD_PREGRASP_CEM_CANDIDATES
+            if ARGS.max_cem_rounds
+            else 0,
+            "candidate_revalidation": REVALIDATION_RUN,
             "cem_rounds_executed": rounds_executed,
             "eligible_physical_candidates": int(target.sum().item()),
             "strict_passed_candidates": int(passed_all.sum().item()),

@@ -20,6 +20,10 @@ $g_{ir}$在不同采样下方向稳定，跨资产负余弦才可解释为任务
 逐资产advantage与PPO objective。训练实现文件不被修改；审计输出拥有独立目录与脚本SHA-256。窄
 ``torch.compile``在该进程内降为eager，因为AOTAutograd donated buffers不允许同一图上的多次
 ``autograd.grad(retain_graph=True)``。这只改变诊断执行方式，不改变被审计checkpoint。
+
+``--family_groups --full_rollout``按LEAP/Allegro分组，分别覆盖Actor与Critic全部可训练参数。每个microbatch
+只形成两族×replica两半的梯度和，完整H30归约后复用SSL的两任务解析FairGrad。候选只用于局部进展与
+跨rollout稳定性比较；该模式在生产loss形成后、主backward之前退出，不写parameter.grad或执行optimizer。
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ import itertools
 import json
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -57,11 +61,16 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--seed_offset", type=int, default=10000, help="相对训练seed的诊断随机流偏移。")
     parser.add_argument("--warmup_steps", type=int, default=0, help="无更新预运行步数；0测冷启动，570测28.5–30秒占据。")
     parser.add_argument("--full_rollout", action="store_true", help="按half样本数合并全部分层minibatch的只读梯度。")
+    parser.add_argument(
+        "--family_groups", action="store_true", help="完整H30上的LEAP/Allegro Actor/Critic与FairGrad候选。"
+    )
     args = parser.parse_args()
     if args.rollouts < 2:  # 单一rollout只有half consistency，不能形成跨rollout可靠性证据
         parser.error("--rollouts must be at least 2")
     if args.warmup_steps < 0:
         parser.error("--warmup_steps must be non-negative")
+    if args.family_groups and not args.full_rollout:
+        parser.error("--family_groups requires --full_rollout")  # 不把一个激活切片冒充两族完整采样总体。
     if args.output.expanduser().exists():  # 不复用目录，防止新旧NPZ看似属于同一冻结参数总体
         parser.error("--output must not already exist")
     return args
@@ -108,7 +117,94 @@ def _quantiles(values: np.ndarray) -> list[float]:
     return [float(value) for value in np.quantile(values.astype(np.float64), (0.0, 0.25, 0.5, 0.75, 1.0))]
 
 
-def _cross_rollout_summary(npz_paths: Sequence[Path]) -> dict[str, Any]:
+def _family_half_gradient_sums(
+    objective: torch.Tensor,
+    groups: torch.Tensor,
+    halves: torch.Tensor,
+    parameters: tuple[torch.nn.Parameter, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""返回两族两半的完整参数梯度和及样本数，不写主梯度。
+
+    生产helper给出每个subset的均值梯度$g_{ihm}$；乘回$n_{ihm}$后以FP64跨microbatch相加，最后只除
+    一次完整分母。这样每个microbatch的replica parity不均衡也不会改变完整H30估计量。
+
+    Returns:
+        tuple: FP64梯度和`[2,2,P]`与整数样本数`[2,2]`；参数声明顺序定义固定坐标。
+    """
+
+    from anymani.distill.rl.algorithms.gradient_audit import per_asset_replica_half_gradients  # noqa: PLC0415
+
+    gradients, counts = per_asset_replica_half_gradients(
+        objective, groups, halves, parameters, asset_count=2
+    )  # 沿用生产的autograd.grad、unused参数零填充和half合法性检查。
+    return gradients.detach().double() * counts[..., None], counts  # $\sum_x\nabla L(x)$，不保留计算图。
+
+
+def _family_gradient_evidence(
+    half_sums: torch.Tensor, half_counts: torch.Tensor
+) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+    r"""归约完整两族梯度，比较普通平均、SSL FairGrad及等范数FairGrad候选。
+
+    输入为`[2,2,P]`的梯度和与`[2,2]`计数。两族样本总数必须相等，普通平均才能同时表示原始PPO总体。
+    $g_i=\sum_h s_{ih}/\sum_h n_{ih}$；候选$d$的$g_i^T d$是SGD方向下的一阶loss下降率，不是Adam实际
+    步进或物理能力保证。保留FairGrad原始尺度，同时报告匹配$\|(g_0+g_1)/2\|$后的方向以分开尺度效应。
+    """
+
+    from anymani.distill.methods.multi_anchor_gaussian_implicit_field.training import combine_fairgrad  # noqa: PLC0415
+    from anymani.distill.rl.algorithms.gradient_audit import compute_actor_gradient_scope_audit  # noqa: PLC0415
+
+    if half_sums.ndim != 3 or half_sums.shape[:2] != (2, 2) or half_counts.shape != (2, 2):
+        raise ValueError("family gradient sums/counts require [2,2,P] and [2,2]")
+    if bool((half_counts <= 0).any()) or not bool(torch.isfinite(half_sums).all()):
+        raise ValueError("family gradient evidence requires finite sums and positive half counts")
+    if int(half_counts[0].sum()) != int(half_counts[1].sum()):
+        raise ValueError("family probe requires balanced full-rollout group sample counts")
+    halves = half_sums.double() / half_counts[..., None]  # 每族、每half的样本均值梯度。
+    audit = compute_actor_gradient_scope_audit(halves, half_counts)  # 此处asset轴表示两族，而非256个成员。
+    gradients = audit["asset_gradients"]  # `[2,P]`；Actor与Critic在各自调用内独立归约。
+    mean = gradients.mean(dim=0)  # 原始均匀采样PPO在该冻结参数点的完整总体方向。
+    result = combine_fairgrad((gradients[0],), (gradients[1],))  # flatten不改变Euclidean梯度几何。
+    fairgrad = result.combined[0]
+    if fairgrad is None:
+        fairgrad = torch.zeros_like(mean)  # SSL的零梯度/近反向政策，状态在evidence中明确记录。
+    fairgrad_norm = float(torch.linalg.vector_norm(fairgrad))
+    mean_norm = float(torch.linalg.vector_norm(mean))
+    matched = fairgrad * (mean_norm / fairgrad_norm) if fairgrad_norm > 0.0 else torch.zeros_like(mean)
+    directions = {"mean": mean, "fairgrad": fairgrad, "fairgrad_mean_norm": matched}
+    evidence = {
+        "group_names": ["leap", "allegro"],
+        "half_counts": half_counts.cpu().tolist(),
+        "group_norms": audit["asset_norms"].cpu().tolist(),
+        "gram": audit["asset_gram"].cpu().tolist(),
+        "cosine": float(audit["asset_cosine"][0, 1]),
+        "half_self_cosine": audit["half_self_cosine"].cpu().tolist(),
+        "fairgrad": {
+            "weights": [result.evidence.density_weight, result.evidence.kappa_weight],
+            "active_tasks": result.evidence.active_tasks,
+            "shared_conflict_blocked": result.evidence.shared_conflict_blocked,
+            "near_opposition_tolerance": 1.0e-6,
+            "scale_convention": "SSL analytic alpha=1; paper c=1; nondegenerate norm=sqrt(2)",
+        },
+        "candidates": {
+            name: {
+                "norm": float(torch.linalg.vector_norm(direction)),
+                "group_loss_decrease_rates": (gradients @ direction).cpu().tolist(),
+            }
+            for name, direction in directions.items()
+        },
+        "projection_scope": "raw gradient space before clipping, Adam and parameter-group learning rates",
+    }
+    dense = {
+        "half_gradients": halves,
+        "half_counts": half_counts,
+        "group_gradients": gradients,
+        "half_self_cosine": audit["half_self_cosine"],
+        **{f"{name}_direction": direction for name, direction in directions.items()},
+    }
+    return dense, evidence
+
+
+def _cross_rollout_summary(npz_paths: Sequence[Path], *, family_groups: bool = False) -> dict[str, Any]:
     r"""从$R$份完整梯度形成同资产与合成Actor方向的跨rollout统计。
 
     对每个scope先从NPZ读取$G_r\in\mathbb R^{A\times P}$。每对rollout$(r,s)$计算逐资产
@@ -130,8 +226,11 @@ def _cross_rollout_summary(npz_paths: Sequence[Path]) -> dict[str, Any]:
             "inputs": [{"path": str(path), "sha256": _sha256(path)} for path in npz_paths],
             "scopes": {},
         }
-        for scope in ("global", "per_asset_rollout"):
-            gradients = [array[f"{scope}_asset_gradients"].astype(np.float64) for array in arrays]  # $R\times[A,P]$
+        axis = "family" if family_groups else "asset"  # 两族模式不把group统计命名为逐资产证据。
+        scopes = ("actor", "critic") if family_groups else ("global", "per_asset_rollout")
+        for scope in scopes:
+            gradient_key = f"{scope}_{'group' if family_groups else 'asset'}_gradients"
+            gradients = [array[gradient_key].astype(np.float64) for array in arrays]  # $R\times[A,P]$或$R\times[2,P]$
             if any(value.shape != gradients[0].shape for value in gradients[1:]):
                 raise RuntimeError(f"{scope} gradient arrays do not share one [A,P] coordinate system")
 
@@ -152,15 +251,28 @@ def _cross_rollout_summary(npz_paths: Sequence[Path]) -> dict[str, Any]:
                 [array[f"{scope}_half_self_cosine"].astype(np.float64) for array in arrays], axis=0
             )  # `[R,A]`
             result["scopes"][scope] = {
-                "asset_cross_rollout_cosine_min_q25_median_q75_max": _quantiles(pair_asset),
-                "asset_pair_median_min_q25_median_q75_max": _quantiles(asset_pair_median),
-                "asset_fraction_positive_pair_median": float(np.mean(asset_pair_median > 0.0)),
-                "asset_fraction_positive_pair_q25": float(np.mean(asset_pair_q25 > 0.0)),
+                f"{axis}_cross_rollout_cosine_min_q25_median_q75_max": _quantiles(pair_asset),
+                f"{axis}_pair_median_min_q25_median_q75_max": _quantiles(asset_pair_median),
+                f"{axis}_fraction_positive_pair_median": float(np.mean(asset_pair_median > 0.0)),
+                f"{axis}_fraction_positive_pair_q25": float(np.mean(asset_pair_q25 > 0.0)),
                 "aggregate_cross_rollout_cosines": aggregate_pairs,
                 "aggregate_cross_rollout_cosine_median": float(np.median(aggregate_pairs)),
                 "within_rollout_half_self_cosine_min_q25_median_q75_max": _quantiles(half_self),
                 "within_rollout_positive_half_fraction": float(np.mean(half_self > 0.0)),
             }
+            if family_groups:
+                result["scopes"][scope]["family_cross_rollout_cosines"] = pair_asset.tolist()
+                result["scopes"][scope]["candidate_cross_rollout_cosines"] = {
+                    name: [
+                        float(
+                            _cosine(
+                                arrays[left][f"{scope}_{name}_direction"], arrays[right][f"{scope}_{name}_direction"]
+                            )
+                        )
+                        for left, right in itertools.combinations(range(len(arrays)), 2)
+                    ]
+                    for name in ("mean", "fairgrad", "fairgrad_mean_norm")
+                }  # 跨采样稳定性与单次正投影分开报告。
         return result
     finally:
         for array in arrays:
@@ -215,6 +327,8 @@ def _training_argv(args: argparse.Namespace, checkpoint: Mapping[str, Any]) -> l
         str(float(training.get("rotation_progress_clip_rad_per_step", 0.025))),
         "--strict_goal_reward_weight",
         str(float(training.get("strict_goal_reward_weight", 10.0))),
+        "--joint_pose_anchor_weight",
+        str(float(training.get("joint_pose_anchor_weight", -0.5))),
         "--seed",
         str(int(training["seed"])),
         "--minibatches",
@@ -246,10 +360,16 @@ def _training_argv(args: argparse.Namespace, checkpoint: Mapping[str, Any]) -> l
     return argv
 
 
-def main() -> None:
-    r"""恢复正式Agent，执行冻结多rollout梯度审计并发布原子summary。"""
+def run_checkpoint_audit(
+    args: argparse.Namespace,
+    audit_callback: Callable[[Any, argparse.Namespace, Mapping[str, Any]], None] | None = None,
+) -> None:
+    r"""按原始identity恢复Agent，在独立目录执行冻结检查点诊断。
 
-    args = _arguments()  # wrapper自己的窄参数，不让诊断者重定义PPO合同
+    默认运行完整梯度审计；显式callback可复用同一资产/模型恢复门做动作响应等诊断。Callback负责采样与
+    参数不变校验，且只向args.output写summary，不执行训练或覆盖source run。
+    """
+
     checkpoint_path = args.checkpoint.expanduser().resolve(strict=True)  # exact source artifact
     cohort_path = args.cohort_lock.expanduser().resolve(strict=True)  # exact support/geometry order
     output_root = args.output.expanduser().resolve()  # 全新probe-owned目录
@@ -337,9 +457,71 @@ def main() -> None:
         npz_paths: list[Path] = []  # $R$个full-gradient dense artifacts
         populations: list[dict[str, Any]] = []  # 记录实际episode age，区分elapsed-time与持续存活总体
         original_shadow = probe_runtime.run_full_actor_gradient_shadow
+        original_probe = probe_runtime.run_gradient_probe
         half_sums: dict[str, torch.Tensor] = {}
         count_sums: dict[str, torch.Tensor] = {}
         shadow_calls = 0
+        active_halves: torch.Tensor | None = None  # 当前slice的parity，仅供进程内probe闭包读取。
+        family_reports: list[dict[str, Any]] = []
+        minimum_driver_free: int | None = None
+        family_by_asset: torch.Tensor | None = None
+        family_counts: list[int] = []
+        parameter_layout: dict[str, Any] = {}
+        combiner_source_sha256: str | None = None
+        if args.family_groups:
+            from anymani.distill.methods.multi_anchor_gaussian_implicit_field.training import (  # noqa: PLC0415
+                combine_fairgrad,
+            )
+
+            cohort = json.loads(cohort_path.read_text(encoding="utf-8"))  # 使用已通过Runner identity的同一成员锁。
+            group_ids = {"single_palm_leap": 0, "single_palm_allegro": 1}
+            names = [member["provenance"]["group_name"] for member in cohort["members"]]
+            if len(names) != agent.asset_count or set(names) != set(group_ids):
+                raise RuntimeError("family audit requires the complete pure LEAP/Allegro training cohort")
+            family_counts = [names.count(name) for name in group_ids]
+            if family_counts[0] != family_counts[1] or (agent.num_actors // agent.asset_count) % 2:
+                raise RuntimeError("family audit requires balanced families and an even replica count")
+            family_by_asset = torch.tensor([group_ids[name] for name in names], device=agent.ppo_device)
+            combiner_source_sha256 = _sha256(Path(combine_fairgrad.__code__.co_filename))
+            for side in ("actor", "critic"):
+                module = getattr(agent.model.a2c_network.package, side)
+                parameter_layout[side] = [
+                    {"name": name, "shape": list(parameter.shape), "numel": parameter.numel()}
+                    for name, parameter in module.named_parameters()
+                    if parameter.requires_grad
+                ]  # flatten边界保留，后续不得把Actor与Critic坐标混合。
+
+        class FamilyForwardCaptured(Exception):
+            r"""只读family probe在生产loss形成后、主backward前结束当前调用。"""
+
+        def accumulate_family_probe(
+            current_agent: Any,
+            *,
+            actor_objective: torch.Tensor,
+            critic_objective: torch.Tensor,
+            labels: torch.Tensor,
+        ) -> None:
+            r"""复用生产的逐样本loss，累计两族两半的完整参数梯度和。
+
+            Actor已包含当前优势scope、entropy和bounds；Critic已包含0.5系数、value clip和critic_coef。
+            此处不重写loss，也不把单个microbatch的FairGrad方向相加来冒充完整采样段FairGrad。
+            """
+
+            nonlocal shadow_calls
+            if family_by_asset is None or active_halves is None:
+                raise RuntimeError("family gradient probe lacks frozen grouping/parity metadata")
+            groups = family_by_asset[labels]  # `[M]`，不进入Actor或Critic的forward输入。
+            for side, objective in (("actor", actor_objective), ("critic", critic_objective)):
+                module = getattr(current_agent.model.a2c_network.package, side)
+                parameters = tuple(parameter for parameter in module.parameters() if parameter.requires_grad)
+                sums, counts = _family_half_gradient_sums(objective, groups, active_halves, parameters)
+                if side not in half_sums:
+                    half_sums[side], count_sums[side] = sums, counts.clone()
+                else:
+                    half_sums[side].add_(sums)
+                    count_sums[side].add_(counts)
+            shadow_calls += 1
+            raise FamilyForwardCaptured  # 不执行生产calc_gradients后续的backward、clipping或optimizer。
 
         def accumulate_shadow(
             current_agent: Any,
@@ -402,7 +584,9 @@ def main() -> None:
                 },
             )
 
-        if args.full_rollout:
+        if args.family_groups:
+            probe_runtime.run_gradient_probe = accumulate_family_probe
+        elif args.full_rollout:
             probe_runtime.run_full_actor_gradient_shadow = accumulate_shadow
 
         try:
@@ -461,25 +645,69 @@ def main() -> None:
                 batch = agent.play_steps()  # env-major flatten前的正式rollout batch
                 agent._reset_optimization_metrics()
                 agent.prepare_dataset(batch)  # global/per-asset GAE与stratified permutation
-                print(f"[gradient-audit] rollout {repeat_index}: differentiating full Actor", flush=True)
+                print(f"[gradient-audit] rollout {repeat_index}: differentiating frozen objectives", flush=True)
 
                 # Shadow在``calc_gradients``主backward之前运行；accumulation=2使第一个microbatch绝不触发step。
                 repeat_root = output_root / f"rollout_{repeat_index:02d}"
                 agent.experiment_dir = str(repeat_root)  # dense NPZ/JSON只写独立repeat目录
                 agent.epoch_num = checkpoint_epoch  # artifact update含义始终是source checkpoint坐标
-                agent.config["gradient_probe_frequency"] = 0 if args.full_rollout else 1
-                agent.config["full_gradient_shadow_frequency"] = 1  # 完整Actor global/per-asset两种scope
+                agent.config["gradient_probe_frequency"] = 1 if args.family_groups else (0 if args.full_rollout else 1)
+                agent.config["full_gradient_shadow_frequency"] = 0 if args.family_groups else 1
                 agent._gradient_accumulation_steps = 2  # 当前只调用一个microbatch，故optimizer boundary不可达
                 for minibatch_index in range(len(agent.dataset) if args.full_rollout else 1):
                     agent._gradient_microbatch_index = 0  # 每个slice均单独只读，永不进入第二个累积microstep
-                    agent.calc_gradients(agent.dataset[minibatch_index])
-                    if agent._gradient_microbatch_index != 1:
+                    minibatch = agent.dataset[minibatch_index]
+                    minibatch_halves = minibatch.get("replica_halves")
+                    if not isinstance(minibatch_halves, torch.Tensor):
+                        raise RuntimeError("gradient audit minibatch has no replica parity tensor")
+                    active_halves = minibatch_halves  # 与同一slice的observations/actions/advantages对齐。
+                    if args.family_groups:
+                        try:
+                            agent.calc_gradients(minibatch)
+                        except FamilyForwardCaptured:
+                            pass  # 仅消费loss图；正常return表示未进入只读hook，必须拒绝。
+                        else:
+                            raise RuntimeError("family probe did not stop before production backward")
+                    else:
+                        agent.calc_gradients(minibatch)
+                    if agent._gradient_microbatch_index != (0 if args.family_groups else 1):
                         raise RuntimeError("gradient audit crossed an optimizer boundary")
+                    if args.family_groups and torch.device(agent.ppo_device).type == "cuda":
+                        free, total = torch.cuda.mem_get_info(agent.ppo_device)  # 包含PhysX与allocator外部占用。
+                        minimum_driver_free = free if minimum_driver_free is None else min(minimum_driver_free, free)
+                        required = int(agent.config.get("gpu_driver_free_memory_bytes_min", 0))
+                        if free < required:
+                            raise RuntimeError(
+                                "palm-rotation training exhausted CUDA driver headroom: "
+                                f"free={free}, required={required}, total={total}, scope=family-gradient-audit"
+                            )  # 与正式训练保持相同安全门，父watchdog能识别该停止原因。
                 if args.full_rollout and shadow_calls != len(agent.dataset):
                     raise RuntimeError("full-rollout shadow did not observe every minibatch")
                 print(f"[gradient-audit] rollout {repeat_index}: gradient artifact complete", flush=True)
-                if agent._gradient_microbatch_index != 1:
+                if agent._gradient_microbatch_index != (0 if args.family_groups else 1):
                     raise RuntimeError("gradient audit unexpectedly executed more than one activation microbatch")
+
+                if args.family_groups:
+                    if any(parameter.grad is not None for parameter in agent.model.parameters()):
+                        raise RuntimeError("family probe wrote a model parameter gradient")
+                    replicas = agent.num_actors // agent.asset_count
+                    expected_counts = torch.tensor(family_counts, device=agent.ppo_device)[:, None]
+                    expected_counts = (expected_counts * (replicas // 2) * agent.horizon_length).expand(2, 2)
+                    dense_family: dict[str, np.ndarray] = {}
+                    report_family: dict[str, Any] = {}
+                    for side in ("actor", "critic"):
+                        if not torch.equal(count_sums[side], expected_counts):
+                            raise RuntimeError("family gradient counts do not cover the full H30 population")
+                        dense_side, report_family[side] = _family_gradient_evidence(half_sums[side], count_sums[side])
+                        dense_family.update({f"{side}_{key}": value.cpu().numpy() for key, value in dense_side.items()})
+                    family_root = repeat_root / "family_gradient_shadows"
+                    family_root.mkdir(parents=True, exist_ok=True)
+                    destination = family_root / f"update_{checkpoint_epoch:06d}.npz"
+                    temporary = destination.with_suffix(".tmp.npz")
+                    np.savez_compressed(temporary, **dense_family)
+                    temporary.replace(destination)  # 完整梯度写完才发布可见artifact。
+                    _atomic_json(family_root / f"update_{checkpoint_epoch:06d}.json", report_family)
+                    family_reports.append(report_family)
 
                 # 任何Actor参数变化都说明optimizer隔离失败；即刻拒绝发布summary。
                 current_actor = tuple(agent.model.a2c_network.package.actor.parameters())
@@ -495,12 +723,14 @@ def main() -> None:
                     )
                 ):
                     raise RuntimeError("checkpoint gradient audit changed Critic parameters")
-                npz_path = repeat_root / "full_gradient_shadows" / f"update_{checkpoint_epoch:06d}.npz"
+                shadow_directory = "family_gradient_shadows" if args.family_groups else "full_gradient_shadows"
+                npz_path = repeat_root / shadow_directory / f"update_{checkpoint_epoch:06d}.npz"
                 if not npz_path.is_file():
                     raise RuntimeError("full Actor gradient shadow did not publish its dense artifact")
                 npz_paths.append(npz_path)
         finally:
             probe_runtime.run_full_actor_gradient_shadow = original_shadow
+            probe_runtime.run_gradient_probe = original_probe
             # 内存状态也恢复到checkpoint，确保后续清理/observer不会看见probe更新后的value RMS或gradients。
             agent.model.load_state_dict(frozen_model, strict=True)
             vec_env.set_env_state(deepcopy(frozen_environment))
@@ -512,7 +742,11 @@ def main() -> None:
             agent.config["full_gradient_shadow_frequency"] = original_shadow_frequency
 
         summary = {
-            "schema_version": "checkpoint-full-actor-gradient-reliability-v1",
+            "schema_version": (
+                "checkpoint-family-actor-critic-gradient-reliability-v1"
+                if args.family_groups
+                else "checkpoint-full-actor-gradient-reliability-v1"
+            ),
             "checkpoint": str(checkpoint_path),
             "checkpoint_sha256": _sha256(checkpoint_path),
             "checkpoint_epoch": checkpoint_epoch,
@@ -535,8 +769,22 @@ def main() -> None:
                 if args.full_rollout
                 else "independent-H30-after-declared-untrained-warmup-first-stratified-minibatch-even-odd-halves"
             ),
-            "cross_rollout": _cross_rollout_summary(npz_paths),
+            "cross_rollout": _cross_rollout_summary(npz_paths, family_groups=bool(args.family_groups)),
         }
+        if args.family_groups:
+            summary.update(
+                {
+                    "family_groups": ["leap", "allegro"],
+                    "family_asset_counts": family_counts,
+                    "parameter_layout": parameter_layout,
+                    "parameter_gradients_untouched": True,
+                    "minimum_driver_free_bytes": minimum_driver_free,
+                    "combiner_source_sha256": combiner_source_sha256,
+                    "advantage_scope": agent.advantage_normalization_scope,
+                    "family_rollout_reports": family_reports,
+                    "candidate_optimizer_updates_executed": False,
+                }
+            )
         _atomic_json(output_root / "summary.json", summary)
         print(json.dumps({"output": str(output_root / "summary.json"), "optimizer_steps": 0}, sort_keys=True))
 
@@ -548,7 +796,10 @@ def main() -> None:
 
             print("[gradient-audit] entered frozen checkpoint audit agent", flush=True)
             try:
-                audit_train(self)
+                if audit_callback is None:
+                    audit_train(self)
+                else:
+                    audit_callback(self, args, checkpoint_state)  # 复用恢复门；不进入原PPO train loop。
             except BaseException as error:
                 print(
                     f"[gradient-audit] aborted by {type(error).__name__}: {error!r}",
@@ -581,6 +832,12 @@ def main() -> None:
     finally:
         torch.compile = original_compile  # type: ignore[assignment]
         training_entry.simulation_app.close()  # import模式不会进入正式模块的``__main__`` finally
+
+
+def main() -> None:
+    r"""命令行入口仍执行原有冻结梯度审计。"""
+
+    run_checkpoint_audit(_arguments())
 
 
 if __name__ == "__main__":

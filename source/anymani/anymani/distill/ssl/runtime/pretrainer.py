@@ -23,6 +23,37 @@ class AdamWCfg:
             raise ValueError("AdamW learning rate must be positive and weight decay non-negative")
 
 
+@dataclass(frozen=True)
+class ExecutionPrecisionCfg:
+    r"""Geometry teacher、learned model、loss/FairGrad 与 compile 的数值边界。
+
+    几何 teacher 的 FK、Warp closest-face、barycentric、$\kappa$、Gaussian target 与 mask 固定
+    FP32；learned encoder/readers 可在 BF16 autocast 中运行。参数与 AdamW master state 仍为 FP32，
+    FairGrad 范数和点积仍以 FP64 累计，因此低精度只作用于 learned GEMM/activation。
+    """
+
+    teacher_dtype: str = "float32"  # Warp/几何真值执行精度
+    parameter_dtype: str = "float32"  # 参数、AdamW master state 与持久化 retained state
+    model_autocast_dtype: str = "bfloat16"  # learned forward 的 CUDA autocast dtype
+    loss_dtype: str = "float32"  # objective numerator/denominator 与 private gradient dtype
+    fairgrad_accumulation_dtype: str = "float64"  # shared task-gradient norm/dot 累计精度
+    allow_tf32: bool = False  # 全局关闭，避免 teacher FP32 matmul 被透明降精度
+    compile_enabled: bool = True  # 固定 64-pair learned region 的正式执行策略
+    compile_mode: str = "reduce-overhead"  # CUDA graph/private-pool 适合固定 shape 热路径
+
+    def __post_init__(self) -> None:
+        r"""拒绝会改变 teacher 或 optimizer master-state 数值语义的组合。"""
+
+        if self.teacher_dtype != "float32" or self.parameter_dtype != "float32" or self.loss_dtype != "float32":
+            raise ValueError("Geometry SSL teacher, parameters and loss reduction must remain float32")
+        if self.model_autocast_dtype not in {"bfloat16", "float32", "tf32"}:
+            raise ValueError("model_autocast_dtype must be bfloat16, tf32, or float32")
+        if self.fairgrad_accumulation_dtype != "float64":
+            raise ValueError("FairGrad accumulation must remain float64")
+        if self.compile_mode not in {"default", "reduce-overhead", "max-autotune"}:
+            raise ValueError("unsupported torch.compile mode")
+
+
 class EmbodimentPretrainTrainer:
     r"""拥有资产/q 在线日程、显存分块、optimizer update 和训练 checkpoint。"""
 
@@ -69,12 +100,14 @@ class EmbodimentPretrainTrainerCfg:
     mini_epochs: int = 1  # 对本 epoch 全部 minibatches 的完整遍历次数
     microbatch_size: int = 64  # 一次模型 forward/backward 的 $(asset,q)$ pair 数
     optimizer: AdamWCfg = field(default_factory=AdamWCfg)
+    execution: ExecutionPrecisionCfg = field(default_factory=ExecutionPrecisionCfg)
     max_gradient_norm_per_group: float = 10.0  # shared/density-private/kappa-private 分别裁剪
-    max_resident_assets: int = 64  # 首个 preset 恰好驻留一个 64-asset 训练 minibatch
     device: str = "cuda:0"
-    dtype: str = "float32"
-    checkpoint_every_epochs: int = 4  # 每 16 updates 保存一次完整状态，兼顾恢复粒度与磁盘占用
+    checkpoint_every_epochs: int = 32  # 每个 8192-asset catalog cycle 保存一次 immutable full state
     resource_profile: bool = False  # 默认热路径禁止显存快照和显式 CUDA synchronize
+    emit_compression_basis: bool = False  # 正式 snapshot 可在最终 train state 上发布 train-derived PCA basis
+    compression_q_per_asset: int = 64  # train-derived basis 的固定 q-bank，正式评估与此保持同一测度
+    compression_q_per_asset: int = 64  # train-derived basis 的固定 q-bank，正式评估与此保持同一测度
 
     def __post_init__(self) -> None:
         r"""验证新数据预算、复用次数、设备资源与记录轴严格为正。"""
@@ -84,13 +117,12 @@ class EmbodimentPretrainTrainerCfg:
             self.num_minibatches,
             self.mini_epochs,
             self.microbatch_size,
-            self.max_resident_assets,
             self.checkpoint_every_epochs,
+            self.compression_q_per_asset,
+            self.compression_q_per_asset,
         )
         if min(counts) < 1 or self.max_gradient_norm_per_group <= 0.0:
             raise ValueError("trainer update/resource/cadence values must be positive")
-        if self.max_resident_assets < self.sampling.assets_per_minibatch:
-            raise ValueError("max_resident_assets must cover one training asset minibatch")
         minibatch_size = (
             self.sampling.assets_per_minibatch * self.sampling.q_per_asset_per_minibatch
         )  # $B_{mb}=N_{asset}^{mb}N_q^{mb}$
@@ -100,12 +132,21 @@ class EmbodimentPretrainTrainerCfg:
             raise ValueError("microbatch_size must contain complete per-asset q blocks")
         if not (self.device == "cuda" or (self.device.startswith("cuda:") and self.device[5:].isdigit())):
             raise ValueError("embodiment pretraining device must be 'cuda' or 'cuda:<index>'")
-        if self.dtype != "float32":
-            raise ValueError("current Warp online supervision requires trainer dtype='float32'")
+        if self.device_window_assets < 1:
+            raise ValueError("microbatch_size must contain at least one complete asset q block")
+        if self.checkpoint_every_epochs > self.max_epochs or self.max_epochs % self.checkpoint_every_epochs != 0:
+            raise ValueError("immutable checkpoint cadence must exactly divide max_epochs")
+
+    @property
+    def device_window_assets(self) -> int:
+        r"""返回一个 64-pair stream unit 的资产数，正式配置为 $64/8=8$。"""
+
+        return self.microbatch_size // self.sampling.q_per_asset_per_minibatch
 
 
 __all__ = [
     "AdamWCfg",
     "EmbodimentPretrainTrainer",
     "EmbodimentPretrainTrainerCfg",
+    "ExecutionPrecisionCfg",
 ]

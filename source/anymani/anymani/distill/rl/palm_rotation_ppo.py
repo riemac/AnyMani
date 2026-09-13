@@ -13,6 +13,9 @@ r"""异构掌旋PPO的训练生命周期与rl_games注册入口。
 
 from __future__ import annotations
 
+import gc
+import hashlib
+import math
 import os
 import random
 from collections.abc import Mapping
@@ -26,13 +29,22 @@ from rl_games.common import common_losses
 from torch import nn
 from torch.nn.utils import clip_grad_norm_
 
-from anymani.distill.diagnostics.recording.rl.palm_rotation import PalmRotationMetricsRecorder
+from anymani.distill.diagnostics.recording.rl.optimization_evidence import write_optimization_evidence
+from anymani.distill.diagnostics.recording.rl.palm_rotation import (
+    PalmRotationMetricsRecorder,
+    write_selected_trajectories_hdf5,
+)
 
+from .algorithms.action_regularization import tip_silent_rejected_action_cost
+from .algorithms.cagrad import combine_task_gradients
+from .algorithms.policy_statistics import mean_preserving_squashed_kl
+from .algorithms.popart import PopArtValueNormalizer
 from .algorithms.ppo_batch import (
     bounded_adaptive_learning_rate,
     normalize_advantages_per_asset,
     stratified_asset_permutation,
 )
+from .algorithms.task_gradients import per_asset_ppo_gradients
 from .masked_ppo import (
     AnyManiMaskedPpoAgent,
     AnyManiMaskedPpoPlayer,
@@ -45,12 +57,19 @@ from .runtime.palm_rotation_diagnostics import (
     PalmRotationPpoDiagnostics,
     rollout_policy_mechanism_metrics,
 )
+from .runtime.palm_rotation_experience import EnvMajorExperienceBuffer
 from .runtime.palm_rotation_network import (
     PalmRotationMaskedContinuousModel,
     PalmRotationRlGamesBuilder,
     PalmRotationRlGamesNetwork,
     denormalize_value_readonly,
 )
+from .runtime.palm_rotation_optimizer_init import (
+    load_named_optimizer_state,
+    load_optimizer_parameter_names,
+    optimizer_parameter_names,
+)
+from .runtime.palm_rotation_phase import audit_phase_rollout
 from .runtime.palm_rotation_warm_start import (
     load_actor_init_checkpoint,
     load_critic_init_checkpoint,
@@ -62,6 +81,7 @@ PALM_ROTATION_NETWORK = "anymani_palm_rotation"
 CRITIC_OPTIMIZER_KEY = "anymani_critic_optimizer"
 DIAGNOSTICS_RECORDER_KEY = "anymani_metrics_recorder"
 TRAINING_CONTINUATION_KEY = "anymani_training_continuation"
+OPTIMIZER_PARAMETER_NAMES_KEY = "anymani_optimizer_parameter_names"
 
 
 def validate_gradient_probe_compile_compatibility(
@@ -104,6 +124,36 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
         if not isinstance(network, PalmRotationRlGamesNetwork):
             raise TypeError("palm-rotation PPO agent received an incompatible network")
 
+        self.value_normalization_mode = str(self.config.get("value_normalization", "rms"))
+        if self.value_normalization_mode not in {"rms", "popart"}:
+            raise ValueError("value_normalization must be rms or popart")
+        if self.value_normalization_mode == "popart":
+            if not self.normalize_value:
+                raise ValueError("PopArt requires normalize_value=True")
+            if not isinstance(self.model.value_mean_std, PopArtValueNormalizer):
+                raise TypeError("model identity and agent PopArt configuration disagree")
+            if self.value_mean_std is not self.model.value_mean_std:
+                raise RuntimeError("agent/model value normalizer aliases disagree")
+        self._last_popart_compensation: dict[str, torch.Tensor] | None = None
+        self.gradient_aggregation = str(self.config.get("gradient_aggregation", "mean"))
+        self.rejected_action_weight = float(self.config.get("rejected_action_weight", 0.0))
+        if not math.isfinite(self.rejected_action_weight) or self.rejected_action_weight < 0:
+            raise ValueError("rejected action weight must be finite and nonnegative")
+        self.cagrad_c = float(self.config.get("cagrad_c", 0.4))
+        self.cagrad_task_chunk = int(self.config.get("cagrad_task_chunk", 128))
+        if self.gradient_aggregation not in {"mean", "cagrad"} or not 0 <= self.cagrad_c < 1:
+            raise ValueError("invalid gradient aggregation or CAGrad protection radius")
+        if self.cagrad_task_chunk < 1:
+            raise ValueError("cagrad_task_chunk must be positive")
+        if self.gradient_aggregation == "cagrad" and (
+            int(self.config.get("gradient_probe_frequency", 0))
+            or int(self.config.get("full_gradient_shadow_frequency", 0))
+        ):
+            raise ValueError("CAGrad already computes full task gradients; disable legacy gradient probes")
+        self._cagrad_actor_accumulator: dict[str, torch.Tensor] | None = None
+        self._cagrad_critic_accumulator: dict[str, torch.Tensor] | None = None
+        self._last_cagrad_diagnostics: dict[str, torch.Tensor] = {}
+
         # Actor-only迁移发生在fresh optimizers构造前；checkpoint其余state从未交给rl_games restore。
         actor_init_path = str(self.config.get("actor_init_checkpoint", "")).strip()
         runtime_identity = network.anymani_identity
@@ -115,17 +165,33 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
             full_checkpoint_resume=bool(self.config.get("full_checkpoint_resume", False)),
         )
         if load_actor_init:
+            if not isinstance(warm_start, Mapping):
+                raise RuntimeError("Actor initialization requires its inspected warm-start identity")
+            requested_sigma = warm_start.get("actor_init_sigma") if isinstance(warm_start, Mapping) else None
+            phase_adaptation = bool(warm_start.get("phase_clock_adaptation"))
             loaded_keys = load_actor_init_checkpoint(
                 network.package.actor,
                 actor_init_path,
                 expected_checkpoint_sha256=str(warm_start["checkpoint_sha256"]),  # type: ignore[index]
+                actor_init_sigma=float(requested_sigma) if requested_sigma is not None else None,
+                allow_phase_clock_adaptation=phase_adaptation,
             )
             if len(loaded_keys) != int(warm_start["loaded_tensor_count"]):  # type: ignore[index]
                 raise RuntimeError("actor-init loaded tensor count disagrees with inspected identity")
             if isinstance(warm_start, Mapping) and bool(warm_start.get("initialize_critic", False)):
                 load_critic_init_checkpoint(
-                    self.model, actor_init_path, expected_checkpoint_sha256=str(warm_start["checkpoint_sha256"])
+                    self.model, actor_init_path, expected_checkpoint_sha256=str(warm_start["checkpoint_sha256"]),
+                    allow_phase_clock_adaptation=phase_adaptation,
                 )
+            print(
+                {
+                    "actor_initialization": "loaded-before-first-rollout",
+                    "requested_sigma": requested_sigma,
+                    "actual_log_std": float(network.package.actor.global_log_std.detach().item()),
+                    "actual_sigma": float(network.package.actor.global_log_std.detach().exp().item()),
+                },
+                flush=True,
+            )  # 启动日志记录真实权重状态；完整resume不会再次进入此分支
 
         base_parameters, contextual_parameters = network.actor_parameter_groups()  # disjoint actor groups
         critic_parameters = list(network.package.critic.parameters())  # completely separate$\theta^c$
@@ -140,6 +206,7 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
         if self._base_lr_ceiling != self._base_lr_reference:
             raise ValueError("MVP adaptive_lr_max must equal the declared actor base learning-rate anchor")
         self.actor_arm = network.arm  # 四种arm决定side-channel、机制指标与第二参数组名称
+        self.phase_period_steps = network.phase_period_steps  # 可重放内部时钟的已验证方法配置。
         secondary_lr_key = (
             "contextual_learning_rate" if self.actor_arm in {"direct", "direct_token"} else "residual_learning_rate"
         )
@@ -229,33 +296,100 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
                 "critic_loss",
                 "entropy",
                 "policy_sigma",
+                "policy_base_sigma",
+                "recovery_floor_fraction",
+                "actor_rejected_action_cost",
+                "actor_rejected_action_fraction",
                 "actor_grad_norm",
                 "critic_grad_norm",
+                "actor_cagrad_relative_gap",
+                "critic_cagrad_relative_gap",
+                "actor_cagrad_worst_projection",
+                "critic_cagrad_worst_projection",
+                "actor_cagrad_iterations",
+                "critic_cagrad_iterations",
             )
         }  # 无per-asset归属的标量留在GPU累计，update边界才执行六次host transfer
 
-    def init_tensors(self) -> None:
-        r"""在upstream experience buffer增加detached action-residual side-channel。"""
+        # 新方法分支保留原Adam矩与采样随机流，新run的计数与物理段独立。
+        if load_actor_init and isinstance(warm_start, Mapping) and warm_start.get("initialize_optimizers", False):
+            source = torch.load(actor_init_path, map_location="cpu", weights_only=False)  # 源字节已由Actor/Critic载入核验。
+            names_path = self.config.get("actor_init_optimizer_names")
+            named_source = None
+            if names_path is not None:
+                named_source = load_optimizer_parameter_names(
+                    names_path,
+                    expected_checkpoint_sha256=str(warm_start["checkpoint_sha256"]),
+                    expected_ledger_sha256=str(warm_start["optimizer_name_ledger_sha256"]),
+                )
+            if warm_start.get("phase_clock_adaptation") and named_source is None:
+                raise ValueError("phase adapter optimizer initialization requires a bound parameter-name ledger")
+            named_reports = {}
+            for optimizer, key in ((self.optimizer, "optimizer"), (self.critic_optimizer, CRITIC_OPTIMIZER_KEY)):
+                if named_source is not None:
+                    module = network.package.actor if key == "optimizer" else network.package.critic
+                    new_name = "phase_contextual_adapter.weight" if key == "optimizer" else "phase_readout_adapter.weight"
+                    named_reports[key] = load_named_optimizer_state(
+                        optimizer, source[key], named_source[key], dict(module.named_parameters()),
+                        allowed_new_names=(new_name,) if warm_start.get("phase_clock_adaptation") else (),
+                    )
+                    continue
+                current_groups, source_groups = optimizer.state_dict()["param_groups"], source[key]["param_groups"]
+                if len(current_groups) != len(source_groups) or any(
+                    len(current["params"]) != len(saved["params"]) or current.get("name") != saved.get("name")
+                    for current, saved in zip(current_groups, source_groups, strict=True)
+                ):
+                    raise ValueError("optimizer initialization requires the same ordered parameter groups")
+                optimizer.load_state_dict(source[key])  # 迁移一阶/二阶矩及step，保持目标参数对象。
+            continuation = source[TRAINING_CONTINUATION_KEY]
+            self.entropy_coef = float(continuation["entropy_coef"])
+            self.update_lr(float(continuation["last_lr"]))  # 保持原三组学习率比例。
+            random.setstate(continuation["python_random_state"])
+            np.random.set_state(continuation["numpy_random_state"])
+            torch.set_rng_state(continuation["torch_cpu_rng_state"])
+            if torch.cuda.is_available() and continuation["torch_cuda_rng_states"]:
+                torch.cuda.set_rng_state_all(continuation["torch_cuda_rng_states"])
+            print({"learner_initialization": "actor-critic-popart-adam-rng-inherited",
+                   "source_epoch": int(source["epoch"]), "new_run_counters": "restart-at-zero"}, flush=True)
+            if named_reports:
+                actor_phase = getattr(network.package.actor, "phase_contextual_adapter", None)
+                critic_phase = getattr(network.package.critic, "phase_readout_adapter", None)
+                self._named_initialization_audit = {
+                    "source_checkpoint_sha256": str(warm_start["checkpoint_sha256"]),
+                    "optimizer_name_ledger_sha256": str(warm_start["optimizer_name_ledger_sha256"]),
+                    "optimizers": named_reports,
+                    "value_rms_initial_count": float(self.model.value_mean_std.count.item()),
+                    "actor_phase_adapter_initial_max_abs": float(actor_phase.weight.detach().abs().max().item()) if actor_phase is not None else None,
+                    "critic_phase_adapter_initial_max_abs": float(critic_phase.weight.detach().abs().max().item()) if critic_phase is not None else None,
+                }
+                print({"named_learner_initialization": self._named_initialization_audit}, flush=True)
 
-        super().init_tensors()
+    def init_tensors(self) -> None:
+        r"""选择经验底层布局并补充诊断通道；逻辑接口始终为[H,N,...]。"""
+
         batch = self.num_agents * self.num_actors  # rollout并行样本数$N$
+        if self.config.get("env_major_rollout_storage", False):
+            if self.is_rnn:
+                raise ValueError("env-major experience currently supports the non-RNN Palm policy path")
+            info = {"num_actors": self.num_actors, "horizon_length": self.horizon_length,
+                    "has_central_value": self.has_central_value, "use_action_masks": self.use_action_masks}
+            self.experience_buffer = EnvMajorExperienceBuffer(self.env_info, info, self.ppo_device)
+            self.init_current_rewards(batch, (batch, self.value_size))  # 与父类非RNN初始化相同。
+            self.update_list = ["actions", "neglogpacs", "values", "mus", "sigmas"]
+            self.tensor_list = self.update_list + ["obses", "states", "dones"]
+            print("[STORAGE] Env-major backing enabled: rollout flatten uses views, not full observation copies.", flush=True)
+        else:
+            super().init_tensors()
         mechanism_key = "direct_means" if self.actor_arm in {"direct", "direct_token"} else "residuals"
-        self.experience_buffer.tensor_dict[mechanism_key] = torch.zeros(
-            self.horizon_length,
-            batch,
-            16,
-            dtype=torch.float32,
-            device=self.ppo_device,
-        )  # `[H,N,16]`，与actions/mus同axis
+        channels = (mechanism_key, "film_modulations")
+        for name in channels:
+            if isinstance(self.experience_buffer, EnvMajorExperienceBuffer):
+                value = self.experience_buffer.side_channel(16)  # 与所有主经验字段保持同一stride约定。
+            else:
+                value = torch.zeros(self.horizon_length, batch, 16, dtype=torch.float32, device=self.ppo_device)
+            self.experience_buffer.tensor_dict[name] = value  # [H,N,16]，仅用于诊断。
         self.update_list.append(mechanism_key)  # play_steps从custom model输出写入buffer
         self.tensor_list.append(mechanism_key)  # rollout结束后swap env/time并flatten
-        self.experience_buffer.tensor_dict["film_modulations"] = torch.zeros(
-            self.horizon_length,
-            batch,
-            16,
-            dtype=torch.float32,
-            device=self.ppo_device,
-        )  # `[H,N,16]`，逐joint local-hidden FiLM RMS
         self.update_list.append("film_modulations")
         self.tensor_list.append("film_modulations")
 
@@ -304,14 +438,16 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
         old_sigma: torch.Tensor,
         active_mask: torch.Tensor,
     ) -> torch.Tensor:
-        r"""利用tanh双射，在latent Normal中计算物理squashed policy的精确KL。"""
+        r"""在潜Normal中稳定计算D_KL(current||reference)，并按有效关节数归约。"""
 
-        current_latent = PalmRotationMaskedContinuousModel.Network._action_to_latent(current_mu)
-        old_latent = PalmRotationMaskedContinuousModel.Network._action_to_latent(old_mu)
-        c1 = torch.log(old_sigma / current_sigma + 1.0e-5)
-        c2 = (current_sigma.square() + (old_latent - current_latent).square()) / (2.0 * (old_sigma.square() + 1.0e-5))
-        weights = active_mask.to(dtype=current_mu.dtype)
-        return ((c1 + c2 - 0.5) * weights).sum(dim=-1) / weights.sum(dim=-1).clamp_min(1.0)
+        return mean_preserving_squashed_kl(
+            current_mu,
+            current_sigma,
+            old_mu,
+            old_sigma,
+            active_mask,
+            action_epsilon=PalmRotationMaskedContinuousModel.Network._ACTION_EPS,
+        )
 
     def _gradient_probe_parameters(self) -> tuple[tuple[nn.Parameter, ...], tuple[nn.Parameter, ...]]:
         r"""委托专用模块处理同一agent状态，保持训练hook和参数语义。"""
@@ -383,6 +519,19 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
         raw_advantages = (raw_returns - raw_values).sum(dim=1)  # upstream PPO定义的物理GAE `[B]`
         if raw_advantages.numel() % self.horizon_length != 0:
             raise RuntimeError("flattened rollout does not divide into complete environment trajectories")
+        phase_period = getattr(self, "phase_period_steps", None)
+        if ("phase_clock" in rollout_observation) != (phase_period is not None):
+            raise RuntimeError("rollout phase clock and agent configuration disagree")
+        if phase_period is not None and not hasattr(self, "_phase_transport_witness"):
+            phase = rollout_observation["phase_clock"].detach().reshape(-1, self.horizon_length, 2)
+            resets = batch_dict["dones"].detach().bool().reshape(-1, self.horizon_length)
+            report = audit_phase_rollout(phase, resets, period_steps=phase_period)
+            witness = Path(self.nn_dir).parent / "phase_rollout_witness.h5"
+            write_selected_trajectories_hdf5(
+                witness, arrays={"phase_clock": phase.cpu().numpy(), "reset_observation": resets.cpu().numpy()},
+                metadata={**report, "axes": "environment,time,feature", "method_identity_digest": self.model.a2c_network.anymani_identity["identity_digest"]},
+            )  # 一次性保存真实 buffer 叶子；不能只用构造配置声称运行时钟正确。
+            self._phase_transport_witness = {**report, "path": str(witness), "sha256": hashlib.sha256(witness.read_bytes()).hexdigest()}
         flat_index = torch.arange(raw_advantages.numel(), device=raw_advantages.device)
         environment_index = torch.div(flat_index, self.horizon_length, rounding_mode="floor")  # env-major flatten axis
         expected_labels = environment_index.remainder(self.asset_count)  # runtime route定义$k_e=e\bmod A$
@@ -398,6 +547,12 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
         if not isinstance(rollout_mean, torch.Tensor) or rollout_mean.shape != mechanism.shape:
             raise RuntimeError("palm-rotation rollout mean and mechanism side-channel shapes disagree")
         frozen_rollout_mean = rollout_mean.detach().clone()  # 与dataset可变KL reference断开storage alias
+        if isinstance(self.value_mean_std, PopArtValueNormalizer):
+            head = self.model.a2c_network.package.critic.value_head[-1]
+            if not isinstance(head, nn.Linear):
+                raise TypeError("PopArt requires the structured Critic scalar Linear head")
+            self._last_popart_compensation = self.value_mean_std.update_from_returns(raw_returns, head)
+            # super会再次train()；PopArt.forward始终只读，values/returns共享本次唯一新快照。
         super().prepare_dataset(batch_dict)  # 保持upstream GAE/value normalization与PPO fields
         global_advantages = self.dataset.values_dict.get("advantages")
         if not isinstance(global_advantages, torch.Tensor) or global_advantages.shape != raw_advantages.shape:
@@ -437,10 +592,61 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
             key: self._index_dataset_value(value, permutation) for key, value in self.dataset.values_dict.items()
         }  # 所有old policy/value/action/obs字段保持同一sample correspondence
         self.last_stratified_permutation = permutation.detach()  # scalar/table diagnostics可审计本update顺序
+        audit_frequency = int(self.config.get("optimization_audit_frequency", 0))
+        if audit_frequency > 0 and (int(self.epoch_num) == 1 or int(self.epoch_num) % audit_frequency == 0):
+            destination = Path(self.nn_dir).parent  # 与checkpoint同一run下的独立审计目录。
+            segment = str(self.config["evidence_segment_id"])
+            write_optimization_evidence(
+                destination / "optimization_audits" / segment / f"pre-update-{int(self.epoch_num):06d}.pt",
+                {
+                    "artifact_type": "palm-rotation-optimization-audit",
+                    "schema_version": "1.0.0",
+                    "capture_phase": "post-dataset-prepare-before-optimizer",
+                    "segment_id": segment,
+                    "update": int(self.epoch_num),
+                    "policy_version": int(self.frame),
+                    "identity": self.model.a2c_network.anymani_identity,
+                    "model": self.model.state_dict(),
+                    "actor_optimizer": self.optimizer.state_dict(),
+                    "critic_optimizer": self.critic_optimizer.state_dict(),
+                    "dataset": self.dataset.values_dict,
+                    "permutation": permutation,
+                    "torch_rng": torch.get_rng_state(),
+                    "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+                    "numpy_rng": np.random.get_state(),
+                    "python_rng": random.getstate(),
+                    "loss_configuration": {
+                        key: self.config.get(key)
+                        for key in (
+                            "e_clip",
+                            "entropy_coef",
+                            "bounds_loss_coef",
+                            "critic_coef",
+                            "clip_value",
+                            "gradient_aggregation",
+                            "cagrad_c",
+                            "cagrad_task_chunk",
+                            "gradient_accumulation_steps",
+                        )
+                    },
+                },
+            )
+
+        if self.config.get("release_rollout_batch", False):
+            # 每个dataset字段已经通过同一个整数permutation建立独立存储。
+            # 父train_epoch在此后仅用batch_dict['step_time']构造返回值；大观测副本可以释放。
+            step_time = batch_dict["step_time"]
+            batch_dict.clear()
+            batch_dict["step_time"] = step_time  # 保留调用方需要的墙钟标量。
+            self._release_unused_rollout_cache = True  # 等本函数局部引用消失后，再回收allocator缓存。
 
     def calc_gradients(self, input_dict: dict[str, Any]) -> None:
         r"""同一前向图分别对$\theta^a$与$\theta^c$执行FP32 PPO/value更新。"""
 
+        if getattr(self, "_release_unused_rollout_cache", False):
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()  # 每个rollout仅一次；归还已释放的展开副本，活跃dataset与原始buffer不受影响。
+            self._release_unused_rollout_cache = False
         value_predictions = input_dict["old_values"]  # rollout normalized values`[M,1]`
         old_neglogp = input_dict["old_logp_actions"]  # masked action negative log probability`[M]`
         advantage = input_dict["advantages"]  # identity-selected global/per-asset GAE`[M]`
@@ -464,14 +670,51 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
         actions = input_dict["actions"]  # sampled canonical actions`[M,16]`
         observation = self._preproc_obs(input_dict["obs"])  # named Dict；normalize_input=False
         labels = observation["prototype_index"].reshape(-1).long()  # sampler certificate，不进模型
-        result = self.model({"is_train": True, "prev_actions": actions, "obs": observation})
+        task_actor_gradients = task_critic_gradients = None
+        if self.gradient_aggregation == "cagrad":
+            network = self.model.a2c_network
+            task_actor_gradients, task_critic_gradients, result = per_asset_ppo_gradients(
+                network.package,
+                observation,
+                input_dict,
+                asset_count=self.asset_count,
+                entropy_noise=torch.randn_like(actions),
+                chunk_size=self.cagrad_task_chunk,
+                clip_epsilon=self.e_clip,
+                entropy_coef=self.entropy_coef,
+                bounds_coef=float(self.bounds_loss_coef or 0.0),
+                rejected_action_weight=self.rejected_action_weight,
+                critic_coef=self.critic_coef,
+                clip_value=self.clip_value,
+            )
+            network.last_active_joint_mask = observation["jnt_valid"].bool()
+        else:
+            result = self.model({"is_train": True, "prev_actions": actions, "obs": observation})
         new_neglogp = result["prev_neglogp"]  # masked active-joint likelihood
         values = result["values"]  # privileged critic prediction`[M,1]`
         entropy = result["entropy"]  # mean entropy per active DoF`[M]`
         mu = result["mus"]  # current actor means`[M,16]`
-        sigma = result["sigmas"]  # shared scalar expanded to`[M,16]`
+        sigma = result["sigmas"]  # `[M,16]`有效探索尺度，可能由当前观测触发恢复下限。
+        actor = self.model.a2c_network.package.actor
+        base_sigma = actor.global_log_std.detach().exp()  # 与此microbatch的sigma同一更新前时点，不读取step后的参数。
+        recovery_floor_fraction = sigma.new_zeros(())
+        if actor.recovery_sigma_floor is not None:
+            valid = observation["jnt_valid"].bool()
+            recovery_floor_fraction = ((sigma.detach() > base_sigma + 1e-6) & valid).sum() / valid.sum()
 
-        # Actor objective只含clipped surrogate、active-DoF entropy与masked bounds；无critic gradient path。
+        # 可选控制先验只作用于当前均值中被目标夹紧拒绝的分量；不修改环境reward或Critic目标。
+        rejected_cost = torch.zeros_like(advantage)
+        rejected_fraction = torch.zeros_like(advantage)
+        if self.rejected_action_weight > 0.0:
+            rejected_cost, rejected_fraction = tip_silent_rejected_action_cost(
+                mean=mu,
+                target_normalized=observation["actor_jnt_current"][..., 1],
+                limits_normalized=observation["actor_jnt_limits"],
+                joint_valid=observation["jnt_valid"],
+                tip_contact=observation["actor_owner_contact"][:, 17:21, 0],
+                tip_valid=observation["tip_valid"],
+            )
+        # Actor仍使用原clipped surrogate、active-DoF entropy与masked bounds。
         actor_loss_vector = self.actor_loss_func(old_neglogp, new_neglogp, advantage, self.ppo, self.e_clip)
         bounds_loss_vector = self.bound_loss(mu)  # active-DoF mean bounds penalty
         actor_objective_vector = (
@@ -483,6 +726,10 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
         )
         actor_loss, entropy_loss, bounds_loss = actor_terms
         actor_objective = actor_loss - entropy_loss * self.entropy_coef + bounds_loss * self.bounds_loss_coef
+        if self.rejected_action_weight > 0.0:
+            weighted_rejection = self.rejected_action_weight * rejected_cost
+            actor_objective_vector = actor_objective_vector + weighted_rejection  # probes与实际目标一致。
+            actor_objective = actor_objective + weighted_rejection.mean()  # 此scalar才是普通PPO的backward入口。
 
         # Critic objective使用独立structured critic和optimizer；0.5保持upstream PPO value-loss convention。
         critic_vector = common_losses.critic_loss(
@@ -505,6 +752,7 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
             "entropy": entropy_loss,
             "bounds_loss": bounds_loss,
             "actor_objective": actor_objective,
+            "rejected_action_cost": rejected_cost,
             "critic_objective": critic_objective,
             "mu": mu,
             "sigma": sigma,
@@ -524,6 +772,8 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
             and self._gradient_microbatch_index == 0
         ):
             common_actor_regularizer = -entropy * self.entropy_coef + bounds_loss_vector * self.bounds_loss_coef
+            if self.rejected_action_weight > 0.0:
+                common_actor_regularizer = common_actor_regularizer + self.rejected_action_weight * rejected_cost
             global_actor_objective = (
                 self.actor_loss_func(
                     old_neglogp,
@@ -569,14 +819,52 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
         if accumulation_offset == 0:
             self.optimizer.zero_grad(set_to_none=True)
             self.critic_optimizer.zero_grad(set_to_none=True)
-        (actor_objective / self._gradient_accumulation_steps).backward()
-        (critic_objective / self._gradient_accumulation_steps).backward()
+        if self.gradient_aggregation == "cagrad":
+            if task_actor_gradients is None or task_critic_gradients is None:
+                raise RuntimeError("CAGrad task gradients are missing")
+            # 各activation slice在同一参数点形成每资产均值；严格累计K份后才求CAGrad方向。
+            if accumulation_offset == 0:
+                self._cagrad_actor_accumulator = {
+                    name: value.div_(self._gradient_accumulation_steps) for name, value in task_actor_gradients.items()
+                }
+                self._cagrad_critic_accumulator = {
+                    name: value.div_(self._gradient_accumulation_steps) for name, value in task_critic_gradients.items()
+                }
+            else:
+                assert self._cagrad_actor_accumulator is not None and self._cagrad_critic_accumulator is not None
+                for name, value in task_actor_gradients.items():
+                    self._cagrad_actor_accumulator[name].add_(value, alpha=1 / self._gradient_accumulation_steps)
+                for name, value in task_critic_gradients.items():
+                    self._cagrad_critic_accumulator[name].add_(value, alpha=1 / self._gradient_accumulation_steps)
+        else:
+            (actor_objective / self._gradient_accumulation_steps).backward()
+            (critic_objective / self._gradient_accumulation_steps).backward()
         network = self.model.a2c_network  # validated PalmRotationRlGamesNetwork
         if not self.truncate_grads:
             raise RuntimeError("palm-rotation PPO requires independent actor/critic gradient clipping")
         accumulation_boundary = accumulation_offset + 1 == self._gradient_accumulation_steps
         if accumulation_boundary:
             self._assert_actor_learning_rate_ratio()  # 必须读取step-time optimizer groups
+            if self.gradient_aggregation == "cagrad":
+                assert self._cagrad_actor_accumulator is not None and self._cagrad_critic_accumulator is not None
+                actor_direction, actor_diagnostics = combine_task_gradients(
+                    self._cagrad_actor_accumulator, c=self.cagrad_c
+                )
+                critic_direction, critic_diagnostics = combine_task_gradients(
+                    self._cagrad_critic_accumulator, c=self.cagrad_c
+                )
+                for name, parameter in network.package.actor.named_parameters():
+                    parameter.grad = actor_direction[name]
+                for name, parameter in network.package.critic.named_parameters():
+                    parameter.grad = critic_direction[name]
+                self._last_cagrad_diagnostics = {
+                    **{f"actor/{name}": value for name, value in actor_diagnostics.items()},
+                    **{f"critic/{name}": value for name, value in critic_diagnostics.items()},
+                }
+                for side, diagnostic in (("actor", actor_diagnostics), ("critic", critic_diagnostics)):
+                    for name in ("relative_gap", "worst_projection", "iterations"):
+                        self._optimizer_scalar_sums[f"{side}_cagrad_{name}"].add_(diagnostic[name].float())
+                self._cagrad_actor_accumulator = self._cagrad_critic_accumulator = None
             actor_grad_norm = clip_grad_norm_(
                 network.package.actor.parameters(), self.grad_norm
             )  # 逻辑batch$\|g_a\|_2$
@@ -601,7 +889,11 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
             "actor_loss": actor_loss.detach(),
             "critic_loss": critic_loss.detach(),
             "entropy": entropy_loss.detach(),
-            "policy_sigma": sigma.detach().mean(),
+            "policy_sigma": (sigma.detach() * observation["jnt_valid"]).sum() / observation["jnt_valid"].sum(),  # 排除ghost sigma=1。
+            "policy_base_sigma": base_sigma,
+            "recovery_floor_fraction": recovery_floor_fraction,
+            "actor_rejected_action_cost": rejected_cost.detach().mean(),
+            "actor_rejected_action_fraction": rejected_fraction.detach().mean(),
         }
         for name, value in microbatch_scalars.items():
             self._optimizer_scalar_sums[name].add_(value.float())  # scalar detach已阻断autograd graph
@@ -726,22 +1018,31 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
         return diagnostics.record_update_metrics(self, epoch_result)
 
     def train_epoch(self):
-        r"""运行标准rollout/update，并在dataset释放前记录紧凑per-asset证据。"""
+        r"""运行完整rollout/update，再释放已用完的数据并记录真正轮次边界的资源水位。"""
 
         if hasattr(self, "_resume_last_mean_rewards"):
             self.last_mean_rewards = float(self._resume_last_mean_rewards)  # 恢复被upstream train()重置的best门
             del self._resume_last_mean_rewards
         self._reset_optimization_metrics()
         result = super().train_epoch()
+        if self.config.get("release_rollout_batch", False):
+            self.dataset.update_values_dict(None)  # 参数更新已完成；统计来自累计标量，不再消费dataset。
+            gc.collect()  # 回收跨forward/记录对象形成的Python引用环，避免下一轮叠加旧整批存储。
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()  # 在资源门之前归还真正空闲的缓存；峰值统计仍保留。
         self._record_update_metrics(result)
         return result
 
     def train(self):
-        r"""执行rl_games训练循环，并在正常预算结束后发布单个metrics.parquet。"""
-
-        result = super().train()
-        self.metrics_recorder.finalize()
-        return result
+        r"""正常完成时发布总表；中断时保存已完成update的指标，不保存半更新模型。"""
+        try:
+            result = super().train()
+        except BaseException:
+            self.metrics_recorder.flush(reason="shutdown")  # 用户Ctrl+C仍保留完整update行。
+            raise
+        else:
+            self.metrics_recorder.finalize()
+            return result
 
     def write_stats(
         self,
@@ -793,8 +1094,21 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
         r"""保存模型、两套optimizer、课程、诊断与可精确续接的随机/调度状态。"""
 
         self.metrics_recorder.flush(reason="checkpoint")  # checkpoint不得领先于durable metric rows
+        wrapper = getattr(self.vec_env, "env", None)
+        evidence = getattr(wrapper, "training_evidence", None)
+        if evidence is not None:
+            evidence.drain(force=True)  # 与checkpoint一起发布已结束回合；进行中的回合保持右删失语义。
         state = super().get_full_state_weights()  # model、actor optimizer、normalizer、env state、identity
         state[CRITIC_OPTIMIZER_KEY] = self.critic_optimizer.state_dict()  # 独立critic Adam moments
+        network = self.model.a2c_network
+        state[OPTIMIZER_PARAMETER_NAMES_KEY] = {
+            "optimizer": optimizer_parameter_names(self.optimizer, dict(network.package.actor.named_parameters())),
+            CRITIC_OPTIMIZER_KEY: optimizer_parameter_names(self.critic_optimizer, dict(network.package.critic.named_parameters())),
+        }  # 未来结构迁移可直接按名称对应；整数 optimizer ID 只保留序列化作用。
+        if hasattr(self, "_named_initialization_audit"):
+            state["anymani_named_initialization_audit"] = self._named_initialization_audit
+        if hasattr(self, "_phase_transport_witness"):
+            state["anymani_phase_transport_witness"] = self._phase_transport_witness
         state[DIAGNOSTICS_RECORDER_KEY] = self.metrics_recorder.state_dict()  # shard inventory/append cursor
         state[TRAINING_CONTINUATION_KEY] = {
             "schema_version": "1.0.0",
@@ -836,6 +1150,10 @@ class PalmRotationPpoAgent(AnyManiMaskedPpoAgent):
         if not isinstance(continuation, Mapping) or continuation.get("schema_version") != "1.0.0":
             raise RuntimeError("palm-rotation checkpoint is missing exact training continuation state")
         super().set_full_state_weights(weights, set_epoch=set_epoch)  # 先执行AnyMani identity验证
+        if "anymani_named_initialization_audit" in weights:
+            self._named_initialization_audit = dict(weights["anymani_named_initialization_audit"])
+        if "anymani_phase_transport_witness" in weights:
+            self._phase_transport_witness = dict(weights["anymani_phase_transport_witness"])
         self.critic_optimizer.load_state_dict(weights[CRITIC_OPTIMIZER_KEY])  # 精确恢复critic Adam moments
         self.metrics_recorder.load_state_dict(weights[DIAGNOSTICS_RECORDER_KEY])  # 核对durable Parquet shards
         self.last_lr = float(continuation["last_lr"])  # scheduler scalar不能只依赖optimizer param-group LR
