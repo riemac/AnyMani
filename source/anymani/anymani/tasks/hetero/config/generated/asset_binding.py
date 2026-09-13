@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from anymani.assets.bank.cohort import load_hand_asset_cohort
 from anymani.assets.bank.dataset import HandAssetDataset
@@ -27,7 +28,11 @@ from anymani.pregrasp import (
     active_mask_digest,
     tier_satisfies,
 )
+from anymani.pregrasp.revalidation import validate_revalidation_generation_identity
+from anymani.pregrasp.schema import stable_digest
+from anymani.pregrasp.strict_gate import MVP80_STRICT_GOOD_PREGRASP_GATE
 from anymani.robots.hand_spawn import CanonicalRuntimeCfg, HandSpawnAdapter, HandSpawnCfg, HandUrdfSpawnCfg
+from anymani.robots.visual_material_policy import generated_hand_visual_materials_enabled
 
 from ...contact_layout import HeterogeneousContactLayout, build_canonical_contact_layout
 from ...mdp.events import (
@@ -66,8 +71,10 @@ def selected_formal_dataset_rows() -> tuple[int, ...]:
     r"""解析当前进程的显式canary rows；缺省为formal 2048轴。"""
 
     raw = os.environ.get("ANYMANI_HETERO_ASSET_ROWS", "").strip()
-    rows = tuple(range(FORMAL_PPO_ASSET_COUNT)) if not raw else tuple(
-        int(item.strip()) for item in raw.split(",") if item.strip()
+    rows = (
+        tuple(range(FORMAL_PPO_ASSET_COUNT))
+        if not raw
+        else tuple(int(item.strip()) for item in raw.split(",") if item.strip())
     )
     if not rows or len(set(rows)) != len(rows):
         raise ValueError("ANYMANI_HETERO_ASSET_ROWS must contain unique formal rows")
@@ -106,6 +113,7 @@ class GeneratedAssetBinding:
     morphology_cell_ids: tuple[int, ...]
     contact_layout: HeterogeneousContactLayout
     dataset_sha256: str
+    pregrasp_generation_identity: Mapping[str, Any] | None = None  # 显式cohort重验协议；None保持历史Sobol/CEM
 
     @property
     def asset_count(self) -> int:
@@ -181,12 +189,22 @@ class GeneratedAssetBinding:
         runtime不会扫描catalog后反向接受任意generation protocol。
         """
 
+        if self.pregrasp_generation_identity is not None and not self.cohort_lock_sha256:
+            raise ValueError("explicit pregrasp revalidation requires a frozen cohort lock")
         if self.cohort_lock_sha256:
             resolved_catalog_root = catalog_root or DEFAULT_COHORT_GOOD_PREGRASP_CATALOG_ROOT
             object_scale = COHORT_GOOD_PREGRASP_OBJECT_SCALE
             physics_digest = COHORT_GOOD_PREGRASP_PHYSICS_DIGEST
             generation_digest = COHORT_GOOD_PREGRASP_GENERATION_DIGEST
             require_strict = COHORT_GOOD_PREGRASP_REQUIRE_STRICT
+            if self.pregrasp_generation_identity is not None:
+                # 只接受明确的候选重验协议；物理与strict门固定，不从catalog反推可接受的身份。
+                protocol = validate_revalidation_generation_identity(dict(self.pregrasp_generation_identity))
+                if protocol["physics_identity_digest"] != physics_digest:
+                    raise ValueError("cohort revalidation cannot change the fixed pregrasp physics")
+                if protocol["strict_gate_digest"] != MVP80_STRICT_GOOD_PREGRASP_GATE.digest:
+                    raise ValueError("cohort revalidation cannot relax the strict pregrasp gate")
+                generation_digest = stable_digest(protocol)  # 新candidate来源有新key，绝不重命名旧证书
         else:
             resolved_catalog_root = catalog_root or DEFAULT_GOOD_PREGRASP_CATALOG_ROOT
             object_scale = GOOD_PREGRASP_OBJECT_SCALE
@@ -254,6 +272,10 @@ def build_generated_asset_binding(dataset_rows: tuple[int, ...] | None = None) -
         )
         source_assets = cohort.assets
         effective_dataset_sha256 = cohort.lock_sha256  # binding identity follows exact selected membership/order
+        raw_generation = cohort.selection.get("pregrasp_generation_identity")
+        if raw_generation is not None and not isinstance(raw_generation, Mapping):
+            raise ValueError("cohort pregrasp_generation_identity must be an explicit protocol mapping")
+        pregrasp_generation_identity = None if raw_generation is None else dict(raw_generation)
     else:
         rows = selected_formal_dataset_rows() if dataset_rows is None else tuple(dataset_rows)
         if not rows or len(set(rows)) != len(rows) or any(row < 0 or row >= FORMAL_PPO_ASSET_COUNT for row in rows):
@@ -269,6 +291,7 @@ def build_generated_asset_binding(dataset_rows: tuple[int, ...] | None = None) -
         cohort_lock_sha256 = ""
         source_manifest_sha256s = (("ppo", dataset.source_sha256),)
         effective_dataset_sha256 = dataset.source_sha256
+        pregrasp_generation_identity = None  # legacy dataset行选择的生成协议逐值保持
     spawn_cfg = HandSpawnCfg(
         urdf=HandUrdfSpawnCfg(
             activate_contact_sensors=True,
@@ -282,7 +305,9 @@ def build_generated_asset_binding(dataset_rows: tuple[int, ...] | None = None) -
             validate_artifact=True,
         ),
         asset_routing="round_robin",
-        restore_visual_materials=os.environ.get("ANYMANI_HETERO_RESTORE_VISUAL_MATERIALS", "0") == "1",
+        restore_visual_materials=generated_hand_visual_materials_enabled(
+            override_env="ANYMANI_HETERO_RESTORE_VISUAL_MATERIALS"
+        ),  # GUI/录像自动恢复URDF颜色，纯headless默认跳过；保留显式覆盖。
         validate_same_schema=True,
     )
     adapter = HandSpawnAdapter(spawn_cfg, resolved_assets=source_assets)
@@ -327,6 +352,7 @@ def build_generated_asset_binding(dataset_rows: tuple[int, ...] | None = None) -
         morphology_cell_ids=tuple(_morphology_cell_id(artifact) for artifact in artifacts),
         contact_layout=build_canonical_contact_layout(),
         dataset_sha256=effective_dataset_sha256,
+        pregrasp_generation_identity=pregrasp_generation_identity,
     )
 
 

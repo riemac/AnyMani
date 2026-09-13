@@ -20,8 +20,10 @@ from .task_math import (
     active_reference_l2,
     active_reference_sum,
     contact_role_reward,
+    exponential_orientation_step_reward,
     full_pose_keypoint_reward,
     impulse_to_rate,
+    inverse_orientation_step_reward,
 )
 
 if TYPE_CHECKING:
@@ -72,6 +74,32 @@ def signed_rotation_progress_rate(
 
     command = get_rotation_command(env, command_name)
     return torch.clamp(command.delta_psi, min=-clip_rad_per_step, max=clip_rad_per_step) / float(env.step_dt)
+
+
+def track_orientation_inv_l2(env: ManagerBasedRLEnv, command_name: str, *, rot_eps: float = 0.1) -> torch.Tensor:
+    r"""按旧inhand official封装的单步语义返回姿态角误差倒数。
+
+    实际奖励w/(theta+epsilon)，theta=||Log(R_goal R_object^T)||，单位rad。
+    函数返回值除以policy dt，抵消RewardManager的积分；因此w=1与旧official_orientation一致，
+    而非直接调用未补偿IsaacLab函数后再隐式乘0.05。位置不进入本项。
+    """
+    command = get_rotation_command(env, command_name)
+    return inverse_orientation_step_reward(command.orientation_error_rad, rot_eps) / float(env.step_dt)
+
+
+def track_orientation_exponential(
+    env: ManagerBasedRLEnv, command_name: str, *, slope_rad_inv: float = 4.0, denominator_epsilon: float = 0.1,
+) -> torch.Tensor:
+    r"""读取实时角误差，形成实际单步w/(exp(k*theta)+epsilon)奖励。
+
+    theta单位rad；k单位rad^{-1}；epsilon无量纲。位置、目标推进与奖金由command独立处理。
+    返回值除以policy dt以抵消RewardManager积分，权重1时30度误差实际得到0.1216467/步。
+    """
+    command = get_rotation_command(env, command_name)  # 消费本次物理步的目标角误差[N]。
+    value = exponential_orientation_step_reward(
+        command.orientation_error_rad, slope_rad_inv, denominator_epsilon,
+    )  # 未加权的每策略步奖励[N]，不改变command状态。
+    return value / float(env.step_dt)  # Manager随后乘dt，恢复上述单步数值。
 
 
 def goal_success_impulse_rate(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:

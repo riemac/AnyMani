@@ -97,6 +97,7 @@ from anymani.robots.hand_spawn import (
     HandSpawnCfg,
     HandUrdfSpawnCfg,
 )
+from anymani.robots.visual_material_policy import generated_hand_visual_materials_enabled
 from anymani.tools.grasp_preset import GraspPreset, asset_preset_path
 
 from ... import mdp as gm_mdp
@@ -151,7 +152,7 @@ GM_SINGLE_ASSET_HAND_SPAWN_CFG = HandSpawnCfg(
     ),
     urdf=HandUrdfSpawnCfg(activate_contact_sensors=True),
     asset_routing="round_robin",
-    restore_visual_materials=True,
+    restore_visual_materials=generated_hand_visual_materials_enabled(),  # GUI/录像保留URDF颜色；headless计算跳过。
     validate_same_schema=True,
 )
 r"""单资产 hand spawn 配置。

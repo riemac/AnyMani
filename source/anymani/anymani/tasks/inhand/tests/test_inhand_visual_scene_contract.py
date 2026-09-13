@@ -43,9 +43,10 @@ def test_inhand_special_scenes_reuse_gm_style_sky_light() -> None:
 
 
 def test_generated_official_adr_restores_hand_visual_materials() -> None:
-    r"""Generated official-ADR should enable visual material restore for correct hand colors."""
+    r"""Generated场景按渲染用途恢复颜色，避免纯headless训练无条件创建材质。"""
 
     source = _read(GENERATED_ADR_CFG)
 
-    assert "restore_visual_materials=True" in source
+    assert "restore_visual_materials=generated_hand_visual_materials_enabled()" in source
+    assert "restore_visual_materials=True" not in source
     assert "restore_visual_materials=False" not in source

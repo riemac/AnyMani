@@ -10,10 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .good_catalog import GoodPregraspEntry, GoodPregraspMetrics
+from .good_catalog import GOOD_PREGRASP_TOP_K, GoodPregraspEntry, GoodPregraspMetrics
 
 
 @dataclass(frozen=True)
@@ -111,4 +112,17 @@ class StrictGoodPregraspGate:
 MVP80_STRICT_GOOD_PREGRASP_GATE = StrictGoodPregraspGate()
 
 
-__all__ = ["MVP80_STRICT_GOOD_PREGRASP_GATE", "StrictGoodPregraspGate"]
+def top8_publication_indices(candidate_counts: Sequence[int], *, allow_partial: bool = False) -> tuple[int, ...]:
+    r"""按完整Top-8数量确定可组装条目的原资产索引。
+
+    默认要求整批就绪；准备池显式允许partial时，只交付至少8个严格候选的资产。返回值保留原轴，
+    供发布时继续索引source、physical和routing身份。完整entry仍须经过schema及逐成员strict验证。
+    """
+
+    if any(count < 0 for count in candidate_counts):
+        raise ValueError("strict candidate counts must be non-negative")
+    ready = tuple(index for index, count in enumerate(candidate_counts) if count >= GOOD_PREGRASP_TOP_K)
+    return ready if allow_partial or len(ready) == len(candidate_counts) else ()
+
+
+__all__ = ["MVP80_STRICT_GOOD_PREGRASP_GATE", "StrictGoodPregraspGate", "top8_publication_indices"]

@@ -81,6 +81,8 @@ Critic使用与actor完全分参的两层structured graph backbone，每个envir
 
 Good pregrasp表示hand-object-scale耦合的cold-reset安全准备态。PALM/JOINT/TIP contact均是metadata，TIP数量不定义查询tier；硬门关注联合指间包络、joint reserve、穿透、位移/倾斜、速度峰值、palm support及训练同路径1 s hold。MVP固定消费rank-0并要求$q_0=u_0$、object upright和零速度。
 
+cohort可通过`selection.pregrasp_generation_identity`声明旧Top-8候选的独立重验协议；binding必须验证physics与strict gate摘要保持，再构造新generation key。默认未声明时继续使用原Sobol/CEM。重验必须真实执行相同物理门，不能把旧entry改key；候选、投影与parent-rank顺序由`pregrasp.revalidation`合同管理，不进入Actor特征。
+
 ## ADR边界
 
 首版可以建立mask-aware actual ADR state、diagnostics以及global/group/asset/env scope接口，但第一个科学baseline关闭ADR。只有固定easy-tier能力与分层证据建立后，才引入group、asset residual、per-env或hierarchical scheduler。ADR状态必须记录实际采样值、scope、level、升降级事件与固定tier评估，不把curriculum变化误写成策略进步。

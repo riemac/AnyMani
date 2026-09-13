@@ -53,6 +53,7 @@ from anymani.robots.hand_spawn import (
     HandSpawnCfg,
     HandUrdfSpawnCfg,
 )
+from anymani.robots.visual_material_policy import generated_hand_visual_materials_enabled
 from anymani.tasks.gm.contact_sensors import build_contact_sensor_layout_from_hand_spawn
 from anymani.tasks.gm.mdp.events import apply_generated_structural_collision_filter
 from anymani.tasks.inhand import mdp as leap_mdp
@@ -64,8 +65,8 @@ from anymani.tasks.inhand.config.leaphand.leaphand_adr_env_cfg import (
     LeapHandOfficialADRTerminationsCfg,
     LeapHandTactileADREnvCfg,
 )
-from anymani.tasks.inhand.mdp import rewards as official_rewards
 from anymani.tasks.inhand.inhand_env_cfg import INHAND_CLEAR_SKY_LIGHT_INTENSITY, INHAND_CLEAR_SKY_TEXTURE_FILE
+from anymani.tasks.inhand.mdp import rewards as official_rewards
 from anymani.tools.grasp_preset import GraspPreset, asset_preset_path
 
 GENERATED_RIGHT_T4_I4_M4_R4_BUNDLE_ID = (
@@ -248,14 +249,14 @@ GENERATED_RIGHT_T4_I4_M4_R4_HAND_SPAWN_CFG = HandSpawnCfg(
     ),
     urdf=HandUrdfSpawnCfg(activate_contact_sensors=False),
     asset_routing="round_robin",
-    restore_visual_materials=True,
+    restore_visual_materials=generated_hand_visual_materials_enabled(),  # GUI/录像开启，纯headless训练关闭。
     validate_same_schema=True,
 )
 r"""Generated hand spawn cfg。
 
     该 cfg 与 calibrator 的 frame anchor 保持一致：$T_{eh}^{anchor}$ 为 flat hand semantic pose，
-    不套 official LEAP root quaternion。`restore_visual_materials=True` 只恢复 generated URDF 的
-    debug 颜色，不改变动力学、关节、碰撞或 reward 语义。
+    不套 official LEAP root quaternion。GUI或摄像机渲染时恢复generated URDF颜色，纯headless跳过；
+    该开关不改变动力学、关节、碰撞或reward语义。
 """
 
 GENERATED_RIGHT_T4_I4_M4_R4_CONTACT_LAYOUT = build_contact_sensor_layout_from_hand_spawn(

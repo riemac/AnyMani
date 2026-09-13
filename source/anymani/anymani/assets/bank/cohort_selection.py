@@ -1,9 +1,9 @@
-r"""从published train manifests确定性选择pure LEAP-right mother-lineage cohorts。
+r"""从published train manifests确定性选择单一家族的mother-lineage cohorts。
 
 Scale ladder的选择原子是mother lineage，不是manifest row：每条lineage取mother与三个代表variants。离散覆盖
 优先于连续几何距离，且source-qualified row只作可追溯坐标，不参与tie-break。A64使用PPO中的全部16条
 pure LEAP-right mothers；A128保留该前缀，再从SSL-only topology补16条，使四个$(N_{tip},D_{thumb})$
-cell各有8条mothers。
+cell各有8条mothers。Allegro A128先保护旧迁移留出谱系，再由PPO与SSL-only源补足相同四组配额。
 
 本模块只读取asset bank交付的typed semantics、provenance与静态geometry fingerprint，不启动Isaac。最终
 ``physical_geometry_hash``仍由canonical lowering给出，不能由source descriptor猜测。
@@ -55,8 +55,12 @@ class SourceCellMotherQuota:
 
 
 @dataclass(frozen=True)
-class PureLeapRightLineageRecipe:
-    r"""Pure LEAP-right scale cohort的声明式选择合同。"""
+class PureFamilyLineageRecipe:
+    r"""单一家族、单一手性的分层母体系选择合同。
+
+    每条谱系交付母体与三个变体；源配额按固定的指尖数/拇指自由度四组定义。纯家族条件由所有存活
+    手指的family标记共同验证，顶层palm family只提供其中一个必要条件。
+    """
 
     cohort_id: str  # 稳定的人类可读实验支持集ID
     source_quotas: tuple[SourceCellMotherQuota, ...]  # source顺序同时定义cohort prefix顺序
@@ -64,7 +68,7 @@ class PureLeapRightLineageRecipe:
     selection_seed: int = 20260904  # 当前算法无随机采样；seed仍冻结未来兼容的选择域
     production_group: str = "single_palm_leap"  # dataset production group过滤条件
     handedness: str = "right"  # 首轮scale ladder只覆盖右手
-    family: str = "leap"  # surviving finger slots必须全部属于LEAP
+    family: str = "leap"  # surviving finger slots必须全部属于指定家族
     require_unique_topology: bool = True  # A128的32条mother主轴不得重复topology
     excluded_mother_names: tuple[str, ...] = ()  # 研究留出母体；从所有source的候选池排除整个lineage
 
@@ -94,6 +98,10 @@ class PureLeapRightLineageRecipe:
         r"""返回最终成员数$A=4N_{mother}$。"""
 
         return self.mother_count * self.members_per_lineage
+
+
+PureLeapRightLineageRecipe = PureFamilyLineageRecipe
+"""已发布LEAP选择入口的公开导入名；其recipe字段与序列化身份保持不变。"""
 
 
 @dataclass(frozen=True)
@@ -143,7 +151,7 @@ class MutationVariantDescriptor:
 class ResolvedLineageCohortSelection:
     r"""Selector交付给cohort writer的有序坐标与完整审计文档。"""
 
-    recipe: PureLeapRightLineageRecipe
+    recipe: PureFamilyLineageRecipe
     member_coordinates: tuple[tuple[str, int], ...]  # source-qualified有序成员轴$[A]$
     selection_document: Mapping[str, Any]  # 写入lock并由其SHA冻结
 
@@ -171,6 +179,19 @@ PURE_LEAP_RIGHT_A128_RECIPE = PureLeapRightLineageRecipe(
     ),
 )
 """PPO 16条前缀加SSL-only 16条，使四个cell最终各8条mothers。"""
+
+
+PURE_ALLEGRO_RIGHT_A128_RECIPE = PureFamilyLineageRecipe(
+    cohort_id="pure-allegro-right-a128",
+    source_quotas=(
+        SourceCellMotherQuota("ppo", (1, 3, 4, 7)),  # PPO的3TIP/4DoF-thumb组已移除旧迁移留出
+        SourceCellMotherQuota("ssl", (7, 5, 4, 1)),  # SSL中排除既选topology，再补足四组各8条
+    ),
+    production_group="single_palm_allegro",
+    family="allegro",
+    excluded_mother_names=("right_t4_m4_r3",),  # 保护整条谱系，而不仅是已有holdout的三个成员
+)
+"""纯Allegro右手32×4源候选；物理身份与严格预抓取准入由后续独立验证形成。"""
 
 
 def _distance(left: Sequence[float], right: Sequence[float]) -> float:
@@ -373,7 +394,7 @@ def _finger_dofs(asset: RepresentativeAsset, record: ResolvedHandAssetRecord) ->
 def _resolved_lineages(
     source_alias: str,
     partition: ResolvedHandAssetPartition,
-    recipe: PureLeapRightLineageRecipe,
+    recipe: PureFamilyLineageRecipe,
 ) -> tuple[_ResolvedLineage, ...]:
     r"""从一个resolved train partition提取满足pure family边界的mother+3 variants。"""
 
@@ -455,7 +476,7 @@ def _resolved_lineages(
 
 
 def resolve_lineage_cohort_selection(
-    recipe: PureLeapRightLineageRecipe,
+    recipe: PureFamilyLineageRecipe,
     *,
     source_manifests: Mapping[str, str | Path],
 ) -> ResolvedLineageCohortSelection:
@@ -578,7 +599,7 @@ def resolve_lineage_cohort_selection(
 def write_lineage_cohort_lock(
     path: str | Path,
     *,
-    recipe: PureLeapRightLineageRecipe,
+    recipe: PureFamilyLineageRecipe,
     source_manifests: Mapping[str, str | Path],
 ) -> Path:
     r"""执行确定性lineage selector并通过统一writer原子发布schema-1.1 lock。"""
@@ -596,10 +617,12 @@ def write_lineage_cohort_lock(
 
 __all__ = [
     "LINEAGE_COHORT_SELECTION_SCHEMA_VERSION",
+    "PURE_ALLEGRO_RIGHT_A128_RECIPE",
     "PURE_LEAP_RIGHT_A64_RECIPE",
     "PURE_LEAP_RIGHT_A128_RECIPE",
     "LineageDescriptor",
     "MutationVariantDescriptor",
+    "PureFamilyLineageRecipe",
     "PureLeapRightLineageRecipe",
     "ResolvedLineageCohortSelection",
     "SourceCellMotherQuota",

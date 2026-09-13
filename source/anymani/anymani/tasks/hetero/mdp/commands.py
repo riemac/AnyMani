@@ -23,6 +23,7 @@ from .task_math import (
     goal_errors_and_success,
     hand_axis_to_world,
     moving_goal_quaternion,
+    orientation_tracking_flags,
     projected_space_rotation_delta,
     quaternion_inverse_wxyz,
     quaternion_multiply_wxyz,
@@ -96,6 +97,11 @@ class HeterogeneousRotationCommand(CommandTerm):
         self.axis_speed_rad_s = torch.zeros(self.num_envs, device=self.device)
         self.axis_speed_ema_rad_s = torch.zeros(self.num_envs, device=self.device)
         self.orientation_keypoint_error_m = torch.zeros(self.num_envs, device=self.device)
+        self.orientation_error_rad = torch.zeros(self.num_envs, device=self.device)  # 直接SO(3)角误差。
+        self.goal_advance_pulse = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.goal_advance_count = torch.zeros(self.num_envs, device=self.device)  # 仅角度到达的目标数。
+        self.reference_window_net_turns = torch.zeros(self.num_envs, device=self.device)  # 首30秒真实净圈。
+        self.reference_window_complete = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.position_error_m = torch.zeros(self.num_envs, device=self.device)
         self.goal_normal_alignment = torch.ones(self.num_envs, device=self.device)
         self.goal_success_pulse = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -121,6 +127,14 @@ class HeterogeneousRotationCommand(CommandTerm):
             "rotation_frontier_delta": torch.zeros(self.num_envs, device=self.device),
             "rotation_frontier_pulse": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
             "completed_subgoals": torch.zeros(self.num_envs, device=self.device),
+            "completed_orientation_subgoals": torch.zeros(self.num_envs, device=self.device),
+            "goal_advance_pulse": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            "orientation_error_rad": torch.zeros(self.num_envs, device=self.device),
+            "adr_position_level": torch.zeros(self.num_envs, dtype=torch.long, device=self.device),
+            "adr_position_offset_x_h_m": torch.zeros(self.num_envs, device=self.device),
+            "adr_position_offset_y_h_m": torch.zeros(self.num_envs, device=self.device),
+            "net_turns_first30": torch.zeros(self.num_envs, device=self.device),
+            "first30_complete": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
             "goal_success_pulse": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
             "episode_duration_s": torch.zeros(self.num_envs, device=self.device),
             "tip_active_count": torch.zeros(self.num_envs, device=self.device),
@@ -152,6 +166,8 @@ class HeterogeneousRotationCommand(CommandTerm):
                 "rotation/axis_speed_rad_s": self.axis_speed_rad_s,
                 "rotation/axis_speed_ema_rad_s": self.axis_speed_ema_rad_s,
                 "pose/orientation_keypoint_error_m": self.orientation_keypoint_error_m,
+                "pose/orientation_error_rad": self.orientation_error_rad,
+                "task/orientation_goal_count": self.goal_advance_count,
                 "pose/position_error_m": self.position_error_m,
                 "pose/goal_normal_alignment_signed": self.goal_normal_alignment,
                 "task/goal_success_count": self.goal_success_count,
@@ -160,6 +176,7 @@ class HeterogeneousRotationCommand(CommandTerm):
         )
         ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
         self._capture_reset_state(ids)
+        self.goal_quat_w[ids] = self.object.data.root_quat_w[ids]  # 首目标从本回合实际姿态出发。
         self._resample_command(ids)
 
     @property
@@ -177,8 +194,10 @@ class HeterogeneousRotationCommand(CommandTerm):
 
         ids = self._as_ids(env_ids)
         self.goal_success_count[ids] += self.goal_success_pulse[ids].to(dtype=self.goal_success_count.dtype)
+        self.goal_advance_count[ids] += self.goal_advance_pulse[ids].float()
         self.subgoal_throughput_per_horizon_s[ids] = self.goal_success_count[ids] / float(self.cfg.horizon_s)
         asset_extras = self._asset_episode_extras(ids)  # 必须在super清零metrics前读取terminal subset
+        self.goal_quat_w[ids] = self.object.data.root_quat_w[ids]  # super.reset内的首次resample使用新回合初态。
         extras = super().reset(env_ids)
         extras.update(asset_extras)
         self._capture_reset_state(ids)
@@ -250,6 +269,16 @@ class HeterogeneousRotationCommand(CommandTerm):
             self.goal_success_count + self.goal_success_pulse.to(dtype=self.goal_success_count.dtype)
         )
         snapshot["goal_success_pulse"].copy_(self.goal_success_pulse)
+        snapshot["goal_advance_pulse"].copy_(self.goal_advance_pulse)
+        snapshot["completed_orientation_subgoals"].copy_(self.goal_advance_count + self.goal_advance_pulse.float())
+        snapshot["orientation_error_rad"].copy_(self.orientation_error_rad)
+        snapshot["net_turns_first30"].copy_(self.reference_window_net_turns)
+        snapshot["first30_complete"].copy_(self.reference_window_complete)
+        adr = getattr(self._env, "_hetero_position_adr", None)
+        if adr is not None:
+            snapshot["adr_position_level"].copy_(adr.level)
+            snapshot["adr_position_offset_x_h_m"].copy_(adr.offset_h[:, 0])
+            snapshot["adr_position_offset_y_h_m"].copy_(adr.offset_h[:, 1])  # 在reset改档/重采样前冻结本回合事实。
         snapshot["episode_duration_s"].copy_(
             self._env.episode_length_buf.to(dtype=torch.float32) * float(self._env.step_dt)
         )
@@ -301,6 +330,12 @@ class HeterogeneousRotationCommand(CommandTerm):
         self.positive_net_rotation_turns[ids] = torch.clamp(self.net_rotation_rad[ids], min=0.0) / (2.0 * math.pi)
         self.reached_positive_full_turn[ids] = (self.net_rotation_rad[ids] >= 2.0 * math.pi).to(torch.float32)
         self.axis_speed_rad_s[ids] = self.delta_psi[ids] / float(self._env.step_dt)
+        reached_window = (~self.reference_window_complete[ids]) & (
+            self._env.episode_length_buf[ids].float() * float(self._env.step_dt) >= self.cfg.adr_reference_seconds
+        )
+        window_ids = ids[reached_window]
+        self.reference_window_net_turns[window_ids] = self.net_rotation_rad[window_ids] / (2 * math.pi)
+        self.reference_window_complete[window_ids] = True  # 后续回合长度不改变已完成的首30秒统计。
         alpha = 1.0 - math.exp(-float(self._env.step_dt) / float(self.cfg.speed_ema_time_constant_s))
         self.axis_speed_ema_rad_s[ids] = (
             (1.0 - alpha) * self.axis_speed_ema_rad_s[ids] + alpha * self.axis_speed_rad_s[ids]
@@ -318,10 +353,11 @@ class HeterogeneousRotationCommand(CommandTerm):
     def _update_command(self) -> None:
         r"""Reward消费success pulse后，从当前object pose推进下一30°goal。"""
 
-        success_ids = self.goal_success_pulse.nonzero(as_tuple=False).flatten()
+        success_ids = self.goal_advance_pulse.nonzero(as_tuple=False).flatten()
         if success_ids.numel() == 0:
             return
-        self.goal_success_count[success_ids] += 1.0
+        self.goal_success_count[success_ids] += self.goal_success_pulse[success_ids].float()  # 只为位置合格目标计奖。
+        self.goal_advance_count[success_ids] += 1.0
         self.subgoal_throughput_per_horizon_s[success_ids] = self.goal_success_count[success_ids] / float(
             self.cfg.horizon_s
         )
@@ -329,6 +365,7 @@ class HeterogeneousRotationCommand(CommandTerm):
         self.command_counter[success_ids] += 1
         self.time_left[success_ids] = self.cfg.resampling_time_range[1]
         self.goal_success_pulse[success_ids] = False
+        self.goal_advance_pulse[success_ids] = False
 
     def _resample_command(self, env_ids: Sequence[int] | torch.Tensor) -> None:
         r"""从当前pose左乘固定space rotation，不从旧goal累积。"""
@@ -340,7 +377,8 @@ class HeterogeneousRotationCommand(CommandTerm):
             self.axis_h[ids], self.robot.data.root_quat_w[ids], self.semantic_R_ha
         )
         self.goal_quat_w[ids] = moving_goal_quaternion(
-            self.object.data.root_quat_w[ids], self.axis_w[ids], subgoal_angle_rad=float(self.cfg.subgoal_angle_rad)
+            self.goal_quat_w[ids] if self.cfg.goal_reference == "previous_goal" else self.object.data.root_quat_w[ids],
+            self.axis_w[ids], subgoal_angle_rad=float(self.cfg.subgoal_angle_rad)
         )
         self._refresh_goal_state(ids)
 
@@ -366,6 +404,10 @@ class HeterogeneousRotationCommand(CommandTerm):
         self.axis_speed_ema_rad_s[ids] = 0.0
         self.goal_success_pulse[ids] = False
         self.goal_success_count[ids] = 0.0
+        self.goal_advance_count[ids] = 0.0
+        self.goal_advance_pulse[ids] = False
+        self.reference_window_net_turns[ids] = 0.0
+        self.reference_window_complete[ids] = False
         self.subgoal_throughput_per_horizon_s[ids] = 0.0
         self.last_progress_step[ids] = int(self._env.common_step_counter)
 
@@ -391,6 +433,17 @@ class HeterogeneousRotationCommand(CommandTerm):
             self.goal_quat_w[ids], quaternion_inverse_wxyz(self.object.data.root_quat_w[ids])
         )
         error_vector_w = axis_angle_from_quaternion_wxyz(error_quaternion_w)
+        self.orientation_error_rad[ids] = torch.linalg.vector_norm(error_vector_w, dim=-1)
+        if self.cfg.orientation_only_advance:
+            advance, qualified = orientation_tracking_flags(
+                self.orientation_error_rad[ids], position_error,
+                angle_tolerance_rad=self.cfg.orientation_success_threshold_rad,
+                position_tolerance_m=self.cfg.position_success_threshold_m,
+            )
+            self.goal_success_pulse[ids] = qualified
+            self.goal_advance_pulse[ids] = advance
+        else:
+            self.goal_advance_pulse[ids] = success  # 旧位姿双门模式逐值保留。
         rotation_wa = quaternion_to_matrix_wxyz(self.robot.data.root_quat_w[ids])
         rotation_hw = self.semantic_R_ha.unsqueeze(0) @ rotation_wa.transpose(-1, -2)
         self.goal_error_so3_h[ids] = torch.einsum("bij,bj->bi", rotation_hw, error_vector_w)
@@ -426,6 +479,10 @@ class HeterogeneousRotationCommandCfg(CommandTermCfg):
     rotation_frontier_interval_rad: float = math.pi / 6.0  # 核心物理success区间$\delta=30^\circ$
     keypoint_radius_m: float = 0.05
     orientation_success_threshold_m: float = 0.005
+    orientation_success_threshold_rad: float = 0.2
+    orientation_only_advance: bool = False  # 新目标模式角度推进，位置仅控制合格奖金。
+    goal_reference: str = "current_object"  # 新方案previous_goal形成固定的30°姿态序列。
+    adr_reference_seconds: float = 30.0
     position_success_threshold_m: float = 0.025
     speed_ema_time_constant_s: float = 0.25
     horizon_s: float = 120.0  # fixed-horizon throughput分母
@@ -443,6 +500,10 @@ class HeterogeneousRotationCommandCfg(CommandTermCfg):
             raise ValueError("fixed_axis_h must be non-zero")
         if not 0.0 < self.subgoal_angle_rad < math.pi:
             raise ValueError("subgoal angle must lie in (0,pi)")
+        if self.goal_reference not in {"current_object", "previous_goal"}:
+            raise ValueError("unknown goal reference")
+        if not 0 < self.orientation_success_threshold_rad < self.subgoal_angle_rad or self.adr_reference_seconds <= 0:
+            raise ValueError("angular tolerance must be smaller than subgoal angle and reference window positive")
         positive = (
             self.keypoint_radius_m,
             self.orientation_success_threshold_m,

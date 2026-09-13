@@ -127,6 +127,73 @@ def test_catalog_resolve_many_reads_shared_index_once(tmp_path, monkeypatch) -> 
     assert calls == 1
 
 
+def test_catalog_read_entries_restores_complete_content_snapshot(tmp_path) -> None:
+    r"""目录快照按index恢复完整Top-8，交付复制工具而不重新生成候选。"""
+
+    catalog = GoodPregraspCatalog(tmp_path / "source")
+    entries = (_entry(scale=1.1), _entry(scale=1.2))  # 不同exact scale是不同键
+    catalog.publish_many(entries)
+    restored = catalog.read_entries()
+    assert {entry.digest for entry in restored} == {entry.digest for entry in entries}
+    assert tuple(entry.key.digest for entry in restored) == tuple(sorted(entry.key.digest for entry in entries))
+
+
+def test_strict_catalog_copy_preserves_source_and_supports_exact_key_subset(tmp_path) -> None:
+    r"""独立快照可只含目标角色的keys，源目录字节与候选内容保持不变。"""
+
+    from anymani.pregrasp.scripts.catalog import copy_strict_catalog
+
+    source, target = GoodPregraspCatalog(tmp_path / "source"), GoodPregraspCatalog(tmp_path / "target")
+    entries = (_entry(scale=1.1), _entry(scale=1.2))
+    source.publish_many(entries)
+    source_bytes = source.index_path.read_bytes()  # 直接比较已知字节，不额外计算一轮摘要
+    copied = copy_strict_catalog(source, target, keys=(entries[0].key,))
+    assert len(copied) == 1 and target.resolve(entries[0].key) == entries[0]
+    assert source.index_path.read_bytes() == source_bytes
+    with pytest.raises(GoodPregraspMissError):
+        target.resolve(entries[1].key)
+    assert copy_strict_catalog(source, target, keys=(entries[0].key,)) == copied  # 同内容幂等
+    with pytest.raises(ValueError, match="distinct"):
+        copy_strict_catalog(source, source)
+
+
+def test_strict_catalog_copy_rejects_all_before_publishing_any_bad_batch(tmp_path) -> None:
+    r"""任一完整entry不满足strict门时，其他条目也不提前提交到目标快照。"""
+
+    from anymani.pregrasp.scripts.catalog import copy_strict_catalog
+
+    source, target = GoodPregraspCatalog(tmp_path / "source"), GoodPregraspCatalog(tmp_path / "target")
+    second = _entry(scale=1.2)
+    bad = replace(
+        second,
+        members=(
+            replace(second.members[0], metrics=replace(second.members[0].metrics, object_tilt_max_deg=30.0)),
+            *second.members[1:],
+        ),
+    )  # schema合法但物理准入不合格的条目
+    source.publish_many((_entry(), bad))
+    with pytest.raises(ValueError, match="strict"):
+        copy_strict_catalog(source, target)
+    assert not target.index_path.exists()
+
+
+@pytest.mark.parametrize(
+    "counts,allow_partial,expected",
+    [
+        ((8, 17), False, (0, 1)),
+        ((8, 0, 9), False, ()),
+        ((8, 0, 9), True, (0, 2)),
+        ((7, 0), True, ()),
+    ],
+)
+def test_top8_publication_indices_keep_original_asset_axis(counts, allow_partial, expected) -> None:
+    r"""准备池可保留完整资产条目，但不足8项的资产不发布，也不压缩原资产索引。"""
+
+    from anymani.pregrasp.strict_gate import top8_publication_indices
+
+    assert top8_publication_indices(counts, allow_partial=allow_partial) == expected
+
+
 def test_catalog_extension_preserves_previous_index_revision(tmp_path) -> None:
     r"""新增资产保留旧目录版本，旧checkpoint可以核对其实际使用的Top-8而不受无关新增项影响。"""
 

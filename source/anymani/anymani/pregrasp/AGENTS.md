@@ -9,6 +9,7 @@ pregrasp/
 ├── schema.py / cache.py / provider.py  schema-2 tiered历史接口
 ├── good_catalog.py                     schema-3 Top-8 exact-key catalog
 ├── strict_gate.py                      MVP80 strict reset准入唯一谓词
+├── revalidation.py                     原Top-8候选重验的输入与独立generation identity
 ├── mvp80_strict_search.py              Sobol、包络、低秩CEM纯Torch数学
 ├── isaac_runtime.py                    hand/world frame与PhysX contact解包
 └── tests/                              schema、identity、搜索和buffer contracts
@@ -33,6 +34,8 @@ Pair fallback的多run证据只由`scripts/research/assemble_heterogeneous_mvp80
 Strict v5只判断cold-reset质量，不读取rotation reward、micro-roll或PPO结果。每个最终entry的Top-8全部满足：joint margin至少10%、三指TIP-center距离不超过10 cm、sector至少30°、penetration不超过0.5 mm、1 s位移不超过5 mm、倾角不超过10°、前0.2 s线速度不超过0.25 m/s、总角速度不超过2 rad/s、后0.5 s PALM support至少50%。Contact role是metadata，不形成TIP数量tier。
 
 搜索预算为每资产256 Sobol proposals、cheap geometry Top-32 full physics；不足Top-8时最多3轮低秩CEM，每轮128项全部走相同1 s physics。失败后按冻结left/right pair候选顺序换整对，不放宽门或逐资产手调。
+
+显式资产设计修订可使用独立的原Top-8重验协议：候选NPZ与源catalog摘要、投影规则和parent rank规则进入新generation identity；v1仅重验八项，v2可按显式绑定的原strict profile为不足八项者接续最多三轮CEM，两者均不执行Sobol。每个候选仍需在目标资产的真实PhysX中重算同一strict门，完整八项且互不重复才可发布；初始八项全部通过时保持parent rank，否则按实际物理质量取Top-8。cohort中的旧物理身份和失败成员继续保留在对照及完整分母中。
 
 ## Common Operations
 

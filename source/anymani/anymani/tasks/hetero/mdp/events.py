@@ -29,6 +29,7 @@ from anymani.pregrasp import (
 from anymani.pregrasp.isaac_runtime import hand_semantic_pose_w, object_pose_w_from_hand
 
 from ..contact_layout import structural_collision_filter_pairs
+from .adr import perturb_reset_position
 from .runtime_state import (
     CANONICAL_JOINT_COUNT,
     HETERO_PREGRASP_STATE_ATTR,
@@ -405,6 +406,7 @@ def _install_resolved_pregrasp_batch(
         batch.object_position_h_m,
         batch.object_quat_h_wxyz,
     )
+    object_pos_w = perturb_reset_position(env, ids, object_pos_w, hand_quat_w)  # 新分布显式叠加，后续command捕获扰动后anchor。
     object_pose_w = torch.cat((object_pos_w, object_quat_w), dim=-1)  # `[K,7]`
     zero_joint_velocity = torch.zeros_like(batch.q_state_rad)  # $\dot q_0=0$ rad/s
     zero_object_velocity = torch.zeros(ids.numel(), 6, device=env.device)  # world twist$[K,6]=0$

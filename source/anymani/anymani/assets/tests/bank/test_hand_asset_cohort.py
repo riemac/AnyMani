@@ -157,6 +157,19 @@ def test_cohort_lock_rejects_member_or_parent_manifest_identity_drift(tmp_path: 
         load_hand_asset_cohort(output, require_geometry_semantics=False)
 
 
+def test_cohort_json_round_trip_preserves_scientific_notation_numbers(tmp_path: Path) -> None:
+    r"""canonical JSON中的5e-05必须仍为float，不能被YAML1.1解析成字符串而改变协议摘要。"""
+
+    manifest = _write_source_dataset(tmp_path / "scientific", mother_id="mother", variant_id="variant")
+    path = tmp_path / "numeric.lock.yaml"  # 后缀不决定内容语法；正式writer实际写canonical JSON
+    selection = {"position_std_m": [5e-5, 5e-5, 2.5e-5], "literal": "5e-05"}
+    write_hand_asset_cohort_lock(path, cohort_id="numeric-contract", source_manifests={"one": manifest},
+                                 member_coordinates=(("one", 0),), selection=selection,
+                                 require_geometry_semantics=False)
+    loaded = load_hand_asset_cohort(path, require_geometry_semantics=False)
+    assert loaded.selection == selection  # quoted string仍为string；不靠强制float转换“修复”协议
+    assert all(isinstance(x, float) for x in loaded.selection["position_std_m"])
+
 def test_canonical_final_lock_binds_source_bytes_and_ordered_physical_hashes(tmp_path: Path) -> None:
     r"""Schema-1.2保留1.1父lock并逐成员冻结canonical physical/schema identity。"""
 
@@ -185,6 +198,18 @@ def test_canonical_final_lock_binds_source_bytes_and_ordered_physical_hashes(tmp
     assert tuple(member.configuration_domain_hash for member in resolved.members) == ("6" * 64, "7" * 64)
     assert tuple(member.physical_geometry_hash for member in resolved.members) == ("8" * 64, "9" * 64)
     assert {member.canonical_schema_digest for member in resolved.members} == {"a" * 64}
+
+    # 同名canonical锁是已发布的物理身份；再次finalize不能原地替换其证据。
+    published_bytes = final_lock.read_bytes()  # 独立保留原始字节，不用重新序列化比较
+    with pytest.raises(FileExistsError):
+        finalize_hand_asset_cohort_lock(
+            source_lock,
+            final_lock,
+            canonical_identities=(("6" * 64, "8" * 64, "a" * 64), ("7" * 64, "9" * 64, "a" * 64)),
+            canonical_schema_version="1.0.0",
+            require_geometry_semantics=False,
+        )
+    assert final_lock.read_bytes() == published_bytes
 
 
 def test_canonical_subset_reuses_verified_parent_without_resolving_full_source(
@@ -273,6 +298,96 @@ def _lineage(key: str, missing: str, dofs: tuple[int, int, int, int], x: float) 
     )
 
 
+def _canonical_parent(root: Path, alias: str, physical_start: int):
+    r"""为跨父集合发布构造两个成员的已验证canonical fixture。"""
+
+    manifest = _write_source_dataset(root, mother_id=f"{root.name}-mother", variant_id=f"{root.name}-variant")
+    # 多父合并测试需要明确的源内容身份；旧最小fixture保留无content hash的legacy覆盖。
+    mother_dir = root / "generated/single_palm_leap/right_t4_i4_m4_r4"
+    for directory in (mother_dir, mother_dir / "variants" / f"{root.name}-variant"):
+        sidecar_path = directory / "hand.yaml"
+        sidecar = yaml.safe_load(sidecar_path.read_text())
+        sidecar["geometry_semantics"] = {"content_hash": hashlib.sha256(sidecar["id"].encode()).hexdigest()}
+        sidecar_path.write_text(yaml.safe_dump(sidecar))
+    source, final = root / "source.lock.yaml", root / "canonical.lock.yaml"
+    write_hand_asset_cohort_lock(
+        source,
+        cohort_id=root.name,
+        source_manifests={alias: manifest},
+        member_coordinates=((alias, 0), (alias, 1)),
+        selection={},
+        require_geometry_semantics=False,
+    )
+    finalize_hand_asset_cohort_lock(
+        source,
+        final,
+        canonical_identities=tuple(
+            (f"{n + 100:064x}", f"{n:064x}", "a" * 64) for n in (physical_start, physical_start + 1)
+        ),
+        canonical_schema_version="v1",
+        require_geometry_semantics=False,
+    )
+    return load_hand_asset_cohort(final, require_geometry_semantics=False)
+
+
+def test_canonical_union_preserves_parent_coordinates_without_source_reresolution(tmp_path, monkeypatch) -> None:
+    r"""多父已验证快照仅重排成员，并保留每个成员的真实canonical证书。"""
+
+    left, right = _canonical_parent(tmp_path / "left", "ppo", 1), _canonical_parent(tmp_path / "right", "ssl", 3)
+    source, final = tmp_path / "union.lock.yaml", tmp_path / "union.canonical.lock.yaml"
+
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("union publication must reuse validated canonical parents")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(cohort_module, "resolve_prepared_train", forbidden_resolution)
+        cohort_module.write_hand_asset_cohort_union(
+            {"left": left, "right": right},
+            source,
+            final,
+            cohort_id="union",
+            member_coordinates=(("left", 1), ("right", 0), ("left", 0)),
+            selection={"purpose": "fixture"},
+        )
+    combined = load_hand_asset_cohort(final, require_geometry_semantics=False)
+    assert combined.source_keys == ("ppo#1", "ssl#0", "ppo#0")
+    assert tuple(member.physical_geometry_hash for member in combined.members) == (
+        f"{2:064x}",
+        f"{3:064x}",
+        f"{1:064x}",
+    )
+    assert combined.selection["parent_cohorts"]["left"]["lock_sha256"] == left.lock_sha256
+    assert combined.selection["parent_cohorts"]["right"]["lock_sha256"] == right.lock_sha256
+    with pytest.raises(FileExistsError):
+        cohort_module.write_hand_asset_cohort_union(
+            {"left": left},
+            source,
+            final,
+            cohort_id="again",
+            member_coordinates=(("left", 0),),
+            selection={},
+        )
+
+
+def test_canonical_union_rejects_alias_and_physical_collisions(tmp_path) -> None:
+    r"""不同源不能共用含糊alias，物理相同的两个成员不能靠两个父名称重复进入新集合。"""
+
+    left = _canonical_parent(tmp_path / "left", "ppo", 1)
+    wrong_alias = _canonical_parent(tmp_path / "alias", "ppo", 3)
+    same_physics = _canonical_parent(tmp_path / "physical", "ssl", 1)
+    for other, message in ((wrong_alias, "source alias"), (same_physics, "physical")):
+        with pytest.raises(ValueError, match=message):
+            cohort_module.write_hand_asset_cohort_union(
+                {"left": left, "other": other},
+                tmp_path / "bad.lock.yaml",
+                tmp_path / "bad.canonical.lock.yaml",
+                cohort_id="bad",
+                member_coordinates=(("left", 0), ("other", 0)),
+                selection={},
+            )
+    assert not (tmp_path / "bad.canonical.lock.yaml").exists()
+
+
 def test_diverse_lineage_selector_prioritizes_missing_slot_and_dof_coverage() -> None:
     r"""离散topology覆盖优先于仅在连续描述上更远的重复类别。"""
 
@@ -299,6 +414,24 @@ def test_scale_recipe_cardinalities_and_cell_totals_are_exact() -> None:
         for cell in ((3, 3), (3, 4), (4, 3), (4, 4))
     )
     assert combined == (8, 8, 8, 8)
+
+
+def test_allegro_recipe_balances_cells_after_protecting_old_transfer_lineage() -> None:
+    r"""纯Allegro从15条PPO与17条SSL母体形成32×4，保留整个旧迁移留出谱系。"""
+
+    recipe = cohort_selection.PURE_ALLEGRO_RIGHT_A128_RECIPE  # 新族的源配额，不是PPO-ready声明
+    assert isinstance(recipe, cohort_selection.PureFamilyLineageRecipe)
+    assert cohort_selection.PureLeapRightLineageRecipe is cohort_selection.PureFamilyLineageRecipe
+    assert (recipe.family, recipe.production_group, recipe.handedness) == ("allegro", "single_palm_allegro", "right")
+    assert recipe.excluded_mother_names == ("right_t4_m4_r3",)
+    assert (recipe.mother_count, recipe.asset_count, recipe.members_per_lineage) == (32, 128, 4)
+
+    # PPO原四cell为1/4/4/7；移除3TIP/4DoF-thumb旧留出后，由SSL-only补到各8条。
+    quotas = {quota.source_alias: quota.counts for quota in recipe.source_quotas}
+    assert quotas == {"ppo": (1, 3, 4, 7), "ssl": (7, 5, 4, 1)}
+    assert tuple(
+        sum(quota.for_cell(cell) for quota in recipe.source_quotas) for cell in ((3, 3), (3, 4), (4, 3), (4, 4))
+    ) == (8, 8, 8, 8)
 
 
 @pytest.mark.parametrize("excluded", [(), ("right-1",)])

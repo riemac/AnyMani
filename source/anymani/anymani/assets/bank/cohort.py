@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -171,6 +173,24 @@ def _member_document(
     }
 
 
+def parse_hand_asset_cohort_document(data: bytes | str) -> Mapping[str, Any]:
+    r"""优先按canonical JSON解析cohort，保留科学计数法的数值类型。
+
+    正式writer输出JSON，即使文件后缀为``.yaml``。PyYAML的YAML1.1规则会把
+    合法JSON数值``5e-05``误作字符串，但``2.5e-05``仍为float；这会悄悄改变
+    嵌套科研协议的类型与摘要。先用JSON语法恢复数值，非JSON的人工YAML才交给
+    原safe loader。显式引号内的``"5e-05"``保持字符串，不做事后float强制转换。
+    """
+
+    try:
+        document = json.loads(data)  # 对正式锁的真实语法作无损解析
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        document = safe_load(data)  # 保留既有人工YAML入口及安全标签集合
+    if not isinstance(document, Mapping):
+        raise TypeError("cohort lock root must be a mapping")
+    return cast(Mapping[str, Any], document)
+
+
 def load_hand_asset_cohort(
     path: str | Path,
     *,
@@ -190,7 +210,7 @@ def load_hand_asset_cohort(
 
     lock_path = resolve_bank_path(path)
     raw_bytes = lock_path.read_bytes()
-    raw_document = safe_load(raw_bytes) or {}
+    raw_document = parse_hand_asset_cohort_document(raw_bytes)
     if not isinstance(raw_document, Mapping):
         raise TypeError("cohort lock YAML root must be a mapping")
     schema_version, cohort_id, selection, raw_members = _validate_lock_mapping(raw_document)
@@ -414,6 +434,8 @@ def finalize_hand_asset_cohort_lock(
     output = resolve_bank_path(output_path)
     if output.resolve() == source_path:
         raise ValueError("canonical cohort finalization must preserve the source lock at a distinct path")
+    if output.exists():
+        raise FileExistsError(output)  # 已发布的canonical物理身份使用新文件表达后续变更
     identities = tuple(
         (str(configuration), str(physical), str(schema)) for configuration, physical, schema in canonical_identities
     )
@@ -430,7 +452,7 @@ def finalize_hand_asset_cohort_lock(
     if len({physical for _configuration, physical, _schema in identities}) != len(identities):
         raise ValueError("canonical cohort finalization rejects duplicate physical geometry hashes")
 
-    raw_document = safe_load(source_path.read_bytes())
+    raw_document = parse_hand_asset_cohort_document(source_path.read_bytes())
     if not isinstance(raw_document, Mapping):
         raise TypeError("source cohort lock must contain a mapping")
     document = dict(raw_document)
@@ -459,10 +481,13 @@ def finalize_hand_asset_cohort_lock(
     }
     payload = (json.dumps(document, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_suffix(output.suffix + ".tmp")
-    temporary.write_bytes(payload)
-    temporary.replace(output)
-    load_hand_asset_cohort(output, require_geometry_semantics=require_geometry_semantics)
+
+    # 同文件系统的独占staging先完成完整验证，硬链接再原子新建最终路径；并发同名发布也不能覆盖。
+    with tempfile.TemporaryDirectory(prefix=".canonical-cohort-", dir=output.parent) as directory:
+        staged = Path(directory) / "canonical.lock.yaml"  # 唯一本次可写的候选文件
+        staged.write_bytes(payload)
+        load_hand_asset_cohort(staged, require_geometry_semantics=require_geometry_semantics)
+        os.link(staged, output)  # 目标若已出现，由文件系统明确抛出FileExistsError
     return output
 
 
@@ -508,7 +533,7 @@ def write_hand_asset_cohort_subset(
     parent_bytes = parent.lock_path.read_bytes()
     if hashlib.sha256(parent_bytes).hexdigest() != parent.lock_sha256:
         raise ValueError("parent cohort lock changed after validation")
-    raw = safe_load(parent_bytes)
+    raw = parse_hand_asset_cohort_document(parent_bytes)
     if not isinstance(raw, Mapping) or raw.get("schema_version") != HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION:
         raise ValueError("subset publication requires a canonical parent cohort")
     for source in parent.sources.values():
@@ -552,6 +577,122 @@ def write_hand_asset_cohort_subset(
     return output
 
 
+def write_hand_asset_cohort_union(
+    parents: Mapping[str, ResolvedHandAssetCohort],
+    source_lock_path: str | Path,
+    output_path: str | Path,
+    *,
+    cohort_id: str,
+    member_coordinates: Sequence[tuple[str, int]],
+    selection: Mapping[str, Any],
+) -> Path:
+    r"""从多个已验证canonical父快照按显式坐标发布新集合。
+
+    坐标为``(parent_id, parent_member_index)``，区别于资产的source alias/row。合并只改变局部成员轴，
+    configuration、physical、canonical与mutation证书均继承真实父记录。源alias若对应不同manifest，
+    或所选成员的来源、内容、bundle、物理身份重复，发布前拒绝。此过程不重新解析整份训练源或再次lower。
+    """
+
+    coordinates = tuple(member_coordinates)  # 调用方顺序即新cohort tensor轴
+    if not coordinates or len(set(coordinates)) != len(coordinates):
+        raise ValueError("union member coordinates must be non-empty and unique")
+    if any(
+        name not in parents or not isinstance(index, int) or not 0 <= index < len(parents[name].members)
+        for name, index in coordinates
+    ):
+        raise ValueError("union member coordinates must lie within declared parent axes")
+    source_path, output = resolve_bank_path(source_lock_path), resolve_bank_path(output_path)
+    if source_path == output or not cohort_id.strip():
+        raise ValueError("union publication requires a cohort ID and distinct source/canonical paths")
+    if source_path.exists() or output.exists():
+        raise FileExistsError("union publication preserves existing source and canonical locks")
+
+    # 只复核本次实际使用的父快照和唯一源manifest，复用已经完成的资产解析及canonical证书。
+    raw_parents: dict[str, Mapping[str, Any]] = {}
+    sources: dict[str, dict[str, str]] = {}
+    parent_evidence = {}
+    schema_versions = set()
+    for name in dict.fromkeys(parent for parent, _index in coordinates):
+        parent = parents[name]
+        payload = parent.lock_path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != parent.lock_sha256:
+            raise ValueError("union parent cohort changed after validation")
+        raw = parse_hand_asset_cohort_document(payload)
+        if not isinstance(raw, Mapping) or raw.get("schema_version") != HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION:
+            raise ValueError("union requires canonical parent cohorts")
+        if not isinstance(raw.get("members"), list) or len(raw["members"]) != len(parent.members):
+            raise ValueError("union parent member axis disagrees with its validated snapshot")
+        raw_parents[name] = raw
+        schema_versions.add(raw["canonical_binding"]["canonical_schema_version"])
+        parent_evidence[name] = {
+            "cohort_id": parent.cohort_id,
+            "lock_path": str(parent.lock_path),
+            "lock_sha256": parent.lock_sha256,
+        }
+        for alias, source in parent.sources.items():
+            specification = {"manifest_path": str(source.manifest_path), "manifest_sha256": source.manifest_sha256}
+            if alias in sources:
+                if sources[alias] != specification:
+                    raise ValueError(f"union source alias {alias!r} refers to conflicting manifests")
+            else:
+                if hashlib.sha256(source.manifest_path.read_bytes()).hexdigest() != source.manifest_sha256:
+                    raise ValueError("union source manifest changed after parent validation")
+                sources[alias] = specification
+    if len(schema_versions) != 1:
+        raise ValueError("union parents must use the same canonical schema version")
+
+    # 每个来源、bundle和物理映射只能贡献一个成员；不以两个父名称掩盖重复样本。
+    members = [
+        dict(raw_parents[name]["members"][index], cohort_index=local) for local, (name, index) in enumerate(coordinates)
+    ]
+    identities = {
+        "source coordinates": [(member["source_alias"], member["source_row"]) for member in members],
+        "asset IDs": [member["asset_id"] for member in members],
+        "source content": [member["content_hash"] for member in members],
+        "physical geometry": [member["physical_geometry_hash"] for member in members],
+        "bundle paths": [
+            str(parents[name].partition.records[index].container.urdf_path.resolve()) for name, index in coordinates
+        ],
+    }
+    for kind, values in identities.items():
+        if len(set(values)) != len(coordinates):
+            raise ValueError(f"union rejects duplicate {kind}")
+    canonical_fields = {"configuration_domain_hash", "physical_geometry_hash", "canonical_schema_digest"}
+    source_document = {
+        "schema_version": HAND_ASSET_COHORT_SCHEMA_VERSION,
+        "cohort_id": cohort_id.strip(),
+        "selection": {
+            **dict(selection),
+            "parent_cohorts": parent_evidence,
+            "parent_member_coordinates": [{"parent": name, "index": index} for name, index in coordinates],
+        },
+        "sources": sources,
+        "members": [{key: value for key, value in member.items() if key not in canonical_fields} for member in members],
+    }
+    source_bytes = (json.dumps(source_document, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
+    canonical_document = {
+        **source_document,
+        "schema_version": HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION,
+        "members": members,
+        "canonical_binding": {
+            "source_lock_path": str(source_path),
+            "source_lock_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "canonical_schema_version": next(iter(schema_versions)),
+            "physical_identity_algorithm": "canonical-runtime-lowering",
+        },
+    }
+    canonical_bytes = (json.dumps(canonical_document, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
+
+    # source先于canonical发布；每个文件均使用独占staging与原子新建，已存在证据不覆盖。
+    for path, payload in ((source_path, source_bytes), (output, canonical_bytes)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".cohort-union-", dir=path.parent) as directory:
+            staged = Path(directory) / "payload.json"
+            staged.write_bytes(payload)
+            os.link(staged, path)
+    return output
+
+
 __all__ = [
     "HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION",
     "HAND_ASSET_COHORT_SCHEMA_VERSION",
@@ -560,6 +701,8 @@ __all__ = [
     "ResolvedHandAssetCohort",
     "finalize_hand_asset_cohort_lock",
     "load_hand_asset_cohort",
+    "parse_hand_asset_cohort_document",
     "write_hand_asset_cohort_lock",
     "write_hand_asset_cohort_subset",
+    "write_hand_asset_cohort_union",
 ]

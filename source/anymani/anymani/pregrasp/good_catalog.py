@@ -556,6 +556,30 @@ class GoodPregraspCatalog:
 
         return self.resolve_many((key,))[0]
 
+    def _read_index_entry(self, match: GoodPregraspIndexEntry) -> GoodPregraspEntry:
+        r"""恢复一个index引用，并校验完整内容与内嵌exact key。"""
+
+        path = self.root / match.payload_relpath  # index类已将路径限定为content-addressed records目录
+        try:
+            payload = json.loads(path.read_bytes())
+            entry = GoodPregraspEntry.from_dict(payload)  # 完整Top-8、rank、候选状态均由schema验证
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+            raise GoodPregraspCatalogError(f"cannot restore good-pregrasp payload: {error}") from error
+        if hashlib.sha256(_canonical_bytes(payload)).hexdigest() != match.entry_digest:
+            raise GoodPregraspCatalogError("good-pregrasp payload content digest mismatch")
+        if entry.key.digest != match.key_digest:
+            raise GoodPregraspCatalogError("good-pregrasp payload embedded key mismatch")
+        return entry
+
+    def read_entries(self) -> tuple[GoodPregraspEntry, ...]:
+        r"""单次读取index并恢复完整目录快照，供跨目录复制和角色快照发布使用。
+
+        每个payload只读一次，并复用resolver的schema、内容与键校验。返回顺序是index中的key顺序；
+        目录扫描不构造新候选，也不改变原来的物理或生成身份。
+        """
+
+        return tuple(self._read_index_entry(match) for match in self._load_index())
+
     def resolve_many(self, keys: Sequence[GoodPregraspKey]) -> tuple[GoodPregraspEntry, ...]:
         r"""一次读取index并按输入顺序解析多个exact keys。
 
@@ -577,17 +601,9 @@ class GoodPregraspCatalog:
                 )
             entry = resolved_by_digest.get(match.entry_digest)
             if entry is None:
-                path = self.root / match.payload_relpath
-                try:
-                    payload_bytes = path.read_bytes()
-                    payload = json.loads(payload_bytes)
-                    entry = GoodPregraspEntry.from_dict(payload)
-                except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
-                    raise GoodPregraspCatalogError(f"cannot restore good-pregrasp payload: {error}") from error
-                if hashlib.sha256(_canonical_bytes(payload)).hexdigest() != match.entry_digest:
-                    raise GoodPregraspCatalogError("good-pregrasp payload content digest mismatch")
+                entry = self._read_index_entry(match)  # 相同payload重复请求时只恢复一次
                 resolved_by_digest[match.entry_digest] = entry
-            if entry.key != key or entry.key.digest != match.key_digest:
+            if entry.key != key:
                 raise GoodPregraspCatalogError("good-pregrasp payload embedded key mismatch")
             output.append(entry)
         return tuple(output)

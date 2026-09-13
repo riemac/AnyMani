@@ -13,6 +13,10 @@
 - `asset_physics.py` 对最终 collision 几何的动力学闭包；
 - asset bank 对单项或直接 source root 做路径解析、bundle 校验和虚拟视图，asset dataset 在其上冻结跨 run 的实验 partitions 与 evaluation suites。
 
+`asset_revisions.py` 与 `scripts/revise_joint_limits.py` 承载显式机械设计派生：限位修改须生成独立 bundle/ID 和同序 cohort 差分，保留原资产；旧预抓取证书不得改 key 后复用。静态几何相同不意味着 canonical 物理身份或配置域相同，新设计仍需 canonical lowering 与下游物理重验。
+
+cohort锁由writer输出canonical JSON，即使后缀是`.yaml`也通过`bank.cohort.parse_hand_asset_cohort_document`读取；不要直接使用YAML1.1 loader把合法JSON科学计数法变成字符串。人工YAML由该入口安全回退解析，不能事后强制转换协议字段来掩盖类型漂移。
+
 ## 核心原则
 
 ### 1. 声明式配置驱动

@@ -23,9 +23,8 @@ r"""统一资产生成配置。
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 
-from . import AssetRunStrategyCfg
+from ..asset_physics import AssetPhysicsCfg, DensityProfileCfg
 from ..generator.hand_generator import HandGeneratorCfg
 from ..generator.mutate import (
     HandMutatorCfg,
@@ -35,50 +34,36 @@ from ..generator.mutate import (
     MountPerturbCfg,
     TipReplaceCfg,
 )
+from ..units import cm, deg, g_cm3, mm
 from ..validator.hand_rules import HandValidatorCfg
+from . import AssetRunStrategyCfg
+
+ConnectivityFacade = dict[str, dict[str, list[str]]] | None  # hand_preset -> finger_slot -> allowed connectivity recipes
+EditablePath = str | Path  # 允许研究者直接写相对路径或绝对路径
 
 
-ConnectivityFacade = dict[str, dict[str, list[str]]] | None
-r"""pre-made connectivity façade 类型。
+# ============================================================================
+#  统一物理资产配置；设为 None 可显式关闭 physics closure
+# ============================================================================
 
-语义上它表示：
-`hand_preset_name -> finger_slot_name -> allowed_connectivity_recipe_names`。
-
-`None` 表示不在此处手工约束，回退到 registry 中该 hand family 的全部合法 recipe。
-"""
-
-RecolorFacade = str | dict[str, tuple[float, float, float, float]] | bool | None
-r"""recolor façade 类型。
-
-这里保留了几种科研上常见的输入方式：
-
-- `str`：使用已注册 recolor preset 名；
-- `dict`：显式指定 RGBA；
-- `bool`：快速开关；
-- `None`：沿用默认行为。
-"""
-
-ArtifactLevel = Literal["hand_cfg", "urdf", "bundle"]
-r"""资产导出粒度。
-
-- `hand_cfg`：只保留内存中的轻量结构；
-- `urdf`：强调 URDF 落盘；
-- `bundle`：同时保留 sidecar / urdf / tree 等完整产物。
-"""
-
-EditablePath = str | Path
-r"""允许研究者在配置文件里直接写相对路径或绝对路径。"""
+ASSET_PHYSICS_CFG: AssetPhysicsCfg | None = AssetPhysicsCfg(
+    density=DensityProfileCfg(
+        # default=g_cm3(0.65),  # 全局默认密度 $\rho$ [$\mathrm{kg}/\mathrm{m}^3$]
+        palm=g_cm3(0.55),  # palm 专用密度；
+        finger_link=g_cm3(1.2),  # 普通 finger link 专用密度；
+        fingertip=g_cm3(0.72),  # primitive fingertip 专用密度；TPU 材料约 1.2 $$\mathrm{g}/\mathrm{cm}^3$$，这里填充率设 60 %
+        custom_tip=g_cm3(0.72),  # 同上
+    )
+)
 
 
 # ============================================================================
 #  pre-made 配置
 # ============================================================================
 
-HAND_PRESETS: list[str] = ["single_palm_allegro", "single_palm_leap"]
-"""当前 pre-made 主实验默认同时覆盖 Allegro 与 LEAP 两个 canonical base hand。"""
+HAND_PRESETS: list[str] = ["single_palm_allegro", "single_palm_leap"]  # pre-made 默认覆盖 Allegro + LEAP
 
-CONNECTIVITY_PRESETS: ConnectivityFacade = None
-"""为 `None` 时使用 registry 中已注册的全部合法 connectivity recipe。"""
+CONNECTIVITY_PRESETS: ConnectivityFacade = None  # None 表示使用 registry 中全部合法 connectivity recipe
 
 # # 部分已注册示例
 # CONNECTIVITY_PRESETS: ConnectivityFacade = {
@@ -108,28 +93,9 @@ CONNECTIVITY_PRESETS: ConnectivityFacade = None
 #     },
 # }
 
+PRE_MADE_OUTPUT_DIR: Path = Path(__file__).resolve().parents[1] / "generated"  # 默认写回 assets/generated/
 
-HANDEDNESS: Literal["left", "right", "all"] = "all"
-"""默认同时枚举左右手，避免只在单侧上做 topology 统计。"""
-
-MIXED = True
-"""是否允许 mixed family topology。`True` 只混合 non-thumb；thumb 始终绑定 base palm family。"""
-
-MISSING = True
-"""是否允许缺指 topology。`True` 表示 pre-made 离散空间包含 missing finger 变体。"""
-
-PRE_MADE_RECOLORED: RecolorFacade = "anatomy_soft_v1"
-"""默认 recolor preset；这属于可视检查时的重要数值锚点。"""
-
-PRE_MADE_MAX_ENUMERATE: int | None = None
-"""pre-made 笛卡尔展开上限。`None` 表示不截断全部离散空间。"""
-
-PRE_MADE_ARTIFACT_LEVEL: ArtifactLevel = "bundle"
-"""默认直接导出完整 bundle，便于后续 mutate-only 从 sidecar/urdf 恢复。"""
-
-PRE_MADE_OUTPUT_DIR: Path = Path(__file__).resolve().parents[1] / "generated"
-"""默认写回 `assets/generated/`，保持子项目内部自包含。"""
-
+# 这几个阈值是后续 manipulation 任务的最小机械合理性锚点，不是单纯工程过滤。
 PRE_MADE_VALIDATOR_CFG: HandValidatorCfg | None = HandValidatorCfg(
     pre_made=HandValidatorCfg.PreMadeCfg(
         finger_count_min=3,  # 至少保留 3 根手指，避免退化成非灵巧手拓扑
@@ -137,77 +103,40 @@ PRE_MADE_VALIDATOR_CFG: HandValidatorCfg | None = HandValidatorCfg(
         check_palm_thumb_binding=True,  # 拇指仍需与 palm 保持合法绑定关系
     )
 )
-"""pre-made validator 默认锚点。
 
-# NOTE:
-这几个数值直接对应“可用于后续 manipulation 任务的最小机械合理性”，
-不是单纯的工程过滤条件。
-"""
+PRE_MADE_SHOW_REGISTRY = True  # CLI 是否打印当前 finger-level connectivity registry
 
-PREMADE_PARALLEL = True
-"""是否默认开启 pre-made 样本级并行。"""
-
-PREMADE_PARALLEL_WORKERS: int | None = None
-"""worker 数为 `None` 时由 `HandGenerator` 根据 CPU 数自动推断。"""
-
-PREMADE_PARALLEL_FALLBACK: Literal["serial", "raise"] = "serial"
-"""并行失败后默认回退串行，优先保证科研产物能落地。"""
-
-PRE_MADE_SHOW_REGISTRY = True
-"""是否在 CLI 中打印当前有效 finger-level connectivity registry。"""
-
-PRE_MADE_PRINT_RESULT_LIMIT: int | None = 40
-"""终端 preview 上限，避免全量枚举时刷屏。"""
+PRE_MADE_PRINT_RESULT_LIMIT: int | None = 40  # 终端 preview 上限，避免全量枚举时刷屏
 
 PRE_MADE_CFG = HandGeneratorCfg(
     mode="made",  # 只做离散 pre-made，不进入 post-mutate Monte Carlo
-    artifact_level=PRE_MADE_ARTIFACT_LEVEL,  # 默认导出完整 bundle
+    artifact_level="bundle",  # 默认导出完整 bundle，便于 mutate-only 恢复
     output_dir=PRE_MADE_OUTPUT_DIR,  # 产物根目录保持在 `assets/generated/`
-    handedness=HANDEDNESS,  # 左右手枚举策略
+    handedness="all",  # 默认同时枚举左右手
     hand_presets=list(HAND_PRESETS),  # canonical base hand 候选集合
     connectivity_presets=CONNECTIVITY_PRESETS,  # 每个 base hand 允许搭配的 connectivity recipe
-    mixed=MIXED,  # 只允许 non-thumb 跨 family；thumb 绑定 base palm family
-    missing=MISSING,  # 是否允许缺指 topology
+    mixed=True,  # 只允许 non-thumb 跨 family；thumb 始终绑定 base palm family
+    missing=True,  # 允许 pre-made 离散空间包含缺指 topology
     Validate=PRE_MADE_VALIDATOR_CFG,  # pre-made hand-level validator
-    recolored=PRE_MADE_RECOLORED,  # 导出前的可视 recolor 方案
-    max_enumerate=PRE_MADE_MAX_ENUMERATE,  # 离散笛卡尔空间截断预算
-    premade_parallel=PREMADE_PARALLEL,  # 是否并行展开 pre-made 样本
-    premade_parallel_workers=PREMADE_PARALLEL_WORKERS,  # worker 数占位
-    premade_parallel_fallback=PREMADE_PARALLEL_FALLBACK,  # 并行失败后的回退策略
+    Physics=ASSET_PHYSICS_CFG,  # pre-made 导出前按统一物理资产配置闭合刚体参数
+    recolored="anatomy_soft_v1",  # 导出前的可视 recolor 方案
+    max_enumerate=None,  # None 表示不截断 pre-made 笛卡尔展开空间
+    premade_parallel=True,  # 默认开启 pre-made 样本级并行
+    premade_parallel_workers=None,  # None 表示由 HandGenerator 根据 CPU 数自动推断
+    premade_parallel_fallback="serial"  # 并行失败后默认回退串行
 )
-"""正式的 pre-made 主入口。
-
-# NOTE:
-这里直接实例化 `HandGeneratorCfg`，而不是再包一层 quick cfg，
-是这轮重构的核心设计收敛点之一。
-"""
 
 
 # ============================================================================
 #  post-mutate 配置
 # ============================================================================
 
+# 独立 post-mutate 来源必须是 topology root，且该目录应直接持有 pre-made 的 hand.yaml。
 POST_MUTATE_SOURCE_TOPOLOGY_PATH: EditablePath = (
-    "AnyMani/source/anymani/anymani/assets/generated/"
-    "2026-05-03_09-45-45/single_palm_leap/right_t4_i4_m4_r4"
+    "AnyMani/source/anymani/anymani/assets/generated/2026-08-12_18-16-48/single_palm_leap/right_t4_i4_m4_r4"
 )
-"""独立 post-mutate 的默认来源 topology 根目录。
 
-新 contract 下，这个目录自己就持有 pre-made 的 `hand.yaml`，
-runner 与 `HandGenerator` 都不再接受 sample 子目录。
-"""
-
-POST_MUTATE_N_SAMPLES: int = 100
-"""联合 Monte Carlo 目标样本数 $N=100$。"""
-
-POST_MUTATE_ARTIFACT_LEVEL: ArtifactLevel = "bundle"
-"""默认导出 bundle，便于事后比对 sidecar / urdf / summary。"""
-
-POST_MUTATE_RECOLORED: RecolorFacade = "anatomy_soft_v1"
-"""后变异样本默认沿用同一套 anatomy recolor preset。"""
-
-POST_MUTATE_PRINT_RESULT_LIMIT: int | None = 10
-"""终端里只 preview 前若干个后变异样本。"""
+POST_MUTATE_PRINT_RESULT_LIMIT: int | None = 10  # 终端 preview 上限
 
 
 class QuickPostMutateCfg(HandMutatorCfg):
@@ -215,104 +144,87 @@ class QuickPostMutateCfg(HandMutatorCfg):
 
     这里保留的是“当前最常用的一套后变异组合”，而不是 post-mutate 唯一合法形式。
     其 Declare / Sample / Apply 语义由 `HandMutatorCfg` 与各 mutator 自己负责：
-
-    1. `link_scale`
-       对 finger 链中间 link 的有效长度做轻度相对扰动；
-    2. `mount_perturb`
-       对 finger root mount 做小范围局部位姿扰动；
-    3. `limit_tweak`
-       对活动关节 limit 做共享微调；
-    4. `tip_replace`
-       对末端 tip family / scale 做统一替换。
-
-    数值锚点：
-    - `link_scale=(0.9, 1.1)`：长度相对扰动约 $\pm10\%$；
-    - `pos_range=(-0.002, 0.002)`：平移扰动量级约 $\pm2\text{mm}$；
-    - `rot_range=(-0.03, 0.03)`：小角度旋转扰动约 $\pm1.7^\circ$；
-    - `joint_range=(-0.03, 0.03)`：关节限位加性微调约 $\pm0.03\text{rad}$。
     """
 
     link_scale = LinkScaleCfg(
+        self_mode={"identity": 0.2, "general": 0.4, "only_length": 0.4},  # 每个候选独立抽 mode；only_length 只消费 length range
         scale_type="rel",  # 采用相对缩放语义，而不是绝对长度增量
-        link_scale=(0.9, 1.1),  # 主长度方向允许约 $\pm10\%$ 的轻扰动
-        clip=(0.8, 1.2),  # 防止极端采样把 link 拉到明显脱离原家族的尺度
+        # link_scale=(0.9, 1.1),  # 主长度方向允许约 $\pm10\%$ 的轻扰动
+        link_scale=(0.75, 1.25, 0.9, 1.1, 0.9, 1.1),
+        # clip=(0.8, 1.2),  # 防止极端采样把 link 拉到明显脱离原家族的尺度
         distrib="uniform",  # 首版默认使用均匀分布
         boundary_policy="clip",  # 越界样本直接裁剪回合法区间
     )
     link_proximal_overlap = LinkProximalOverlapCfg(
-        self_mode={"identity": 0.2, "disturb": 0.5, "homologous_non_thumb": 0.3},
-        overhang_delta_ratio=(-0.1, 0.2),
-        max_parent_overlap_ratio=0.5,
-        distrib="uniform",
-        boundary_policy="clip",
+        self_mode={"identity": 0.2, "disturb": 0.5, "homologous_non_thumb": 0.3},  # 整手先选 no-op、逐 owner 或 non-thumb 同源槽共享模式
+        overhang_delta_ratio=(-1, 2),  # signed ratio：最多缩减 $10\%$ child span，或增加 $20\%$ child span 的 proximal overhang
+        max_parent_overlap_ratio=0.4,  # 最终 overhang 不得超过变异前 parent 净 span 的一半
+        distrib="uniform",  # 在声明区间内均匀采样 $\eta_i$
+        boundary_policy="clip",  # ratio 越界时裁回合法区间，最终几何另受 parent-relative cap
     )
     mount_perturb = MountPerturbCfg(
-        disturb_unit="deg",  # 这里保留原配置的角度输入语义
-        sample_space={"pos": "ellipsoid", "rot": "ellipsoid"},  # 位置与姿态都按椭球小扰动采样
-        self_mode="general",  # 不引入 index/ring 镜像耦合，先做一般性挂载点 family variation
-        pos_range=(-0.002, 0.002),  # 平移扰动量级约 $\pm2\text{mm}$
-        rot_range=(-0.03, 0.03),  # 小角度姿态扰动区间
+        self_mode={"identity": 0.2, "general": 0.2, "index_ring_x_pos": 0.2, "index_ring_yaw_rot": 0.2, "index_ring": 0.2},  # 保留一部分 pre-made 原姿态权重，再在 index/ring family variation 中采样
+        pos_radius=cm(0.8),  # mount 平移扰动半径当前取 $0.8\text{cm}$，配合后续的 mirror_x_range 形成 index/ring family variation
+        rot_radius=deg(5),  # mount 局部旋转扰
+        mirror_x_range=(cm(-1.0), cm(1.0)),  # index/ring 横向间距在 palm-frame $x$ 上做镜像 cube 采样，量级约 $\pm1\text{cm}$
+        mirror_yaw_range=(deg(-5), deg(5)),  # index/ring 根部 yaw 在局部 frame 上做镜像 cube 采样，量级约 $\pm5^\circ$
+        thumb_pos_radius=cm(1.0),  # index/ring 模式下，thumb 仍保留局部椭球平移扰动，作为独立 family variation
+        thumb_rot_radius=deg(5.0),  # thumb 局部旋转椭球半径当前取 $5^\circ$
         distrib="uniform",  # 默认在合法区域内均匀采样
         boundary_policy="clip",  # 首版仍使用简单可解释的裁剪策略
     )
     limit_tweak = LimitTweakCfg(
-        disturb_unit="rad",  # joint limit 内部正式写回就是弧度语义
-        disturb_object="shared",  # 每个关节的 lower / upper 共用同一个扰动量
+        disturb_object="independent",  # 每个关节的 lower / upper 分别独立采样；如需同关节上下界同移，改用 "shared"
         disturb_type="add",  # 以加性微调方式改 limit，而不是比例缩放
-        joint_range=(-0.03, 0.03),  # 共享扰动区间约 $\pm0.03\text{rad}$
-        clip={"abs": 0.12},  # 限制微调绝对幅值，避免 limit 被推得过大
-        distrib={"type": "normal", "sigma_rule": 3},  # 用约 $3\sigma$ 覆盖配置区间
+        joint_range=(deg(-10), deg(10)),
+        self_mode={"identity":0.2, "disturb":0.5, "homologous_non_thumb":0.3},
+        # clip={"abs": 0.12},  # 限制微调绝对幅值，避免 limit 被推得过大
+        distrib={"type": "uniform"},  # 在配置区间内均匀采样；`deg(...)` 已在 authoring 侧换算为 rad
         boundary_policy="clip",  # 首版仍优先保持行为确定、容易调试
     )
     tip_replace = TipReplaceCfg(
-        mode="geometry_swap",  # 首版先做 primitive / preset tip 几何互换
-        target_geometry=None,  # `None` 表示由运行时在合法目标几何间自行 resolve
-        self_mode="same",  # 全手共享同一套 tip family 假设，保持 morphology coherence
-        tip_range=None,  # 候选 tip family 由运行时根据当前 hand family 自动推断
-        scale=(0.98, 1.02),  # tip size 只做约 $\pm2\%$ 的轻微缩放
+        self_mode={"identity": 0.2, "same": 0.5, "general": 0.3},  # 每个候选独立抽 mode；validator 可自然改变 accepted 分布
+        tip_range={"cs": 0.2, "leap_cube": 0.2, "round": 0.2, "wedge": 0.2, "thinner": 0.2},  # tip_type 概率只是 proposal 分布
+        scale=(0.9, 1.1),  # tip size 只做约 $\pm2\%$ 的轻微缩放
+        cs_ratio={"add": (-0.15, 0.15)},  # `cs` 固定半径 $r$，只微调 $\lambda=h/r$
     )
 
 
-POST_MUTATE_MUTATOR_CFG = QuickPostMutateCfg()
-"""独立 post-mutate 默认采用的 mutator term container。"""
+POST_MUTATE_MUTATOR_CFG = QuickPostMutateCfg()  # 独立 post-mutate 默认 mutator term container
 
+# 后变异不能把 asset 从局部随机化推到明显不合理的机械体。
 POST_MUTATE_VALIDATOR_CFG: HandValidatorCfg | None = HandValidatorCfg(
     post_mutate=HandValidatorCfg.PostMutateCfg(
         finger_count_min=3,  # 后变异后仍需保持至少 3 指
         require_non_thumb_with_min_revolute_dof=3,  # 非拇指手指仍需有足够活动自由度
         check_finger_spacing=True,  # 显式检查挂载扰动后是否出现过近手指间距
-        min_finger_spacing=0.01,  # 最小合法间距约 $1\text{cm}$
+        min_finger_spacing=mm(5),  # 最小合法间距当前取 $5\text{mm}$；显式写单位避免注释与数值脱节
+        check_finger_length=True,  # 显式检查 home pose 下 finger 沿 nominal distal axis 的真实几何长度
+        max_thumb_length=cm(18.5),  # thumb 的轴向真实长度上限；比 non-thumb 略放宽，容纳当前拇指基座段几何包络
+        max_non_thumb_length=cm(18.0),  # non-thumb 的轴向真实长度上限；先挡掉 link_scale 产生的极端长指
         check_mount_consistency=True,  # mount perturb 后仍需保持 mount 语义一致性
         sdf_device="cuda",  # 正式 dataset validator 固定使用 GPU，CUDA 不可用时 fail-hard
         sdf_mesh_backend="warp",  # mesh SDF 固定 Warp；禁止同一 dataset 内隐式混入 CPU fallback
     )
 )
-"""post-mutate validator 默认锚点。
-
-这里强调的是“后变异不能把 asset 从局部随机化推到明显不合理的机械体”。
-"""
 
 # `mode="mutate"` 目前要求 cfg 上存在 `source_topology_dir`，因此这里放一个静态占位符；
 # 真正运行前由统一 runner 根据来源 topology 路径替换成正式 pre-made topology 根目录。
 POST_MUTATE_CFG = HandGeneratorCfg(
     mode="mutate",  # 只做后变异，不重新枚举 pre-made 空间
-    artifact_level=POST_MUTATE_ARTIFACT_LEVEL,  # 默认导出完整 bundle
+    artifact_level="bundle",  # 默认导出 bundle，便于事后比对 sidecar / URDF / summary
     source_topology_dir=Path("__post_mutate_topology_dir__"),  # 运行前由 runner 动态替换成 pre-made topology 根
     output_dir=Path("__post_mutate_output_dir__"),  # 兼容占位；新目录 contract 实际由 source_topology_dir 驱动
-    n_samples=POST_MUTATE_N_SAMPLES,  # 目标联合 Monte Carlo 样本数
+    n_samples=20,  # 本轮 Geometry SSL 试水需要 20 个成功 variants；shortfall run 只作生成诊断
+    post_mutate_seed=20260813,  # 固定联合 proposal 随机序列，便于生成 run 完整重放
+    post_mutate_attempts_per_variant=10,  # 每个计划 variant 独立拥有十次完整重抽预算
     post_mutate_require_unique_geometry=True,  # 数据集 variant set 拒绝 mother no-op 与 set 内静态几何重复，并在当前槽位补抽
     post_mutate_sdf_execution="central_gpu_batch",  # 单 GPU actor 批量验证；mother workers 不持有 CUDA context
     Mutate=POST_MUTATE_MUTATOR_CFG,  # 当前默认 mutator term container
     Validate=POST_MUTATE_VALIDATOR_CFG,  # 后变异 hand-level validator
-    recolored=POST_MUTATE_RECOLORED,  # 后变异样本的可视 recolor 方案
+    Physics=ASSET_PHYSICS_CFG,  # 后变异 validator 之前按同一套物理资产配置闭合刚体参数
+    recolored="anatomy_soft_v1",  # 后变异样本的可视 recolor 方案
 )
-"""正式的独立 post-mutate 主入口。
-
-# NOTE:
-这里保留静态占位路径，是因为 `HandGeneratorCfg(mode="mutate")`
-目前 contract 上要求 `source_topology_dir` 已存在；而人在调试时更自然填写的是
-配置模块里的 topology 根路径，lowering 放到 runner 层做。
-"""
 
 
 # ============================================================================
@@ -323,19 +235,11 @@ ASSET_RUN_STRATEGY = AssetRunStrategyCfg(
     topology_selection_mode="all",  # 当前只实现“覆盖全部 topology”的保守策略
     topology_selection_count=None,  # 随机子集策略尚未实现，因此这里必须保持空值
 )
-"""runner 级未来扩展占位。
-
-用户后续提到的：
-
-- 只对若干随机 topology 做 mutate；
-- 或者强制包含 presets full hand 再随机补其它 topology；
-
-都预留在这里，但这轮先不落实现。
-"""
 
 
 __all__ = [
     "ASSET_RUN_STRATEGY",
+    "ASSET_PHYSICS_CFG",
     "POST_MUTATE_CFG",
     "POST_MUTATE_PRINT_RESULT_LIMIT",
     "POST_MUTATE_SOURCE_TOPOLOGY_PATH",

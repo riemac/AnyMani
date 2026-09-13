@@ -1,3 +1,11 @@
+0.6.0 - 2026-09-12
+==================
+
+- 新增显式机械设计修订入口 `scripts/revise_joint_limits.py`：从冻结 Allegro-right cohort 出发，仅扩大恰有两个活动关节的非拇指 MCP2 上限；按实际 finger family 和 MCP1/MCP2 anatomy 选择，保留下限、力矩、速度、几何、惯量与完整成员轴。
+- 受影响资产导出独立 bundle/ID、父子差分与 source lock，未受影响成员继续引用原资产；默认 2.23 rad 是来自 LEAP 屈曲范围的设计候选，不更改原 Allegro physical preset，也不继承旧预抓取证书。
+- 新 source lock 需要正式 canonical lowering 和 strict pregrasp 验证后才进入训练；原 generated bundle、历史锁和评价结果不覆写。
+- cohort统一优先解析writer输出的canonical JSON，避免`.yaml`后缀触发YAML1.1把`5e-05`读成字符串；人工YAML仍由原安全loader解析，显式字符串不做数值强制转换。
+
 0.5.1 - 2026-08-28
 ==================
 

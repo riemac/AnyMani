@@ -3,7 +3,7 @@ AnyMani Assets
 
 `source/anymani/anymani/assets/` 是 AnyMani 的手资产生成子项目。
 
-当前版本：`0.5.1`
+当前版本：`0.6.0`
 
 它负责的不是单一 URDF 导出，而是一整条可追溯的资产生产链：
 
@@ -49,6 +49,15 @@ python -m anymani.assets.scripts.dataset build --template source/anymani/anymani
 ```
 
 `derive-ppo` 只从 completed SSL lineage pool 派生新的 PPO manifest，不生成或复制 variant assets。模板控制科研分布、资产数与随机域；mutator、validator 和 physics 参数继续由 `config/asset_gen_cfg.py::POST_MUTATE_CFG` 定义，worker 数仅是 CLI 执行参数。
+
+局部机械设计修订
+----------------
+
+Allegro 非拇指删去 PIP/DIP 后，只保留 MCP1 侧摆与 MCP2 屈曲。`asset_revisions.py` 提供确定性修订：复制 `HandCfg`，仅把这类短指的 MCP2 上限扩大到指定弧度值。默认 2.23 rad（127.77°）取自 LEAP 近掌屈曲范围，是用于验证接触可达性的设计候选，不是对 Allegro 原始硬件规格的更正；其他关节、力矩、速度、几何和惯量保持原值。
+
+`python -m anymani.assets.scripts.revise_joint_limits --source-lock <original.lock.yaml> --output-dir <new-case-dir> --cohort-id <new-cohort-id> --upper-rad 2.23` 保留原 cohort 的成员顺序，为实际变化项导出新 bundle/ID，并写入 `revision.json` 和新 `training.lock.yaml`。未修改成员仍引用原 source manifest。输出目录必须不存在；部分失败先审查 `invocation.json` 与已导出文件，不直接重跑覆盖。
+
+该入口只完成资产设计与 source 身份发布。正式使用前，需要由 `scripts/research/finalize_hand_asset_cohort.py` 通过实际 robot adapter 构建新 canonical lock，再使用原 strict pregrasp 管线验证新 exact keys。扩限会改变归一化关节余量，即使旧姿态仍在物理限位内，也不能直接移用旧预抓取安全证书。固定检查点的旋转评价属于下游训练管线，资产导出成功不代表技能成功。
 
 中断构建先执行默认 dry-run recovery，再由人工决定是否接管完整 run 或删除当前 invocation 的所有 marker-owned run：
 

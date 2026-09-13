@@ -368,6 +368,50 @@ def full_pose_keypoint_reward(
     return kernel.mean(dim=-1)
 
 
+def orientation_tracking_flags(
+    orientation_error_rad: torch.Tensor,
+    position_error_m: torch.Tensor,
+    *,
+    angle_tolerance_rad: float = 0.2,
+    position_tolerance_m: float = 0.025,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""分离角度推进与合格位姿奖金；位置偏移不锁住下一姿态目标。
+
+    advance=[theta<=theta_tol]，qualified=advance & [d<=d_tol]。
+    两个信号在一次目标消费后清除，不能把持续满足阈值的多个帧重复计奖。
+    """
+    if angle_tolerance_rad <= 0 or position_tolerance_m <= 0:
+        raise ValueError('orientation/position tolerances must be positive')
+    advance = orientation_error_rad <= angle_tolerance_rad
+    return advance, advance & (position_error_m <= position_tolerance_m)
+
+
+def inverse_orientation_step_reward(orientation_error_rad: torch.Tensor, epsilon: float = 0.1) -> torch.Tensor:
+    r"""IsaacLab同一角误差倒数形式，返回实际单个policy-step奖励（尚未乘权重）。"""
+    if not math.isfinite(epsilon) or epsilon <= 0:
+        raise ValueError('inverse orientation epsilon must be finite and positive')
+    return 1.0 / (orientation_error_rad.abs() + epsilon)  # theta为SO(3)最短转角，rad。
+
+
+def exponential_orientation_step_reward(
+    orientation_error_rad: torch.Tensor, slope_rad_inv: float = 4.0, denominator_epsilon: float = 0.1,
+) -> torch.Tensor:
+    r"""指数姿态核，返回未乘权重的实际每策略步奖励，保持输入形状。
+
+    $$f(\theta)=1/(\exp(k|\theta|)+\varepsilon).$$
+    theta为最短SO(3)角误差（rad），k的单位为rad^{-1}，epsilon无量纲。
+    preset k=4、epsilon=0.1：30度误差得到0.1216467，0.2rad得到0.4300075。
+    该核同时改变距离响应与奖励尺度；不重新归一化峰值，也不减去常数基线。
+    数值实现将分子分母同乘exp(-k|theta|)，与原式等价且无需截断指数。
+    """
+    if not math.isfinite(slope_rad_inv) or slope_rad_inv <= 0:  # 正斜率保证奖励随角误差递减。
+        raise ValueError("orientation exponential slope must be finite and positive")
+    if not math.isfinite(denominator_epsilon) or denominator_epsilon < 0:  # 分母本身至少为1。
+        raise ValueError("orientation exponential epsilon must be finite and nonnegative")
+    decay = torch.exp(-slope_rad_inv * orientation_error_rad.abs())  # 无量纲，[N]或原输入形状。
+    return decay / (1.0 + denominator_epsilon * decay)  # 精确等价于1/(exp(k|theta|)+epsilon)。
+
+
 def task_termination_flags(
     position_error_m: torch.Tensor,
     normal_alignment: torch.Tensor,

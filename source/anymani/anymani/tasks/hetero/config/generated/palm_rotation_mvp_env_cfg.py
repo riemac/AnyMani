@@ -32,6 +32,7 @@ from ...mdp import observations as observation_mdp
 from ...mdp import rewards as reward_mdp
 from ...mdp import terminations as termination_mdp
 from ...mdp.actions import POLICY_STEP_AUTHORITY_RAD, PreloadAwareMaskedRelativeJointPositionActionCfg
+from ...mdp.adr import HeterogeneousAdrCfg
 from ...mdp.contact_state import reset_contact_state
 from ...mdp.curriculums import RewardReleaseByAssetMedianCell, reward_release_observation
 from ...mdp.events import (
@@ -183,6 +184,7 @@ class PalmRotationMvpRewardsCfg:
     """
 
     pose_keypoint = RewTerm(func=reward_mdp.pose_keypoint_reward, weight=1.0, params={"command_name": "goal_pose"})
+    orientation_tracking: RewTerm | None = None  # 新任务显式替代KD；声明在failure之前以保留末项快照边界。
     rotation_progress = RewTerm(
         func=reward_mdp.signed_rotation_progress_rate,
         weight=5.0,
@@ -310,6 +312,7 @@ class GeneratedPalmRotationMvpEnvCfg(ManagerBasedRLEnvCfg):
     r"""80手主训练环境；同一对象/任务，仅morphology与pregrasp随asset变化。"""
 
     is_finite_horizon: bool = True
+    adr: HeterogeneousAdrCfg = HeterogeneousAdrCfg()  # 各组件独立开关；旧配置默认全关。
     seed: int | None = 42
     scene: GeneratedHeterogeneousSceneCfg = GeneratedHeterogeneousSceneCfg(
         num_envs=NUM_ENVS,
