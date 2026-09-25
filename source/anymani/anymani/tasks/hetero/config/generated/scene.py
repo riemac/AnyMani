@@ -1,0 +1,109 @@
+'Shared scene for canonical generated hands and DexCube, independent of pregrasp cache availability. Formal task and pregrasp search use the same articulation, object material, solver, scale, and 24-sensor ABI. Scene setup resolves physical asset identity but does not query pregrasp records; the task reset enforces exact basin lookup.'
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.utils import configclass
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, retrieve_file_path
+
+from anymani.pregrasp.isaac_runtime import file_sha256
+
+from ...contact_sensors import install_contact_sensors
+from .asset_binding import GeneratedAssetBinding, build_generated_asset_binding
+from .pregrasp_identity import (
+    DEX_CUBE_SHA256,
+    FORMAL_OBJECT_DENSITY_KG_M3,
+    FORMAL_OBJECT_SCALE,
+    FORMAL_SOLVER_POSITION_ITERATIONS,
+    FORMAL_SOLVER_VELOCITY_ITERATIONS,
+    FormalPregraspCatalogIdentity,
+)
+
+OBJECT_SCALE = FORMAL_OBJECT_SCALE  # Absolute DexCube USD scale; other anchors override spawn config in a separate pre-start process.
+DEX_CUBE_USD_PATH = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd"
+RESOLVED_DEX_CUBE_PATH = Path(retrieve_file_path(DEX_CUBE_USD_PATH)).resolve(strict=True)
+RESOLVED_DEX_CUBE_SHA256 = file_sha256(RESOLVED_DEX_CUBE_PATH)
+if RESOLVED_DEX_CUBE_SHA256 != DEX_CUBE_SHA256:
+    raise RuntimeError("resolved DexCube USD bytes disagree with formal pregrasp identity")
+FORMAL_PREGRASP_IDENTITY = FormalPregraspCatalogIdentity.build(
+    object_scale=OBJECT_SCALE,
+    cube_sha256=RESOLVED_DEX_CUBE_SHA256,
+)
+ASSET_BINDING: GeneratedAssetBinding = build_generated_asset_binding()  # The ordered physical axis for this process.
+ASSET_COUNT = ASSET_BINDING.asset_count  # Selection-local prototype count A.
+NUM_ENVS = int(os.environ.get("ANYMANI_HETERO_NUM_ENVS", str(ASSET_COUNT)))  # Round-robin scene environment count N.
+if NUM_ENVS < ASSET_COUNT:
+    raise ValueError("ANYMANI_HETERO_NUM_ENVS must be at least the selected asset count")
+ACTIVE_MASK_BY_ENV = ASSET_BINDING.active_joint_mask_by_env(NUM_ENVS)  # Canonical validity mask with shape [N,16].
+CONTACT_LAYOUT = ASSET_BINDING.contact_layout  # Fixed TIP4 + non-tip19 + PALM1 sensor ABI.
+
+
+@configclass
+class GeneratedHeterogeneousSceneCfg(InteractiveSceneCfg):
+    'Scene containing canonical generated hands, fixed-scale DexCube, ground, lights, and 24 contact sensors. Scale 1.2, density 400 kg/m3, and eight position iterations belong to the measured P0001 physics identity. Other scales must override object.spawn.scale before startup, not mutate collision geometry during an episode.'
+
+    robot = ASSET_BINDING.hand_adapter.build_articulation_cfg(prim_path="{ENV_REGEX_NS}/Robot")
+    object: RigidObjectCfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/object",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=DEX_CUBE_USD_PATH,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=False,
+                disable_gravity=False,
+                enable_gyroscopic_forces=True,
+                solver_position_iteration_count=FORMAL_SOLVER_POSITION_ITERATIONS,
+                solver_velocity_iteration_count=FORMAL_SOLVER_VELOCITY_ITERATIONS,
+                sleep_threshold=0.005,
+                stabilization_threshold=0.0025,
+                max_depenetration_velocity=1000.0,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(density=FORMAL_OBJECT_DENSITY_KG_M3),
+            scale=(OBJECT_SCALE, OBJECT_SCALE, OBJECT_SCALE),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.6), rot=(1.0, 0.0, 0.0, 0.0)),
+    )
+    ground = AssetBaseCfg(
+        prim_path="/World/ground",
+        spawn=sim_utils.GroundPlaneCfg(),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, -0.1)),
+    )
+    light = AssetBaseCfg(
+        prim_path="/World/skyLight",
+        spawn=(
+            sim_utils.DomeLightCfg(
+                intensity=750.0,
+                texture_file=(
+                    f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/"
+                    "kloofendal_43d_clear_puresky_4k.hdr"
+                ),
+            )
+            if os.environ.get("ANYMANI_HETERO_N000_VISUAL_STYLE", "0") == "1"
+            else sim_utils.DomeLightCfg(intensity=750.0)
+        ),
+    )  # HDRI and URDF palette are viewer-only; headless training does not load textures or author materials by default.
+
+    def __post_init__(self) -> None:
+        'Install the same object-filtered sensor set used by the formal task.'
+
+        super().__post_init__()  # pyright: ignore[reportAttributeAccessIssue]
+        install_contact_sensors(self, CONTACT_LAYOUT)
+
+
+__all__ = [
+    "ACTIVE_MASK_BY_ENV",
+    "ASSET_BINDING",
+    "ASSET_COUNT",
+    "CONTACT_LAYOUT",
+    "DEX_CUBE_USD_PATH",
+    "FORMAL_PREGRASP_IDENTITY",
+    "GeneratedHeterogeneousSceneCfg",
+    "NUM_ENVS",
+    "OBJECT_SCALE",
+    "RESOLVED_DEX_CUBE_PATH",
+    "RESOLVED_DEX_CUBE_SHA256",
+]

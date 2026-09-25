@@ -1,0 +1,835 @@
+"Builds partitioned asset cohorts from a frozen pre-made inventory and records each accepted or quarantined run."
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal, cast
+from uuid import uuid4
+
+import yaml
+
+from ...bank.path_utils import resolve_bank_path
+from ...geometry_identity import geometry_fingerprint_from_sidecar
+from ..hand_generator import (
+    HandGenerator,
+    HandGeneratorCfg,
+    PostMutateSourceCfg,
+    PostMutateVariantSetResult,
+)
+from .planner import (
+    CanonicalMotherPair,
+    MotherInventoryRecord,
+    derive_retry_seed,
+    select_pair_subset,
+)
+from .schema import DatasetBuildTemplateCfg
+
+BUILD_STATE_SCHEMA_VERSION = "2.0.0"
+"Version of the resumable dataset-build state record."
+
+_STAGES: tuple[tuple[str, ...], ...] = (
+    ("train",),
+    ("validation.unseen_variant_set", "validation.unseen_mother"),
+    ("evaluation.unseen_variant_set", "evaluation.unseen_mother"),
+)
+
+RunBatch = Callable[
+    [HandGeneratorCfg, tuple[PostMutateSourceCfg, ...], int | None],
+    tuple[PostMutateVariantSetResult, ...],
+]
+
+
+def build_dataset_from_lock(
+    template: DatasetBuildTemplateCfg,
+    *,
+    template_sha256: str,
+    lock_path: str | Path,
+    post_mutate_cfg: HandGeneratorCfg,
+    workers: int | None = None,
+    resume: bool = True,
+    run_batch: RunBatch | None = None,
+) -> dict[str, Any]:
+    'Builds dataset from lock.'
+
+    resolved_lock = Path(lock_path).expanduser().resolve()
+    lock_bytes = resolved_lock.read_bytes()
+    lock = yaml.safe_load(lock_bytes) or {}
+    if not isinstance(lock, dict):
+        raise TypeError("selection lock must be a mapping")
+    _validate_lock(template, template_sha256=template_sha256, lock=lock, post_mutate_cfg=post_mutate_cfg)
+    lock_sha256 = hashlib.sha256(lock_bytes).hexdigest()
+    output_dir = resolved_lock.parent
+    state_path = output_dir / ".build_state.yaml"
+    state = _load_or_create_state(lock, lock_sha256=lock_sha256, state_path=state_path, resume=resume)
+    runner = run_batch or _run_generator_batch
+
+
+    accepted_fingerprints: dict[str, str] = {}
+    for role_names in _STAGES:
+        for task in _tasks_for_roles(lock, role_names):
+            task_state = state["tasks"][task["task_id"]]
+            if task_state.get("status") != "completed":
+                continue
+            if not _completed_task_is_valid(task, task_state, state=state):
+                task_state["status"] = "pending"
+                task_state["active_run_dir"] = ""
+                continue
+            _register_task_fingerprints(task, task_state, accepted_fingerprints)
+    _write_yaml_atomic(state_path, state)
+
+    for role_names in _STAGES:
+        stage_tasks = _tasks_for_roles(lock, role_names)
+        _execute_stage(
+            stage_tasks,
+            state=state,
+            state_path=state_path,
+            post_mutate_cfg=post_mutate_cfg,
+            workers=workers,
+            retry_rounds=template.generation_policy.dataset_retry_rounds,
+            mutation_root_seed=template.seeds.mutation,
+            accepted_fingerprints=accepted_fingerprints,
+            run_batch=runner,
+        )
+
+    failed = [task_id for task_id, task_state in state["tasks"].items() if task_state["status"] != "completed"]
+    report = _build_report(lock, state=state, failed_task_ids=failed)
+    _write_yaml_atomic(output_dir / "build_report.yaml", report)
+    if failed:
+        for manifest_name in ("ssl.yaml", "ppo.yaml"):
+            manifest_path = output_dir / manifest_name
+            if manifest_path.exists():
+                manifest_path.unlink()
+        raise RuntimeError(f"dataset build has incomplete tasks and cannot publish manifests: {tuple(failed)}")
+
+    ssl_manifest = compile_dataset_manifest(template, lock=lock, state=state, ppo=False)
+    _write_yaml_atomic(output_dir / "ssl.yaml", ssl_manifest)
+    if template.manifests.ppo.enabled:
+        ppo_manifest = compile_dataset_manifest(template, lock=lock, state=state, ppo=True)
+        _write_yaml_atomic(output_dir / "ppo.yaml", ppo_manifest)
+    return report
+
+
+def compile_dataset_manifest(
+    template: DatasetBuildTemplateCfg,
+    *,
+    lock: Mapping[str, Any],
+    state: Mapping[str, Any],
+    ppo: bool,
+    ppo_pair_keys: set[str] | None = None,
+) -> dict[str, Any]:
+    'Compiles dataset manifest.'
+
+    lineages = _lineages_by_role(lock)
+    train_lineages = lineages["train"]
+    selected_ppo_pairs: set[str] | None = None
+    if ppo:
+        selected_ppo_pairs = ppo_pair_keys or {str(key) for key in lock.get("ppo_train_pair_keys", ())}
+        train_lineages = [
+            lineage for lineage in train_lineages if str(lineage["pair_key"]) in selected_ppo_pairs
+        ]
+    validation = {
+        suite: _partition_document(
+            _filter_seen_suite_for_ppo(
+                lineages[f"validation.{suite}"],
+                suite=suite,
+                ppo_pair_keys=selected_ppo_pairs,
+            ),
+            state=state,
+        )
+        for suite in ("unseen_variant_set", "unseen_mother")
+    }
+    evaluation = {
+        suite: _partition_document(
+            _filter_seen_suite_for_ppo(
+                lineages[f"evaluation.{suite}"],
+                suite=suite,
+                ppo_pair_keys=selected_ppo_pairs,
+            ),
+            state=state,
+        )
+        for suite in ("unseen_variant_set", "unseen_mother")
+    }
+    evaluation["official_zero_shot"] = {
+        "assets": list(template.partitions.evaluation.official_zero_shot)
+    }
+    return {
+        "schema_version": "2.0.0",
+        "default_run_dir": template.inventory.run_dir,
+        "train": _partition_document(train_lineages, state=state),
+        "validation": validation,
+        "evaluation": evaluation,
+    }
+
+
+def derive_ppo_manifest_from_lock(
+    template: DatasetBuildTemplateCfg,
+    *,
+    lock: Mapping[str, Any],
+    state: Mapping[str, Any],
+    mother_count: int,
+    selection_seed: int,
+    reuse_ssl_holdouts: bool,
+) -> dict[str, Any]:
+    'Derives ppo manifest from lock.'
+
+    if mother_count < 2 or mother_count % 2 != 0:
+        raise ValueError("derived PPO mother_count must be a positive even number")
+    train_pairs = _pairs_from_locked_train(lock)
+    template_for_selection = replace(
+        template,
+        seeds=replace(template.seeds, selection=selection_seed),
+    )
+    mandatory_keys: set[str] = set()
+    if reuse_ssl_holdouts:
+        by_role = _lineages_by_role(lock)
+        mandatory_keys = {
+            str(lineage["pair_key"])
+            for role in ("validation.unseen_variant_set", "evaluation.unseen_variant_set")
+            for lineage in by_role[role]
+        }
+    target_pairs = mother_count // 2
+    if len(mandatory_keys) > target_pairs:
+        raise ValueError("derived PPO cohort is smaller than reused SSL seen-mother holdouts")
+    mandatory = tuple(pair for pair in train_pairs if pair.pair_key in mandatory_keys)
+    remaining = tuple(pair for pair in train_pairs if pair.pair_key not in mandatory_keys)
+    extra = select_pair_subset(
+        remaining,
+        mother_count=2 * (target_pairs - len(mandatory)),
+        template=template_for_selection,
+        domain=f"derived-ppo/{mother_count}/{selection_seed}",
+    )
+    selected_keys = {pair.pair_key for pair in (*mandatory, *extra)}
+    return compile_dataset_manifest(
+        template,
+        lock=lock,
+        state=state,
+        ppo=True,
+        ppo_pair_keys=selected_keys,
+    )
+def _execute_stage(
+    tasks: Sequence[dict[str, Any]],
+    *,
+    state: dict[str, Any],
+    state_path: Path,
+    post_mutate_cfg: HandGeneratorCfg,
+    workers: int | None,
+    retry_rounds: int,
+    mutation_root_seed: int,
+    accepted_fingerprints: dict[str, str],
+    run_batch: RunBatch,
+) -> None:
+
+    while True:
+        _advance_generated_prefix(
+            tasks,
+            state=state,
+            state_path=state_path,
+            accepted_fingerprints=accepted_fingerprints,
+            retry_rounds=retry_rounds,
+        )
+        pending = [
+            task
+            for task in tasks
+            if state["tasks"][task["task_id"]]["status"] == "pending"
+            and len(state["tasks"][task["task_id"]]["attempts"]) < retry_rounds
+        ]
+        if not pending:
+            break
+        source_cfgs: list[PostMutateSourceCfg] = []
+        for task in pending:
+            task_state = state["tasks"][task["task_id"]]
+            retry_index = len(task_state["attempts"])
+            seed = derive_retry_seed(
+                mutation_root_seed,
+                str(task["role"]),
+                str(task["mother"]["asset_id"]),
+                retry_index,
+            )
+            source_cfg = _make_owned_source_cfg(
+                task,
+                state=state,
+                post_mutate_cfg=post_mutate_cfg,
+                attempt_index=retry_index,
+                seed=seed,
+            )
+            source_cfgs.append(source_cfg)
+            task_state["attempts"].append(_dispatched_attempt(source_cfg))
+            task_state["status"] = "running"
+        _write_yaml_atomic(state_path, state)
+
+        def record_generated(report: PostMutateVariantSetResult) -> None:
+            r"""Records this run identity as soon as it finishes without waiting for other mothers in the stage."""
+
+            task_state = state["tasks"].get(report.task_id)
+            if not isinstance(task_state, dict) or not task_state["attempts"]:
+                raise ValueError(f"worker returned report for undispatched task: {report.task_id!r}")
+            attempt = task_state["attempts"][-1]
+            if attempt["status"] == "generated":
+                return
+            if attempt["status"] != "dispatched":
+                raise ValueError(f"worker report conflicts with attempt status {attempt['status']!r}")
+            _record_report_in_attempt(attempt, report)
+            task_state["status"] = "generated"
+            _write_yaml_atomic(state_path, state)
+
+        if run_batch is _run_generator_batch:
+            reports = _run_generator_batch(
+                post_mutate_cfg,
+                tuple(source_cfgs),
+                workers,
+                on_report=record_generated,
+            )
+        else:
+            reports = run_batch(post_mutate_cfg, tuple(source_cfgs), workers)
+
+        for report in reports:
+            record_generated(report)
+        reported_ids = {report.task_id for report in reports}
+        for task in pending:
+            task_id = str(task["task_id"])
+            if task_id in reported_ids:
+                continue
+            task_state = state["tasks"][task_id]
+            attempt = task_state["attempts"][-1]
+            attempt["status"] = "failed"
+            attempt["reason"] = "worker_report_missing"
+            task_state["status"] = "pending"
+        _write_yaml_atomic(state_path, state)
+
+    _advance_generated_prefix(
+        tasks,
+        state=state,
+        state_path=state_path,
+        accepted_fingerprints=accepted_fingerprints,
+        retry_rounds=retry_rounds,
+    )
+    for task in tasks:
+        task_state = state["tasks"][task["task_id"]]
+        if task_state["status"] not in {"completed", "failed"}:
+            task_state["status"] = "failed"
+    _write_yaml_atomic(state_path, state)
+
+
+def _advance_generated_prefix(
+    tasks: Sequence[dict[str, Any]],
+    *,
+    state: dict[str, Any],
+    state_path: Path,
+    accepted_fingerprints: dict[str, str],
+    retry_rounds: int,
+) -> None:
+
+    for task in tasks:
+        task_state = state["tasks"][task["task_id"]]
+        status = str(task_state["status"])
+        if status in {"completed", "failed"}:
+            continue
+        if status == "generated":
+            _accept_or_quarantine_report(
+                task,
+                _report_from_attempt(task_state["attempts"][-1]),
+                task_state=task_state,
+                accepted_fingerprints=accepted_fingerprints,
+            )
+            _write_yaml_atomic(state_path, state)
+            status = str(task_state["status"])
+            if status == "completed":
+                continue
+        if status == "pending" and len(task_state["attempts"]) >= retry_rounds:
+            task_state["status"] = "failed"
+            _write_yaml_atomic(state_path, state)
+            continue
+
+        return
+
+
+def _make_owned_source_cfg(
+    task: Mapping[str, Any],
+    *,
+    state: Mapping[str, Any],
+    post_mutate_cfg: HandGeneratorCfg,
+    attempt_index: int,
+    seed: int,
+) -> PostMutateSourceCfg:
+
+    source = _source_path(state, task).resolve()
+    provisional = PostMutateSourceCfg(
+        task_id=str(task["task_id"]),
+        source_topology_dir=source,
+        n_samples=int(task["variant_count"]),
+        seed=seed,
+        build_id=str(state["build_id"]),
+        selection_lock_sha256=str(state["selection_lock_sha256"]),
+        attempt_index=attempt_index,
+        generator_config_sha256=str(state["generator_config_sha256"]),
+    )
+    child_cfg = post_mutate_cfg.replace(
+        source_topology_dir=source,
+        post_mutate_sources=[],
+        n_samples=provisional.n_samples,
+        post_mutate_seed=provisional.seed,
+        post_mutate_parallel=False,
+        post_mutate_parallel_workers=None,
+    )
+    from ..runtime.recipe_loader import RecipeLoader
+
+    child_sha256 = hashlib.sha256(
+        yaml.safe_dump(RecipeLoader.dump(child_cfg), allow_unicode=True, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return replace(provisional, child_config_sha256=child_sha256)
+
+
+def _dispatched_attempt(source_cfg: PostMutateSourceCfg) -> dict[str, Any]:
+
+    return {
+        "attempt_index": source_cfg.attempt_index,
+        "status": "dispatched",
+        "reason": "",
+        "task_id": source_cfg.task_id,
+        "source_topology_dir": str(Path(source_cfg.source_topology_dir).resolve()),
+        "seed": source_cfg.seed,
+        "generator_config_sha256": source_cfg.generator_config_sha256,
+        "child_config_sha256": source_cfg.child_config_sha256,
+        "run_dir": "",
+        "planned_variants": source_cfg.n_samples,
+        "successful_variants": 0,
+        "shortfall": source_cfg.n_samples,
+        "error": "",
+        "sidecar_paths": [],
+        "urdf_paths": [],
+        "worker_pid": 0,
+        "worker_cuda_initialized": False,
+        "sdf_service_pid": 0,
+    }
+
+
+def _record_report_in_attempt(
+    attempt: dict[str, Any],
+    report: PostMutateVariantSetResult,
+) -> None:
+
+    if report.mutation_seed != int(attempt["seed"]):
+        raise ValueError(f"worker report seed drifted for task {report.task_id!r}")
+    attempt.update(
+        {
+            "status": "generated",
+            "run_dir": str(report.run_dir),
+            "planned_variants": report.planned_variants,
+            "successful_variants": report.successful_variants,
+            "shortfall": report.shortfall,
+            "error": report.error,
+            "sidecar_paths": [str(path) for path in report.sidecar_paths],
+            "urdf_paths": [str(path) for path in report.urdf_paths],
+            "worker_pid": report.worker_pid,
+            "worker_cuda_initialized": report.worker_cuda_initialized,
+            "sdf_service_pid": report.sdf_service_pid,
+        }
+    )
+
+
+def _report_from_attempt(attempt: Mapping[str, Any]) -> PostMutateVariantSetResult:
+
+    if attempt.get("status") != "generated":
+        raise ValueError("only a generated attempt can be reconstructed as a worker report")
+    return PostMutateVariantSetResult(
+        task_id=str(attempt["task_id"]),
+        source_topology_dir=Path(str(attempt["source_topology_dir"])),
+        run_dir=Path(str(attempt["run_dir"])),
+        planned_variants=int(attempt["planned_variants"]),
+        successful_variants=int(attempt["successful_variants"]),
+        shortfall=int(attempt["shortfall"]),
+        mutation_seed=int(attempt["seed"]),
+        sidecar_paths=tuple(Path(str(path)) for path in attempt.get("sidecar_paths", ())),
+        urdf_paths=tuple(Path(str(path)) for path in attempt.get("urdf_paths", ())),
+        worker_pid=int(attempt.get("worker_pid", 0)),
+        worker_cuda_initialized=bool(attempt.get("worker_cuda_initialized", False)),
+        sdf_service_pid=int(attempt.get("sdf_service_pid", 0)),
+        error=str(attempt.get("error", "")),
+    )
+
+
+def _accept_or_quarantine_report(
+    task: Mapping[str, Any],
+    report: PostMutateVariantSetResult,
+    *,
+    task_state: dict[str, Any],
+    accepted_fingerprints: dict[str, str],
+) -> None:
+
+    attempt = task_state["attempts"][-1]
+    if attempt.get("status") != "generated":
+        raise ValueError(f"task {task['task_id']!r} has no generated attempt to evaluate")
+    if report.error:
+        attempt["status"] = "failed"
+        attempt["reason"] = f"worker_error:{report.error}"
+        task_state["status"] = "pending"
+        return
+    if report.shortfall != 0 or report.successful_variants != int(task["variant_count"]):
+        _quarantine(report.run_dir, reason="variant_shortfall", details=attempt)
+        attempt["status"] = "quarantined"
+        attempt["reason"] = "variant_shortfall"
+        task_state["status"] = "pending"
+        return
+
+    local: dict[str, str] = {}
+    candidate_paths = list(report.sidecar_paths)
+    if bool(task["include_mother"]):
+        candidate_paths.insert(0, report.source_topology_dir / "hand.yaml")
+    conflict: tuple[str, str] | None = None
+    for sidecar_path in candidate_paths:
+        fingerprint = geometry_fingerprint_from_sidecar(sidecar_path)
+        previous = local.get(fingerprint) or accepted_fingerprints.get(fingerprint)
+        if previous is not None:
+            conflict = (fingerprint, previous)
+            break
+        local[fingerprint] = str(sidecar_path)
+    if conflict is not None:
+        reason = f"geometry_fingerprint_collision:{conflict[0]}:{conflict[1]}"
+        _quarantine(report.run_dir, reason=reason, details=attempt)
+        attempt["status"] = "quarantined"
+        attempt["reason"] = reason
+        task_state["status"] = "pending"
+        return
+
+    accepted_fingerprints.update({fingerprint: str(task["task_id"]) for fingerprint in local})
+    attempt["status"] = "accepted"
+    task_state["status"] = "completed"
+    task_state["active_run_dir"] = str(report.run_dir)
+    task_state["geometry_fingerprints"] = list(local)
+
+
+def _run_generator_batch(
+    cfg: HandGeneratorCfg,
+    tasks: tuple[PostMutateSourceCfg, ...],
+    workers: int | None,
+    *,
+    on_report: Callable[[PostMutateVariantSetResult], None] | None = None,
+) -> tuple[PostMutateVariantSetResult, ...]:
+
+    if cfg.mode != "mutate" or cfg.artifact_level != "bundle":
+        raise ValueError("dataset build requires POST_MUTATE_CFG mode='mutate', artifact_level='bundle'")
+    run_cfg = cfg.replace(
+        source_topology_dir=None,
+        post_mutate_sources=list(tasks),
+        post_mutate_parallel=True,
+        post_mutate_parallel_workers=workers,
+    )
+    return tuple(HandGenerator(run_cfg).generate_variant_sets(on_report=on_report))
+
+
+def _validate_lock(
+    template: DatasetBuildTemplateCfg,
+    *,
+    template_sha256: str,
+    lock: Mapping[str, Any],
+    post_mutate_cfg: HandGeneratorCfg,
+) -> None:
+
+    if str(lock.get("schema_version")) != "1.0.0":
+        raise ValueError("selection lock schema must be exactly '1.0.0'")
+    if str(lock.get("template_id")) != template.template_id or str(lock.get("template_sha256")) != template_sha256:
+        raise ValueError("selection lock does not match current dataset template")
+    from ..runtime.recipe_loader import RecipeLoader
+
+    snapshot = RecipeLoader.dump(post_mutate_cfg)
+    digest = hashlib.sha256(yaml.safe_dump(snapshot, allow_unicode=True, sort_keys=True).encode()).hexdigest()
+    generator = lock.get("generator", {})
+    if not isinstance(generator, Mapping) or str(generator.get("config_sha256")) != digest:
+        raise ValueError("selection lock generator config hash does not match current POST_MUTATE_CFG")
+
+
+def _load_or_create_state(
+    lock: Mapping[str, Any],
+    *,
+    lock_sha256: str,
+    state_path: Path,
+    resume: bool,
+) -> dict[str, Any]:
+
+    tasks = [task for role_tasks in _lineages_by_role(lock).values() for task in role_tasks]
+    if state_path.exists() and resume:
+        state = yaml.safe_load(state_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(state, dict) or state.get("selection_lock_sha256") != lock_sha256:
+            raise ValueError("build state does not match current selection lock")
+        if state.get("schema_version") != BUILD_STATE_SCHEMA_VERSION:
+            raise ValueError(
+                f"build state schema must be {BUILD_STATE_SCHEMA_VERSION!r}; "
+                "run dataset recover before resuming a legacy invocation"
+            )
+        if not state.get("build_id") or not state.get("started_at") or not isinstance(state.get("baseline"), dict):
+            raise ValueError("build state is missing schema-2 invocation identity or baseline")
+        _reconcile_interrupted_attempts(lock, state=state)
+        return state
+    if state_path.exists() and not resume:
+        raise FileExistsError("build state already exists; recover or remove the prior invocation before --no-resume")
+
+    initial_tasks = {
+        str(task["task_id"]): {
+            "status": "pending",
+            "active_run_dir": "",
+            "attempts": [],
+            "geometry_fingerprints": [],
+        }
+        for task in tasks
+    }
+    generator = lock.get("generator", {})
+    if not isinstance(generator, Mapping) or not generator.get("config_sha256"):
+        raise ValueError("selection lock has no generator config identity")
+    return {
+        "schema_version": BUILD_STATE_SCHEMA_VERSION,
+        "build_id": uuid4().hex,
+        "selection_lock_sha256": lock_sha256,
+        "generator_config_sha256": str(generator["config_sha256"]),
+        "started_at": datetime.now(UTC).isoformat(),
+        "inventory_run_dir": str(resolve_bank_path(str(lock["inventory"]["run_dir"]))),
+
+        "baseline": {"tasks": deepcopy(initial_tasks)},
+        "tasks": initial_tasks,
+    }
+
+
+def _reconcile_interrupted_attempts(lock: Mapping[str, Any], *, state: dict[str, Any]) -> None:
+
+    from .recovery import _discover_owned_candidates
+
+    candidates = _discover_owned_candidates(lock, state=state)
+    candidate_by_attempt = {
+        (str(candidate["task_id"]), int(candidate["attempt_index"])): candidate
+        for candidate in candidates
+    }
+    tasks_by_id = {
+        str(task["task_id"]): task
+        for role_tasks in _lineages_by_role(lock).values()
+        for task in role_tasks
+    }
+    for task_id, task_state in state["tasks"].items():
+        if task_state.get("status") != "running":
+            continue
+        attempts = task_state.get("attempts", [])
+        if not attempts:
+            raise ValueError(f"running schema-2 task has no dispatched attempt: {task_id!r}")
+        attempt = attempts[-1]
+        attempt_index = int(attempt.get("attempt_index", len(attempts) - 1))
+        if attempt.get("status") == "generated":
+            task_state["status"] = "generated"
+            continue
+        if attempt.get("status") != "dispatched":
+            raise ValueError(f"running task {task_id!r} has invalid attempt status {attempt.get('status')!r}")
+        candidate = candidate_by_attempt.get((str(task_id), attempt_index))
+        if candidate is None:
+            attempt["status"] = "failed"
+            attempt["reason"] = "interrupted_before_owned_run"
+            task_state["status"] = "pending"
+            continue
+        run_dir = Path(str(candidate["run_dir"]))
+        if candidate["classification"] != "complete":
+            _quarantine(run_dir, reason="interrupted_partial_run", details=candidate)
+            attempt["status"] = "quarantined"
+            attempt["reason"] = "interrupted_partial_run"
+            attempt["run_dir"] = str(run_dir)
+            task_state["status"] = "pending"
+            continue
+        task = tasks_by_id[str(task_id)]
+        sidecars = tuple(sorted(run_dir.glob("*/hand.yaml")))
+        report = PostMutateVariantSetResult(
+            task_id=str(task_id),
+            source_topology_dir=_source_path(state, task),
+            run_dir=run_dir,
+            planned_variants=int(candidate["planned_variants"]),
+            successful_variants=int(candidate["successful_variants"]),
+            shortfall=int(candidate["shortfall"]),
+            mutation_seed=int(candidate["seed"]),
+            sidecar_paths=sidecars,
+            urdf_paths=tuple(path.parent / "hand.urdf" for path in sidecars),
+        )
+        _record_report_in_attempt(attempt, report)
+        task_state["status"] = "generated"
+
+
+def _completed_task_is_valid(
+    task: Mapping[str, Any],
+    task_state: Mapping[str, Any],
+    *,
+    state: Mapping[str, Any],
+) -> bool:
+
+    run_dir = Path(str(task_state.get("active_run_dir", "")))
+    summary_path = run_dir / "summary.yaml"
+    if not summary_path.is_file():
+        return False
+    summary = yaml.safe_load(summary_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(summary, Mapping) or summary.get("run", {}).get("mode") != "mutate":
+        return False
+    if int(summary.get("stats", {}).get("succeeded", -1)) != int(task["variant_count"]):
+        return False
+    source = Path(str(summary.get("config", {}).get("source_topology_dir", ""))).resolve(strict=False)
+    if source != _source_path(state, task).resolve(strict=False):
+        return False
+    variant_sidecars = tuple(sorted(run_dir.glob("*/hand.yaml")))
+    if len(variant_sidecars) != int(task["variant_count"]):
+        return False
+
+
+
+    candidate_paths = list(variant_sidecars)
+    if bool(task["include_mother"]):
+        candidate_paths.insert(0, _source_path(state, task) / "hand.yaml")
+    actual_fingerprints = [geometry_fingerprint_from_sidecar(path) for path in candidate_paths]
+    stored_fingerprints = [str(value) for value in task_state.get("geometry_fingerprints", ())]
+    return (
+        len(set(actual_fingerprints)) == len(actual_fingerprints)
+        and len(set(stored_fingerprints)) == len(stored_fingerprints)
+        and set(actual_fingerprints) == set(stored_fingerprints)
+    )
+
+
+def _register_task_fingerprints(
+    task: Mapping[str, Any],
+    task_state: Mapping[str, Any],
+    accepted: dict[str, str],
+) -> None:
+
+    for fingerprint in task_state.get("geometry_fingerprints", ()):
+        previous = accepted.get(str(fingerprint))
+        if previous is not None:
+            raise ValueError(f"completed build state contains duplicate geometry fingerprint: {fingerprint}")
+        accepted[str(fingerprint)] = str(task["task_id"])
+
+
+def _tasks_for_roles(lock: Mapping[str, Any], roles: Sequence[str]) -> list[dict[str, Any]]:
+
+    by_role = _lineages_by_role(lock)
+    return [task for role in roles for task in by_role[role]]
+
+
+def _lineages_by_role(lock: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
+
+    raw = lock.get("lineages")
+    if not isinstance(raw, Mapping):
+        raise TypeError("selection lock lineages must be a mapping")
+    parsed: dict[str, list[dict[str, Any]]] = {}
+    for role, tasks in raw.items():
+        if not isinstance(tasks, list) or not all(isinstance(task, dict) for task in tasks):
+            raise TypeError(f"selection lock role {role!r} must be a sequence of task mappings")
+        parsed[str(role)] = [{**task, "role": str(role)} for task in tasks]
+    return parsed
+
+
+def _filter_seen_suite_for_ppo(
+    lineages: Sequence[dict[str, Any]],
+    *,
+    suite: str,
+    ppo_pair_keys: set[str] | None,
+) -> list[dict[str, Any]]:
+
+    if ppo_pair_keys is None or suite != "unseen_variant_set":
+        return list(lineages)
+    return [lineage for lineage in lineages if str(lineage["pair_key"]) in ppo_pair_keys]
+
+
+def _pairs_from_locked_train(lock: Mapping[str, Any]) -> tuple[CanonicalMotherPair, ...]:
+
+    grouped: dict[str, dict[str, MotherInventoryRecord]] = {}
+    for lineage in _lineages_by_role(lock)["train"]:
+        pair_key = str(lineage["pair_key"])
+        mother = _mother_record_from_lock(lineage["mother"])
+        grouped.setdefault(pair_key, {})[mother.handedness] = mother
+    pairs: list[CanonicalMotherPair] = []
+    for pair_key, members in grouped.items():
+        if set(members) != {"left", "right"}:
+            raise ValueError(f"locked train pair {pair_key!r} is incomplete")
+        pairs.append(CanonicalMotherPair(pair_key=pair_key, left=members["left"], right=members["right"]))
+    return tuple(pairs)
+
+
+def _mother_record_from_lock(payload: Mapping[str, Any]) -> MotherInventoryRecord:
+
+    return MotherInventoryRecord(
+        asset_id=str(payload["asset_id"]),
+        relative_dir=str(payload["relative_dir"]),
+        collection_kind=cast(Literal["groups", "mixed"], str(payload["collection_kind"])),
+        group_name=str(payload["group_name"]),
+        mother_name=str(payload["mother_name"]),
+        handedness=cast(Literal["left", "right"], str(payload["handedness"])),
+        base_family=cast(Literal["allegro", "leap"], str(payload["base_family"])),
+        family_composition=cast(
+            Literal["single_family", "mixed"], str(payload["family_composition"])
+        ),
+        macro_family=str(payload["macro_family"]),
+        topology_shape=cast(Literal["full", "missing"], str(payload["topology_shape"])),
+        missing_slots=tuple(str(slot) for slot in payload.get("missing_slots", ())),
+        dof=int(payload["dof"]),
+        finger_count=int(payload["finger_count"]),
+        slot_family_map=tuple((str(key), str(value)) for key, value in payload.get("slot_family_map", ())),
+        selected_slot_recipes=tuple(
+            (str(key), str(value)) for key, value in payload.get("selected_slot_recipes", ())
+        ),
+    )
+
+
+def _partition_document(lineages: Sequence[Mapping[str, Any]], *, state: Mapping[str, Any]) -> dict[str, Any]:
+
+    run_block: dict[str, Any] = {"groups": {}, "mixed": {}}
+    for lineage in lineages:
+        mother = lineage["mother"]
+        collection = str(mother["collection_kind"])
+        group = str(mother["group_name"])
+        mother_name = str(mother["mother_name"])
+        task_state = state["tasks"][lineage["task_id"]]
+        variant_sets = []
+        if int(lineage["variant_count"]) > 0:
+            variant_sets.append(Path(str(task_state["active_run_dir"])).name)
+        run_block[collection].setdefault(group, {})[mother_name] = {
+            "include_mother": bool(lineage["include_mother"]),
+            "variant_sets": variant_sets,
+        }
+    run_block = {key: value for key, value in run_block.items() if value}
+    return {"runs": {"default": run_block}} if run_block else {"runs": {}}
+
+
+def _source_path(state: Mapping[str, Any], task: Mapping[str, Any]) -> Path:
+
+    return Path(str(state["inventory_run_dir"])) / str(task["mother"]["relative_dir"])
+
+
+def _quarantine(run_dir: Path, *, reason: str, details: Mapping[str, Any]) -> None:
+
+    _write_yaml_atomic(run_dir / "QUARANTINED.yaml", {"reason": reason, "attempt": dict(details)})
+
+
+def _build_report(lock: Mapping[str, Any], *, state: Mapping[str, Any], failed_task_ids: Sequence[str]) -> dict[str, Any]:
+
+    statuses = {task_id: task_state["status"] for task_id, task_state in state["tasks"].items()}
+    return {
+        "schema_version": "1.0.0",
+        "template_id": lock["template_id"],
+        "published": not failed_task_ids,
+        "failed_task_ids": list(failed_task_ids),
+        "status_counts": {
+            status: sum(current == status for current in statuses.values())
+            for status in sorted(set(statuses.values()))
+        },
+        "quota_report": deepcopy(lock.get("quota_report", {})),
+        "tasks": deepcopy(state["tasks"]),
+    }
+
+
+def _write_yaml_atomic(path: Path, document: Mapping[str, Any]) -> None:
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(yaml.safe_dump(dict(document), allow_unicode=True, sort_keys=False), encoding="utf-8")
+    temporary.replace(path)
+
+
+__all__ = [
+    "BUILD_STATE_SCHEMA_VERSION",
+    "build_dataset_from_lock",
+    "compile_dataset_manifest",
+    "derive_ppo_manifest_from_lock",
+]

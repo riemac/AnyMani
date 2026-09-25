@@ -1,0 +1,88 @@
+# Shared structured PPO over 80 generated hands with rank-0 palm pregrasps and N000 task semantics.
+# The custom agent fully separates Actor and privileged Critic parameters. N040 runs once per rollout in BF16;
+# FP32 geometry tokens are cached in the Dict experience side channel across all five mini-epochs.
+
+params:
+  seed: 42
+
+  env:
+    clip_observations: 100.0  # Wide finite guard for task tensors; it does not clip N040 tokens.
+    clip_actions: 1.0         # Canonical relative-action range [-1,1].
+
+  algo:
+    name: anymani_palm_rotation_ppo
+
+  model:
+    name: anymani_palm_rotation_masked_continuous  # Masked tanh-squashed Gaussian with a mean-preserving action.
+
+  network:
+    name: anymani_palm_rotation
+    palm_rotation:
+      arm: residual                  # The CLI may select residual, base, direct, or direct_token arms.
+      initial_log_std: -0.5          # One shared scalar log standard deviation.
+      max_log_std: -0.43             # Bound exploration under the matched N000 transition budget.
+      base_action_limit: 0.8         # Base has 80% authority; residual uses the remaining 20%.
+      history_encoder: tcn           # The CLI may select raw_stack; both use the same per-joint History30.
+      compile_mode: null             # Optional narrow Actor/Critic forward compilation; no model wrapper compile.
+
+  load_checkpoint: false
+  load_path: ''
+
+  config:
+    name: heterogeneous_palm_rotation_mvp_residual
+    env_name: rlgpu
+    device: 'cuda:0'
+    device_name: 'cuda:0'
+    multi_gpu: false
+    ppo: true
+    mixed_precision: false           # Actor, Critic, losses, and both optimizers use FP32.
+    normalize_input: false           # Raw Actor packets use no running input normalization.
+    normalize_value: true            # Maintain global value statistics across all 80 assets.
+    normalize_advantage: true        # Normalize GAE over the complete 76,800-sample rollout batch.
+    advantage_normalization_scope: global  # Per-asset rollout normalization is an explicit CLI candidate.
+    value_bootstrap: false           # The 120 s horizon is terminal; do not bootstrap through timeout.
+    torch_compile: false             # Compile only the narrow forward boundary, not the full rl_games model.
+    rsl_style_console: true
+    num_actors: 2560                 # 80 assets x 32 replicas; the only fallback is 1280 environments.
+    asset_count: 80
+    reward_shaper:
+      scale_value: 1.0
+    gamma: 0.99
+    tau: 0.95
+    learning_rate: 3.0e-4            # TCN/local/base/head/global log_std
+    adaptive_lr_max: 3.0e-4          # The KL scheduler may not exceed the method learning-rate anchor.
+    residual_learning_rate: 1.0e-4   # one-block graph residual branch
+    contextual_learning_rate: 1.0e-4 # One-block graph action path for matched direct-arm comparisons.
+    critic_learning_rate: 5.0e-4     # completely independent privileged critic Adam
+    lr_schedule: adaptive
+    schedule_type: standard
+    kl_threshold: 0.01               # The custom agent averages KL over active DoFs.
+    score_to_win: 100000
+    max_epochs: 6400                 # Seed 42 limit: 491.52 million transitions.
+    save_best_after: 128
+    save_frequency: 128
+    evaluation_frequency: 320        # Save full checkpoints for isolated fixed evaluation.
+    print_stats: true
+    grad_norm: 1.0                   # Clip Actor and Critic gradients separately.
+    entropy_coef: 0.002
+    truncate_grads: true
+    e_clip: 0.2
+    horizon_length: 30
+    minibatch_size: 4800             # Formal default: 16 minibatches, each with 80 assets x 60 samples.
+    gradient_accumulation_steps: 4   # Four activation slices make one 19,200-sample logical minibatch.
+    mini_epochs: 5
+    critic_coef: 4.0
+    clip_value: true
+    clip_actions: false              # Clip once at the MVP vector-environment boundary.
+    seq_length: 1                    # History30 is an observation; the Actor is not an rl_games RNN.
+    bounds_loss_coef: 1.0e-4
+    diagnostics_flush_updates: 50   # Flush before checkpointing so Parquet does not lag the saved state.
+    gradient_probe_frequency: 500   # Probe per-asset head gradients on the first stratified minibatch only.
+    full_gradient_shadow_frequency: 0  # Full Actor gradient shadows are reserved for explicit short probes.
+    gpu_memory_fraction_limit: 0.85  # Peak allocated-memory limit for scene, rollout, model, and optimizers.
+    gpu_driver_free_memory_bytes_min: 2147483648  # Keep at least 2 GiB free for PhysX and CUDA context.
+
+    player:
+      deterministic: true
+      games_num: 80
+      print_stats: true

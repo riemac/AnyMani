@@ -1,0 +1,781 @@
+"""Density and material Jacobian training method built on the shared geometry source lifecycle."""
+
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+import torch
+from torch._functorch import config as functorch_config  # pyright: ignore[reportPrivateImportUsage]
+
+from anymani.distill.methods.contracts import (
+    FeatureSpec,
+    MethodEvaluationReport,
+    MethodParameterGroup,
+    MethodStep,
+    MethodUpdate,
+)
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.method import MultiAnchorGaussianMethod
+from anymani.distill.methods.multi_anchor_gaussian_implicit_field.training import combine_fairgrad
+from anymani.distill.models.density_material_jacobian_ssl import (
+    DensityMaterialJacobianForward,
+    DensityMaterialJacobianSSLModel,
+)
+
+from .artifact import build_retained_artifact
+from .augmentation import maybe_rewrite_density_gamma_batch, permute_density_gamma_sample, sample_entity_permutation
+from .batch import (
+    PaddedDensityGammaBatch,
+    pad_density_gamma_blocks,
+    restore_padded_batch_from_replay,
+    sample_density_gamma_block,
+    stage_padded_batch_for_replay,
+)
+from .config import DensityMaterialJacobianMethodCfg
+from .evaluation_metrics import DensityPhysicalMetricAccumulator
+from .objectives import (
+    DensityGammaObjectiveContext,
+    evaluate_objectives,
+    finalize_teacher_baselines,
+    merge_teacher_baseline_statistics,
+    reduce_method_steps,
+    teacher_baseline_statistics,
+)
+
+_DEVICE_SUBWINDOW_ASSETS = 8
+
+
+class DensityMaterialJacobianMethod(MultiAnchorGaussianMethod):
+
+
+    def __init__(self, config: DensityMaterialJacobianMethodCfg) -> None:
+
+
+        super().__init__(config)  # type: ignore[arg-type]
+        self.config = config
+        self.model: DensityMaterialJacobianSSLModel | None = None
+        self._compiled_forward: Any | None = None
+
+    @property
+    def dense_snapshot(self) -> None:
+
+
+        return None
+
+    def initialize_model(self, *, device: torch.device, dtype: torch.dtype) -> DensityMaterialJacobianSSLModel:
+
+
+        if self.model is not None:
+            raise RuntimeError("density/Gamma model is already initialized")
+        self.model = DensityMaterialJacobianSSLModel(self.config.model).to(device=device, dtype=dtype)
+        if self.execution_policy is not None and bool(self.execution_policy.compile_enabled):
+            functorch_config.donated_buffer = False
+            self._compiled_forward = torch.compile(
+                self.model,
+                mode=str(self.execution_policy.compile_mode),
+                fullgraph=True,
+            )
+        return self.model
+
+    def require_model(self) -> DensityMaterialJacobianSSLModel:
+
+
+        if self.model is None:
+            raise RuntimeError("density/Gamma model has not been initialized")
+        return self.model
+
+    def optimizer_parameter_groups(self) -> tuple[MethodParameterGroup, ...]:
+
+
+        model = self.require_model()
+        groups = (
+            MethodParameterGroup("shared_encoder", tuple(model.encoder.parameters())),
+            MethodParameterGroup("density_reader", tuple(model.density_decoder.parameters())),
+            MethodParameterGroup("material_jacobian_reader", tuple(model.material_jacobian_decoder.parameters())),
+        )
+        grouped = tuple(parameter for group in groups for parameter in group.parameters if parameter.requires_grad)
+        trainable = tuple(parameter for parameter in model.parameters() if parameter.requires_grad)
+        if len({id(parameter) for parameter in grouped}) != len(grouped):
+            raise RuntimeError("density/Gamma optimizer parameter groups overlap")
+        if {id(parameter) for parameter in grouped} != {id(parameter) for parameter in trainable}:
+            raise RuntimeError("density/Gamma parameter groups do not cover the trainable model")
+        return groups
+
+    def feature_spec(self) -> FeatureSpec:
+
+
+        return FeatureSpec(
+            entity_width=self.config.model.encoder.backbone.hidden_width,
+            coordinate_rewrite_contract="density invariant; material_jacobian selected-column sign-equivariant",
+        )
+
+    def declared_objective_weights(self) -> dict[str, float]:
+
+
+        return {name: 1.0 for name in self.config.objectives.enabled()}
+
+    def formula_identity(self) -> dict[str, str]:
+
+
+        return {name: term.qualified_func_name() for name, term in self.config.objectives.enabled().items()}
+
+    def optimization_identity(self) -> dict[str, object]:
+
+
+        return {
+            "algorithm": self.config.fairgrad.algorithm,
+            "tasks": ["density", "material_jacobian"],
+            "near_opposition_tolerance": self.config.fairgrad.near_opposition_tolerance,
+        }
+
+    def _realize_minibatch_blocks(
+        self,
+        schedule_item: Any,
+        *,
+        sources: Any,
+        samplers: Any,
+        window: Any,
+        seed: int,
+        schedule: Any,
+        mode: str,
+    ):
+
+
+        del schedule
+        catalog_ids = sources.asset_ids
+        logical_indices = tuple(schedule_item.asset_indices)
+        chunks = tuple(
+            logical_indices[start : start + _DEVICE_SUBWINDOW_ASSETS]
+            for start in range(0, len(logical_indices), _DEVICE_SUBWINDOW_ASSETS)
+        )
+        q_block_index = int(schedule_item.q_block_index)
+        prefetch = sources.prefetch_async(tuple(catalog_ids[index] for index in chunks[0]))
+        for chunk_index, asset_chunk in enumerate(chunks):
+            cores = sources.await_prefetch(prefetch)
+            next_handle = None
+            if chunk_index + 1 < len(chunks):
+                next_ids = tuple(catalog_ids[index] for index in chunks[chunk_index + 1])
+                next_handle = sources.prefetch_async(next_ids)
+            bank_index = 0 if mode != "train" else q_block_index % self.config.representation.source.anchors.bank_size
+            states = window.ensure(
+                tuple(catalog_ids[index] for index in asset_chunk),
+                prefetch_sources=False,
+                prepared_sources={core.asset_id: core for core in cores},
+                bank_index=bank_index,
+            )
+            state_by_id = {state.source.asset_id: state for state in states}
+            blocks = []
+            for asset_index in asset_chunk:
+                asset_id = catalog_ids[asset_index]
+                state = state_by_id[asset_id]
+                q_count = int(schedule_item.q_per_asset)
+                q = samplers[asset_index].draw(
+                    q_count,
+                    device=state.spec.space_screws.device,
+                    dtype=state.spec.space_screws.dtype,
+                )
+                q_start = samplers[asset_index].cursor - q_count
+                schedule_seed = (
+                    int(schedule_item.minibatch_index) * 1_000_003
+                    + int(schedule_item.window_index) * 10_007
+                    + int(schedule_item.asset_group)
+                )
+                block = sample_density_gamma_block(
+                        state,
+                        q,
+                        self.config,
+                        sampling_seed=seed + schedule_seed,
+                        q_index=torch.arange(q_start, q_start + q_count, device="cpu", dtype=torch.long),
+                        anchor_index=bank_index,
+                        supervision_split="train" if mode == "train" else "eval",
+                    )
+                if mode == "train" and self.config.entity_permutation.enabled:
+                    permutation = sample_entity_permutation(
+                        len(state.source.container.geometry_semantics.owners),
+                        asset_id=asset_id,
+                        q_block_start=q_start,
+                        root_seed=seed + schedule_seed,
+                        config=self.config.entity_permutation,
+                    )
+                    block = permute_density_gamma_sample(block, permutation)
+                blocks.append(block)
+            yield blocks
+            if next_handle is not None:
+                prefetch = next_handle
+
+    def realize_minibatch(self, schedule_item: Any, **kwargs: Any) -> PaddedDensityGammaBatch:
+
+
+        blocks = [block for unit in self._realize_minibatch_blocks(schedule_item, **kwargs) for block in unit]
+        return pad_density_gamma_blocks(blocks, padding=self.require_padding())
+
+    def realize_minibatch_units(self, schedule_item: Any, **kwargs: Any):
+
+
+        for blocks in self._realize_minibatch_blocks(schedule_item, **kwargs):
+            yield pad_density_gamma_blocks(blocks, padding=self.require_padding())
+
+    def _forward_with_prediction(
+        self,
+        batch: PaddedDensityGammaBatch,
+        *,
+        mode: str,
+    ) -> tuple[MethodStep, DensityMaterialJacobianForward]:
+
+
+        if mode == "train":
+            batch = maybe_rewrite_density_gamma_batch(
+                batch,
+                config=self.config.joint_sign_rewrite,
+                step=int(batch.q_index[0]) if batch.q_index.numel() else 0,
+                seed=int(batch.anchor_index[0]) if batch.anchor_index.numel() else 0,
+            )
+        model = self.require_model()
+        forward = self._compiled_forward if self._compiled_forward is not None else model
+        autocast_name = str(getattr(self.execution_policy, "model_autocast_dtype", "float32"))
+        if self._compiled_forward is not None and batch.q.device.type == "cuda":
+            torch.compiler.cudagraph_mark_step_begin()
+        kwargs = {
+            "evidence_row_index": batch.evidence_row_index,
+            "joint_coordinate_sign": batch.joint_coordinate_sign,
+        }
+        if batch.q.device.type == "cuda" and autocast_name == "bfloat16":
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                raw = forward(
+                    batch.q.detach(),
+                    batch.evidence,
+                    batch.queries.query_points_h,
+                    batch.field_targets.bandwidths,
+                    batch.material_targets.owner_index,
+                    batch.material_targets.joint_index,
+                    batch.material_point_index,
+                    **kwargs,
+                )
+        else:
+            raw = forward(
+                batch.q.detach(),
+                batch.evidence,
+                batch.queries.query_points_h,
+                batch.field_targets.bandwidths,
+                batch.material_targets.owner_index,
+                batch.material_targets.joint_index,
+                batch.material_point_index,
+                **kwargs,
+            )
+        prediction = DensityMaterialJacobianForward(
+            latents=raw.latents,
+            query_features=raw.query_features,
+            material_pair_features=raw.material_pair_features,
+            density=raw.density.float(),
+            material_jacobian=raw.material_jacobian.float(),
+        )
+        results = evaluate_objectives(DensityGammaObjectiveContext(prediction, batch), self.config.objectives)
+        return MethodStep(results, int(batch.q.shape[0])), prediction
+
+    def forward_objectives(
+        self,
+        batch: PaddedDensityGammaBatch,
+        *,
+        step: int,
+        mode: str = "train",
+        microbatch_size: int | None = None,
+    ) -> MethodStep:
+
+
+        del step, microbatch_size
+        return self._forward_with_prediction(batch, mode=mode)[0]
+
+    @staticmethod
+    def _accumulate_gradient(
+        accumulator: list[torch.Tensor | None],
+        gradients: tuple[torch.Tensor | None, ...],
+    ) -> None:
+
+
+        for index, gradient in enumerate(gradients):
+            if gradient is None:
+                continue
+            current = accumulator[index]
+            accumulator[index] = gradient.detach().clone() if current is None else current + gradient.detach()
+
+    def backward_update_units(
+        self,
+        units: Iterable[PaddedDensityGammaBatch],
+        *,
+        forward_step: int,
+        logical_sample_count: int,
+        microbatch_size: int,
+        collect_z_gradients: bool = False,
+    ) -> MethodUpdate:
+
+
+        del forward_step, microbatch_size, collect_z_gradients
+        model = self.require_model()
+        shared = tuple(model.encoder.parameters())
+        density_private = tuple(model.density_decoder.parameters())
+        gamma_private = tuple(model.material_jacobian_decoder.parameters())
+        density_shared: list[torch.Tensor | None] = [None] * len(shared)
+        gamma_shared: list[torch.Tensor | None] = [None] * len(shared)
+        density_reader: list[torch.Tensor | None] = [None] * len(density_private)
+        gamma_reader: list[torch.Tensor | None] = [None] * len(gamma_private)
+        numerator = {"density": 0.0, "material_jacobian": 0.0}
+        observed = 0
+        for unit in units:
+            step, _prediction = self._forward_with_prediction(unit, mode="train")
+            observed += int(unit.q.shape[0])
+            density_component = step.objectives["density"].components[0]
+            gamma_component = step.objectives["material_jacobian"].components[0]
+            density_term = density_component.numerator / float(logical_sample_count)
+            gamma_term = gamma_component.numerator / float(logical_sample_count)
+            d_grad = torch.autograd.grad(
+                density_term,
+                (*shared, *density_private),
+                retain_graph=True,
+                allow_unused=True,
+            )
+            g_grad = torch.autograd.grad(
+                gamma_term,
+                (*shared, *gamma_private),
+                allow_unused=True,
+            )
+            self._accumulate_gradient(density_shared, d_grad[: len(shared)])
+            self._accumulate_gradient(density_reader, d_grad[len(shared) :])
+            self._accumulate_gradient(gamma_shared, g_grad[: len(shared)])
+            self._accumulate_gradient(gamma_reader, g_grad[len(shared) :])
+            numerator["density"] += float(density_component.numerator.detach())
+            numerator["material_jacobian"] += float(gamma_component.numerator.detach())
+        if observed != logical_sample_count:
+            raise RuntimeError(f"stream units contain {observed} samples; expected {logical_sample_count}")
+
+        fairgrad = combine_fairgrad(
+            density_shared,
+            gamma_shared,
+            near_opposition_tolerance=self.config.fairgrad.near_opposition_tolerance,
+        )
+        for parameter, gradient in zip(shared, fairgrad.combined, strict=True):
+            parameter.grad = gradient
+        for parameter, gradient in zip(density_private, density_reader, strict=True):
+            parameter.grad = gradient
+        for parameter, gradient in zip(gamma_private, gamma_reader, strict=True):
+            parameter.grad = gradient
+        evidence = asdict(fairgrad.evidence)
+        evidence = {key.replace("kappa", "material_jacobian"): float(value) for key, value in evidence.items()}
+        return MethodUpdate(
+            terms={name: value / logical_sample_count for name, value in numerator.items()},
+            sample_count=observed,
+            denominators={name: float(logical_sample_count) for name in numerator},
+            gradient_evidence={f"fairgrad/{name}": value for name, value in evidence.items()},
+        )
+
+    def backward_update(
+        self,
+        batch: PaddedDensityGammaBatch,
+        *,
+        forward_step: int,
+        microbatch_size: int,
+        collect_z_gradients: bool = False,
+    ) -> MethodUpdate:
+
+
+        return self.backward_update_units(
+            (batch,),
+            forward_step=forward_step,
+            logical_sample_count=int(batch.q.shape[0]),
+            microbatch_size=microbatch_size,
+            collect_z_gradients=collect_z_gradients,
+        )
+
+    def reduce_update(self, steps: tuple[MethodStep, ...]) -> MethodUpdate:
+
+
+        return reduce_method_steps(steps, self.config.objectives)
+
+    def teacher_baseline_statistics(self, batch: PaddedDensityGammaBatch) -> dict[str, torch.Tensor]:
+
+
+        return teacher_baseline_statistics(batch, self.config.objectives)
+
+    def merge_teacher_baseline_statistics(
+        self,
+        total: dict[str, torch.Tensor] | None,
+        block: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+
+
+        return merge_teacher_baseline_statistics(total, block)
+
+    def finalize_teacher_baselines(self, statistics: dict[str, torch.Tensor]) -> dict[str, object]:
+
+
+        return finalize_teacher_baselines(statistics)
+
+    def stage_replay_unit(self, unit: PaddedDensityGammaBatch) -> PaddedDensityGammaBatch:
+
+
+        return stage_padded_batch_for_replay(unit)
+
+    def restore_replay_unit(self, unit: PaddedDensityGammaBatch, *, device: torch.device) -> PaddedDensityGammaBatch:
+
+
+        return restore_padded_batch_from_replay(unit, device=device)
+
+    def training_state_dict(self) -> dict[str, torch.Tensor]:
+
+
+        return {name: value.detach().clone() for name, value in self.require_model().state_dict().items()}
+
+    def load_training_state_dict(self, state: Mapping[str, torch.Tensor]) -> None:
+
+
+        self.require_model().load_state_dict(dict(state), strict=True)
+
+    def retained_state_dict(self) -> dict[str, torch.Tensor]:
+
+
+        return self.require_model().retained_state_dict()
+
+    def retained_artifact_payload(
+        self,
+        *,
+        metadata: Mapping[str, Any],
+        source_checkpoint: Path,
+    ) -> dict[str, Any]:
+
+
+        return build_retained_artifact(self, metadata=metadata, source_checkpoint=source_checkpoint)
+
+    def evaluate_session(
+        self,
+        session: Any,
+        schedule: Any,
+        *,
+        include_ablations: bool = False,
+    ) -> MethodEvaluationReport:
+
+
+        numerator = {"density": 0.0, "material_jacobian": 0.0}
+        denominator = {"density": 0.0, "material_jacobian": 0.0}
+        baseline_total: dict[str, torch.Tensor] | None = None
+        channel_error = torch.zeros(4, dtype=torch.float64)
+        channel_baseline = torch.zeros(4, dtype=torch.float64)
+        channel_count = torch.zeros(4, dtype=torch.float64)
+        channel_sign_correct = torch.zeros(4, dtype=torch.float64)
+        channel_sign_count = torch.zeros(4, dtype=torch.float64)
+        zero_prediction_square = torch.zeros((), dtype=torch.float64)
+        zero_prediction_count = torch.zeros((), dtype=torch.float64)
+        ablation_names = ("full", "query_only", "same_asset_q_shuffle", "cross_asset_shuffle", "joint_token_shuffle")
+        ablation_totals = {
+            ablation: {
+                term: [0.0, 0.0]
+                for term in ("density", "material_jacobian")
+            }
+            for ablation in ablation_names
+        }
+        asset_ablation_sums: dict[str, dict[str, dict[str, float]]] = {}
+        asset_ablation_counts: dict[str, int] = {}
+        density_physical = DensityPhysicalMetricAccumulator()
+        step_index = 0
+        self.eval_mode()
+        with torch.no_grad():
+            while not schedule.complete:
+                batch = session.realize(schedule.next(), schedule=schedule, step=step_index)
+                step, prediction = self._forward_with_prediction(batch, mode="eval")
+                for name, result in step.objectives.items():
+                    component = result.components[0]
+                    numerator[name] += float(component.numerator)
+                    denominator[name] += float(component.denominator)
+                    ablation_totals["full"][name][0] += float(component.numerator)
+                    ablation_totals["full"][name][1] += float(component.denominator)
+                baseline_total = self.merge_teacher_baseline_statistics(
+                    baseline_total,
+                    {name: value.cpu().double() for name, value in self.teacher_baseline_statistics(batch).items()},
+                )
+                target = batch.material_targets.relation_sensitivity_per_rad
+                anchor_valid = batch.evidence.anchor_valid_mask
+                if anchor_valid is None:
+                    anchor_valid = torch.ones(
+                        batch.evidence.anchors.shape[:-1],
+                        device=target.device,
+                        dtype=torch.bool,
+                    )
+                anchor_valid = anchor_valid[batch.evidence_row_index]
+                valid = batch.edge_valid_mask[:, :, None, None] & anchor_valid[:, None, :, None]
+                radius_valid = torch.ones_like(target, dtype=torch.bool)
+                radius_valid[..., 1] = batch.material_targets.radius_valid_mask
+                valid = valid & radius_valid
+                active = valid & batch.material_targets.ancestor_mask[:, :, None, None]
+                zero = valid & ~batch.material_targets.ancestor_mask[:, :, None, None]
+                error = prediction.material_jacobian - target
+                for channel in range(4):
+                    mask = active[..., channel]
+                    channel_error[channel] += error[..., channel][mask].double().square().sum().cpu()
+                    channel_baseline[channel] += target[..., channel][mask].double().square().sum().cpu()
+                    channel_count[channel] += mask.sum().double().cpu()
+                    nonzero = mask & (target[..., channel].abs() >= 1.0e-5)
+                    channel_sign_correct[channel] += (
+                        torch.sign(prediction.material_jacobian[..., channel][nonzero])
+                        == torch.sign(target[..., channel][nonzero])
+                    ).sum().double().cpu()
+                    channel_sign_count[channel] += nonzero.sum().double().cpu()
+                zero_prediction_square += prediction.material_jacobian[zero].double().square().sum().cpu()
+                zero_prediction_count += zero.sum().double().cpu()
+
+                density_physical.update(
+                    prediction.density,
+                    batch.field_targets.distance,
+                    batch.field_targets.bandwidths,
+                    batch.field_targets.valid_mask,
+                    batch.field_targets.query_stratum,
+                    batch.field_targets.owner_role,
+                )
+                if include_ablations:
+                    model = self.require_model()
+                    entities = prediction.latents.entities
+                    rows_by_asset: dict[str, list[int]] = {}
+                    for row, asset_id in enumerate(batch.asset_ids):
+                        rows_by_asset.setdefault(asset_id, []).append(row)
+                    same_q_index = torch.arange(len(batch.asset_ids), device=entities.device)
+                    groups = list(rows_by_asset.values())
+                    for rows in groups:
+                        index = torch.tensor(rows, device=entities.device)
+                        same_q_index[index] = torch.tensor(list(reversed(rows)), device=entities.device)
+                    cross_asset_index = torch.empty_like(same_q_index)
+                    for group_index, rows in enumerate(groups):
+                        source_rows = groups[(group_index + 1) % len(groups)]
+                        if len(source_rows) != len(rows):
+                            raise ValueError("cross-asset ablation requires equal q-block lengths")
+                        cross_asset_index[torch.tensor(rows, device=entities.device)] = torch.tensor(
+                            source_rows,
+                            device=entities.device,
+                        )
+                    joint_shuffled = entities.clone()
+                    joint_entities = batch.evidence.joint_entity_index[batch.evidence_row_index]
+                    joint_valid = batch.evidence.joint_valid_mask
+                    if joint_valid is None:
+                        joint_valid = torch.ones_like(joint_entities, dtype=torch.bool)
+                    else:
+                        joint_valid = joint_valid[batch.evidence_row_index]
+                    for row in range(entities.shape[0]):
+                        slots = joint_entities[row, joint_valid[row]]
+                        if slots.numel() > 1:
+                            joint_shuffled[row, slots] = entities[row, torch.roll(slots, shifts=1)]
+                    variants = {
+                        "query_only": torch.zeros_like(entities),
+                        "same_asset_q_shuffle": entities[same_q_index],
+                        "cross_asset_shuffle": entities[cross_asset_index],
+                        "joint_token_shuffle": joint_shuffled,
+                    }
+                    prediction_by_ablation = {"full": prediction}
+                    for ablation, ablated_entities in variants.items():
+                        ablated_latents = type(prediction.latents)(entities=ablated_entities)
+                        ablated_prediction = model.decode_features(
+                            ablated_latents,
+                            prediction.query_features,
+                            prediction.material_pair_features,
+                            batch.field_targets.bandwidths,
+                            batch.evidence,
+                            batch.material_targets.owner_index,
+                            batch.material_targets.joint_index,
+                            evidence_row_index=batch.evidence_row_index,
+                            entity_valid_mask=batch.evidence.entity_valid_mask[batch.evidence_row_index]
+                            if batch.evidence.entity_valid_mask is not None
+                            else None,
+                        )
+                        ablated_step = evaluate_objectives(
+                            DensityGammaObjectiveContext(ablated_prediction, batch),
+                            self.config.objectives,
+                        )
+                        prediction_by_ablation[ablation] = ablated_prediction
+                        for name, result in ablated_step.items():
+                            component = result.components[0]
+                            ablation_totals[ablation][name][0] += float(component.numerator)
+                            ablation_totals[ablation][name][1] += float(component.denominator)
+                    per_sample = {
+                        ablation: self._per_sample_evaluation_terms(candidate, batch)
+                        for ablation, candidate in prediction_by_ablation.items()
+                    }
+                    for row, asset_id in enumerate(batch.asset_ids):
+                        asset_terms = asset_ablation_sums.setdefault(
+                            asset_id,
+                            {
+                                ablation: {"density": 0.0, "material_jacobian": 0.0}
+                                for ablation in ablation_names
+                            },
+                        )
+                        asset_ablation_counts[asset_id] = asset_ablation_counts.get(asset_id, 0) + 1
+                        for ablation in ablation_names:
+                            for term in ("density", "material_jacobian"):
+                                asset_terms[ablation][term] += float(per_sample[ablation][term][row])
+                step_index += 1
+        if baseline_total is None:
+            raise RuntimeError("evaluation produced no teacher baseline statistics")
+        baselines = self.finalize_teacher_baselines(baseline_total)
+        metrics = {name: numerator[name] / denominator[name] for name in numerator}
+        for name in numerator:
+            baseline = baselines[name]
+            if not isinstance(baseline, Mapping):
+                raise TypeError(f"teacher baseline {name!r} must be a mapping")
+            metrics[f"{name}_skill"] = 1.0 - metrics[name] / float(baseline["baseline_mse"])
+        channel_names = ("height", "radius", "dot", "chirality")
+        channel_metrics: dict[str, object] = {}
+        for channel, name in enumerate(channel_names):
+            mse = channel_error[channel] / channel_count[channel].clamp_min(1.0)
+            zero_mse = channel_baseline[channel] / channel_count[channel].clamp_min(1.0)
+            channel_metrics[name] = {
+                "active_mse": float(mse),
+                "active_zero_baseline": float(zero_mse),
+                "active_skill": float(1.0 - mse / zero_mse.clamp_min(1.0e-30)),
+                "active_sign_accuracy": float(
+                    channel_sign_correct[channel] / channel_sign_count[channel].clamp_min(1.0)
+                ),
+                "active_scalar_count": int(channel_count[channel]),
+            }
+        metrics["material_jacobian_structural_zero_prediction_rms"] = float(
+            torch.sqrt(zero_prediction_square / zero_prediction_count.clamp_min(1.0))
+        )
+        density_physical_report = density_physical.finalize()
+        ablation_payload = None
+        if include_ablations:
+            aggregate = {
+                ablation: {
+                    name: values[0] / values[1]
+                    for name, values in terms.items()
+                }
+                for ablation, terms in ablation_totals.items()
+            }
+            ablation_payload = {
+                "pairing_key": ["asset_id"],
+                "ablations": ablation_names,
+                "aggregate_metrics": aggregate,
+                "records": [
+                    {
+                        "asset_id": asset_id,
+                        "metrics": {
+                            ablation: {
+                                term: value / asset_ablation_counts[asset_id]
+                                for term, value in terms.items()
+                            }
+                            for ablation, terms in ablations.items()
+                        },
+                    }
+                    for asset_id, ablations in sorted(asset_ablation_sums.items())
+                ],
+            }
+        return MethodEvaluationReport(
+            metrics=metrics,
+            strata={
+                "metric_scores": metrics,
+                "material_jacobian_channels": channel_metrics,
+                "density_physical": density_physical_report,
+                "batch_count": step_index,
+            },
+            teacher_baselines=baselines,
+            ablations=ablation_payload,
+        )
+
+    def analyze_ablations(self, evidence: Mapping[str, Any], *, bootstrap_replicates: int, seed: int) -> dict[str, Any]:
+
+
+        records = evidence.get("records", ())
+        if not isinstance(records, (tuple, list)) or not records:
+            raise ValueError("paired ablation analysis requires non-empty asset records")
+        ablations = tuple(str(name) for name in evidence.get("ablations", ()))
+        if not ablations or ablations[0] != "full":
+            raise ValueError("ablation evidence must list full as the first condition")
+        terms = ("density", "material_jacobian")
+        deltas: dict[str, dict[str, list[float]]] = {
+            ablation: {term: [] for term in terms}
+            for ablation in ablations[1:]
+        }
+        for record in records:
+            metrics = record.get("metrics") if isinstance(record, Mapping) else None
+            if not isinstance(metrics, Mapping) or not isinstance(metrics.get("full"), Mapping):
+                raise ValueError("ablation record lacks full metric mapping")
+            full = metrics["full"]
+            for ablation in ablations[1:]:
+                candidate = metrics.get(ablation)
+                if not isinstance(candidate, Mapping):
+                    raise ValueError(f"ablation record lacks {ablation!r} metrics")
+                for term in terms:
+                    deltas[ablation][term].append(float(candidate[term]) - float(full[term]))
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed))
+        analysis: dict[str, dict[str, object]] = {}
+        for ablation, term_values in deltas.items():
+            analysis[ablation] = {}
+            for term, values in term_values.items():
+                tensor = torch.tensor(values, dtype=torch.float64)
+                indices = torch.randint(
+                    len(tensor),
+                    (bootstrap_replicates, len(tensor)),
+                    generator=generator,
+                )
+                bootstrap = tensor[indices].mean(dim=1)
+                analysis[ablation][term] = {
+                    "mean_delta": float(tensor.mean()),
+                    "ci95": [
+                        float(torch.quantile(bootstrap, 0.025)),
+                        float(torch.quantile(bootstrap, 0.975)),
+                    ],
+                    "positive_fraction": float((tensor > 0.0).double().mean()),
+                }
+        return {
+            "record_count": len(records),
+            "bootstrap_replicates": bootstrap_replicates,
+            "seed": seed,
+            "aggregate_metrics": evidence.get("aggregate_metrics", {}),
+            "paired_delta": analysis,
+        }
+
+    def _per_sample_evaluation_terms(
+        self,
+        prediction: DensityMaterialJacobianForward,
+        batch: PaddedDensityGammaBatch,
+    ) -> dict[str, torch.Tensor]:
+
+
+        density_error = prediction.density - batch.field_targets.density
+        density_weight = batch.field_targets.valid_mask.to(density_error.dtype).unsqueeze(-1).expand_as(density_error)
+        density = (density_error.square() * density_weight).flatten(start_dim=1).sum(dim=1) / density_weight.flatten(
+            start_dim=1
+        ).sum(dim=1).clamp_min(1.0)
+        gamma_target = batch.material_targets.relation_sensitivity_per_rad
+        scales = torch.tensor(
+            self.config.objectives.material_jacobian.channel_scale.values,
+            device=gamma_target.device,
+            dtype=gamma_target.dtype,
+        )
+        gamma_error = (prediction.material_jacobian - gamma_target) / scales
+        anchor_valid = batch.evidence.anchor_valid_mask
+        if anchor_valid is None:
+            anchor_valid = torch.ones(
+                batch.evidence.anchors.shape[:-1],
+                device=gamma_target.device,
+                dtype=torch.bool,
+            )
+        anchor_valid = anchor_valid[batch.evidence_row_index]
+        valid = batch.edge_valid_mask[:, :, None, None] & anchor_valid[:, None, :, None]
+        channel_valid = torch.ones_like(gamma_target, dtype=torch.bool)
+        channel_valid[..., 1] = batch.material_targets.radius_valid_mask
+        valid = valid & channel_valid
+        active = valid & batch.material_targets.ancestor_mask[:, :, None, None]
+        zero = valid & ~batch.material_targets.ancestor_mask[:, :, None, None]
+        active_weight = active.to(gamma_error.dtype)
+        zero_weight = zero.to(gamma_error.dtype)
+        active_mean = (gamma_error.square() * active_weight).flatten(start_dim=1).sum(dim=1) / active_weight.flatten(
+            start_dim=1
+        ).sum(dim=1).clamp_min(1.0)
+        zero_mean = (gamma_error.square() * zero_weight).flatten(start_dim=1).sum(dim=1) / zero_weight.flatten(
+            start_dim=1
+        ).sum(dim=1).clamp_min(1.0)
+        gamma = (2.0 / 3.0) * active_mean + (1.0 / 3.0) * zero_mean
+        return {"density": density.detach(), "material_jacobian": gamma.detach()}
+
+
+DensityMaterialJacobianMethodCfg.runtime_type = DensityMaterialJacobianMethod
+
+
+__all__ = ["DensityMaterialJacobianMethod"]

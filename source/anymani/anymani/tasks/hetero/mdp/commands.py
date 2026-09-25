@@ -1,0 +1,525 @@
+(
+    'Own the fixed hand +z, 30-degree moving-subgoal command and signed progress. '
+    'Consumers refresh post-physics state using common_step_counter for one '
+    'update per policy step. Success advances the subgoal without ending the '
+    'episode; count terminal-step pulses before command reset.'
+)
+
+from __future__ import annotations
+
+import math
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, cast
+
+import torch
+from isaaclab.assets import Articulation, RigidObject
+from isaaclab.managers import CommandTerm, CommandTermCfg
+from isaaclab.utils import configclass
+
+from .contact_state import HeterogeneousContactState
+from .diagnostics import asset_episode_sufficient_statistics
+from .task_math import (
+    axis_angle_from_quaternion_wxyz,
+    goal_errors_and_success,
+    hand_axis_to_world,
+    moving_goal_quaternion,
+    orientation_tracking_flags,
+    projected_space_rotation_delta,
+    quaternion_inverse_wxyz,
+    quaternion_multiply_wxyz,
+    quaternion_to_matrix_wxyz,
+    rotation_frontier_update,
+)
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedRLEnv
+
+
+def _identity_quaternion(num_envs: int, device: torch.device | str) -> torch.Tensor:
+    'Create an [N,4] identity-quaternion batch in (w,x,y,z) order.'
+
+    quaternion = torch.zeros(num_envs, 4, device=device)
+    quaternion[:, 0] = 1.0
+    return quaternion
+
+
+class HeterogeneousRotationCommand(CommandTerm):
+    (
+        'Continuous rotation about the fixed semantic hand +z axis. Preserve signs in '
+        'net_rotation_rad and net_rotation_turns; store positive capability '
+        'separately as positive_net_rotation_turns. The command tensor is hand-frame '
+        'goal log error [N,3]; the initial actor may ignore it and learn a '
+        'fixed-direction primitive.'
+    )
+
+    cfg: HeterogeneousRotationCommandCfg
+
+    def __init__(self, cfg: HeterogeneousRotationCommandCfg, env: ManagerBasedRLEnv) -> None:
+        'Allocate goal, anchor, signed-progress, and episode-metric buffers.'
+
+        super().__init__(cfg, env)
+        self._env = env
+        self.object = cast(RigidObject, env.scene[cfg.object_name])
+        self.robot = cast(Articulation, env.scene[cfg.robot_name])
+        self.semantic_R_ha = torch.tensor(cfg.semantic_R_ha, dtype=torch.float32, device=self.device).reshape(3, 3)
+        identity = torch.eye(3, device=self.device)
+        if not torch.allclose(self.semantic_R_ha @ self.semantic_R_ha.T, identity, atol=1.0e-4, rtol=0.0):
+            raise ValueError("semantic_R_ha must be orthonormal")
+        if abs(float(torch.det(self.semantic_R_ha).item()) - 1.0) > 1.0e-4:
+            raise ValueError("semantic_R_ha must have determinant +1")
+
+        axis_h = torch.tensor(cfg.fixed_axis_h, dtype=torch.float32, device=self.device).reshape(1, 3)
+        axis_norm = torch.linalg.vector_norm(axis_h, dim=-1, keepdim=True)
+        if bool((axis_norm < 1.0e-12).any().item()):
+            raise ValueError("fixed hand-frame rotation axis must be non-zero")
+        self.axis_h = (axis_h / axis_norm).repeat(self.num_envs, 1)  # Fixed hand-frame axis k_h = +z.
+        self.axis_w = torch.zeros(self.num_envs, 3, device=self.device)
+        self.goal_quat_w = _identity_quaternion(self.num_envs, self.device)
+        self.goal_error_so3_h = torch.zeros(self.num_envs, 3, device=self.device)
+        self.position_anchor_w = torch.zeros(self.num_envs, 3, device=self.device)
+        self.previous_quat_w = _identity_quaternion(self.num_envs, self.device)
+        self.has_previous = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.last_progress_step = torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
+
+        self.delta_psi = torch.zeros(self.num_envs, device=self.device)  # signed rad/policy step
+        self.net_rotation_rad = torch.zeros(self.num_envs, device=self.device)  # Signed net rotation Psi.
+        self.absolute_path_rotation_rad = torch.zeros(self.num_envs, device=self.device)  # Accumulated absolute rotation, sum of |delta psi_t|.
+        self.max_positive_net_rotation_rad = torch.zeros(self.num_envs, device=self.device)  # Positive rotation frontier M_t, rad.
+        self._rotation_frontier_count_int = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )  # Exact integer frontier count K_t = floor(M_t / 30 deg).
+        self.rotation_frontier_count = torch.zeros(self.num_envs, device=self.device)  # Float mirror for metrics and rewards.
+        self.rotation_frontier_delta = torch.zeros(self.num_envs, device=self.device)  # Frontier increment delta K_t; it may exceed one.
+        self.rotation_frontier_pulse = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.rotation_frontier_throughput_per_horizon_s = torch.zeros(self.num_envs, device=self.device)
+        self.net_rotation_turns = torch.zeros(self.num_envs, device=self.device)  # Signed net turns Psi / (2 pi).
+        self.positive_net_rotation_turns = torch.zeros(self.num_envs, device=self.device)
+        self.reached_positive_full_turn = torch.zeros(self.num_envs, device=self.device)
+        self.axis_speed_rad_s = torch.zeros(self.num_envs, device=self.device)
+        self.axis_speed_ema_rad_s = torch.zeros(self.num_envs, device=self.device)
+        self.orientation_keypoint_error_m = torch.zeros(self.num_envs, device=self.device)
+        self.orientation_error_rad = torch.zeros(self.num_envs, device=self.device)  # Direct SO(3) angle error.
+        self.goal_advance_pulse = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.goal_advance_count = torch.zeros(self.num_envs, device=self.device)  # Number of angle-only target advances.
+        self.reference_window_net_turns = torch.zeros(self.num_envs, device=self.device)  # Actual net turns in the first 30 seconds.
+        self.reference_window_complete = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.position_error_m = torch.zeros(self.num_envs, device=self.device)
+        self.goal_normal_alignment = torch.ones(self.num_envs, device=self.device)
+        self.goal_success_pulse = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.goal_success_count = torch.zeros(self.num_envs, device=self.device)
+        self.subgoal_throughput_per_horizon_s = torch.zeros(self.num_envs, device=self.device)
+
+        # The last reward term snapshots full-env tensors before automatic reset. Command/event resets preserve them,
+        # so returned done rows still describe the terminal physics frame, not the new episode zeros.
+        dataset_rows = (
+            torch.tensor(cfg.dataset_row_by_env, dtype=torch.long, device=self.device)
+            if len(cfg.dataset_row_by_env) == self.num_envs
+            else torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
+        )
+        self.post_physics_evaluation_snapshot: dict[str, torch.Tensor] = {
+            "valid": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            "step": torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device),
+            "dataset_row": dataset_rows,
+            "axis_speed_rad_s": torch.zeros(self.num_envs, device=self.device),
+            "net_rotation_rad": torch.zeros(self.num_envs, device=self.device),
+            "absolute_path_rotation_rad": torch.zeros(self.num_envs, device=self.device),
+            "max_positive_net_rotation_rad": torch.zeros(self.num_envs, device=self.device),
+            "rotation_frontier_count": torch.zeros(self.num_envs, device=self.device),
+            "rotation_frontier_delta": torch.zeros(self.num_envs, device=self.device),
+            "rotation_frontier_pulse": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            "completed_subgoals": torch.zeros(self.num_envs, device=self.device),
+            "completed_orientation_subgoals": torch.zeros(self.num_envs, device=self.device),
+            "goal_advance_pulse": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            "orientation_error_rad": torch.zeros(self.num_envs, device=self.device),
+            "adr_position_level": torch.zeros(self.num_envs, dtype=torch.long, device=self.device),
+            "adr_position_offset_x_h_m": torch.zeros(self.num_envs, device=self.device),
+            "adr_position_offset_y_h_m": torch.zeros(self.num_envs, device=self.device),
+            "net_turns_first30": torch.zeros(self.num_envs, device=self.device),
+            "first30_complete": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            "goal_success_pulse": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+            "episode_duration_s": torch.zeros(self.num_envs, device=self.device),
+            "tip_active_count": torch.zeros(self.num_envs, device=self.device),
+            "palm_contact": torch.zeros(self.num_envs, device=self.device),
+            "finger_non_tip_contact": torch.zeros(self.num_envs, device=self.device),
+            "orientation_keypoint_error_m": torch.zeros(self.num_envs, device=self.device),
+            "position_error_m": torch.zeros(self.num_envs, device=self.device),
+            "termination_object_out_of_anchor": torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device
+            ),
+            "termination_goal_axis_misaligned": torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device
+            ),
+            "termination_time_out": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+        }
+
+        self.metrics.update(
+            {
+                "rotation/delta_psi_rad": self.delta_psi,
+                "rotation/net_rotation_rad": self.net_rotation_rad,
+                "rotation/absolute_path_rotation_rad": self.absolute_path_rotation_rad,
+                "rotation/max_positive_net_rotation_rad": self.max_positive_net_rotation_rad,
+                "rotation/frontier_count": self.rotation_frontier_count,
+                "rotation/frontier_delta": self.rotation_frontier_delta,
+                "rotation/frontier_throughput_per_horizon_s": self.rotation_frontier_throughput_per_horizon_s,
+                "rotation/net_rotation_turns_signed": self.net_rotation_turns,
+                "rotation/positive_net_rotation_turns": self.positive_net_rotation_turns,
+                "rotation/reached_positive_full_turn": self.reached_positive_full_turn,
+                "rotation/axis_speed_rad_s": self.axis_speed_rad_s,
+                "rotation/axis_speed_ema_rad_s": self.axis_speed_ema_rad_s,
+                "pose/orientation_keypoint_error_m": self.orientation_keypoint_error_m,
+                "pose/orientation_error_rad": self.orientation_error_rad,
+                "task/orientation_goal_count": self.goal_advance_count,
+                "pose/position_error_m": self.position_error_m,
+                "pose/goal_normal_alignment_signed": self.goal_normal_alignment,
+                "task/goal_success_count": self.goal_success_count,
+                "task/subgoal_throughput_per_horizon_s": self.subgoal_throughput_per_horizon_s,
+            }
+        )
+        ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+        self._capture_reset_state(ids)
+        self.goal_quat_w[ids] = self.object.data.root_quat_w[ids]  # Start the first target from this episode's actual pose.
+        self._resample_command(ids)
+
+    @property
+    def command(self) -> torch.Tensor:
+        'Return the hand-frame relative goal log error, shape [N,3].'
+
+        return self.goal_error_so3_h
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
+        (
+            'Count the completed episode, then establish its anchor and goal from the '
+            'post-pregrasp object pose. Reset occurs after reward and before regular '
+            'command compute; count a terminal-step success pulse here because '
+            '_update_command has not consumed it yet.'
+        )
+
+        ids = self._as_ids(env_ids)
+        self.goal_success_count[ids] += self.goal_success_pulse[ids].to(dtype=self.goal_success_count.dtype)
+        self.goal_advance_count[ids] += self.goal_advance_pulse[ids].float()
+        self.subgoal_throughput_per_horizon_s[ids] = self.goal_success_count[ids] / float(self.cfg.horizon_s)
+        asset_extras = self._asset_episode_extras(ids)  # Read terminal rows before super.reset clears metrics.
+        self.goal_quat_w[ids] = self.object.data.root_quat_w[ids]  # The first resample inside super.reset uses the new episode initial pose.
+        extras = super().reset(env_ids)
+        extras.update(asset_extras)
+        self._capture_reset_state(ids)
+        self._refresh_goal_state(ids)
+        return extras
+
+    def _asset_episode_extras(self, ids: torch.Tensor) -> dict[str, float]:
+        (
+            'Return per-asset terminal sums and counts. Read only selected reset rows and '
+            'the current TerminationManager snapshot; avoid stale dones from other envs. '
+            'The caller already includes any terminal-step pulse in goal_success_count.'
+        )
+
+        if not self.cfg.log_asset_metrics:
+            return {}
+        if len(self.cfg.dataset_row_by_env) != self.num_envs:
+            raise RuntimeError("asset diagnostics require one formal dataset row per environment")
+        dataset_rows = torch.tensor(self.cfg.dataset_row_by_env, dtype=torch.long, device=self.device)
+        duration_s = self._env.episode_length_buf.to(dtype=torch.float32) * float(self._env.step_dt)
+        termination = {
+            name: self._env.termination_manager.get_term(name)
+            for name in ("object_out_of_anchor", "goal_axis_misaligned", "time_out")
+        }
+        # The caller already added the terminal pulse to goal_success_count; pass all-false pulses to avoid double counting.
+        return asset_episode_sufficient_statistics(
+            dataset_row_by_env=dataset_rows,
+            reset_env_ids=ids,
+            goal_success_count=self.goal_success_count,
+            goal_success_pulse=torch.zeros_like(self.goal_success_pulse),
+            net_rotation_rad=self.net_rotation_rad,
+            positive_net_rotation_turns=self.positive_net_rotation_turns,
+            max_positive_net_rotation_rad=self.max_positive_net_rotation_rad,
+            rotation_frontier_count=self.rotation_frontier_count,
+            episode_duration_s=duration_s,
+            termination_bits=termination,
+            horizon_s=float(self.cfg.horizon_s),
+        )
+
+    def capture_post_physics_evaluation_snapshot(
+        self,
+        contact: HeterogeneousContactState,
+        termination_bits: dict[str, torch.Tensor],
+    ) -> None:
+        (
+            'Freeze full-axis trajectory statistics from the post-physics, pre-reset '
+            'frame. Call this as the last reward term, after failure bits and contact EMA '
+            'refresh but before scene reset, pregrasp events, or command reset. Preserve '
+            'the snapshot through automatic reset and overwrite it on the next step.'
+        )
+
+        required_terms = ("object_out_of_anchor", "goal_axis_misaligned", "time_out")
+        if set(termination_bits) != set(required_terms):
+            raise ValueError("evaluation snapshot requires exact drop/axis/timeout termination terms")
+        if any(bits.shape != (self.num_envs,) for bits in termination_bits.values()):
+            raise ValueError("evaluation snapshot termination bits must share the environment axis")
+        self.ensure_post_physics_progress_updated()
+        contact.ensure_updated(self._env)
+        snapshot = self.post_physics_evaluation_snapshot
+        snapshot["valid"].fill_(True)
+        snapshot["step"].fill_(int(self._env.common_step_counter))
+        snapshot["axis_speed_rad_s"].copy_(self.axis_speed_rad_s)
+        snapshot["net_rotation_rad"].copy_(self.net_rotation_rad)
+        snapshot["absolute_path_rotation_rad"].copy_(self.absolute_path_rotation_rad)
+        snapshot["max_positive_net_rotation_rad"].copy_(self.max_positive_net_rotation_rad)
+        snapshot["rotation_frontier_count"].copy_(self.rotation_frontier_count)
+        snapshot["rotation_frontier_delta"].copy_(self.rotation_frontier_delta)
+        snapshot["rotation_frontier_pulse"].copy_(self.rotation_frontier_pulse)
+        snapshot["completed_subgoals"].copy_(
+            self.goal_success_count + self.goal_success_pulse.to(dtype=self.goal_success_count.dtype)
+        )
+        snapshot["goal_success_pulse"].copy_(self.goal_success_pulse)
+        snapshot["goal_advance_pulse"].copy_(self.goal_advance_pulse)
+        snapshot["completed_orientation_subgoals"].copy_(self.goal_advance_count + self.goal_advance_pulse.float())
+        snapshot["orientation_error_rad"].copy_(self.orientation_error_rad)
+        snapshot["net_turns_first30"].copy_(self.reference_window_net_turns)
+        snapshot["first30_complete"].copy_(self.reference_window_complete)
+        adr = getattr(self._env, "_hetero_position_adr", None)
+        if adr is not None:
+            snapshot["adr_position_level"].copy_(adr.level)
+            snapshot["adr_position_offset_x_h_m"].copy_(adr.offset_h[:, 0])
+            snapshot["adr_position_offset_y_h_m"].copy_(adr.offset_h[:, 1])  # Freeze episode facts before reset changes level or resamples state.
+        snapshot["episode_duration_s"].copy_(
+            self._env.episode_length_buf.to(dtype=torch.float32) * float(self._env.step_dt)
+        )
+        snapshot["tip_active_count"].copy_(contact.tip_bits.sum(dim=-1).to(dtype=torch.float32))
+        snapshot["palm_contact"].copy_(contact.palm_bits[:, 0].to(dtype=torch.float32))
+        snapshot["finger_non_tip_contact"].copy_(
+            contact.finger_non_tip_bits.any(dim=-1).to(dtype=torch.float32)
+        )
+        snapshot["orientation_keypoint_error_m"].copy_(self.orientation_keypoint_error_m)
+        snapshot["position_error_m"].copy_(self.position_error_m)
+        for term_name in required_terms:
+            snapshot[f"termination_{term_name}"].copy_(termination_bits[term_name])
+
+    def ensure_post_physics_progress_updated(self) -> None:
+        'Idempotently refresh signed progress, goal error, and success pulse using the common-step stamp.'
+
+        step = int(self._env.common_step_counter)
+        update_mask = self.last_progress_step != step
+        if not bool(update_mask.any().item()):
+            return
+        ids = update_mask.nonzero(as_tuple=False).flatten()
+        self.axis_w[ids] = hand_axis_to_world(
+            self.axis_h[ids], self.robot.data.root_quat_w[ids], self.semantic_R_ha
+        )
+        current_quaternion = self.object.data.root_quat_w
+        valid = update_mask & self.has_previous
+        self.delta_psi[ids] = 0.0
+        if bool(valid.any().item()):
+            self.delta_psi[valid] = projected_space_rotation_delta(
+                self.previous_quat_w[valid], current_quaternion[valid], self.axis_w[valid]
+            )
+        self.net_rotation_rad[ids] += self.delta_psi[ids]
+        self.absolute_path_rotation_rad[ids] += self.delta_psi[ids].abs()
+        maximum, count, delta, pulse = rotation_frontier_update(
+            self.net_rotation_rad[ids],
+            self.max_positive_net_rotation_rad[ids],
+            self._rotation_frontier_count_int[ids],
+            frontier_interval_rad=float(self.cfg.rotation_frontier_interval_rad),
+        )
+        self.max_positive_net_rotation_rad[ids] = maximum  # Positive net-rotation frontier M_t is monotonic.
+        self._rotation_frontier_count_int[ids] = count  # Keep the integer count as truth; avoid repeated float floor/round trips.
+        self.rotation_frontier_count[ids] = count.to(dtype=torch.float32)  # CommandManager metrics can average this float view.
+        self.rotation_frontier_delta[ids] = delta.to(dtype=torch.float32)  # Rewards retain multi-frontier increments from one step.
+        self.rotation_frontier_pulse[ids] = pulse
+        self.rotation_frontier_throughput_per_horizon_s[ids] = self.rotation_frontier_count[ids] / float(
+            self.cfg.horizon_s
+        )
+        self.net_rotation_turns[ids] = self.net_rotation_rad[ids] / (2.0 * math.pi)
+        self.positive_net_rotation_turns[ids] = torch.clamp(self.net_rotation_rad[ids], min=0.0) / (2.0 * math.pi)
+        self.reached_positive_full_turn[ids] = (self.net_rotation_rad[ids] >= 2.0 * math.pi).to(torch.float32)
+        self.axis_speed_rad_s[ids] = self.delta_psi[ids] / float(self._env.step_dt)
+        reached_window = (~self.reference_window_complete[ids]) & (
+            self._env.episode_length_buf[ids].float() * float(self._env.step_dt) >= self.cfg.adr_reference_seconds
+        )
+        window_ids = ids[reached_window]
+        self.reference_window_net_turns[window_ids] = self.net_rotation_rad[window_ids] / (2 * math.pi)
+        self.reference_window_complete[window_ids] = True  # Later episode duration does not change completed first-30-second statistics.
+        alpha = 1.0 - math.exp(-float(self._env.step_dt) / float(self.cfg.speed_ema_time_constant_s))
+        self.axis_speed_ema_rad_s[ids] = (
+            (1.0 - alpha) * self.axis_speed_ema_rad_s[ids] + alpha * self.axis_speed_rad_s[ids]
+        )
+        self.previous_quat_w[ids] = current_quaternion[ids].detach()
+        self.has_previous[ids] = True
+        self._refresh_goal_state(ids)
+        self.last_progress_step[ids] = step
+
+    def _update_metrics(self) -> None:
+        'Reuse the current post-physics snapshot for the CommandManager metric hook.'
+
+        self.ensure_post_physics_progress_updated()
+
+    def _update_command(self) -> None:
+        'After reward consumes the success pulse, advance the next 30-degree goal from the current object pose.'
+
+        success_ids = self.goal_advance_pulse.nonzero(as_tuple=False).flatten()
+        if success_ids.numel() == 0:
+            return
+        self.goal_success_count[success_ids] += self.goal_success_pulse[success_ids].float()  # Reward only targets that meet the position qualification.
+        self.goal_advance_count[success_ids] += 1.0
+        self.subgoal_throughput_per_horizon_s[success_ids] = self.goal_success_count[success_ids] / float(
+            self.cfg.horizon_s
+        )
+        self._resample_command(success_ids)
+        self.command_counter[success_ids] += 1
+        self.time_left[success_ids] = self.cfg.resampling_time_range[1]
+        self.goal_success_pulse[success_ids] = False
+        self.goal_advance_pulse[success_ids] = False
+
+    def _resample_command(self, env_ids: Sequence[int] | torch.Tensor) -> None:
+        'Left-multiply a fixed space rotation onto the current pose; do not accumulate from the old goal.'
+
+        ids = self._as_ids(env_ids)
+        if ids.numel() == 0:
+            return
+        self.axis_w[ids] = hand_axis_to_world(
+            self.axis_h[ids], self.robot.data.root_quat_w[ids], self.semantic_R_ha
+        )
+        self.goal_quat_w[ids] = moving_goal_quaternion(
+            self.goal_quat_w[ids] if self.cfg.goal_reference == "previous_goal" else self.object.data.root_quat_w[ids],
+            self.axis_w[ids], subgoal_angle_rad=float(self.cfg.subgoal_angle_rad)
+        )
+        self._refresh_goal_state(ids)
+
+    def _capture_reset_state(self, ids: torch.Tensor) -> None:
+        'Capture the world position anchor and clear progress only for selected rows.'
+
+        self.position_anchor_w[ids] = self.object.data.root_pos_w[ids].detach()
+        self.previous_quat_w[ids] = self.object.data.root_quat_w[ids].detach()
+        self.has_previous[ids] = True
+        self.delta_psi[ids] = 0.0
+        self.net_rotation_rad[ids] = 0.0
+        self.absolute_path_rotation_rad[ids] = 0.0
+        self.max_positive_net_rotation_rad[ids] = 0.0
+        self._rotation_frontier_count_int[ids] = 0
+        self.rotation_frontier_count[ids] = 0.0
+        self.rotation_frontier_delta[ids] = 0.0
+        self.rotation_frontier_pulse[ids] = False
+        self.rotation_frontier_throughput_per_horizon_s[ids] = 0.0
+        self.net_rotation_turns[ids] = 0.0
+        self.positive_net_rotation_turns[ids] = 0.0
+        self.reached_positive_full_turn[ids] = 0.0
+        self.axis_speed_rad_s[ids] = 0.0
+        self.axis_speed_ema_rad_s[ids] = 0.0
+        self.goal_success_pulse[ids] = False
+        self.goal_success_count[ids] = 0.0
+        self.goal_advance_count[ids] = 0.0
+        self.goal_advance_pulse[ids] = False
+        self.reference_window_net_turns[ids] = 0.0
+        self.reference_window_complete[ids] = False
+        self.subgoal_throughput_per_horizon_s[ids] = 0.0
+        self.last_progress_step[ids] = int(self._env.common_step_counter)
+
+    def _refresh_goal_state(self, ids: torch.Tensor) -> None:
+        'Refresh strict two-gate success, signed normal alignment, and hand-frame goal log error.'
+
+        if ids.numel() == 0:
+            return
+        orientation_error, position_error, alignment, success = goal_errors_and_success(
+            self.object.data.root_pos_w[ids],
+            self.object.data.root_quat_w[ids],
+            self.position_anchor_w[ids],
+            self.goal_quat_w[ids],
+            keypoint_radius_m=float(self.cfg.keypoint_radius_m),
+            orientation_threshold_m=float(self.cfg.orientation_success_threshold_m),
+            position_threshold_m=float(self.cfg.position_success_threshold_m),
+        )
+        self.orientation_keypoint_error_m[ids] = orientation_error
+        self.position_error_m[ids] = position_error
+        self.goal_normal_alignment[ids] = alignment
+        self.goal_success_pulse[ids] = success
+        error_quaternion_w = quaternion_multiply_wxyz(
+            self.goal_quat_w[ids], quaternion_inverse_wxyz(self.object.data.root_quat_w[ids])
+        )
+        error_vector_w = axis_angle_from_quaternion_wxyz(error_quaternion_w)
+        self.orientation_error_rad[ids] = torch.linalg.vector_norm(error_vector_w, dim=-1)
+        if self.cfg.orientation_only_advance:
+            advance, qualified = orientation_tracking_flags(
+                self.orientation_error_rad[ids], position_error,
+                angle_tolerance_rad=self.cfg.orientation_success_threshold_rad,
+                position_tolerance_m=self.cfg.position_success_threshold_m,
+            )
+            self.goal_success_pulse[ids] = qualified
+            self.goal_advance_pulse[ids] = advance
+        else:
+            self.goal_advance_pulse[ids] = success  # Preserve the legacy two-gate pose mode value for value.
+        rotation_wa = quaternion_to_matrix_wxyz(self.robot.data.root_quat_w[ids])
+        rotation_hw = self.semantic_R_ha.unsqueeze(0) @ rotation_wa.transpose(-1, -2)
+        self.goal_error_so3_h[ids] = torch.einsum("bij,bj->bi", rotation_hw, error_vector_w)
+
+    def _as_ids(self, env_ids: Sequence[int] | torch.Tensor | None) -> torch.Tensor:
+        'Normalize full/partial CommandTerm selections to a device LongTensor.'
+
+        if env_ids is None:
+            return torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+        return torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
+
+
+def get_rotation_command(env: ManagerBasedRLEnv, command_name: str) -> HeterogeneousRotationCommand:
+    'Resolve and idempotently refresh the requested rotation command.'
+
+    term = env.command_manager.get_term(command_name)
+    if not isinstance(term, HeterogeneousRotationCommand):
+        raise TypeError(f"command {command_name!r} is not HeterogeneousRotationCommand")
+    term.ensure_post_physics_progress_updated()
+    return term
+
+
+@configclass
+class HeterogeneousRotationCommandCfg(CommandTermCfg):
+    'Palm-up DexCube command with fixed hand +z axis and 30-degree moving subgoals.'
+
+    class_type: type = HeterogeneousRotationCommand
+    object_name: str = "object"
+    robot_name: str = "robot"
+    fixed_axis_h: tuple[float, float, float] = (0.0, 0.0, 1.0)
+    semantic_R_ha: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    subgoal_angle_rad: float = math.pi / 6.0
+    rotation_frontier_interval_rad: float = math.pi / 6.0  # Core physical success interval is 30 deg.
+    keypoint_radius_m: float = 0.05
+    orientation_success_threshold_m: float = 0.005
+    orientation_success_threshold_rad: float = 0.2
+    orientation_only_advance: bool = False  # In the new mode, angle advances the goal and position only gates the bonus.
+    goal_reference: str = "current_object"  # The new previous-goal mode creates a fixed 30-degree pose sequence.
+    adr_reference_seconds: float = 30.0
+    position_success_threshold_m: float = 0.025
+    speed_ema_time_constant_s: float = 0.25
+    horizon_s: float = 120.0  # Fixed-horizon throughput denominator.
+    dataset_row_by_env: tuple[int, ...] = ()  # diagnostics-only formal row labels
+    log_asset_metrics: bool = False  # Training does not emit per-asset dynamic keys by default.
+    resampling_time_range: tuple[float, float] = (1.0e6, 1.0e6)  # Only reset or success advances the goal.
+    debug_vis: bool = False
+
+    def __post_init__(self) -> None:
+        'Statically reject invalid frames, axes, angles, distances, and time constants.'
+
+        if len(self.semantic_R_ha) != 9:
+            raise ValueError("semantic_R_ha must contain nine row-major values")
+        if math.sqrt(sum(value * value for value in self.fixed_axis_h)) < 1.0e-12:
+            raise ValueError("fixed_axis_h must be non-zero")
+        if not 0.0 < self.subgoal_angle_rad < math.pi:
+            raise ValueError("subgoal angle must lie in (0,pi)")
+        if self.goal_reference not in {"current_object", "previous_goal"}:
+            raise ValueError("unknown goal reference")
+        if not 0 < self.orientation_success_threshold_rad < self.subgoal_angle_rad or self.adr_reference_seconds <= 0:
+            raise ValueError("angular tolerance must be smaller than subgoal angle and reference window positive")
+        positive = (
+            self.keypoint_radius_m,
+            self.orientation_success_threshold_m,
+            self.position_success_threshold_m,
+            self.speed_ema_time_constant_s,
+            self.horizon_s,
+            self.rotation_frontier_interval_rad,
+        )
+        if any(not math.isfinite(value) or value <= 0.0 for value in positive):
+            raise ValueError("command distance/time parameters must be finite and positive")
+
+
+__all__ = [
+    "HeterogeneousRotationCommand",
+    "HeterogeneousRotationCommandCfg",
+    "get_rotation_command",
+]

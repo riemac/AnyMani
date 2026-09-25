@@ -1,0 +1,58 @@
+# Replace inventory.run_dir with a pre-made run produced by the asset generator.
+# Geometry mutation, validation, and physics settings remain in the Python config.
+schema_version: 1.0.0
+template_id: cross_embodiment_balanced_v1
+
+inventory:
+  run_dir: source/anymani/anymani/assets/generated/<premade_run>
+
+seeds:
+  selection: 20260819
+  mutation: 20260820
+
+balance:
+  selection_unit: canonical_mirror_pair
+  macro_family:
+    single_allegro: 1
+    single_leap: 1
+    mixed_allegro_base: 1
+    mixed_leap_base: 1
+  topology_shape:
+    full: 2
+    missing: 1
+  missing_slot: uniform
+  mixed_composition_group: uniform
+  dof: uniform_available
+
+partitions:
+  train:
+    mother_count: 512
+    assets_per_lineage: 16
+  validation:
+    unseen_variant_set:
+      mother_count: 64
+      assets_per_lineage: 8
+    unseen_mother:
+      mother_count: 64
+      assets_per_lineage: 8
+  evaluation:
+    unseen_variant_set:
+      mother_count: 64
+      assets_per_lineage: 16
+    unseen_mother:
+      mother_count: 64
+      assets_per_lineage: 16
+    official_zero_shot: []
+
+generation_policy:
+  dataset_retry_rounds: 3
+  uniqueness: resample
+  failed_run_policy: quarantine
+
+manifests:
+  ssl:
+    enabled: true
+  ppo:
+    enabled: true
+    train_mother_count: 128
+    reuse_ssl_holdouts: true

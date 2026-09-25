@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.2.0",
+  "cohort_id": "allegro-training-runtime-lock-excerpt",
+  "sources": {
+    "ppo": {
+      "manifest_path": "source-manifest.yaml",
+      "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "members": [{"cohort_index": 0, "source_alias": "ppo", "source_row": 0, "asset_id": "fixture"}],
+  "selection": {
+    "pregrasp_generation_identity": {
+      "refinement": {
+        "strict_mode_exploitation": {
+          "position_std_m": [5e-05, 5e-05, 2.5e-05]
+        }
+      }
+    }
+  },
+  "fixture_provenance": {
+    "source_lock_sha256": "1f18827f47e29a5c12d36948cec0ad166291a3e1838dc8765d9ef0e2dfc5f8dc",
+    "source_cohort": "allegro_training"
+  }
+}

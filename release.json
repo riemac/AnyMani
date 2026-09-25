@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "release": "v1.0.0",
+  "artifacts": {
+    "models": {
+      "url": "https://github.com/riemac/AnyMani/releases/download/v1.0.0/anymani-paper-models-v1.0.0.tar.gz",
+      "sha256": "e0c60e8070ffac691a0f7b428ceb92536b0d229c0e4083e05f32de51f9f0eb0c",
+      "bytes": 24730909
+    },
+    "assets": {
+      "url": "https://github.com/riemac/AnyMani/releases/download/v1.0.0/anymani-paper-assets-v1.0.0.tar.gz",
+      "sha256": "b7482152d0305b9eae25cdd96d1bbdba9f02e918f80c0d9b4cb2a5da37b8e3b1",
+      "bytes": 7917344,
+      "archive_root": "anymani-paper-assets-v1.0.0"
+    }
+  }
+}

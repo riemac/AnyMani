@@ -1,0 +1,632 @@
+"Loads ordered cohort locks and verifies each member against its source row, content hash, and canonical identity."
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, cast
+
+from .dataset import HandAssetDataset, HandAssetProvenance, ResolvedHandAssetPartition, ResolvedHandAssetRecord
+from .path_utils import resolve_bank_path
+from .prepared_train import resolve_prepared_train
+from .yaml_utils import safe_load
+
+HAND_ASSET_COHORT_SCHEMA_VERSION = "1.1.0"
+"""Resolved member-level cohort lock schema."""
+
+HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION = "1.2.0"
+"Version of the canonical-final ordered cohort lock."
+
+_SUPPORTED_HAND_ASSET_COHORT_SCHEMA_VERSIONS = {
+    "1.0.0",
+    HAND_ASSET_COHORT_SCHEMA_VERSION,
+    HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION,
+}
+"Readable versions of source-qualified cohort locks."
+
+
+@dataclass(frozen=True)
+class HandAssetCohortSource:
+    "Source manifest path and byte hash for a named cohort alias."
+
+    alias: str  # Short source-qualified member prefix, for example ``ppo`` or ``ssl``.
+    manifest_path: Path  # Resolved parent dataset YAML path.
+    manifest_sha256: str  # Exact parent YAML byte digest.
+
+
+@dataclass(frozen=True)
+class HandAssetCohortMember:
+    "One ordered member binding a local cohort index to a source manifest row and full content identity."
+
+    cohort_index: int
+    source_alias: str  # Key into :attr:`ResolvedHandAssetCohort.sources`.
+    source_row: int  # Row within the selected source manifest's resolved train partition.
+    asset_id: str  # Sidecar asset identity verified against the resolved container.
+    content_hash: str  # Typed source semantics identity; empty only for legacy fixtures.
+    provenance: HandAssetProvenance  # Exact run/group/mother/variant role from the source resolver.
+    mutation_descriptor: Mapping[str, Any]
+    configuration_domain_hash: str = ""
+    physical_geometry_hash: str = ""
+    canonical_schema_digest: str = ""
+
+    @property
+    def source_key(self) -> str:
+        r"""Return the source-qualified row key, which is unique even when numeric rows collide."""
+
+        return f"{self.source_alias}#{self.source_row}"
+
+
+@dataclass(frozen=True)
+class ResolvedHandAssetCohort:
+    "An ordered cohort whose source rows and content identities are checked against frozen locks."
+
+    cohort_id: str  # Human-readable stable experiment-support identifier.
+    lock_path: Path  # Exact persisted lock path.
+    lock_sha256: str  # Exact lock YAML bytes.
+    selection: Mapping[str, Any]  # Auditable selector recipe/result metadata; never policy input.
+    canonical_binding: Mapping[str, Any]
+    sources: Mapping[str, HandAssetCohortSource]  # Parent manifests keyed by lock alias.
+    members: tuple[HandAssetCohortMember, ...]  # Ordered local member axis.
+    partition: ResolvedHandAssetPartition  # Existing records in exactly the same local order.
+
+    @property
+    def assets(self):
+        r"""Return the ordered :class:`HandContainer` axis consumed by canonical lowering."""
+
+        return self.partition.assets
+
+    @property
+    def source_keys(self) -> tuple[str, ...]:
+        r"""Return stable human/machine provenance keys aligned with the local cohort axis."""
+
+        return tuple(member.source_key for member in self.members)
+
+
+def _validate_lock_mapping(document: Mapping[str, Any]) -> tuple[str, str, Mapping[str, Any], list[Any]]:
+    r"""Validate non-I/O cohort fields and return the three structured roots."""
+
+    schema_version = str(document.get("schema_version", ""))
+    if schema_version not in _SUPPORTED_HAND_ASSET_COHORT_SCHEMA_VERSIONS:
+        raise ValueError(
+            f"hand asset cohort schema must be one of {sorted(_SUPPORTED_HAND_ASSET_COHORT_SCHEMA_VERSIONS)!r}"
+        )
+    cohort_id = str(document.get("cohort_id", "")).strip()
+    sources = document.get("sources")
+    members = document.get("members")
+    if not cohort_id or not isinstance(sources, Mapping) or not sources:
+        raise ValueError("cohort lock requires a non-empty cohort_id and sources mapping")
+    if not isinstance(members, list) or not members:
+        raise ValueError("cohort lock requires a non-empty ordered members list")
+    selection = document.get("selection", {})
+    if not isinstance(selection, Mapping):
+        raise TypeError("cohort selection metadata must be a mapping")
+    return schema_version, cohort_id, cast(Mapping[str, Any], selection), members
+
+
+def _mutation_descriptor(record: ResolvedHandAssetRecord) -> dict[str, Any]:
+
+    if record.provenance.asset_role == "mother":
+        return {"kind": "mother"}
+    samples = record.container.sidecar.get("post_mutate_samples")
+    if not isinstance(samples, Mapping) or not samples:
+        raise ValueError(f"variant asset {record.container.asset_id!r} lacks post_mutate_samples")
+    payload = json.dumps(samples, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    mutator_modes = {
+        str(name): str(values.get("resolved_self_mode", ""))
+        for name, values in sorted(samples.items())
+        if isinstance(values, Mapping)
+    }
+    return {
+        "kind": "variant",
+        "post_mutate_samples_sha256": hashlib.sha256(payload).hexdigest(),
+        "mutator_modes": mutator_modes,
+        "source_origin_sample_id": str(record.container.sidecar.get("source_origin_sample_id", "")),
+        "source_origin_topology_dir": str(record.container.sidecar.get("source_origin_topology_dir", "")),
+    }
+
+
+def _member_document(
+    *,
+    cohort_index: int,
+    source_alias: str,
+    source_row: int,
+    record: ResolvedHandAssetRecord,
+) -> dict[str, Any]:
+    r"""Serialize one already-resolved record without duplicating bundle parsing logic."""
+
+    return {
+        "cohort_index": int(cohort_index),
+        "source_alias": source_alias,
+        "source_row": int(source_row),
+        "asset_id": record.container.asset_id,
+        "content_hash": record.content_hash,
+        "provenance": asdict(record.provenance),
+        "mutation_descriptor": _mutation_descriptor(record),
+    }
+
+
+def parse_hand_asset_cohort_document(data: bytes | str) -> Mapping[str, Any]:
+    'Loads and validates hand asset cohort document.'
+
+    try:
+        document = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        document = safe_load(data)
+    if not isinstance(document, Mapping):
+        raise TypeError("cohort lock root must be a mapping")
+    return cast(Mapping[str, Any], document)
+
+
+def load_hand_asset_cohort(
+    path: str | Path,
+    *,
+    require_geometry_semantics: bool = True,
+    allow_legacy_left_handedness: bool = False,
+) -> ResolvedHandAssetCohort:
+    'Loads and validates hand asset cohort.'
+
+    lock_path = resolve_bank_path(path)
+    raw_bytes = lock_path.read_bytes()
+    raw_document = parse_hand_asset_cohort_document(raw_bytes)
+    if not isinstance(raw_document, Mapping):
+        raise TypeError("cohort lock YAML root must be a mapping")
+    schema_version, cohort_id, selection, raw_members = _validate_lock_mapping(raw_document)
+
+    # Each source is resolved through the canonical dataset/prepared-cache path, then sealed against lock bytes.
+    sources: dict[str, HandAssetCohortSource] = {}
+    partitions: dict[str, ResolvedHandAssetPartition] = {}
+    raw_sources = cast(Mapping[str, Any], raw_document["sources"])
+    for alias, raw_source in raw_sources.items():
+        alias = str(alias).strip()
+        if not alias or "#" in alias or not isinstance(raw_source, Mapping):
+            raise ValueError("cohort source aliases must be non-empty, '#' free mappings")
+        dataset = HandAssetDataset.from_yaml(str(raw_source.get("manifest_path", "")))
+        expected_sha = str(raw_source.get("manifest_sha256", ""))
+        if dataset.source_sha256 != expected_sha:
+            raise ValueError(
+                f"cohort source {alias!r} manifest SHA mismatch: expected={expected_sha}, "
+                f"actual={dataset.source_sha256}"
+            )
+        partition, _cache_hit = resolve_prepared_train(
+            dataset,
+            require_geometry_semantics=require_geometry_semantics,
+            allow_legacy_left_handedness=allow_legacy_left_handedness,
+        )
+        sources[alias] = HandAssetCohortSource(alias, dataset.source_path, dataset.source_sha256)
+        partitions[alias] = partition
+
+    # Numeric source rows may overlap across manifests; source-qualified keys and physical assets may not.
+    members: list[HandAssetCohortMember] = []
+    records: list[ResolvedHandAssetRecord] = []
+    source_keys: set[str] = set()
+    asset_ids: set[str] = set()
+    nonempty_content_hashes: set[str] = set()
+    bundle_paths: set[Path] = set()
+    for expected_index, raw_member in enumerate(raw_members):
+        if not isinstance(raw_member, Mapping):
+            raise TypeError(f"cohort member {expected_index} must be a mapping")
+        cohort_index = int(raw_member.get("cohort_index", -1))
+        source_alias = str(raw_member.get("source_alias", ""))
+        source_row = int(raw_member.get("source_row", -1))
+        if cohort_index != expected_index:
+            raise ValueError(f"cohort member order/index mismatch: expected {expected_index}, got {cohort_index}")
+        if source_alias not in partitions or source_row < 0 or source_row >= len(partitions[source_alias].records):
+            raise ValueError(f"cohort member {cohort_index} has invalid source coordinate {source_alias}#{source_row}")
+        record = partitions[source_alias].records[source_row]
+        expected_asset_id = str(raw_member.get("asset_id", ""))
+        expected_content_hash = str(raw_member.get("content_hash", ""))
+        expected_provenance = raw_member.get("provenance")
+        if expected_asset_id != record.container.asset_id or expected_content_hash != record.content_hash:
+            raise ValueError(f"cohort member {cohort_index} asset/content identity disagrees with its source record")
+        if not isinstance(expected_provenance, Mapping) or dict(expected_provenance) != asdict(record.provenance):
+            raise ValueError(f"cohort member {cohort_index} lineage provenance disagrees with its source record")
+        actual_mutation_descriptor = _mutation_descriptor(record)
+        expected_mutation_descriptor = raw_member.get("mutation_descriptor")
+        if schema_version in {HAND_ASSET_COHORT_SCHEMA_VERSION, HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION} and (
+            not isinstance(expected_mutation_descriptor, Mapping)
+            or dict(expected_mutation_descriptor) != actual_mutation_descriptor
+        ):
+            raise ValueError(f"cohort member {cohort_index} mutation descriptor disagrees with its source record")
+        configuration_domain_hash = str(raw_member.get("configuration_domain_hash", ""))
+        physical_geometry_hash = str(raw_member.get("physical_geometry_hash", ""))
+        canonical_schema_digest = str(raw_member.get("canonical_schema_digest", ""))
+        if schema_version == HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION:
+            for field_name, value in (
+                ("configuration_domain_hash", configuration_domain_hash),
+                ("physical_geometry_hash", physical_geometry_hash),
+                ("canonical_schema_digest", canonical_schema_digest),
+            ):
+                if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                    raise ValueError(f"cohort member {cohort_index} {field_name} must be lowercase SHA-256")
+        member = HandAssetCohortMember(
+            cohort_index=cohort_index,
+            source_alias=source_alias,
+            source_row=source_row,
+            asset_id=record.container.asset_id,
+            content_hash=record.content_hash,
+            provenance=record.provenance,
+            mutation_descriptor=(
+                actual_mutation_descriptor
+                if schema_version in {HAND_ASSET_COHORT_SCHEMA_VERSION, HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION}
+                else {}
+            ),
+            configuration_domain_hash=configuration_domain_hash,
+            physical_geometry_hash=physical_geometry_hash,
+            canonical_schema_digest=canonical_schema_digest,
+        )
+        bundle_path = record.container.urdf_path.parent.resolve(strict=True)
+        if member.source_key in source_keys or member.asset_id in asset_ids or bundle_path in bundle_paths:
+            raise ValueError(f"cohort member {cohort_index} duplicates a source key, asset ID or bundle path")
+        if member.content_hash and member.content_hash in nonempty_content_hashes:
+            raise ValueError(f"cohort member {cohort_index} duplicates content hash {member.content_hash}")
+        source_keys.add(member.source_key)
+        asset_ids.add(member.asset_id)
+        bundle_paths.add(bundle_path)
+        if member.content_hash:
+            nonempty_content_hashes.add(member.content_hash)
+        members.append(member)
+        records.append(record)
+
+    if schema_version == HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION and len(
+        {member.physical_geometry_hash for member in members}
+    ) != len(members):
+        raise ValueError("canonical cohort lock contains duplicate physical geometry hashes")
+    raw_canonical_binding = raw_document.get("canonical_binding", {})
+    if not isinstance(raw_canonical_binding, Mapping):
+        raise TypeError("cohort canonical_binding must be a mapping")
+    if schema_version == HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION:
+        source_lock_sha256 = str(raw_canonical_binding.get("source_lock_sha256", ""))
+        if len(source_lock_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in source_lock_sha256
+        ):
+            raise ValueError("canonical cohort binding requires source_lock_sha256")
+    return ResolvedHandAssetCohort(
+        cohort_id=cohort_id,
+        lock_path=lock_path,
+        lock_sha256=hashlib.sha256(raw_bytes).hexdigest(),
+        selection=selection,
+        canonical_binding=cast(Mapping[str, Any], raw_canonical_binding),
+        sources=sources,
+        members=tuple(members),
+        partition=ResolvedHandAssetPartition(name=f"cohort:{cohort_id}", records=tuple(records)),
+    )
+
+
+def write_hand_asset_cohort_lock(
+    path: str | Path,
+    *,
+    cohort_id: str,
+    source_manifests: Mapping[str, str | Path],
+    member_coordinates: Sequence[tuple[str, int]],
+    selection: Mapping[str, Any],
+    require_geometry_semantics: bool = True,
+) -> Path:
+    'Writes hand asset cohort lock.'
+
+    cohort_id = str(cohort_id).strip()
+    if not cohort_id or not source_manifests or not member_coordinates:
+        raise ValueError("cohort writer requires cohort_id, source manifests and member coordinates")
+    datasets: dict[str, HandAssetDataset] = {}
+    partitions: dict[str, ResolvedHandAssetPartition] = {}
+    for raw_alias, manifest_path in source_manifests.items():
+        alias = str(raw_alias).strip()
+        if not alias or "#" in alias or alias in datasets:
+            raise ValueError(f"invalid or duplicate cohort source alias {raw_alias!r}")
+        dataset = HandAssetDataset.from_yaml(manifest_path)
+        partition, _cache_hit = resolve_prepared_train(
+            dataset,
+            require_geometry_semantics=require_geometry_semantics,
+        )
+        datasets[alias] = dataset
+        partitions[alias] = partition
+
+    members: list[dict[str, Any]] = []
+    for cohort_index, (source_alias, source_row) in enumerate(member_coordinates):
+        if source_alias not in partitions or source_row < 0 or source_row >= len(partitions[source_alias].records):
+            raise ValueError(f"invalid cohort source coordinate {source_alias}#{source_row}")
+        members.append(
+            _member_document(
+                cohort_index=cohort_index,
+                source_alias=source_alias,
+                source_row=source_row,
+                record=partitions[source_alias].records[source_row],
+            )
+        )
+    document = {
+        "schema_version": HAND_ASSET_COHORT_SCHEMA_VERSION,
+        "cohort_id": cohort_id,
+        "selection": dict(selection),
+        "sources": {
+            alias: {
+                "manifest_path": str(dataset.source_path),
+                "manifest_sha256": dataset.source_sha256,
+            }
+            for alias, dataset in datasets.items()
+        },
+        "members": members,
+    }
+    # Canonical compact JSON is valid YAML and gives the lock a stable byte identity across writer runs.
+    payload = (json.dumps(document, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
+    output = resolve_bank_path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_bytes(payload)
+    temporary.replace(output)
+    load_hand_asset_cohort(output, require_geometry_semantics=require_geometry_semantics)
+    return output
+
+
+def finalize_hand_asset_cohort_lock(
+    source_lock_path: str | Path,
+    output_path: str | Path,
+    *,
+    canonical_identities: Sequence[tuple[str, str, str]],
+    canonical_schema_version: str,
+    require_geometry_semantics: bool = True,
+) -> Path:
+    "Adds canonical geometry hashes to an already validated source lock while retaining that source lock unchanged."
+
+    source = load_hand_asset_cohort(source_lock_path, require_geometry_semantics=require_geometry_semantics)
+    source_path = source.lock_path.resolve()
+    output = resolve_bank_path(output_path)
+    if output.resolve() == source_path:
+        raise ValueError("canonical cohort finalization must preserve the source lock at a distinct path")
+    if output.exists():
+        raise FileExistsError(output)
+    identities = tuple(
+        (str(configuration), str(physical), str(schema)) for configuration, physical, schema in canonical_identities
+    )
+    if len(identities) != len(source.members) or not canonical_schema_version.strip():
+        raise ValueError("canonical identities must align with every cohort member and declare a schema version")
+    for member_index, (configuration_hash, physical_hash, schema_digest) in enumerate(identities):
+        for field_name, value in (
+            ("configuration hash", configuration_hash),
+            ("physical hash", physical_hash),
+            ("schema digest", schema_digest),
+        ):
+            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                raise ValueError(f"canonical member {member_index} {field_name} must be lowercase SHA-256")
+    if len({physical for _configuration, physical, _schema in identities}) != len(identities):
+        raise ValueError("canonical cohort finalization rejects duplicate physical geometry hashes")
+
+    raw_document = parse_hand_asset_cohort_document(source_path.read_bytes())
+    if not isinstance(raw_document, Mapping):
+        raise TypeError("source cohort lock must contain a mapping")
+    document = dict(raw_document)
+    raw_members = document.get("members")
+    if not isinstance(raw_members, list) or len(raw_members) != len(identities):
+        raise ValueError("source cohort members changed during canonical finalization")
+    finalized_members = []
+    for member, source_member, (configuration_hash, physical_hash, schema_digest) in zip(
+        source.members, raw_members, identities, strict=True
+    ):
+        if not isinstance(source_member, Mapping):
+            raise TypeError("source cohort member must be a mapping")
+        finalized = dict(source_member)
+        finalized["mutation_descriptor"] = dict(_mutation_descriptor(source.partition.records[member.cohort_index]))
+        finalized["configuration_domain_hash"] = configuration_hash
+        finalized["physical_geometry_hash"] = physical_hash
+        finalized["canonical_schema_digest"] = schema_digest
+        finalized_members.append(finalized)
+    document["schema_version"] = HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION
+    document["members"] = finalized_members
+    document["canonical_binding"] = {
+        "source_lock_path": str(source_path),
+        "source_lock_sha256": source.lock_sha256,
+        "canonical_schema_version": canonical_schema_version,
+        "physical_identity_algorithm": "canonical-runtime-lowering",
+    }
+    payload = (json.dumps(document, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+
+    with tempfile.TemporaryDirectory(prefix=".canonical-cohort-", dir=output.parent) as directory:
+        staged = Path(directory) / "canonical.lock.yaml"
+        staged.write_bytes(payload)
+        load_hand_asset_cohort(staged, require_geometry_semantics=require_geometry_semantics)
+        os.link(staged, output)
+    return output
+
+
+def write_hand_asset_cohort_subset(
+    parent: ResolvedHandAssetCohort,
+    source_lock_path: str | Path,
+    output_path: str | Path,
+    *,
+    cohort_id: str,
+    member_indices: Sequence[int],
+    selection: Mapping[str, Any],
+) -> Path:
+    'Writes hand asset cohort subset.'
+
+    indices = tuple(member_indices)
+    if (
+        not indices
+        or any(not isinstance(index, int) or index < 0 or index >= len(parent.members) for index in indices)
+        or len(set(indices)) != len(indices)
+    ):
+        raise ValueError("subset indices must be unique, non-empty and within the parent member axis")
+    source_path = resolve_bank_path(source_lock_path)
+    output = resolve_bank_path(output_path)
+    if source_path == output or not cohort_id.strip():
+        raise ValueError("subset publication requires a cohort ID and distinct source/canonical paths")
+    if source_path.exists() or output.exists():
+        raise FileExistsError("subset publication must preserve existing source and canonical locks")
+
+
+    parent_bytes = parent.lock_path.read_bytes()
+    if hashlib.sha256(parent_bytes).hexdigest() != parent.lock_sha256:
+        raise ValueError("parent cohort lock changed after validation")
+    raw = parse_hand_asset_cohort_document(parent_bytes)
+    if not isinstance(raw, Mapping) or raw.get("schema_version") != HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION:
+        raise ValueError("subset publication requires a canonical parent cohort")
+    for source in parent.sources.values():
+        if hashlib.sha256(source.manifest_path.read_bytes()).hexdigest() != source.manifest_sha256:
+            raise ValueError("parent source manifest changed after validation")
+    canonical_fields = {"configuration_domain_hash", "physical_geometry_hash", "canonical_schema_digest"}
+    canonical_members = [dict(raw["members"][index], cohort_index=local) for local, index in enumerate(indices)]
+    source_members = [
+        {key: value for key, value in member.items() if key not in canonical_fields} for member in canonical_members
+    ]
+    source_document = {
+        "schema_version": HAND_ASSET_COHORT_SCHEMA_VERSION,
+        "cohort_id": cohort_id.strip(),
+        "selection": {
+            **dict(selection),
+            "parent_cohort_lock": str(parent.lock_path),
+            "parent_cohort_lock_sha256": parent.lock_sha256,
+            "parent_asset_indices": list(indices),
+        },
+        "sources": raw["sources"],
+        "members": source_members,
+    }
+    source_bytes = (json.dumps(source_document, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
+    canonical_document = {
+        **source_document,
+        "schema_version": HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION,
+        "members": canonical_members,
+        "canonical_binding": {
+            "source_lock_path": str(source_path),
+            "source_lock_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "canonical_schema_version": raw["canonical_binding"]["canonical_schema_version"],
+            "physical_identity_algorithm": "canonical-runtime-lowering",
+        },
+    }
+    canonical_bytes = (json.dumps(canonical_document, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
+    for path, payload in ((source_path, source_bytes), (output, canonical_bytes)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_bytes(payload)
+        temporary.replace(path)
+    return output
+
+
+def write_hand_asset_cohort_union(
+    parents: Mapping[str, ResolvedHandAssetCohort],
+    source_lock_path: str | Path,
+    output_path: str | Path,
+    *,
+    cohort_id: str,
+    member_coordinates: Sequence[tuple[str, int]],
+    selection: Mapping[str, Any],
+) -> Path:
+    'Writes hand asset cohort union.'
+
+    coordinates = tuple(member_coordinates)
+    if not coordinates or len(set(coordinates)) != len(coordinates):
+        raise ValueError("union member coordinates must be non-empty and unique")
+    if any(
+        name not in parents or not isinstance(index, int) or not 0 <= index < len(parents[name].members)
+        for name, index in coordinates
+    ):
+        raise ValueError("union member coordinates must lie within declared parent axes")
+    source_path, output = resolve_bank_path(source_lock_path), resolve_bank_path(output_path)
+    if source_path == output or not cohort_id.strip():
+        raise ValueError("union publication requires a cohort ID and distinct source/canonical paths")
+    if source_path.exists() or output.exists():
+        raise FileExistsError("union publication preserves existing source and canonical locks")
+
+
+    raw_parents: dict[str, Mapping[str, Any]] = {}
+    sources: dict[str, dict[str, str]] = {}
+    parent_evidence = {}
+    schema_versions = set()
+    for name in dict.fromkeys(parent for parent, _index in coordinates):
+        parent = parents[name]
+        payload = parent.lock_path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != parent.lock_sha256:
+            raise ValueError("union parent cohort changed after validation")
+        raw = parse_hand_asset_cohort_document(payload)
+        if not isinstance(raw, Mapping) or raw.get("schema_version") != HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION:
+            raise ValueError("union requires canonical parent cohorts")
+        if not isinstance(raw.get("members"), list) or len(raw["members"]) != len(parent.members):
+            raise ValueError("union parent member axis disagrees with its validated snapshot")
+        raw_parents[name] = raw
+        schema_versions.add(raw["canonical_binding"]["canonical_schema_version"])
+        parent_evidence[name] = {
+            "cohort_id": parent.cohort_id,
+            "lock_path": str(parent.lock_path),
+            "lock_sha256": parent.lock_sha256,
+        }
+        for alias, source in parent.sources.items():
+            specification = {"manifest_path": str(source.manifest_path), "manifest_sha256": source.manifest_sha256}
+            if alias in sources:
+                if sources[alias] != specification:
+                    raise ValueError(f"union source alias {alias!r} refers to conflicting manifests")
+            else:
+                if hashlib.sha256(source.manifest_path.read_bytes()).hexdigest() != source.manifest_sha256:
+                    raise ValueError("union source manifest changed after parent validation")
+                sources[alias] = specification
+    if len(schema_versions) != 1:
+        raise ValueError("union parents must use the same canonical schema version")
+
+
+    members = [
+        dict(raw_parents[name]["members"][index], cohort_index=local) for local, (name, index) in enumerate(coordinates)
+    ]
+    identities = {
+        "source coordinates": [(member["source_alias"], member["source_row"]) for member in members],
+        "asset IDs": [member["asset_id"] for member in members],
+        "source content": [member["content_hash"] for member in members],
+        "physical geometry": [member["physical_geometry_hash"] for member in members],
+        "bundle paths": [
+            str(parents[name].partition.records[index].container.urdf_path.resolve()) for name, index in coordinates
+        ],
+    }
+    for kind, values in identities.items():
+        if len(set(values)) != len(coordinates):
+            raise ValueError(f"union rejects duplicate {kind}")
+    canonical_fields = {"configuration_domain_hash", "physical_geometry_hash", "canonical_schema_digest"}
+    source_document = {
+        "schema_version": HAND_ASSET_COHORT_SCHEMA_VERSION,
+        "cohort_id": cohort_id.strip(),
+        "selection": {
+            **dict(selection),
+            "parent_cohorts": parent_evidence,
+            "parent_member_coordinates": [{"parent": name, "index": index} for name, index in coordinates],
+        },
+        "sources": sources,
+        "members": [{key: value for key, value in member.items() if key not in canonical_fields} for member in members],
+    }
+    source_bytes = (json.dumps(source_document, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
+    canonical_document = {
+        **source_document,
+        "schema_version": HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION,
+        "members": members,
+        "canonical_binding": {
+            "source_lock_path": str(source_path),
+            "source_lock_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "canonical_schema_version": next(iter(schema_versions)),
+            "physical_identity_algorithm": "canonical-runtime-lowering",
+        },
+    }
+    canonical_bytes = (json.dumps(canonical_document, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()
+
+
+    for path, payload in ((source_path, source_bytes), (output, canonical_bytes)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".cohort-union-", dir=path.parent) as directory:
+            staged = Path(directory) / "payload.json"
+            staged.write_bytes(payload)
+            os.link(staged, path)
+    return output
+
+
+__all__ = [
+    "HAND_ASSET_CANONICAL_COHORT_SCHEMA_VERSION",
+    "HAND_ASSET_COHORT_SCHEMA_VERSION",
+    "HandAssetCohortMember",
+    "HandAssetCohortSource",
+    "ResolvedHandAssetCohort",
+    "finalize_hand_asset_cohort_lock",
+    "load_hand_asset_cohort",
+    "parse_hand_asset_cohort_document",
+    "write_hand_asset_cohort_lock",
+    "write_hand_asset_cohort_subset",
+    "write_hand_asset_cohort_union",
+]
