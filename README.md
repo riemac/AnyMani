@@ -50,7 +50,7 @@ All commands below run from the **AnyMani repository root** with this environmen
 python scripts/download.py
 ```
 
-This downloads approximately 33 MB to `data/` (a 24.7 MB model archive and a 7.9 MB asset archive) and verifies checksums before extraction. The model package contains the geometry encoder, both family teachers, and the shared Ours student. The asset package contains 256 training hands, 128 held-out hand records (including five recorded initialization failures, yielding 379 ready hands in total), and their corresponding initial-grasp catalogs.
+This downloads approximately 33 MB to `data/` (a 24.7 MB model archive and a 7.9 MB asset archive) and verifies checksums before extraction. The unchanged paper-reference package contains the geometry encoder, both family teachers, and the shared Ours student. The asset package contains 256 training hands, 128 held-out hand records (including five recorded initialization failures, yielding 379 ready hands in total), and their corresponding initial-grasp catalogs.
 
 ### 3. Watch the student
 
@@ -98,7 +98,7 @@ python scripts/train_student.py \
 
 The default uses seed 42, 16,750 optimizer updates arranged as 50 rounds of 335 updates, Adam learning rate 0.0003, and FP32 training with TF32 disabled. The release fixes CPU reductions and CUDA kernels for repeatable training. Trajectories are admitted only if they last 30 seconds, complete at least half a net turn, and maintain a directionality of at least 0.7. Validation uses separate replicas.
 
-The frozen sampler requests 2,048 indices per update. An indexing mismatch between source labels and training views discards some draws, giving an expected batch of approximately 1,509 training examples on these data and uneven hand weights. All three paper variants use this same routine.
+The sampler weights families equally, then retained hands equally within each family. Every update uses 2,048 examples from the training views; validation replicas are excluded from the sampling weights. Version 1.0.1 corrects the compact-view indexing used by the original implementation. Use [v1.0.0](https://github.com/riemac/AnyMani/tree/v1.0.0) for the frozen paper sampling recipe.
 
 The selected checkpoint is saved to `outputs/student/best.pt`; `actor.ts` and `actor.ts.json` provide the TorchScript actor and its input specification. `training-report.json` and `metrics.jsonl` record training progress and validation-based model selection.
 
@@ -115,6 +115,8 @@ python scripts/replay.py --cohort allegro_right_variant \
 ```
 
 Evaluation runs 16 replicas per hand using the paper's 30-second first-trajectory protocol. `cohort-summary.json` reports hand success, safe completion, and mean per-hand net turns. Success requires at least one median net turn, directionality of at least 0.7, and at least 12 safe trials out of 16. Its denominator retains all 128 held-out hands, including the five initialization failures. Omit `--student-checkpoint` and `--student-torchscript` to evaluate the downloaded reference student. Pass `--population train` to benchmark across the 256 training hands.
+
+The supplied reference checkpoint reproduces 76/128 successful hands. A complete seed-42 retraining with the corrected sampler reached 74/128, compared with 71/128 using the frozen sampling recipe; safe completion and mean net turns decreased slightly. The [verification record](reproduction.json) reports all three metrics and keeps these release checks separate from the paper's original three-seed statistics. An optional corrected-sampler student is available with [v1.0.1](https://github.com/riemac/AnyMani/releases/tag/v1.0.1).
 
 ## Further details
 

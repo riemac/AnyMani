@@ -1,4 +1,4 @@
-"""Train BC from frozen teacher means with the paper's retained trajectories and sampler."""
+"""Train BC from frozen teacher means with balanced sampling over training views."""
 
 from __future__ import annotations
 import argparse

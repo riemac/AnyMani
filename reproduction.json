@@ -190,5 +190,103 @@
     "fresh_training_inside_original_observed_range": true,
     "same_score_as_original_seed42": false,
     "formal_paper_statistics_changed": false
+  },
+  "code_release": "1.0.1",
+  "default_training_record": "corrected_sampler",
+  "corrected_sampler": {
+    "status": "completed",
+    "rounds": 50,
+    "updates": 16750,
+    "materialized_samples": 34304000,
+    "selected_round": 49,
+    "validation_balanced_action_mse": 0.01885513007822794,
+    "training_seconds": 2546.690687284019,
+    "sampling_version": "compact_view_projected_v1",
+    "sha256": {
+      "best.pt": "f2398bc6dbcc19f5fa0bda41ce30a26052d24d4d45e08d9e9fac68a62273abca",
+      "actor.ts": "0063de38dd6489c4b98f9acda37ef55d1875e9d1cae7a47ed87d10b0f061eb42"
+    },
+    "export_max_absolute_error": 0.0,
+    "training_source_commit": "94a0dbd",
+    "seed": 42,
+    "learning_rate": 0.0003,
+    "batch_size": 2048,
+    "metrics": {
+      "overall": {
+        "nominal_hands": 128,
+        "evaluated_hands": 123,
+        "successful_hands": 74,
+        "success_rate": 0.578125,
+        "safe_completion_fraction": 0.7774390243902439,
+        "mean_per_hand_net_turns": 1.262848535128604
+      },
+      "leap": {
+        "nominal_hands": 64,
+        "evaluated_hands": 63,
+        "successful_hands": 44,
+        "success_rate": 0.6875,
+        "safe_completion_fraction": 0.7986111111111112,
+        "mean_per_hand_net_turns": 1.2734951736435058
+      },
+      "leap_right_variant": {
+        "nominal_hands": 32,
+        "evaluated_hands": 32,
+        "successful_hands": 24,
+        "success_rate": 0.75,
+        "safe_completion_fraction": 0.7734375,
+        "mean_per_hand_net_turns": 1.3568856711499393
+      },
+      "leap_right_mother": {
+        "nominal_hands": 32,
+        "evaluated_hands": 31,
+        "successful_hands": 20,
+        "success_rate": 0.625,
+        "safe_completion_fraction": 0.8245967741935484,
+        "mean_per_hand_net_turns": 1.1874146600884776
+      },
+      "allegro": {
+        "nominal_hands": 64,
+        "evaluated_hands": 60,
+        "successful_hands": 30,
+        "success_rate": 0.46875,
+        "safe_completion_fraction": 0.7552083333333334,
+        "mean_per_hand_net_turns": 1.2516695646879574
+      },
+      "allegro_right_variant": {
+        "nominal_hands": 32,
+        "evaluated_hands": 30,
+        "successful_hands": 14,
+        "success_rate": 0.4375,
+        "safe_completion_fraction": 0.7020833333333333,
+        "mean_per_hand_net_turns": 1.265078764843444
+      },
+      "allegro_right_mother": {
+        "nominal_hands": 32,
+        "evaluated_hands": 30,
+        "successful_hands": 16,
+        "success_rate": 0.5,
+        "safe_completion_fraction": 0.8083333333333333,
+        "mean_per_hand_net_turns": 1.2382603645324708
+      }
+    },
+    "full_R1_replay": {
+      "steps": 600,
+      "duration_s": 30.0,
+      "safe": true,
+      "net_turns": 1.9296493530273438,
+      "directional_consistency": 0.9931392281501292
+    },
+    "comparison_against_frozen_recipe": {
+      "success_count_change": 3,
+      "safe_completion_fraction_change": -0.008638211382113847,
+      "mean_per_hand_net_turns_change": -0.028473984586393053
+    },
+    "formal_paper_statistics_changed": false,
+    "download": {
+      "url": "https://github.com/riemac/AnyMani/releases/download/v1.0.1/anymani-corrected-sampler-student-v1.0.1.tar.gz",
+      "bytes": 4076665,
+      "sha256": "52176a91d903ec4827f4c67242e47f75248f4269081d9037c943ce5b05c90073",
+      "archive_root": "anymani-corrected-sampler-student-v1.0.1"
+    }
   }
 }
