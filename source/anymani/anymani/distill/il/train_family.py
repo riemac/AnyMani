@@ -1,4 +1,4 @@
-"""Train BC from frozen teacher means with the paper's retained trajectories and sampler."""
+"""Train BC from frozen teacher means with balanced sampling over training views."""
 
 from __future__ import annotations
 import argparse
@@ -49,6 +49,7 @@ DEFAULT_MAX_EPOCHS = 50
 DEFAULT_MAX_SECONDS = 7200.0
 DEFAULT_MAX_RAM_GIB = 16.0
 SAMPLE_READ_CHUNK_ROWS = 4
+TRAINING_SAMPLING_VERSION = "compact_view_projected_v1"
 METRICS_FILENAME = "metrics.jsonl"
 TRAINING_REPORT_FILENAME = "training-report.json"
 TRAINING_REPORT_ARTIFACT_TYPE = "anymani.family_distilled_actor_training_report"
@@ -118,6 +119,23 @@ class FamilySampleBatch:
     @property
     def sample_count(self) -> int:
         return int(self.target.shape[0])
+
+
+def _compact_view_indices(index: np.ndarray | torch.Tensor | slice, sample_count: int) -> np.ndarray:
+    if isinstance(index, slice):
+        selected = np.arange(sample_count, dtype=np.int64)[index]
+    elif isinstance(index, torch.Tensor):
+        if index.dtype not in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64):
+            raise TypeError("compact view indices must use an integer dtype")
+        selected = index.detach().cpu().numpy().astype(np.int64, copy=False).reshape(-1)
+    else:
+        raw = np.asarray(index)
+        if raw.dtype.kind not in "iu":
+            raise TypeError("compact view indices must use an integer dtype")
+        selected = raw.astype(np.int64, copy=False).reshape(-1)
+    if selected.size and (np.any(selected < 0) or np.any(selected >= sample_count)):
+        raise ValueError(f"compact view index must lie in [0,{sample_count})")
+    return np.asarray(selected, dtype=np.int64)
 
 
 @dataclass(frozen=True)
@@ -205,22 +223,12 @@ class CompactFamilyBatch:
         return int(self.target.shape[0] if self.pair_index is None else self.pair_index.shape[0])
 
     def subset(self, index: np.ndarray | torch.Tensor | slice) -> CompactFamilyBatch:
-        if isinstance(index, slice):
-            selected = np.arange(self.sample_count, dtype=np.int64)[index]
-        elif isinstance(index, torch.Tensor):
-            selected = index.detach().cpu().numpy().astype(np.int64, copy=False).reshape(-1)
-        else:
-            selected = np.asarray(index, dtype=np.int64).reshape(-1)
+        selected = _compact_view_indices(index, self.sample_count)
         base = selected if self.pair_index is None else self.pair_index[selected]
         return replace(self, pair_index=np.asarray(base, dtype=np.int64))
 
     def materialize(self, index: np.ndarray | torch.Tensor | slice) -> FamilySampleBatch:
-        if isinstance(index, slice):
-            selected = np.arange(self.sample_count, dtype=np.int64)[index]
-        elif isinstance(index, torch.Tensor):
-            selected = index.detach().cpu().numpy().astype(np.int64, copy=False).reshape(-1)
-        else:
-            selected = np.asarray(index, dtype=np.int64).reshape(-1)
+        selected = _compact_view_indices(index, self.sample_count)
         base = selected if self.pair_index is None else self.pair_index[selected]
         rows = self.sample_row[base]
         environments = self.env_index[base]
@@ -408,11 +416,23 @@ def _coerce_view(raw: FamilyView | tuple[Any, ...]) -> FamilyView:
 
 
 def _view_labels(view: FamilyView) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    # Preserve the historical full-source label axis for paper reproduction.
-    return (view.family_ids, view.asset_ids)
+    if not isinstance(view, CompactFamilyBatch) or view.pair_index is None:
+        return (view.family_ids, view.asset_ids)
+    selected = view.pair_index.tolist()
+    return (
+        tuple(view.family_ids[index] for index in selected),
+        tuple(view.asset_ids[index] for index in selected),
+    )
 
 
 def _materialize_global_indices(views: Sequence[FamilyView], index: torch.Tensor) -> FamilySampleBatch:
+    if not isinstance(index, torch.Tensor) or index.ndim != 1:
+        raise TypeError("balanced sample indices must be a one-dimensional torch tensor")
+    if index.dtype not in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64):
+        raise TypeError("balanced sample indices must use an integer dtype")
+    index = index.detach().to(device="cpu", dtype=torch.long)
+    if index.numel() == 0:
+        raise ValueError("balanced sample index must not be empty")
     pieces: list[FamilySampleBatch] = []
     offsets: list[tuple[int, int, FamilyView]] = []
     cursor = 0
@@ -420,8 +440,11 @@ def _materialize_global_indices(views: Sequence[FamilyView], index: torch.Tensor
         stop = cursor + view.sample_count
         offsets.append((cursor, stop, view))
         cursor = stop
+    if cursor < 1:
+        raise ValueError("balanced sample views contain no training samples")
+    if bool((index < 0).any().item()) or bool((index >= cursor).any().item()):
+        raise ValueError(f"balanced sample index must lie in [0,{cursor})")
     for start, stop, view in offsets:
-        # The frozen sampler discards draws outside the compact training views.
         local_mask = (index >= start) & (index < stop)
         if not bool(local_mask.any().item()):
             continue
@@ -429,10 +452,21 @@ def _materialize_global_indices(views: Sequence[FamilyView], index: torch.Tensor
         if isinstance(view, CompactFamilyBatch):
             pieces.append(view.materialize(local))
         else:
-            pieces.append(_slice_batch(view, local))
+            pieces.append(_slice_batch(view, local.to(device=view.target.device)))
     if not pieces:
         raise ValueError("balanced sample index selected no family view")
-    return _concat_batches(pieces)
+    batch = _concat_batches(pieces)
+    if batch.sample_count != index.numel():
+        raise RuntimeError(f"balanced sampler requested {index.numel()} rows but materialized {batch.sample_count}")
+    # Keep the source-grouped batch order used by the original training loop.
+    return batch
+
+
+def _view_asset_counts(views: Sequence[FamilyView]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for view in views:
+        counts.update(_view_labels(view)[1])
+    return counts
 
 
 def _slice_batch(batch: FamilySampleBatch, index: torch.Tensor | slice) -> FamilySampleBatch:
@@ -600,6 +634,9 @@ def fit_family_student(
     families = tuple((label for view in views for label in _view_labels(view)[0]))
     assets = tuple((label for view in views for label in _view_labels(view)[1]))
     weights = family_asset_weights(families, assets, device=torch.device("cpu"))
+    total_count = sum((view.sample_count for view in views))
+    if weights.numel() != total_count:
+        raise RuntimeError(f"sampler has {weights.numel()} weights for {total_count} training samples")
     generator = sampling_generator or torch.Generator(device="cpu")
     if sampling_generator_state is not None:
         generator.set_state(sampling_generator_state.cpu())
@@ -622,12 +659,13 @@ def fit_family_student(
     last_fk = 0.0
     update_count = 0
     processed_samples = int(start_processed_samples)
-    total_count = sum((view.sample_count for view in views))
     while update_count < max_updates:
         if max_seconds is not None and time.perf_counter() - started >= max_seconds:
             break
         indices = torch.multinomial(weights, batch_size, replacement=True, generator=generator)
         selected = _move_batch(_materialize_global_indices(views, indices), device)
+        if selected.sample_count != batch_size:
+            raise RuntimeError(f"training update requires {batch_size} rows, got {selected.sample_count}")
         optimizer_instance.zero_grad(set_to_none=True)
         total, bc, fk = _forward_losses(actor, selected, lambda_fk=lambda_fk)
         if not bool(torch.isfinite(total).item()):
@@ -640,7 +678,7 @@ def fit_family_student(
             raise ValueError("family student gradient norm became non-finite")
         optimizer_instance.step()
         update_count += 1
-        processed_samples += batch_size  # Historical counter: requested draws, not materialized examples.
+        processed_samples += selected.sample_count
         last_loss = float(total.detach().item())
         last_bc = float(bc.detach().item())
         last_fk = float(fk.detach().item())
@@ -1359,14 +1397,16 @@ def _load_source(path: Path, *, max_ram_gib: float, expected_n040: str | None, b
             asset_indices = sorted(set((int(item) for item in env_asset)))
         all_asset_names = tuple((_asset_name(metadata, int(index)) for index in asset_indices))
         quality_asset_names = tuple(sorted({_asset_name(metadata, int(item)) for item in env_asset_quality}))
-        data_asset_names = tuple(sorted({label for batch in training + validation for label in batch.asset_ids}))
+        training_asset_counts = _view_asset_counts(training)
+        validation_asset_counts = _view_asset_counts(validation)
+        data_asset_names = tuple(sorted(set(training_asset_counts) | set(validation_asset_counts)))
         zero_data_assets = tuple((name for name in all_asset_names if name not in data_asset_names))
         asset_report = {
             name: {
                 "quality": name in quality_asset_names,
-                "samples": int(sum((batch.asset_ids.count(name) for batch in training + validation))),
-                "training_samples": int(sum((batch.asset_ids.count(name) for batch in training))),
-                "validation_samples": int(sum((batch.asset_ids.count(name) for batch in validation))),
+                "samples": training_asset_counts[name] + validation_asset_counts[name],
+                "training_samples": training_asset_counts[name],
+                "validation_samples": validation_asset_counts[name],
             }
             for name in all_asset_names
         }
@@ -1667,8 +1707,18 @@ def _run_identity(
         "gradient_clip": 1.0,
         "amp": False,
         "tf32": bool(tf32),
+        "sampling_version": TRAINING_SAMPLING_VERSION,
         "reproducibility": _reproducibility_settings(),
     }
+
+
+def _require_sampling_version(metadata: Mapping[str, object], *, checkpoint: Path) -> None:
+    protocol = metadata.get("protocol")
+    version = protocol.get("sampling_version") if isinstance(protocol, Mapping) else None
+    if version != TRAINING_SAMPLING_VERSION:
+        raise ValueError(
+            f"resume checkpoint {checkpoint} uses sampling_version {version!r}; expected {TRAINING_SAMPLING_VERSION!r}"
+        )
 
 
 def _validate_output_state(
@@ -1762,6 +1812,7 @@ def run_family_training(
             expected_n040_sha256=bundle.n040_sha256,
         )
         resume_metadata = resume_metadata_value
+        _require_sampling_version(resume_metadata, checkpoint=resume_path)
         training_state = payload.get("training_state", {})
         if not isinstance(training_state, Mapping):
             raise ValueError("resume checkpoint training_state must be a mapping")
@@ -1949,6 +2000,7 @@ def run_family_training(
                 "gradient_clip": 1.0,
                 "amp": False,
                 "tf32": bool(tf32),
+                "sampling_version": TRAINING_SAMPLING_VERSION,
                 "reproducibility": run_identity["reproducibility"],
                 "sigma": "global_log_std_frozen_mean_supervision",
             },
