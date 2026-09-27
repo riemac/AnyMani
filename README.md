@@ -73,12 +73,11 @@ Each replay logs its selected asset, model identity, and rollout trajectory into
 The student policy is trained using offline behavior cloning. Because the download includes the pretrained LEAP and Allegro teachers, you can collect demonstration datasets directly without retraining teachers.
 
 ```mermaid
-flowchart LR
-    A[LEAP teacher] --> C[Mean and sampled rollouts]
+flowchart TD
+    A[LEAP teacher] --> C[Collect and filter demonstrations]
     B[Allegro teacher] --> C
-    C --> D[Trajectory filtering]
-    D --> E[Shared BC student]
-    E --> F[Evaluate and replay]
+    C --> D[Shared BC student]
+    D --> E[Evaluate and replay]
 ```
 
 ### 1. Collect teacher demonstrations
