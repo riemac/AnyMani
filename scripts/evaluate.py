@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
+import statistics
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "source/anymani"))
@@ -33,17 +35,78 @@ COHORT_FAMILY = {
     **{name: "allegro" for names in (TRAIN_COHORTS["allegro"], UNSEEN_COHORTS["allegro"]) for name in names},
 }
 ALL_COHORTS = (
-    "leap_training", "allegro_training", "leap_right_variant", "leap_right_mother",
-    "allegro_right_variant", "allegro_right_mother",
+    "leap_training",
+    "allegro_training",
+    "leap_right_variant",
+    "leap_right_mother",
+    "allegro_right_variant",
+    "allegro_right_mother",
 )
+
+
+def aggregate_paper_metrics(results: list[dict]) -> dict:
+    """Summarize the paper's hand-level R16 criterion with nominal denominators."""
+    groups: dict[str, dict] = {}
+
+    def add(name: str, nominal: int, rows: list[dict]) -> None:
+        group = groups.setdefault(name, {"nominal_hands": 0, "rows": []})
+        group["nominal_hands"] += nominal
+        group["rows"].extend(rows)
+
+    for result in results:
+        document = json.loads(Path(result["evaluation"]).read_text(encoding="utf-8"))
+        rows = document["physical_rotation"]["asset_results"]
+        if document["executed_steps"] != 600 or len(rows) != result["ready_asset_count"]:
+            raise ValueError("Paper metrics require complete 600-step, ready-cohort evaluations")
+        for row in rows:
+            if row["replica_count"] != 16 or not row["finite"]:
+                raise ValueError("Paper metrics require finite R16 hand results")
+            for key in ("net_turns_median", "directional_consistency", "safe_replica_fraction"):
+                if not math.isfinite(row[key]):
+                    raise ValueError(f"Non-finite evaluation metric: {key}")
+            if not 0 <= row["safe_replica_fraction"] <= 1 or not 0 <= row["directional_consistency"] <= 1:
+                raise ValueError("Evaluation fractions must lie in [0, 1]")
+        nominal = result["nominal_asset_count"]
+        if nominal < len(rows) or nominal - len(rows) != result["initialization_failure_count"]:
+            raise ValueError("Evaluation denominator disagrees with initialization failures")
+        family = COHORT_FAMILY[result["cohort"]]
+        for name in ("overall", family, result["cohort"]):
+            add(name, nominal, rows)
+
+    output = {}
+    for name, group in groups.items():
+        rows = group["rows"]
+        successes = sum(
+            row["net_turns_median"] >= 1.0
+            and row["directional_consistency"] >= 0.7
+            and row["safe_replica_fraction"] >= 0.75
+            for row in rows
+        )
+        output[name] = {
+            "nominal_hands": group["nominal_hands"],
+            "evaluated_hands": len(rows),
+            "successful_hands": successes,
+            "success_rate": successes / group["nominal_hands"],
+            "safe_completion_fraction": statistics.mean(row["safe_replica_fraction"] for row in rows) if rows else None,
+            "mean_per_hand_net_turns": statistics.mean(row["net_turns_median"] for row in rows) if rows else None,
+        }
+    return {
+        "criteria": {"median_net_turns_min": 1.0, "direction_min": 0.7, "safe_trials_min": 12, "trials_per_hand": 16},
+        "continuous_metrics_population": "initialized hands",
+        "groups": output,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--policy", choices=("student", "teacher"), default="student")
-    parser.add_argument("--student-checkpoint", type=Path, default=None, help="Override the packaged student state file.")
-    parser.add_argument("--student-torchscript", type=Path, default=None, help="Override the packaged TorchScript actor.")
+    parser.add_argument(
+        "--student-checkpoint", type=Path, default=None, help="Override the packaged student state file."
+    )
+    parser.add_argument(
+        "--student-torchscript", type=Path, default=None, help="Override the packaged TorchScript actor."
+    )
     parser.add_argument("--student-sidecar", type=Path, default=None, help="Override the actor ABI sidecar.")
     parser.add_argument("--population", choices=("cohort", "train", "unseen"), default="cohort")
     parser.add_argument("--cohort", choices=ALL_COHORTS, default=None)
@@ -131,14 +194,22 @@ def _run_cohort(
     reference = runtime.write_reference(output_dir, reference_override)
     result_path = output_dir / "evaluation.json"
     evaluator_args = [
-        "--cohort_lock", str(selection.lock_path),
-        "--reference", str(reference),
-        "--output", str(result_path),
-        "--num_replicas", str(replicas),
-        "--steps", str(steps),
-        "--action_mode", "mean",
-        "--n040_artifact", str(encoder),
-        "--n040_sha256", encoder_sha256,
+        "--cohort_lock",
+        str(selection.lock_path),
+        "--reference",
+        str(reference),
+        "--output",
+        str(result_path),
+        "--num_replicas",
+        str(replicas),
+        "--steps",
+        str(steps),
+        "--action_mode",
+        "mean",
+        "--n040_artifact",
+        str(encoder),
+        "--n040_sha256",
+        encoder_sha256,
         "--headless",
         "--rl_games_strict",
     ]
@@ -152,12 +223,18 @@ def _run_cohort(
         if student_artifacts is None:
             raise RuntimeError("student evaluation requires resolved student runtime artifacts")
         wrapper_args = [
-            "--student_checkpoint", str(student_artifacts.checkpoint),
-            "--student_torchscript", str(student_artifacts.torchscript),
-            "--student_sidecar", str(student_artifacts.sidecar),
-            "--reference_teacher_checkpoint", str(teacher),
-            "--student_status", str(status_path),
-            "--", *evaluator_arguments_for_policy(policy, teacher, evaluator_args),
+            "--student_checkpoint",
+            str(student_artifacts.checkpoint),
+            "--student_torchscript",
+            str(student_artifacts.torchscript),
+            "--student_sidecar",
+            str(student_artifacts.sidecar),
+            "--reference_teacher_checkpoint",
+            str(teacher),
+            "--student_status",
+            str(status_path),
+            "--",
+            *evaluator_arguments_for_policy(policy, teacher, evaluator_args),
         ]
         exit_code = run_module_main("anymani.distill.il.evaluate_family", wrapper_args)
     else:
@@ -230,36 +307,43 @@ def main(argv: list[str] | None = None) -> int:
     results = []
     if len(cohorts) == 1:
         runtime = PaperRuntime.open(args.data_dir)
-        results.append(_run_cohort(
-            runtime=runtime,
-            cohort_name=cohorts[0],
-            policy=args.policy,
-            student_artifacts=(
-                resolve_student_runtime_artifacts(
-                    runtime.models,
-                    checkpoint=args.student_checkpoint,
-                    torchscript=args.student_torchscript,
-                    sidecar=args.student_sidecar,
-                )
-                if args.policy == "student"
-                else None
-            ),
-            output_dir=output_dir,
-            smoke=args.smoke,
-            reference_override=args.reference,
-            certificate=args.implementation_certificate,
-            rl_games_root=args.rl_games_root,
-        ))
+        results.append(
+            _run_cohort(
+                runtime=runtime,
+                cohort_name=cohorts[0],
+                policy=args.policy,
+                student_artifacts=(
+                    resolve_student_runtime_artifacts(
+                        runtime.models,
+                        checkpoint=args.student_checkpoint,
+                        torchscript=args.student_torchscript,
+                        sidecar=args.student_sidecar,
+                    )
+                    if args.policy == "student"
+                    else None
+                ),
+                output_dir=output_dir,
+                smoke=args.smoke,
+                reference_override=args.reference,
+                certificate=args.implementation_certificate,
+                rl_games_root=args.rl_games_root,
+            )
+        )
     else:
         for cohort_name in cohorts:
             cohort_output = output_dir / cohort_name
             command = [
                 str(Path(__file__).resolve()),
-                "--data-dir", str(args.data_dir.expanduser().resolve()),
-                "--population", "cohort",
-                "--cohort", cohort_name,
-                "--policy", args.policy,
-                "--output-dir", str(cohort_output),
+                "--data-dir",
+                str(args.data_dir.expanduser().resolve()),
+                "--population",
+                "cohort",
+                "--cohort",
+                cohort_name,
+                "--policy",
+                args.policy,
+                "--output-dir",
+                str(cohort_output),
                 "--_single-cohort",
             ]
             if args.smoke:
@@ -296,13 +380,23 @@ def main(argv: list[str] | None = None) -> int:
         "policy": args.policy,
         "population": args.population,
         "family": args.family,
-        "protocol": {"horizon_s": 2 * 0.05 if args.smoke else 30.0, "replicas_per_ready_asset": 1 if args.smoke else 16},
+        "protocol": {
+            "horizon_s": 2 * 0.05 if args.smoke else 30.0,
+            "replicas_per_ready_asset": 1 if args.smoke else 16,
+        },
         "nominal_asset_denominator": nominal_total,
         "ready_assets_evaluated": ready_total if not args.smoke else len(results),
         "unavailable_initialization_failures": failures_total,
         "unavailable_assets_count_as_failures": True,
         "results": results,
     }
+    if completed and not args.smoke:
+        summary["metrics"] = aggregate_paper_metrics(results)
+        overall = summary["metrics"]["groups"]["overall"]
+        print(
+            f"Hand success: {overall['successful_hands']}/{overall['nominal_hands']} "
+            f"({100 * overall['success_rate']:.1f}%)"
+        )
     summary_path = output_dir / "cohort-summary.json"
     if summary_path.exists():
         raise FileExistsError(summary_path)

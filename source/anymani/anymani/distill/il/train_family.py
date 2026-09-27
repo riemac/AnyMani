@@ -1480,6 +1480,26 @@ def _seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _configure_reproducible_training() -> None:
+    """Fix CPU reductions and CUDA kernels for repeatable BC updates."""
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    torch.set_num_threads(1)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms(True)
+
+
+def _reproducibility_settings() -> dict[str, object]:
+    return {
+        "cpu_threads": torch.get_num_threads(),
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "cudnn_deterministic": torch.backends.cudnn.deterministic,
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+    }
+
+
 def _rng_state(generator: torch.Generator) -> dict[str, object]:
     state: dict[str, object] = {
         "python": random.getstate(),
@@ -1645,6 +1665,7 @@ def _run_identity(
         "gradient_clip": 1.0,
         "amp": False,
         "tf32": bool(tf32),
+        "reproducibility": _reproducibility_settings(),
     }
 
 
@@ -1707,6 +1728,7 @@ def run_family_training(
         raise ValueError("max_epochs and max_seconds must be positive")
     if max_updates is not None and max_updates < 1:
         raise ValueError("max_updates must be positive when provided")
+    _configure_reproducible_training()
     _seed_everything(seed)
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
@@ -1924,6 +1946,7 @@ def run_family_training(
                 "gradient_clip": 1.0,
                 "amp": False,
                 "tf32": bool(tf32),
+                "reproducibility": run_identity["reproducibility"],
                 "sigma": "global_log_std_frozen_mean_supervision",
             },
             "source_code_files": _source_code_files(),
