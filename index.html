@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="AnyMani learns contact geometry and joint-driven surface motion for a shared in-hand rotation policy across generated LEAP-type and Allegro-type hands." />
+  <meta name="theme-color" content="#176e77" />
+  <title>AnyMani — Cross-Embodiment In-Hand Rotation</title>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <script type="module" crossorigin src="./assets/index-8vl-kAHs.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-C2EBYNPN.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <nav class="navigation" aria-label="Main navigation">
+    <a class="wordmark" href="#top">Any<span>Mani</span><span class="wordmark-dot">.</span></a>
+    <div class="nav-links"><a href="#method">Method</a><a href="#geometry">Geometry</a><a href="#rotation">Rotation</a><a href="#results">Results</a><a href="#resources">Resources</a></div>
+  </nav>
+  <main id="main">
+    <header id="top" class="hero wrap">
+      <p class="eyebrow">Geometry learning · Dexterous manipulation</p>
+      <h1>AnyMani<span class="title-dot">.</span></h1>
+      <p class="paper-title">Cross-Embodiment In-Hand Rotation<br class="desktop-break" /> via Contact Geometry Learning</p>
+      <p class="authors">Aochen He <span>and</span> <a href="mailto:jinggangshan@cqu.edu.cn">Gangshan Jing<sup>†</sup></a></p>
+      <p class="affiliation">School of Automation, Chongqing University</p>
+      <p class="correspondence">† Corresponding author</p>
+      <div class="resource-buttons"><a class="button primary" href="https://github.com/riemac/AnyMani">Code &amp; models <span aria-hidden="true">↗</span></a><a class="button" href="#geometry">Explore the geometry <span aria-hidden="true">↓</span></a></div>
+    </header>
+
+    <section id="method" class="wrap section method-section">
+      <div class="section-heading"><span class="section-number">01</span><div><h2>From hand geometry to a shared policy</h2><p>Learn where contact surfaces lie—and how joints move them.</p></div></div>
+      <figure class="overview-figure"><a href="./figures/overview.png" target="_blank" rel="noopener" aria-label="Open the method overview at full resolution"><img src="./figures/overview.png" width="2200" height="1028" alt="Method overview: generated hand geometry and joint angles enter a pretrained geometry encoder; two family teachers supply demonstrations to one shared behavior-cloning student." fetchpriority="high" /></a><figcaption>Two complementary geometric objectives pretrain the encoder. Its configuration-dependent tokens condition family teachers and a shared student trained by behavior cloning.</figcaption></figure>
+      <div class="abstract"><h3>Abstract</h3><p>In-hand rotation requires a policy to reorganize contacts while keeping an object stable. Sharing that policy across hands is difficult because morphology changes both joint kinematics and the surfaces those joints move. AnyMani generates controlled structural and geometric variations around LEAP-type and Allegro-type designs and learns a configuration-dependent geometric representation referenced to physical palm anchors. Pretraining predicts continuous surface proximity and the motion of fixed surface points under joint rotation. A single student learns from two family-specific teachers through offline behavior cloning, with the encoder frozen and no downstream reinforcement-learning fine-tuning.</p><p>Across three student training seeds, the shared policy achieves <strong>57.6 ± 2.5% success on 128 held-out generated hands</strong>, compared with 41.1 ± 3.9% for the baseline without pretrained geometry tokens (No-Z) and 44.8 ± 3.9% for the FK auxiliary baseline. This simulated benchmark uses generated right hands from the two represented kinematic families, one cube, a fixed rotation axis, and prepared stable grasps.</p></div>
+    </section>
+
+    <section id="geometry" class="section section-tint">
+      <div class="wrap"><div class="section-heading"><span class="section-number">02</span><div><h2>Hand &amp; Geometry Explorer</h2><p>Hold the configuration fixed and change shape. Hold the shape fixed and move a joint.</p></div></div>
+        <div id="geometry-explorer" class="explorer-host" aria-label="Interactive hand geometry explorer"><div class="explorer-loading"><span class="loader" aria-hidden="true"></span><p>Loading the hand explorer…</p></div></div>
+        <div class="explanation-grid"><div><h3>Surface geometry</h3><p>Colors group the fingers. The highlighted point keeps its identity on the same surface component as joints move, while palm anchors provide a physical reference. Use “See inside palm” to inspect anchors within the palm solid.</p></div><div><h3>Joint-driven motion</h3><p>Moving a joint changes the selected point&#x27;s position and its relation to the anchors. The explorer computes these analytic relations from the actual hand&#x27;s URDF and forward kinematics; it does not display a predicted latent representation.</p></div></div>
+      </div>
+    </section>
+
+    <section id="rotation" class="wrap section">
+      <div class="section-heading"><span class="section-number">03</span><div><h2>Cross-Hand Rotation</h2><p>One frozen student. Different fingers, dimensions, and joint mechanisms.</p></div></div>
+      <div class="replay-layout"><div class="video-panel"><video id="replay" autoplay muted loop playsinline controls preload="none" aria-label="Selected AnyMani Ours policy replay"></video><div class="video-strip"><span>Ours · seed 42</span><span id="replay-timing">20 Hz control</span></div></div><aside id="replay-info" class="replay-info" aria-live="polite"></aside></div>
+      <div id="case-picker" class="case-picker" aria-label="Choose a recorded hand"></div>
+      <p class="figure-note">These are selected first-trajectory recordings from a single Ours checkpoint, including a low-progress failure. The displayed replay and fixed 16-execution statistical evaluation are separate runs; selected clips do not estimate success rates.</p>
+    </section>
+
+    <section id="results" class="section section-tint"><div class="wrap">
+      <div class="section-heading"><span class="section-number">04</span><div><h2>What does the representation learn?</h2><p>Surface proximity, joint-driven motion, and entity-level correspondence.</p></div></div>
+      <figure class="result-figure"><a class="representation-wide" href="./figures/representation.png" target="_blank" rel="noopener" aria-label="Open the representation results at full resolution"><img src="./figures/representation.png" width="2115" height="840" loading="lazy" alt="Representation diagnostics compare spatial errors, analytic and predicted point-motion derivatives, and increased losses when geometry tokens are perturbed." /></a><div class="representation-mobile"><img src="./figures/representation-a.png" width="620" height="720" loading="lazy" alt="Local distance error around one mixed-hand fingertip, in millimetres; large errors remain away from the surface." /><img src="./figures/representation-b.png" width="830" height="840" loading="lazy" alt="Height and radial motion-response predictions compared with analytic targets as a joint rotates." /><img src="./figures/representation-c.png" width="665" height="840" loading="lazy" alt="Proximity and motion losses increase under zeroed, substituted, or shuffled geometry tokens." /></div><figcaption>Selected geometric diagnostics from the paper. Distance errors use the bandwidth nearest the true distance, so they are teacher-assisted diagnostics. Perturbing tokens while fixing decoders and targets tests what information the learned representation carries.</figcaption></figure>
+      <div class="comparison-heading"><h2>Shared control on held-out hands</h2><div class="segmented" role="group" aria-label="Result population"><button data-population="strict-unseen_all" class="active" aria-pressed="true">Overall</button><button data-population="strict-unseen_leap" aria-pressed="false">LEAP-type</button><button data-population="strict-unseen_allegro" aria-pressed="false">Allegro-type</button></div></div>
+      <div class="table-scroll"><table class="comparison-table"><caption id="results-caption">Held-out generated hands, three training seeds</caption><thead><tr><th scope="col">Representation</th><th scope="col">Success ↑</th><th scope="col">Safe completion ↑</th><th scope="col">Net turns ↑</th></tr></thead><tbody id="results-rows"></tbody></table></div>
+      <p class="table-hint">Swipe horizontally to compare all metrics.</p><p id="denominator-note" class="figure-note"></p>
+      <div class="explanation-grid"><div><h3>A matched BC comparison</h3><p>All three conditions use the same teacher data and 16,750 optimization updates under the same frozen training routine. No-Z removes pretrained geometry tokens while retaining the common state and structural inputs. FK also removes those tokens and adds joint-origin prediction as an auxiliary training objective; this auxiliary head is discarded at deployment.</p></div><div><h3>What success means</h3><p>A hand passes if it reaches at least one median net turn, directionality ≥ 0.7, and safe completion in at least 12 of 16 deterministic 30-second executions. This evaluation uses a prepared grasp for each morphology and does not establish robustness to randomized disturbances or transfer to physical hardware.</p></div></div>
+    </div></section>
+
+    <section id="resources" class="wrap section resources-section"><div class="section-heading"><span class="section-number">05</span><div><h2>Resources &amp; citation</h2><p>Explore the implementation and reproduce the shared student.</p></div></div>
+      <div class="resource-links"><a href="https://github.com/riemac/AnyMani"><span>Source code &amp; reproduction</span><span aria-hidden="true">↗</span></a><a href="https://github.com/riemac/AnyMani/releases/download/v1.0.0/anymani-paper-models-v1.0.0.tar.gz"><span>Pretrained models <small>24.7 MB</small></span><span aria-hidden="true">↓</span></a><a href="https://github.com/riemac/AnyMani/releases/download/v1.0.0/anymani-paper-assets-v1.0.0.tar.gz"><span>Hand assets <small>7.9 MB</small></span><span aria-hidden="true">↓</span></a></div>
+      <div class="citation-heading"><h3>Cite this project</h3><button id="copy-citation" type="button">Copy BibTeX</button></div><pre id="citation">@misc{he2026anymani,
+  title  = {AnyMani: Cross-Embodiment In-Hand Rotation
+            via Contact Geometry Learning},
+  author = {He, Aochen and Jing, Gangshan},
+  year   = {2026},
+  url    = {https://riemac.github.io/AnyMani/}
+}</pre><p id="copy-status" class="copy-status" aria-live="polite"></p>
+    </section>
+  </main>
+  <footer class="wrap"><span class="wordmark">Any<span>Mani</span>.</span><p>Aochen He &amp; Gangshan Jing · Chongqing University</p></footer>
+</body>
+</html>

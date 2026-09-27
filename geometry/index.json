@@ -1,0 +1,66 @@
+{
+  "schema_version": "anymani-geometry-catalog-v1",
+  "units": {
+    "length": "m",
+    "angle": "rad"
+  },
+  "coordinate_frames": {
+    "urdf": "asset frame {a}",
+    "viewer": "hand frame {h}",
+    "transform": "p_h = R_ha p_a + t_ha"
+  },
+  "models": [
+    {
+      "id": "leap-base",
+      "family": "leap",
+      "title": "LEAP-type base design",
+      "role": "base design",
+      "asset_id": "f5d8c069",
+      "topology_key": "right_t4_i4_m4_r4",
+      "dof": 16,
+      "finger_count": 4,
+      "descriptor": "models/leap-base.json",
+      "geometry_binary": "models/leap-base.bin",
+      "anchor_count": 40
+    },
+    {
+      "id": "leap-variant",
+      "family": "leap",
+      "title": "LEAP-type geometry variant",
+      "role": "geometry variant",
+      "asset_id": "3ada7ef1",
+      "topology_key": "right_t4_i4_m4_r4",
+      "dof": 16,
+      "finger_count": 4,
+      "descriptor": "models/leap-variant.json",
+      "geometry_binary": "models/leap-variant.bin",
+      "anchor_count": 40
+    },
+    {
+      "id": "allegro-base",
+      "family": "allegro",
+      "title": "Allegro-type base design",
+      "role": "base design",
+      "asset_id": "9340eaf1",
+      "topology_key": "right_t4_i2_m3_r2",
+      "dof": 11,
+      "finger_count": 4,
+      "descriptor": "models/allegro-base.json",
+      "geometry_binary": "models/allegro-base.bin",
+      "anchor_count": 40
+    },
+    {
+      "id": "allegro-variant",
+      "family": "allegro",
+      "title": "Allegro-type geometry variant",
+      "role": "geometry variant",
+      "asset_id": "58f38082",
+      "topology_key": "right_t4_i2_m3_r2",
+      "dof": 11,
+      "finger_count": 4,
+      "descriptor": "models/allegro-variant.json",
+      "geometry_binary": "models/allegro-variant.bin",
+      "anchor_count": 40
+    }
+  ]
+}

@@ -1,0 +1,298 @@
+[
+  {
+    "label": "A",
+    "family": "LEAP",
+    "split": "training",
+    "fingers": 3,
+    "dof": 7,
+    "assetId": "2173e82a",
+    "video": "media/A.mp4",
+    "poster": "media/A.jpg",
+    "formalR16": {
+      "passed": "True",
+      "net_turns_median": "1.852845311164856",
+      "direction": "0.9884852621009016",
+      "safe_replicas": "16"
+    },
+    "replay": {
+      "absolute_path_turns_median": 1.8683911561965942,
+      "cell_id": 4,
+      "dataset_row": 0,
+      "directional_consistency": 0.9868786854708237,
+      "failure_labels": [
+        "net-turns-below-two"
+      ],
+      "finite": true,
+      "frontier_count_median": 22.0,
+      "max_positive_net_turns_median": 1.8438754081726074,
+      "mother_id": "right_t3_m1_r3",
+      "net_turns_median": 1.8438754081726074,
+      "replica_count": 1,
+      "safe_replica_fraction": 1.0,
+      "scale_ready_passed": false,
+      "viability_passed": true
+    },
+    "replayPassed": true,
+    "videoSha256": "5e23d0296843fe6afcc50b71629f573fce342c55a28b845c94507daf63481984",
+    "studentSha256": "0c18b16e4c690ec8e368eb748da79ab0c882f9d955b44ca16e63c1536ea5b2ff",
+    "durationSeconds": 30.0
+  },
+  {
+    "label": "B",
+    "family": "LEAP",
+    "split": "training",
+    "fingers": 4,
+    "dof": 8,
+    "assetId": "d5013297",
+    "video": "media/B.mp4",
+    "poster": "media/B.jpg",
+    "formalR16": {
+      "passed": "True",
+      "net_turns_median": "1.7053700685501099",
+      "direction": "0.9497823737546692",
+      "safe_replicas": "15"
+    },
+    "replay": {
+      "absolute_path_turns_median": 1.6585568189620972,
+      "cell_id": 6,
+      "dataset_row": 0,
+      "directional_consistency": 0.9415481927923005,
+      "failure_labels": [
+        "net-turns-below-two"
+      ],
+      "finite": true,
+      "frontier_count_median": 18.0,
+      "max_positive_net_turns_median": 1.561611294746399,
+      "mother_id": "right_t3_i1_m1_r3",
+      "net_turns_median": 1.5616111755371094,
+      "replica_count": 1,
+      "safe_replica_fraction": 1.0,
+      "scale_ready_passed": false,
+      "viability_passed": true
+    },
+    "replayPassed": true,
+    "videoSha256": "7bf9f10dafcfb3f65935c3b40645633a863e02af3fd1e1457b5c6af7e6bd1f32",
+    "studentSha256": "0c18b16e4c690ec8e368eb748da79ab0c882f9d955b44ca16e63c1536ea5b2ff",
+    "durationSeconds": 30.0
+  },
+  {
+    "label": "D",
+    "family": "Allegro",
+    "split": "training",
+    "fingers": 4,
+    "dof": 16,
+    "assetId": "ec4e5e2a",
+    "video": "media/D.mp4",
+    "poster": "media/D.jpg",
+    "formalR16": {
+      "passed": "True",
+      "net_turns_median": "1.8495270013809204",
+      "direction": "0.886658194576037",
+      "safe_replicas": "12"
+    },
+    "replay": {
+      "absolute_path_turns_median": 2.3199338912963867,
+      "cell_id": 7,
+      "dataset_row": 0,
+      "directional_consistency": 0.947143355722024,
+      "failure_labels": [],
+      "finite": true,
+      "frontier_count_median": 26.0,
+      "max_positive_net_turns_median": 2.197309970855713,
+      "mother_id": "right_t4_i4_m4_r4",
+      "net_turns_median": 2.197309970855713,
+      "replica_count": 1,
+      "safe_replica_fraction": 1.0,
+      "scale_ready_passed": true,
+      "viability_passed": true
+    },
+    "replayPassed": true,
+    "videoSha256": "94306c32a1a612b591c4258d5a93d774a19d87d5535b19b2082e438172e950f6",
+    "studentSha256": "0c18b16e4c690ec8e368eb748da79ab0c882f9d955b44ca16e63c1536ea5b2ff",
+    "durationSeconds": 30.0
+  },
+  {
+    "label": "E",
+    "family": "LEAP",
+    "split": "strict-unseen",
+    "fingers": 4,
+    "dof": 13,
+    "assetId": "527b2ce4",
+    "video": "media/E.mp4",
+    "poster": "media/E.jpg",
+    "formalR16": {
+      "passed": "True",
+      "net_turns_median": "1.8750402331352234",
+      "direction": "0.969285098990439",
+      "safe_replicas": "16"
+    },
+    "replay": {
+      "absolute_path_turns_median": 1.8652045726776123,
+      "cell_id": 7,
+      "dataset_row": 0,
+      "directional_consistency": 0.9756702310489203,
+      "failure_labels": [
+        "net-turns-below-two"
+      ],
+      "finite": true,
+      "frontier_count_median": 21.0,
+      "max_positive_net_turns_median": 1.8198245763778687,
+      "mother_id": "right_t4_i4_m4_r1",
+      "net_turns_median": 1.8198245763778687,
+      "replica_count": 1,
+      "safe_replica_fraction": 1.0,
+      "scale_ready_passed": false,
+      "viability_passed": true
+    },
+    "replayPassed": true,
+    "videoSha256": "a274234ed6f1c0bb95ee1317318ea9497b65cbbd153ae1eb241790afe9160111",
+    "studentSha256": "0c18b16e4c690ec8e368eb748da79ab0c882f9d955b44ca16e63c1536ea5b2ff",
+    "durationSeconds": 30.0
+  },
+  {
+    "label": "G",
+    "family": "Allegro",
+    "split": "strict-unseen",
+    "fingers": 3,
+    "dof": 11,
+    "assetId": "513fcf03",
+    "video": "media/G.mp4",
+    "poster": "media/G.jpg",
+    "formalR16": {
+      "passed": "True",
+      "net_turns_median": "2.3482998609542847",
+      "direction": "0.8913237883989529",
+      "safe_replicas": "16"
+    },
+    "replay": {
+      "absolute_path_turns_median": 2.7349703311920166,
+      "cell_id": 5,
+      "dataset_row": 0,
+      "directional_consistency": 0.901225293007408,
+      "failure_labels": [],
+      "finite": true,
+      "frontier_count_median": 29.0,
+      "max_positive_net_turns_median": 2.4648244380950928,
+      "mother_id": "right_t4_m3_r4",
+      "net_turns_median": 2.4648244380950928,
+      "replica_count": 1,
+      "safe_replica_fraction": 1.0,
+      "scale_ready_passed": true,
+      "viability_passed": true
+    },
+    "replayPassed": true,
+    "videoSha256": "f084764352a5490800a635305ab1a56ff4862d0c35150ff10dea76731b9e8043",
+    "studentSha256": "0c18b16e4c690ec8e368eb748da79ab0c882f9d955b44ca16e63c1536ea5b2ff",
+    "durationSeconds": 30.0
+  },
+  {
+    "label": "H",
+    "family": "Allegro",
+    "split": "strict-unseen",
+    "fingers": 3,
+    "dof": 10,
+    "assetId": "c7f7ce53",
+    "video": "media/H.mp4",
+    "poster": "media/H.jpg",
+    "formalR16": {
+      "passed": "False",
+      "net_turns_median": "0.2769748866558075",
+      "direction": "0.7483809077545915",
+      "safe_replicas": "16"
+    },
+    "replay": {
+      "absolute_path_turns_median": 0.277866005897522,
+      "cell_id": 4,
+      "dataset_row": 0,
+      "directional_consistency": 0.9009376813938254,
+      "failure_labels": [
+        "net-turns-below-two"
+      ],
+      "finite": true,
+      "frontier_count_median": 3.0,
+      "max_positive_net_turns_median": 0.2542615532875061,
+      "mother_id": "right_t3_i4_m3",
+      "net_turns_median": 0.25033995509147644,
+      "replica_count": 1,
+      "safe_replica_fraction": 1.0,
+      "scale_ready_passed": false,
+      "viability_passed": false
+    },
+    "replayPassed": false,
+    "videoSha256": "9537ed855079c176022ebb079dab9ef7da80178db992bbb5087a9059b11f7164",
+    "studentSha256": "0c18b16e4c690ec8e368eb748da79ab0c882f9d955b44ca16e63c1536ea5b2ff",
+    "durationSeconds": 30.0
+  },
+  {
+    "label": "K",
+    "family": "LEAP",
+    "split": "strict-unseen",
+    "fingers": 3,
+    "dof": 11,
+    "assetId": "8fbd0c2f",
+    "video": "media/K.mp4",
+    "poster": "media/K.jpg",
+    "formalR16": {
+      "passed": "True",
+      "net_turns_median": "2.146823525428772",
+      "direction": "0.9901706291208631",
+      "safe_replicas": "16"
+    },
+    "replay": {
+      "absolute_path_turns_median": 2.1643223762512207,
+      "cell_id": 5,
+      "dataset_row": 0,
+      "directional_consistency": 0.9862236839525235,
+      "failure_labels": [],
+      "finite": true,
+      "frontier_count_median": 25.0,
+      "max_positive_net_turns_median": 2.1345059871673584,
+      "mother_id": "right_t4_m3_r4",
+      "net_turns_median": 2.1345059871673584,
+      "replica_count": 1,
+      "safe_replica_fraction": 1.0,
+      "scale_ready_passed": true,
+      "viability_passed": true
+    },
+    "replayPassed": true,
+    "videoSha256": "f799dbded68d5e534c17ca0d77d4333c5d95b51ad47ba0583c2191b650c3f3ae",
+    "studentSha256": "0c18b16e4c690ec8e368eb748da79ab0c882f9d955b44ca16e63c1536ea5b2ff",
+    "durationSeconds": 30.0
+  },
+  {
+    "label": "L",
+    "family": "Allegro",
+    "split": "strict-unseen",
+    "fingers": 4,
+    "dof": 15,
+    "assetId": "94b43648",
+    "video": "media/L.mp4",
+    "poster": "media/L.jpg",
+    "formalR16": {
+      "passed": "True",
+      "net_turns_median": "2.862809419631958",
+      "direction": "0.945072057309927",
+      "safe_replicas": "16"
+    },
+    "replay": {
+      "absolute_path_turns_median": 2.8827648162841797,
+      "cell_id": 7,
+      "dataset_row": 0,
+      "directional_consistency": 0.9424116331954699,
+      "failure_labels": [],
+      "finite": true,
+      "frontier_count_median": 32.0,
+      "max_positive_net_turns_median": 2.7293500900268555,
+      "mother_id": "right_t4_i4_m4_r3",
+      "net_turns_median": 2.7167510986328125,
+      "replica_count": 1,
+      "safe_replica_fraction": 1.0,
+      "scale_ready_passed": true,
+      "viability_passed": true
+    },
+    "replayPassed": true,
+    "videoSha256": "741edda00945757f3f9b9467fd2afce2d8ce237aaa912df3350b8ffbc3485af6",
+    "studentSha256": "0c18b16e4c690ec8e368eb748da79ab0c882f9d955b44ca16e63c1536ea5b2ff",
+    "durationSeconds": 30.0
+  }
+]
