@@ -74,7 +74,7 @@ The student policy is trained using offline behavior cloning. Because the downlo
 
 ```mermaid
 flowchart TD
-    A[LEAP teacher] --> C[Collect and filter demonstrations]
+    A[LEAP teacher] --> C[Collect and filter]
     B[Allegro teacher] --> C
     C --> D[Shared BC student]
     D --> E[Evaluate and replay]
