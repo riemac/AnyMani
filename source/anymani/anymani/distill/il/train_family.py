@@ -1735,6 +1735,7 @@ def run_family_training(
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
         torch.backends.cudnn.allow_tf32 = bool(tf32)
+    print(f"Loading {len(dataset_paths)} demonstration datasets...", flush=True)
     bundle = load_family_sources(dataset_paths, max_ram_gib=max_ram_gib, batch_size=batch_size)
     if not bundle.training:
         raise ValueError("family student dataset has no quality training samples")
@@ -2020,6 +2021,11 @@ def run_family_training(
         report["best_epoch"] = best_epoch
         report["last_update_unix_s"] = time.time()
         _atomic_write_json(report_path, report)
+        print(
+            f"Round {epoch}/{max_epochs} | updates {start_update}/{update_budget} | "
+            f"balanced validation MSE {validation_mse:.6f}",
+            flush=True,
+        )
     invocation_elapsed = time.perf_counter() - invocation_started
     cumulative_wall = prior_cumulative_wall + invocation_elapsed
     if start_update >= update_budget or epoch >= max_epochs:
