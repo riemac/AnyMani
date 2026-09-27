@@ -1,4 +1,4 @@
-"""Train an offline student from frozen teacher means. Use complete 30-second trajectories with at least half a net turn and directionality of 0.7. Split by replica, and weight joints, hands and families as specified in the paper. The default uses FP32 Adam, gradient clipping at 1, and fixed exploration variance."""
+"""Train BC from frozen teacher means with the paper's retained trajectories and sampler."""
 
 from __future__ import annotations
 import argparse
@@ -408,6 +408,7 @@ def _coerce_view(raw: FamilyView | tuple[Any, ...]) -> FamilyView:
 
 
 def _view_labels(view: FamilyView) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    # Preserve the historical full-source label axis for paper reproduction.
     return (view.family_ids, view.asset_ids)
 
 
@@ -420,6 +421,7 @@ def _materialize_global_indices(views: Sequence[FamilyView], index: torch.Tensor
         offsets.append((cursor, stop, view))
         cursor = stop
     for start, stop, view in offsets:
+        # The frozen sampler discards draws outside the compact training views.
         local_mask = (index >= start) & (index < stop)
         if not bool(local_mask.any().item()):
             continue
@@ -638,7 +640,7 @@ def fit_family_student(
             raise ValueError("family student gradient norm became non-finite")
         optimizer_instance.step()
         update_count += 1
-        processed_samples += batch_size
+        processed_samples += batch_size  # Historical counter: requested draws, not materialized examples.
         last_loss = float(total.detach().item())
         last_bc = float(bc.detach().item())
         last_fk = float(fk.detach().item())

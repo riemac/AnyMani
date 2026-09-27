@@ -1,10 +1,10 @@
 # Hand Assets
 
-Run commands from the repository root in the AnyMani Python environment. Prefix source commands with `PYTHONPATH=source/anymani` so they use this checkout.
+Commands in this guide run from the AnyMani repository root inside the active Python environment. When invoking Python modules under `source/anymani`, prefix commands with `PYTHONPATH=source/anymani`.
 
 ## Downloaded paper set
 
-The default paper artifact is a curated, portable set of 384 hand bundles: 256 nominal training hands (128 LEAP and 128 Allegro) and 128 strict-unseen hands. The strict-unseen set has 123 certified pregrasp-ready members; five members remain in the nominal cohort with their failure records. The separate 5.2 GB generated-hand library is not included.
+The default asset download (`python scripts/download.py --component assets`, ~7.9 MB) provides a curated set of 384 nominal hand bundles: 256 training hands (128 LEAP and 128 Allegro) and 128 strict held-out hands. In the held-out cohort, 123 hands have certified pregrasps, while five retain recorded initialization failures, yielding 379 ready hands in total. The separate 5.2 GB generated library is not required for policy replay or student training.
 
 Download and inspect the cohort index:
 
@@ -24,11 +24,11 @@ print("pregrasp catalog:", bundle.catalog_root("leap_training"))
 PY
 ```
 
-`paper_bundle.json` lists each cohort and its ordered members. A member points to one self-contained asset root with `hand.urdf`, `hand.yaml`, and every referenced mesh. Its optional pregrasp record is stored separately in the cohort catalog and is matched by the exact hand, object, scale, physics, and search identity.
+`paper_bundle.json` defines each cohort and its member ordering. Each entry identifies `hand.urdf`, `hand.yaml`, and their mesh dependencies within the package. Variants can share meshes with their parent hand. Pregrasp records are maintained in a separate cohort catalog and indexed by the exact hand, object, scale, physics, and search identities.
 
 ## How the files fit together
 
-An asset dataset manifest such as `ssl.yaml` or `ppo.yaml` selects lineages and partitions within a generated run. The run holds each mother or variant bundle; the URDF defines links, joints, limits, and mesh references; the sidecar records asset provenance and typed geometry identity. The mesh files provide the geometry referenced by the URDF. Pregrasp catalogs store certified candidate states and metrics separately, keyed to the corresponding hand identity.
+An asset dataset manifest (such as `ssl.yaml` or `ppo.yaml`) defines lineages and partitions within a generated asset run. The run directory holds each mother or variant bundle; `hand.urdf` defines kinematic links, joints, limits, and visual/collision mesh references; `hand.yaml` records provenance and typed geometry metadata; and the `meshes/` directory provides surface geometry. The pregrasp catalog stores certified grasp candidate poses and stability metrics indexed by hand identity.
 
 ```mermaid
 flowchart LR
@@ -43,7 +43,7 @@ flowchart LR
 
 ## Generate new hand assets
 
-For a small CPU example, generate and resolve one pre-made LEAP hand:
+To generate and resolve a single pre-made LEAP hand as a quick CPU-only test:
 
 ```bash
 PYTHONPATH=source/anymani python -m anymani.assets.scripts.generate \
@@ -68,7 +68,9 @@ print(len(selection.assets), selection.assets[0].asset_id, len(selection.assets[
 PY
 ```
 
-The example writes one timestamped bundle under `outputs/asset-example`; it does not start Isaac. To build the optional full pre-made inventory, run the default recipe instead. It enumerates every configured hand and connectivity preset and can create a large asset tree:
+The example writes a timestamped bundle under `outputs/asset-example` without launching Isaac Sim.
+
+To construct the full pre-made inventory, run the default generation recipe. It enumerates all configured hand topologies and connectivity presets:
 
 ```bash
 PYTHONPATH=source/anymani python -m anymani.assets.scripts.generate \
@@ -97,7 +99,9 @@ print("inventory run:", runs[-1].parent)
 PY
 ```
 
-The [dataset template](../source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/template.yaml) is sized for a full inventory, not the one-hand example. The helper above copies it and sets `inventory.run_dir` to the latest generated run containing `summary.yaml`. The template requires 2,920 mother assets (1,460 canonical mirror pairs) and publishes 11,264 final assets across train, validation, and evaluation. Planning freezes cohort membership and seeds; building writes `ssl.yaml`, `ppo.yaml`, a build report, and variant bundles. The full post-mutate build uses the configured Warp/SDF validator and requires a supported geometry/GPU environment.
+The [dataset template](../source/anymani/anymani/assets/datasets/cross_embodiment_balanced_v1/template.yaml) is configured for a complete inventory rather than a single hand. The helper script above copies the template and updates `inventory.run_dir` to point to the latest run containing `summary.yaml`. The full specification requires 2,920 mother assets (1,460 canonical mirror pairs) and yields 11,264 assets across training, validation, and evaluation splits.
+
+Planning locks random seeds and cohort partitions; building generates `ssl.yaml`, `ppo.yaml`, a build report, and mutated variant bundles. The full post-mutate build checks geometric clearance with the configured Warp/SDF validator and requires a compatible GPU environment:
 
 ```bash
 DATASET_DIR=outputs/datasets/cross_embodiment_balanced_v1
@@ -114,7 +118,9 @@ PYTHONPATH=source/anymani python -m anymani.assets.scripts.dataset build \
 
 ## Generate strict pregrasps for a new cohort
 
-Strict pregrasp generation is a separate Isaac Lab/PhysX run. Start from the `ssl.yaml` and `ppo.yaml` produced above: select a source cohort, finalize its canonical identities, then prepare and search only the missing cache entries. Each default shard contains up to 16 hands. Initial screening evaluates 32 physics candidates per hand; subsequent CEM rounds add up to 128 candidates per unfinished hand. The commands write source locks, canonical locks, preparation records, physics evidence, and content-addressed catalog entries under `outputs/`.
+Generating strict pregrasps requires an Isaac Lab / PhysX simulation environment. Starting from the `ssl.yaml` and `ppo.yaml` manifests built above, select a source cohort, resolve canonical identities, and search for missing pregrasp entries.
+
+Work is divided into shards of up to 16 hands. A geometric screen selects up to 32 of 256 Sobol proposals per hand for initial physics testing. Subsequent cross-entropy method (CEM) rounds add up to 128 candidates per unfinished hand. The pipeline writes source locks, canonical locks, preparation records, physics logs, and catalog entries under `outputs/`:
 
 ```bash
 DATASET_DIR=outputs/datasets/cross_embodiment_balanced_v1
@@ -148,4 +154,4 @@ for LOCK in "$PREPARATION"/*.canonical.lock.yaml; do
 done
 ```
 
-The generator preserves the fixed strict gate and searches 256 Sobol proposals, then up to three CEM rounds of 128 candidates for each asset that still lacks eight passing states. Exit status `3` reports incomplete cohort coverage; any complete passing entries are still available in the catalog for later admission. The historical script name includes “MVP80,” but `--cohort-lock` mode uses the lock's member count and supports other cohort sizes.
+The generator runs up to three CEM rounds for each hand that still lacks eight states satisfying the fixed strict gate. Exit code `3` reports partial cohort coverage (where certain hands failed to obtain eight passing states); any valid passing entries found are preserved in the catalog. While the script name references "MVP80" for historical reasons, `--cohort-lock` operates on the exact member count specified in the lock file.
