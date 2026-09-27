@@ -73,12 +73,11 @@ Each replay logs its selected asset, model identity, and rollout trajectory into
 The student policy is trained using offline behavior cloning. Because the download includes the pretrained LEAP and Allegro teachers, you can collect demonstration datasets directly without retraining teachers.
 
 ```mermaid
-flowchart LR
-    A[LEAP teacher] --> C[Mean and sampled rollouts]
+flowchart TD
+    A[LEAP teacher] --> C[Collect and filter]
     B[Allegro teacher] --> C
-    C --> D[Trajectory filtering]
-    D --> E[Shared BC student]
-    E --> F[Evaluate and replay]
+    C --> D[Shared BC student]
+    D --> E[Evaluate and replay]
 ```
 
 ### 1. Collect teacher demonstrations
@@ -122,6 +121,7 @@ Evaluation runs 16 replicas per hand using the paper's 30-second first-trajector
 - [Generate assets and prepare initial grasps](docs/assets.md)
 - [Pretrain the geometry encoder](docs/pretraining.md)
 - [Release manifest and download checksums](release.json)
+- [Verified reader run and reference results](reproduction.json)
 - [Third-party licenses and attribution](THIRD_PARTY_NOTICES.md)
 
 The full generated asset bank and historical demonstrations are omitted from the default download; the supplied encoder, teachers, and control assets are sufficient for the replay and shared-student workflows above.

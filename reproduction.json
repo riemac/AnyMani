@@ -1,0 +1,194 @@
+{
+  "schema_version": "1.0.0",
+  "date": "2026-09-27",
+  "baseline_source_commit": "a575ca5",
+  "environment": {
+    "os": "Ubuntu 24.04.5 LTS",
+    "gpu": "NVIDIA GeForce RTX 5070 Ti",
+    "gpu_memory_gib": 16,
+    "driver": "580.159.03",
+    "python": "3.11.14",
+    "torch": "2.7.0+cu128",
+    "isaac_sim": "5.1.0",
+    "isaac_lab_commit": "47c9f95eeab90dc3611981d894d59f163191f5b1",
+    "rl_games_commit": "36edd38823197e6e20c6cc4531765e654d13b80f"
+  },
+  "evaluation_protocol": {
+    "nominal_hands": 128,
+    "initialized_hands": 123,
+    "trials_per_hand": 16,
+    "policy_steps": 600,
+    "control_hz": 20,
+    "criteria": {
+      "median_net_turns_min": 1.0,
+      "direction_min": 0.7,
+      "safe_trials_min": 12,
+      "trials_per_hand": 16
+    }
+  },
+  "paper_reference": {
+    "student_sha256": "0c18b16e4c690ec8e368eb748da79ab0c882f9d955b44ca16e63c1536ea5b2ff",
+    "metrics": {
+      "overall": {
+        "nominal_hands": 128,
+        "evaluated_hands": 123,
+        "successful_hands": 76,
+        "success_rate": 0.59375,
+        "safe_completion_fraction": 0.7789634146341463,
+        "mean_per_hand_net_turns": 1.3035299270315621
+      },
+      "leap": {
+        "nominal_hands": 64,
+        "evaluated_hands": 63,
+        "successful_hands": 44,
+        "success_rate": 0.6875,
+        "safe_completion_fraction": 0.7966269841269841,
+        "mean_per_hand_net_turns": 1.2117971240261953
+      },
+      "leap_right_variant": {
+        "nominal_hands": 32,
+        "evaluated_hands": 32,
+        "successful_hands": 25,
+        "success_rate": 0.78125,
+        "safe_completion_fraction": 0.82421875,
+        "mean_per_hand_net_turns": 1.337345578795066
+      },
+      "leap_right_mother": {
+        "nominal_hands": 32,
+        "evaluated_hands": 31,
+        "successful_hands": 19,
+        "success_rate": 0.59375,
+        "safe_completion_fraction": 0.7681451612903226,
+        "mean_per_hand_net_turns": 1.08219871910349
+      },
+      "allegro": {
+        "nominal_hands": 64,
+        "evaluated_hands": 60,
+        "successful_hands": 32,
+        "success_rate": 0.5,
+        "safe_completion_fraction": 0.7604166666666666,
+        "mean_per_hand_net_turns": 1.399849370187197
+      },
+      "allegro_right_variant": {
+        "nominal_hands": 32,
+        "evaluated_hands": 30,
+        "successful_hands": 16,
+        "success_rate": 0.5,
+        "safe_completion_fraction": 0.74375,
+        "mean_per_hand_net_turns": 1.3936206534684363
+      },
+      "allegro_right_mother": {
+        "nominal_hands": 32,
+        "evaluated_hands": 30,
+        "successful_hands": 16,
+        "success_rate": 0.5,
+        "safe_completion_fraction": 0.7770833333333333,
+        "mean_per_hand_net_turns": 1.4060780869059575
+      }
+    },
+    "all_per_hand_net_direction_safe_values_match_original": true
+  },
+  "demonstration_recollection": {
+    "files": 4,
+    "numeric_datasets_per_file": 28,
+    "all_numeric_arrays_bitwise_match_original": true,
+    "comparison": "All numerical datasets were compared in bounded byte blocks; file metadata and file hashes differ."
+  },
+  "fresh_training": {
+    "sampling": "frozen paper implementation",
+    "seed": 42,
+    "training_rounds": 50,
+    "updates": 16750,
+    "requested_batch_size": 2048,
+    "expected_materialized_batch_size_approx": 1509,
+    "learning_rate": 0.0003,
+    "reproducibility": {
+      "cpu_threads": 1,
+      "deterministic_algorithms": true,
+      "cudnn_deterministic": true,
+      "cudnn_benchmark": false,
+      "cublas_workspace_config": ":4096:8"
+    },
+    "selected_round": 50,
+    "validation_balanced_action_mse": 0.019236385806095678,
+    "training_seconds": 1948.2158377509913,
+    "student_sha256": "c362c116fcfbeb20b2801f1b9de74edb97d8fa195f39d7acc3f39907831b375f",
+    "torchscript_sha256": "619536df5219d2743e55918b52263cdbf24d2f65f95299bba355b3ff28140955",
+    "export_max_absolute_error": 0.0,
+    "metrics": {
+      "overall": {
+        "nominal_hands": 128,
+        "evaluated_hands": 123,
+        "successful_hands": 71,
+        "success_rate": 0.5546875,
+        "safe_completion_fraction": 0.7860772357723578,
+        "mean_per_hand_net_turns": 1.2913225197149971
+      },
+      "leap": {
+        "nominal_hands": 64,
+        "evaluated_hands": 63,
+        "successful_hands": 43,
+        "success_rate": 0.671875,
+        "safe_completion_fraction": 0.8095238095238095,
+        "mean_per_hand_net_turns": 1.222999931948762
+      },
+      "leap_right_variant": {
+        "nominal_hands": 32,
+        "evaluated_hands": 32,
+        "successful_hands": 28,
+        "success_rate": 0.875,
+        "safe_completion_fraction": 0.85546875,
+        "mean_per_hand_net_turns": 1.4266235330724157
+      },
+      "leap_right_mother": {
+        "nominal_hands": 32,
+        "evaluated_hands": 31,
+        "successful_hands": 15,
+        "success_rate": 0.46875,
+        "safe_completion_fraction": 0.7620967741935484,
+        "mean_per_hand_net_turns": 1.0128078275630552
+      },
+      "allegro": {
+        "nominal_hands": 64,
+        "evaluated_hands": 60,
+        "successful_hands": 28,
+        "success_rate": 0.4375,
+        "safe_completion_fraction": 0.7614583333333333,
+        "mean_per_hand_net_turns": 1.3630612368695438
+      },
+      "allegro_right_variant": {
+        "nominal_hands": 32,
+        "evaluated_hands": 30,
+        "successful_hands": 15,
+        "success_rate": 0.46875,
+        "safe_completion_fraction": 0.73125,
+        "mean_per_hand_net_turns": 1.3783342014377316
+      },
+      "allegro_right_mother": {
+        "nominal_hands": 32,
+        "evaluated_hands": 30,
+        "successful_hands": 13,
+        "success_rate": 0.40625,
+        "safe_completion_fraction": 0.7916666666666666,
+        "mean_per_hand_net_turns": 1.347788272301356
+      }
+    },
+    "full_R1_replay": {
+      "asset_id": "e9e53d46",
+      "policy_steps": 600,
+      "net_turns": 1.9881870746612549,
+      "directional_consistency": 0.9953522914390243,
+      "safe_completion_fraction": 1.0
+    }
+  },
+  "interpretation": {
+    "original_three_seed_success_counts": [
+      76,
+      70,
+      75
+    ],
+    "fresh_training_inside_original_observed_range": true,
+    "same_score_as_original_seed42": false,
+    "formal_paper_statistics_changed": false
+  }
+}
